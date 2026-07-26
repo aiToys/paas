@@ -29,17 +29,30 @@ func (s *stubRepo) Create(_ context.Context, a Application) error {
 	s.apps = append(s.apps, a)
 	return nil
 }
-func (s *stubRepo) BindResource(_ context.Context, id, t string) (Application, error) {
+func (s *stubRepo) BindResource(_ context.Context, id, t, name string) (Application, error) {
 	for i, a := range s.apps {
 		if a.ID == id {
-			switch t {
-			case "models":
-				a.Resources.Models++
-			case "mq":
-				a.Resources.MQ++
-			case "dal":
-				a.Resources.DAL++
+			a.Bindings = append(a.Bindings, Binding{Type: t, Name: name})
+			a.Recount()
+			s.apps[i] = a
+			return a, nil
+		}
+	}
+	return Application{}, assertNotFoundErr
+}
+
+func (s *stubRepo) Unbind(_ context.Context, id, t, name string) (Application, error) {
+	for i, a := range s.apps {
+		if a.ID == id {
+			next := a.Bindings[:0]
+			for _, b := range a.Bindings {
+				if b.Type == t && b.Name == name {
+					continue
+				}
+				next = append(next, b)
 			}
+			a.Bindings = next
+			a.Recount()
 			s.apps[i] = a
 			return a, nil
 		}
@@ -65,9 +78,21 @@ func TestListHandler(t *testing.T) {
 func TestBindHandler(t *testing.T) {
 	h := NewHandler(&stubRepo{apps: []Application{{ID: "a1", Name: "A"}}})
 	rec := httptest.NewRecorder()
-	body := strings.NewReader(`{"type":"mq"}`)
+	body := strings.NewReader(`{"type":"mq","name":"mq-new"}`)
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/applications/a1/bindings", body))
 
-	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, http.StatusCreated, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"mq":1`)
+	assert.Contains(t, rec.Body.String(), `"name":"mq-new"`)
+}
+
+func TestUnbindHandler(t *testing.T) {
+	h := NewHandler(&stubRepo{apps: []Application{
+		{ID: "a1", Name: "A", Bindings: []Binding{{Type: "mq", Name: "mq-x"}}}},
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/applications/a1/bindings/mq/mq-x", nil))
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"mq":0`)
 }

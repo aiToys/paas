@@ -66,15 +66,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost && len(parts) == 2 && parts[1] == "bindings" {
 		var body struct {
 			Type string `json:"type"`
+			Name string `json:"name"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		if body.Type == "" {
-			writeErr(w, http.StatusBadRequest, "missing type")
+		if body.Type == "" || body.Name == "" {
+			writeErr(w, http.StatusBadRequest, "missing type or name")
 			return
 		}
-		a, err := h.repo.BindResource(r.Context(), id, body.Type)
+		a, err := h.repo.BindResource(r.Context(), id, body.Type, body.Name)
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(a)
+		return
+	}
+
+	// DELETE /api/applications/{id}/bindings/{type}/{name}
+	if r.Method == http.MethodDelete && len(parts) == 4 && parts[1] == "bindings" {
+		a, err := h.repo.Unbind(r.Context(), id, parts[2], parts[3])
+		if err != nil {
+			writeErr(w, http.StatusNotFound, err.Error())
 			return
 		}
 		_ = json.NewEncoder(w).Encode(a)
