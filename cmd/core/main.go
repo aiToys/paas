@@ -11,6 +11,8 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/aitoys/paas/internal/core/application"
+	appmemory "github.com/aitoys/paas/internal/core/application/memory"
 	"github.com/aitoys/paas/internal/core/gateway"
 	"github.com/aitoys/paas/internal/core/health"
 	coreplugin "github.com/aitoys/paas/internal/core/plugin"
@@ -97,6 +99,10 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter) {
 	auth := gateway.APIKeyAuth(apiKey)
 	mux.Handle("/v1/chat/completions", auth(gateway.ChatCompletions(gw, meter)))
 	mux.Handle("/v1/models", auth(gateway.ListModels(gw)))
+	// 应用为主线 REST API
+	appHandler := application.NewHandler(appmemory.NewStore())
+	mux.Handle("/api/applications", auth(appHandler))
+	mux.Handle("/api/applications/", auth(appHandler))
 	mux.Handle("/livez", health.NewHandler())
 
 	srv := &http.Server{Addr: ":8080", Handler: mux}

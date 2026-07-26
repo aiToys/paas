@@ -1,7 +1,10 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
+
+const API_KEY = 'sk-paas-dev-key'
 
 interface App {
   id: string
@@ -16,13 +19,26 @@ interface App {
   desc: string
 }
 
-const apps = ref<App[]>([
-  { id: 'app-cs', name: '智能客服', initial: '客', env: '生产', status: 'healthy', gradient: 'linear-gradient(135deg,#6366f1,#8b5cf6)', resources: { models: 2, mq: 1, dal: 1 }, replicas: '6/6', rps: '1.2k', desc: '对话式客服，多模型路由 + 消息异步落库' },
-  { id: 'app-rec', name: '推荐服务', initial: '推', env: '生产', status: 'healthy', gradient: 'linear-gradient(135deg,#10b981,#06b6d4)', resources: { models: 1, mq: 0, dal: 2 }, replicas: '4/4', rps: '3.8k', desc: '实时推荐，Embedding 召回 + 重排' },
-  { id: 'app-etl', name: '数据导入', initial: '数', env: '预发', status: 'degraded', gradient: 'linear-gradient(135deg,#f59e0b,#f43f5e)', resources: { models: 0, mq: 2, dal: 1 }, replicas: '2/3', rps: '320', desc: '批处理管道，MQ 削峰 + DAL 写入' },
-  { id: 'app-lab', name: '实验沙盒', initial: '沙', env: '开发', status: 'idle', gradient: 'linear-gradient(135deg,#64748b,#475569)', resources: { models: 1, mq: 0, dal: 0 }, replicas: '0/1', rps: '0', desc: '模型效果评测，按需启动' },
-  { id: 'app-agent', name: '智能体平台', initial: '体', env: '开发', status: 'healthy', gradient: 'linear-gradient(135deg,#ec4899,#8b5cf6)', resources: { models: 3, mq: 1, dal: 0 }, replicas: '2/2', rps: '86', desc: '工具调用 Agent，多模型协同' },
-])
+const apps = ref<App[]>([])
+const loading = ref(true)
+
+async function load() {
+  loading.value = true
+  try {
+    const resp = await fetch('/api/applications', {
+      headers: { Authorization: `Bearer ${API_KEY}` },
+    })
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    const json = await resp.json()
+    apps.value = json.data ?? []
+  } catch (e) {
+    ElMessage.error('加载应用失败：' + (e as Error).message)
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(load)
 
 const envs = ['全部', '生产', '预发', '开发'] as const
 const activeEnv = ref<string>('全部')
@@ -54,7 +70,10 @@ function open(a: App) {
       </div>
     </div>
 
-    <div class="grid">
+    <div v-if="loading" class="grid">
+      <div v-for="i in 6" :key="i" class="skel" />
+    </div>
+    <div v-else class="grid">
       <article v-for="a in filtered" :key="a.id" class="app-card" @click="open(a)">
         <div class="card-top">
           <div class="a-icon" :style="{ background: a.gradient }">{{ a.initial }}</div>
@@ -162,6 +181,24 @@ function open(a: App) {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: 16px;
+}
+.skel {
+  height: 220px;
+  border-radius: var(--radius-lg);
+  background: linear-gradient(90deg, var(--surface) 25%, var(--surface-2) 50%, var(--surface) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s infinite;
+  border: 1px solid var(--border);
+}
+@keyframes shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skel {
+    animation: none;
+  }
 }
 .app-card {
   padding: 20px;
