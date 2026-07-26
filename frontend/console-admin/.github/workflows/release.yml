@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Generate Changelog and Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.23.1'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Set release version
+        run: |
+          VERSION=${GITHUB_REF#refs/*/}
+          echo "RELEASE_VERSION=$VERSION" >> $GITHUB_ENV
+          if [[ "$VERSION" =~ -(rc|alpha|beta|pre) ]]; then
+            echo "IS_PRERELEASE=true" >> $GITHUB_ENV
+          else
+            echo "IS_PRERELEASE=false" >> $GITHUB_ENV
+          fi
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          pnpm exec git-cliff --latest --strip header > /tmp/release-notes.md
+          {
+            echo "content<<EOF"
+            cat /tmp/release-notes.md
+            echo "EOF"
+          } >> $GITHUB_OUTPUT
+
+      - name: Update CHANGELOG.md
+        run: |
+          pnpm exec git-cliff -o CHANGELOG.md || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add CHANGELOG.md
+          git commit -m "docs(changelog): update for ${{ env.RELEASE_VERSION }}" || exit 0
+          git push
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: ${{ steps.notes.outputs.content }}
+          tag_name: ${{ env.RELEASE_VERSION }}
+          prerelease: ${{ env.IS_PRERELEASE }}
+          generate_release_notes: false

@@ -1,0 +1,16 @@
+{
+  "name": "paas-frontend",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "dev:admin": "pnpm --filter ./console-admin dev",
+    "dev:user": "pnpm --filter ./console-user dev",
+    "dev:landing": "pnpm --filter ./landing dev",
+    "build:admin": "pnpm --filter ./console-admin build",
+    "build:user": "pnpm --filter ./console-user build",
+    "build:landing": "pnpm --filter ./landing build",
+    "build": "pnpm -r build",
+    "install:all": "pnpm install --recursive"
+  },
+  "packageManager": "pnpm@9.12.3"
+}
