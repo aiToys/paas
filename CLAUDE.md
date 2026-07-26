@@ -55,8 +55,20 @@ CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md LICENSE(.gitignore 后续子模�
 make build          # 编译 bin/core
 make test           # go test ./... -race
 make lint           # golangci-lint run ./...
-./bin/core          # 运行，暴露 :8080/livez
-go test ./internal/core/plugin/ -run TestLoadOrderResolvesDeps -v   # 单个测试
+./bin/core          # 运行，暴露 :8080（/livez /v1/models /v1/chat/completions）
+go test ./internal/core/gateway/ -run TestChatCompletions -v   # 单个测试
+PAAS_API_KEY=sk-xxx ./bin/core   # 自定义 API Key
+```
+
+端到端验证（core 启动后）：
+
+```bash
+# 列模型
+curl -H "Authorization: Bearer sk-paas-dev-key" http://localhost:8080/v1/models
+# 流式推理
+curl -N -H "Authorization: Bearer sk-paas-dev-key" -H "Content-Type: application/json" \
+  -d '{"model":"echo","messages":[{"role":"user","content":"你好"}],"stream":true}' \
+  http://localhost:8080/v1/chat/completions
 ```
 
 **前端（`frontend/` 目录）：**
@@ -66,6 +78,21 @@ pnpm install                  # 安装三套全部依赖
 pnpm dev:admin | dev:user | dev:landing   # 分别启动（端口 5173/5174/5175）
 pnpm build                    # 构建三套
 ```
+
+## 垂直切片（已落地）
+
+MaaS 端到端最小闭环已打通，验证了插件契约与数据流：
+
+```
+console-user Playground → Gateway(OpenAI 兼容 SSE + API Key 鉴权 + Token 计量)
+                          → MaaS 插件(进程内编排) → echo Provider(回显) → 流式返回
+```
+
+- `pkg/provider/`：Provider / GatewayRegistrar 平台级公共契约（独立包避免 import 循环）。
+- `internal/core/gateway/`：API Gateway（路由表 / API Key 中间件 / OpenAI 流式 handler / Meter）。
+- `internal/maas/`：MaaS 插件（实现 `plugin.Plugin`，Init 阶段注册 echo provider）+ echo provider。
+- `pkg/plugin.CoreDeps` 新增 `Gateway()` 注入点（依赖倒置）。
+- 切片**不依赖 K8s/GPU**（进程内）；真实 vLLM 与 K8s 编排为下一切片。
 
 ## 前端架构
 
