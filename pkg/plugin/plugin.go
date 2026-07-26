@@ -2,7 +2,11 @@
 // 子系统（如 MaaS）通过实现 Plugin 接口注册到 Core，由 Core 注入依赖。
 package plugin
 
-import "context"
+import (
+	"context"
+
+	"github.com/aitoys/paas/pkg/provider"
+)
 
 // Manifest 声明插件元信息。
 type Manifest struct {
@@ -37,6 +41,9 @@ type MeterSpec struct {
 type CoreDeps interface {
 	// Logger 返回带租户/插件上下文的日志器（Plan 2 实现）。
 	Logger() interface{}
+	// Gateway 返回推理路由注册点；插件在 Init 阶段把 Provider 注册进去。
+	// 非 MaaS 类插件可返回 nil。
+	Gateway() provider.GatewayRegistrar
 }
 
 // Plugin 是子系统接入 Core 必须实现的契约。
