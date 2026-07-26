@@ -13,9 +13,9 @@ export default defineConfig({
   server: {
     port: 5174,
     proxy: {
-      // 开发期代理到 Platform Core Gateway（Plan 4 落地后）
-      '/v1': { target: 'http://localhost:8081', changeOrigin: true },
-      '/api': { target: 'http://localhost:8081', changeOrigin: true },
+      // 开发期代理到 Platform Core Gateway（:8080）
+      '/v1': { target: 'http://localhost:8080', changeOrigin: true },
+      '/api': { target: 'http://localhost:8080', changeOrigin: true },
     },
   },
 })
