@@ -1,21 +1,40 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-import { ElInput, ElButton, ElSelect, ElOption, ElCard, ElMessage } from 'element-plus'
+import { nextTick, ref } from 'vue'
+import { ElMessage } from 'element-plus'
+import Icon from '@/components/Icon.vue'
 
-// Playground：交互式推理测试，直连 Platform Core Gateway（OpenAI 兼容 SSE）。
+// Playground：聊天式交互推理，直连 Platform Core Gateway（OpenAI 兼容 SSE）。
 // 本切片 API Key 为开发默认值；生产应从用户会话/Identity 获取（Plan 2）。
 const API_KEY = 'sk-paas-dev-key'
 
+interface Msg {
+  role: 'user' | 'assistant'
+  content: string
+}
+
 const model = ref('echo')
 const input = ref('')
-const output = ref('')
 const loading = ref(false)
+const lastTokens = ref(0)
+const messages = ref<Msg[]>([
+  { role: 'assistant', content: '在下方输入提示词，我会以流式返回结果。当前连接 echo 模型（回显，用于切片验证）。' },
+])
+const scrollRef = ref<HTMLElement | null>(null)
 
-// SSE 行解析：把 Reader 读到的字节按 \n\n 分块，提取 data: {...} 的 delta.content。
-async function streamChat() {
-  if (!input.value.trim() || loading.value) return
+async function scrollToBottom() {
+  await nextTick()
+  if (scrollRef.value) scrollRef.value.scrollTop = scrollRef.value.scrollHeight
+}
+
+async function send() {
+  const text = input.value.trim()
+  if (!text || loading.value) return
   loading.value = true
-  output.value = ''
+  messages.value.push({ role: 'user', content: text })
+  input.value = ''
+  const assistant: Msg = { role: 'assistant', content: '' }
+  messages.value.push(assistant)
+  await scrollToBottom()
 
   const resp = await fetch('/v1/chat/completions', {
     method: 'POST',
@@ -25,13 +44,14 @@ async function streamChat() {
     },
     body: JSON.stringify({
       model: model.value,
-      messages: [{ role: 'user', content: input.value }],
+      messages: [{ role: 'user', content: text }],
       stream: true,
     }),
   })
 
   if (!resp.ok || !resp.body) {
     loading.value = false
+    assistant.content = `请求失败：HTTP ${resp.status}`
     ElMessage.error(`请求失败：HTTP ${resp.status}`)
     return
   }
@@ -39,11 +59,11 @@ async function streamChat() {
   const reader = resp.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  let tokens = 0
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
     buffer += decoder.decode(value, { stream: true })
-    // 按 SSE 事件边界（空行）切分
     const parts = buffer.split('\n\n')
     buffer = parts.pop() ?? ''
     for (const part of parts) {
@@ -52,66 +72,247 @@ async function streamChat() {
       const data = line.slice(5).trim()
       if (data === '[DONE]') {
         loading.value = false
+        lastTokens.value = tokens
         return
       }
       try {
-        const json = JSON.parse(data)
-        const delta = json.choices?.[0]?.delta?.content
-        if (delta) output.value += delta
+        const delta = JSON.parse(data).choices?.[0]?.delta?.content
+        if (delta) {
+          assistant.content += delta
+          tokens += [...delta].length
+          await scrollToBottom()
+        }
       } catch {
-        // 忽略不完整 JSON（流式分片）
+        /* 流式分片，忽略不完整 JSON */
       }
     }
   }
   loading.value = false
+  lastTokens.value = tokens
+}
+
+function onKey(e: KeyboardEvent) {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault()
+    send()
+  }
 }
 </script>
 
 <template>
-  <el-card>
-    <div class="bar">
-      <el-select v-model="model" placeholder="选择模型" style="width: 240px">
-        <el-option label="echo（回显，切片验证用）" value="echo" />
-      </el-select>
-      <el-button type="primary" :loading="loading" @click="streamChat">发送</el-button>
+  <div class="chat">
+    <div class="chat-bar">
+      <div class="model-pill">
+        <span class="pulse-dot" />
+        <span class="mono">{{ model }}</span>
+        <span class="muted">· 已就绪</span>
+      </div>
+      <div v-if="lastTokens > 0" class="tokens mono">{{ lastTokens }} tokens</div>
     </div>
-    <el-input
-      v-model="input"
-      type="textarea"
-      :rows="6"
-      placeholder="输入提示词，例如：你好PaaS"
-    />
-    <div class="label">输出（流式）</div>
-    <div class="output">{{ output }}<span v-if="loading" class="cursor">▋</span></div>
-  </el-card>
+
+    <div ref="scrollRef" class="messages">
+      <div v-for="(m, i) in messages" :key="i" class="msg" :class="m.role">
+        <div class="bubble">
+          <span v-if="m.role === 'assistant' && m.content === '' && loading" class="typing">
+            <i /><i /><i />
+          </span>
+          <template v-else>{{ m.content }}<span v-if="m.role === 'assistant' && loading && i === messages.length - 1" class="cursor">▋</span></template>
+        </div>
+      </div>
+    </div>
+
+    <div class="composer">
+      <div class="input-wrap">
+        <textarea
+          v-model="input"
+          rows="1"
+          placeholder="发送消息…  (Enter 发送，Shift+Enter 换行)"
+          @keydown="onKey"
+        />
+        <button class="send" :disabled="!input.trim() || loading" @click="send">
+          <Icon name="playground" :size="18" />
+        </button>
+      </div>
+      <div class="hint">输出由 echo 模型生成，仅用于端到端验证</div>
+    </div>
+  </div>
 </template>
 
 <style scoped>
-.bar {
+.chat {
+  height: calc(100vh - 56px - 64px);
+  max-width: 820px;
+  margin: 0 auto;
   display: flex;
-  gap: 12px;
-  margin-bottom: 12px;
+  flex-direction: column;
 }
-.label {
-  margin: 16px 0 8px;
-  color: #888;
+.chat-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+.model-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 20px;
   font-size: 13px;
 }
-.output {
-  min-height: 120px;
-  padding: 12px;
-  background: #fafafa;
-  border-radius: 4px;
+.muted {
+  color: var(--text-faint);
+}
+.tokens {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.msg {
+  display: flex;
+}
+.msg.user {
+  justify-content: flex-end;
+}
+.bubble {
+  max-width: 72%;
+  padding: 11px 15px;
+  border-radius: 14px;
+  font-size: 14px;
+  line-height: 1.6;
   white-space: pre-wrap;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-word;
+}
+.msg.user .bubble {
+  background: var(--brand);
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+.msg.assistant .bubble {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  border-bottom-left-radius: 4px;
 }
 .cursor {
+  display: inline-block;
+  margin-left: 2px;
+  color: var(--brand);
   animation: blink 1s step-start infinite;
-  color: var(--el-color-primary);
 }
 @keyframes blink {
   50% {
     opacity: 0;
   }
+}
+
+.typing {
+  display: inline-flex;
+  gap: 4px;
+}
+.typing i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  animation: bounce 1.2s infinite;
+}
+.typing i:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.typing i:nth-child(3) {
+  animation-delay: 0.4s;
+}
+@keyframes bounce {
+  0%,
+  60%,
+  100% {
+    transform: translateY(0);
+    opacity: 0.4;
+  }
+  30% {
+    transform: translateY(-4px);
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .cursor,
+  .typing i {
+    animation: none;
+  }
+}
+
+.composer {
+  flex-shrink: 0;
+  padding-top: 12px;
+}
+.input-wrap {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 8px 8px 8px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  transition: border-color 0.15s;
+}
+.input-wrap:focus-within {
+  border-color: var(--brand);
+  box-shadow: 0 0 0 3px var(--brand-soft);
+}
+textarea {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.6;
+  resize: none;
+  outline: none;
+  padding: 6px 0;
+  max-height: 160px;
+}
+textarea::placeholder {
+  color: var(--text-faint);
+}
+.send {
+  flex-shrink: 0;
+  width: 38px;
+  height: 38px;
+  border: none;
+  border-radius: 10px;
+  background: var(--brand);
+  color: #fff;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: background 0.12s, opacity 0.12s;
+}
+.send:hover:not(:disabled) {
+  background: var(--brand-hover);
+}
+.send:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.send :deep(svg) {
+  transform: rotate(-90deg);
+}
+.hint {
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-top: 8px;
 }
 </style>

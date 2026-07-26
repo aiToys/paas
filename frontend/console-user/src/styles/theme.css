@@ -1,0 +1,208 @@
+/* ==========================================================================
+   PaaS 控制台设计系统
+   深空墨蓝 + 靛蓝主色 + emerald 运行态信号
+   ========================================================================== */
+
+:root {
+  /* —— 背景层 —— */
+  --bg: #0a0d14;
+  --bg-grid: rgba(255, 255, 255, 0.018);
+  --surface: #121622;
+  --surface-2: #1a1f2e;
+  --surface-hover: #20263a;
+
+  /* —— 边框 —— */
+  --border: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.12);
+
+  /* —— 文字 —— */
+  --text: #e8eaf0;
+  --text-dim: #8a92a6;
+  --text-faint: #565e72;
+
+  /* —— 品牌 —— */
+  --brand: #6366f1;
+  --brand-hover: #7376f5;
+  --brand-soft: rgba(99, 102, 241, 0.12);
+  --brand-glow: rgba(99, 102, 241, 0.45);
+
+  /* —— 语义 —— */
+  --success: #10b981;
+  --success-soft: rgba(16, 185, 129, 0.12);
+  --warning: #f59e0b;
+  --warning-soft: rgba(245, 158, 11, 0.12);
+  --danger: #f43f5e;
+  --danger-soft: rgba(244, 63, 94, 0.12);
+
+  /* —— 几何 —— */
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 14px;
+
+  /* —— 字体 —— */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'PingFang SC',
+    'Microsoft YaHei', sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
+
+  /* —— 阴影 —— */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+  --shadow-brand: 0 8px 24px rgba(99, 102, 241, 0.25);
+}
+
+/* —— Element Plus 深色变量覆盖 —— */
+.dark {
+  --el-color-primary: #6366f1;
+  --el-color-primary-light-3: #818cf8;
+  --el-color-primary-light-5: #a5a8f0;
+  --el-color-primary-light-7: #c7c9f5;
+  --el-color-primary-light-8: #d9daf8;
+  --el-color-primary-light-9: #ebecfb;
+  --el-color-primary-dark-2: #4f46e5;
+  --el-color-success: #10b981;
+  --el-color-warning: #f59e0b;
+  --el-color-danger: #f43f5e;
+
+  --el-bg-color: var(--surface);
+  --el-bg-color-page: var(--bg);
+  --el-bg-color-overlay: var(--surface-2);
+  --el-fill-color: var(--surface-2);
+  --el-fill-color-light: var(--surface-2);
+  --el-fill-color-lighter: var(--surface);
+  --el-fill-color-blank: transparent;
+
+  --el-text-color-primary: var(--text);
+  --el-text-color-regular: var(--text-dim);
+  --el-text-color-secondary: var(--text-faint);
+  --el-text-color-placeholder: var(--text-faint);
+
+  --el-border-color: var(--border-strong);
+  --el-border-color-light: var(--border);
+  --el-border-color-lighter: var(--border);
+  --el-border-radius-base: 8px;
+  --el-border-radius-small: 6px;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 滚动条 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.16);
+  background-clip: content-box;
+}
+
+::selection {
+  background: var(--brand-soft);
+}
+
+a {
+  color: inherit;
+}
+
+/* 通用工具类 */
+.mono {
+  font-family: var(--font-mono);
+  font-feature-settings: 'tnum';
+}
+
+/* —— 路由切换过渡 —— */
+.route-enter-active,
+.route-leave-active {
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+.route-enter-from {
+  opacity: 0;
+  transform: translateY(8px);
+}
+.route-leave-to {
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .route-enter-active,
+  .route-leave-active {
+    transition: none;
+  }
+}
+
+/* —— Element Plus 组件深色精修 —— */
+.el-button {
+  font-family: var(--font-sans);
+}
+.el-message {
+  background: var(--surface-2) !important;
+  border: 1px solid var(--border-strong) !important;
+  color: var(--text) !important;
+}
+.el-popper.is-light {
+  background: var(--surface-2) !important;
+  border-color: var(--border-strong) !important;
+}
+
+/* 呼吸状态点（signature） */
+.pulse-dot {
+  position: relative;
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+}
+.pulse-dot::after {
+  content: '';
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  background: var(--success);
+  opacity: 0.5;
+  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+@keyframes pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.5;
+  }
+  50% {
+    transform: scale(1.8);
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pulse-dot::after {
+    animation: none;
+  }
+}

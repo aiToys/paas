@@ -15,7 +15,6 @@ export default defineConfig({
     proxy: {
       // 开发期代理到 Platform Core Gateway（:8080）
       '/v1': { target: 'http://localhost:8080', changeOrigin: true },
-      '/api': { target: 'http://localhost:8080', changeOrigin: true },
     },
   },
 })
