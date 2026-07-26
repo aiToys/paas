@@ -1,0 +1,33 @@
+# Go
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+
+# 构建产物
+/coverage.out
+/coverage.html
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# 本地环境
+.env
+.env.local
+
+# 前端（pnpm workspace）
+node_modules/
+dist/
+**/node_modules/
+**/dist/
+.DS_Store
+*.local
