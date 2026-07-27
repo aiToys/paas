@@ -48,6 +48,7 @@ Platform Core（底座 · 所有子系统依赖）
 环境 ✅
   ✅ 物理环境（prod|test + cluster）+ 跨租户隔离 + 环境视图
   ✅ Workload 带 EnvID + LaneID(default=基线，预留)
+  ✅ 生产安全防护（横切）：prod:write RBAC + gated + 视觉强隔离 + 危险确认
   ❌ 泳道路由（染色+降级）/ 联调自动化 / 多区容灾
 
 DevOps ❌
@@ -117,7 +118,7 @@ Job / CronJob 是应用的工作负载形态（应用以什么方式跑），不
 8. **数据服务资源** — DB/缓存/MQ/存储/向量/搜索（逐个接）
 9. **真实 vLLM 纳管 + K8s 编排** — MaaS 数据面落地
 
-当前：✅ Core 骨架 + 多租户身份骨架（RBAC + 隔离）+ MaaS（mock）+ 应用主线 + 工作负载（mock）+ 环境（mock，约 40%）。
+当前：✅ Core 骨架 + 多租户身份骨架（RBAC + 隔离）+ MaaS（mock）+ 应用主线 + 工作负载（mock）+ 环境（mock）+ 生产安全防护（约 45%）。
 
 ## 架构约束（不变）
 

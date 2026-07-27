@@ -7,6 +7,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
+import { confirmDangerous } from '@/composables/useDangerConfirm'
 
 interface Workload {
   id: string
@@ -68,13 +69,22 @@ async function load() {
 }
 
 async function scale(w: Workload) {
+  // 生产环境扩缩容前置确认（防误操作生产）
+  if (envStore.isProd) {
+    const ok = await confirmDangerous({ action: '扩缩容', target: w.name })
+    if (!ok) return
+  }
   try {
-    const { value } = await ElMessageBox.prompt(`调整「${w.name}」的副本数`, '扩缩容', {
-      confirmButtonText: '应用',
-      cancelButtonText: '取消',
-      inputValue: String(w.replicas),
-      inputType: 'number',
-    })
+    const { value } = await ElMessageBox.prompt(
+      `${envStore.isProd ? '⚠️ [生产环境] ' : ''}调整「${w.name}」的副本数`,
+      '扩缩容',
+      {
+        confirmButtonText: '应用',
+        cancelButtonText: '取消',
+        inputValue: String(w.replicas),
+        inputType: 'number',
+      },
+    )
     const replicas = parseInt(value, 10)
     if (Number.isNaN(replicas) || replicas < 0) {
       ElMessage.warning('请输入有效副本数')
@@ -98,20 +108,16 @@ async function scale(w: Workload) {
 }
 
 async function remove(w: Workload) {
+  // 删除属高危：生产环境要求输入名称确认（防误操作生产）
+  const ok = await confirmDangerous({ action: '删除', target: w.name, requireNameConfirm: true })
+  if (!ok) return
   try {
-    await ElMessageBox.confirm(`确定删除工作负载「${w.name}」吗？`, '删除', {
-      type: 'warning',
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
-    })
     const resp = await fetchAuth(`/api/workloads/${w.id}`, { method: 'DELETE' })
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     ElMessage.success('已删除')
     await load()
   } catch (e) {
-    if (e !== 'cancel' && e !== 'close') {
-      ElMessage.error('删除失败：' + (e as Error).message)
-    }
+    ElMessage.error('删除失败：' + (e as Error).message)
   }
 }
 
