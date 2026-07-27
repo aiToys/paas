@@ -14,7 +14,7 @@ type Tenant struct {
 // User 表示租户内的用户。
 type User struct {
 	ID       string
-	TenantID string   // 所属租户；多租户隔离键
+	TenantID string // 所属租户；多租户隔离键
 	Name     string
 	IsAdmin  bool
 	Roles    []string // 角色名，关联 BuiltinRoles()

@@ -57,20 +57,26 @@ make test           # go test ./... -race
 make lint           # golangci-lint run ./...
 ./bin/core          # 运行，暴露 :8080（/livez /v1/models /v1/chat/completions）
 go test ./internal/core/gateway/ -run TestChatCompletions -v   # 单个测试
-PAAS_API_KEY=sk-xxx ./bin/core   # 自定义 API Key
+PAAS_API_KEY=sk-xxx ./bin/core   # 自定义 API Key（追加为 t-acme admin）
 ```
 
-端到端验证（core 启动后）：
+端到端验证（core 启动后）。API Key 绑定 (租户, 角色)，三预设演示 Key：
+`sk-acme-admin`（Acme 管理员，默认）/ `sk-globex-admin`（Globex 管理员）/ `sk-acme-dev`（Acme 开发者）。
 
 ```bash
-# 列模型（OpenAI 兼容，含 owned_by=供应商）
-curl -H "Authorization: Bearer sk-paas-dev-key" http://localhost:8080/v1/models
+# 列模型（OpenAI 兼容，含 owned_by=供应商；平台级共享）
+curl -H "Authorization: Bearer sk-acme-admin" http://localhost:8080/v1/models
 # 模型市场富信息（含通道列表）
-curl -H "Authorization: Bearer sk-paas-dev-key" http://localhost:8080/api/models
-# 流式推理（mock 通道）
-curl -N -H "Authorization: Bearer sk-paas-dev-key" -H "Content-Type: application/json" \
+curl -H "Authorization: Bearer sk-acme-admin" http://localhost:8080/api/models
+# 流式推理（mock 通道，需 model:infer 权限）
+curl -N -H "Authorization: Bearer sk-acme-dev" -H "Content-Type: application/json" \
   -d '{"model":"qwen2.5-7b","messages":[{"role":"user","content":"你好"}],"stream":true}' \
   http://localhost:8080/v1/chat/completions
+# 多租户隔离：Acme 只见 Acme 应用；跨租户访问 404 不泄漏
+curl -H "Authorization: Bearer sk-acme-admin" http://localhost:8080/api/applications
+curl -H "Authorization: Bearer sk-globex-admin" http://localhost:8080/api/applications
+curl -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer sk-acme-admin" \
+  http://localhost:8080/api/applications/app-etl   # 404（app-etl 属 globex）
 ```
 
 **前端（`frontend/` 目录）：**
@@ -108,6 +114,25 @@ console-user 模型市场(/api/models) / Playground(/v1/chat/completions)
 - REST API：`GET/POST /api/applications`、`GET /api/applications/{id}`、`POST /api/applications/{id}/bindings`、`DELETE /api/applications/{id}/bindings/{type}/{name}`。
 - console-user：应用列表 + 详情（资源绑定分组 + 绑定/解绑端到端）+ 模型市场 + Playground（模型下拉 + `?model=` 预选）。
 
+### 多租户身份骨架（RBAC + 租户隔离端到端）
+
+API Key 是 `(租户, 用户, 角色)` 三元组的凭证，鉴权与计量的统一锚点：
+
+```
+Authorization: Bearer <key>
+  → identity.LookupAPIKey → (tenantID, userID, roles)
+  → tenant.WithTenant(ctx) + WithRoles(ctx)        # ctx 传播
+  → Repository 强制按 tenant 过滤（缺失即拒）       # 数据隔离
+  → Require(perm) / handler.Authorize              # 粗粒度 RBAC
+```
+
+- `internal/core/identity/`：`Tenant/User/Role/Permission/APIKey` + `BuiltinRoles()`（tenant-admin 通行 / developer / viewer）；Repository + 内存实现。
+- `pkg/tenant`：`WithTenant/TenantFrom`，租户上下文走 ctx（PG 时代可下沉行级安全，调用方无感）。
+- `internal/core/application/`：`Application.TenantID`；Repository 全方法从 ctx 取租户强制过滤，跨租户访问统一 not found（不泄漏存在性），`Create` 以 ctx 为准忽略请求体。
+- `internal/core/gateway/`：`APIKeyAuth(idb)` 解析 Key 注入身份；`Require(perm)` 粗粒度中间件；`RequestAllowed` 供需方法级判定的 handler 复用（应用 API 按方法区分 `application:read/write`、`binding:write`）。
+- `cmd/core/seed.go`：两租户（Acme/Globex）+ 三演示 Key。
+- **模型目录平台级共享**（`/api/models` `/v1/models` 不按租户过滤）；租户私有的是应用及其绑定。
+
 ## 前端架构
 
 三套独立 SPA，共享设计系统（Element Plus + 暗黑模式）：
@@ -132,7 +157,7 @@ console-user 导航采用**三层信息架构**（避免「资源」概念被滥
 
 ## 平台模块全景
 
-见 [平台模块蓝图](./docs/superpowers/specs/2026-07-27-platform-modules-blueprint.md)。当前完成度约 20%（Core 骨架 + MaaS + 应用主线），其余模块按蓝图优先级推进。
+见 [平台模块蓝图](./docs/superpowers/specs/2026-07-27-platform-modules-blueprint.md)。当前完成度约 28%（Core 骨架 + 多租户身份骨架 + MaaS + 应用主线），其余模块按蓝图优先级推进。
 
 ## 开发约定
 

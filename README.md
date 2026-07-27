@@ -53,7 +53,7 @@
 **后端**（Platform Core，暴露 :8080）：
 
 ```bash
-make build && ./bin/core          # 编译并运行，默认 API Key: sk-paas-dev-key
+make build && ./bin/core          # 编译并运行，默认 API Key: sk-acme-admin（Acme 租户管理员）
 ```
 
 **前端**（console-user 用户控制台，:5174）：
@@ -62,17 +62,20 @@ make build && ./bin/core          # 编译并运行，默认 API Key: sk-paas-de
 cd frontend && pnpm install && pnpm dev:user
 ```
 
-打开 http://localhost:5174 即可看到：模型市场（8 个模型卡片）→ 点「试用」进 Playground 流式推理；应用列表 → 应用详情（资源绑定/解绑）。
+打开 http://localhost:5174 即可看到：顶栏可切换 API Key（租户/角色视角）；模型市场（8 个模型卡片）→ 点「试用」进 Playground 流式推理；应用列表 → 应用详情（资源绑定/解绑）。换 Key 即换租户，应用数据按租户隔离。
 
-**端到端验证（core 启动后）**：
+**端到端验证（core 启动后）**。API Key 绑定 (租户, 角色)：
 
 ```bash
-# 模型市场富信息
-curl -H "Authorization: Bearer sk-paas-dev-key" http://localhost:8080/api/models
-# 流式推理（mock 通道）
-curl -N -H "Authorization: Bearer sk-paas-dev-key" -H "Content-Type: application/json" \
+# 模型市场富信息（平台级共享，任意有效 Key 可见）
+curl -H "Authorization: Bearer sk-acme-admin" http://localhost:8080/api/models
+# 流式推理（mock 通道，需 model:infer 权限）
+curl -N -H "Authorization: Bearer sk-acme-dev" -H "Content-Type: application/json" \
   -d '{"model":"qwen2.5-7b","messages":[{"role":"user","content":"你好"}],"stream":true}' \
   http://localhost:8080/v1/chat/completions
+# 多租户隔离：不同租户 Key 看到不同应用
+curl -H "Authorization: Bearer sk-acme-admin"   http://localhost:8080/api/applications   # Acme
+curl -H "Authorization: Bearer sk-globex-admin" http://localhost:8080/api/applications   # Globex
 ```
 
 测试与检查：`make test`（含 race）、`make lint`（golangci-lint）。
