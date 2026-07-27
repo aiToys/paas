@@ -33,6 +33,8 @@ type Workload struct {
 	ID        string    `json:"id"`
 	TenantID  string    `json:"tenantId,omitempty"` // ctx 写入，请求体忽略
 	AppID     string    `json:"appId"`              // 归属应用
+	EnvID     string    `json:"envId"`              // 归属环境
+	LaneID    string    `json:"laneId"`             // "default"=基线（单例）；其他=泳道（预留，本期不创建非 default）
 	Type      string    `json:"type"`               // service / job / cronjob
 	Name      string    `json:"name"`
 	Image     string    `json:"image"`
@@ -43,6 +45,10 @@ type Workload struct {
 	Command   string    `json:"command,omitempty"`  // 启动命令（可选）
 	CreatedAt time.Time `json:"createdAt"`
 }
+
+// LaneDefault 是基线泳道的标识。基线 = 环境内稳定默认部署（每应用每环境唯一）。
+// 本期所有部署都是基线；泳道（非 default）预留不实现路由。
+const LaneDefault = "default"
 
 // Validate 校验工作负载字段。
 // 规则：type 合法、name/image 非空、cronjob 须有 schedule。

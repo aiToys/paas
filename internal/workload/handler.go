@@ -66,7 +66,8 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 		if !h.allow(w, r, PermWorkloadRead) {
 			return
 		}
-		list, err := h.repo.List(r.Context(), appID, "")
+		envID := r.URL.Query().Get("envId")
+		list, err := h.repo.List(r.Context(), envID, appID, "")
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -112,7 +113,8 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		wtype := r.URL.Query().Get("type")
-		list, err := h.repo.List(r.Context(), "", wtype)
+		envID := r.URL.Query().Get("envId")
+		list, err := h.repo.List(r.Context(), envID, "", wtype)
 		if err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return

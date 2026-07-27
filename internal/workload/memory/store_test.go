@@ -17,7 +17,7 @@ func globexCtx() context.Context { return tenant.WithTenant(context.Background()
 func TestListByType(t *testing.T) {
 	s := NewStore()
 	// acme: cs-api(service), rec-svc(service)；globex: etl-nightly(cronjob), etl-backfill(job), agent-gw(service)
-	svcs, err := s.List(acmeCtx(), "", workload.TypeService)
+	svcs, err := s.List(acmeCtx(), "", "", workload.TypeService)
 	require.NoError(t, err)
 	require.Len(t, svcs, 2)
 	for _, w := range svcs {
@@ -28,8 +28,8 @@ func TestListByType(t *testing.T) {
 
 func TestListIsolatedByTenant(t *testing.T) {
 	s := NewStore()
-	acme, _ := s.List(acmeCtx(), "", "")
-	globex, _ := s.List(globexCtx(), "", "")
+	acme, _ := s.List(acmeCtx(), "", "", "")
+	globex, _ := s.List(globexCtx(), "", "", "")
 	for _, w := range acme {
 		assert.Equal(t, "t-acme", w.TenantID)
 	}
@@ -45,9 +45,31 @@ func TestListIsolatedByTenant(t *testing.T) {
 func TestListByApp(t *testing.T) {
 	s := NewStore()
 	// app-etl 属 globex，挂 cronjob + job
-	got, err := s.List(globexCtx(), "app-etl", "")
+	got, err := s.List(globexCtx(), "", "app-etl", "")
 	require.NoError(t, err)
 	require.Len(t, got, 2)
+}
+
+func TestListByEnv(t *testing.T) {
+	s := NewStore()
+	// env-acme-test 下应只有 acme 的 cs-api/rec-svc
+	got, err := s.List(acmeCtx(), "env-acme-test", "", "")
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	for _, w := range got {
+		assert.Equal(t, "env-acme-test", w.EnvID)
+		assert.Equal(t, workload.LaneDefault, w.LaneID)
+	}
+}
+
+func TestCreateDefaultsLaneToBaseline(t *testing.T) {
+	s := NewStore()
+	err := s.Create(acmeCtx(), workload.Workload{
+		ID: "wl-x", AppID: "app-cs", EnvID: "env-acme-test", Type: workload.TypeService, Name: "n", Image: "img",
+	})
+	require.NoError(t, err)
+	got, _ := s.Get(acmeCtx(), "wl-x")
+	assert.Equal(t, workload.LaneDefault, got.LaneID, "未指定 LaneID 应默认 default 基线")
 }
 
 func TestCreateValidateAndTenant(t *testing.T) {
@@ -101,7 +123,7 @@ func TestDelete(t *testing.T) {
 
 func TestMissingTenantRejected(t *testing.T) {
 	s := NewStore()
-	_, err := s.List(context.Background(), "", "")
+	_, err := s.List(context.Background(), "", "", "")
 	assert.Error(t, err)
 }
 

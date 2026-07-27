@@ -36,7 +36,7 @@ func tenantOrErr(ctx context.Context) (string, error) {
 	return tid, nil
 }
 
-func (s *Store) List(ctx context.Context, appID, wtype string) ([]workload.Workload, error) {
+func (s *Store) List(ctx context.Context, envID, appID, wtype string) ([]workload.Workload, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {
 		return nil, err
@@ -46,6 +46,9 @@ func (s *Store) List(ctx context.Context, appID, wtype string) ([]workload.Workl
 	out := make([]workload.Workload, 0)
 	for _, w := range s.workloads {
 		if w.TenantID != tid {
+			continue
+		}
+		if envID != "" && w.EnvID != envID {
 			continue
 		}
 		if appID != "" && w.AppID != appID {
@@ -91,6 +94,9 @@ func (s *Store) Create(ctx context.Context, w workload.Workload) error {
 		return fmt.Errorf("工作负载已存在: %s", w.ID)
 	}
 	w.TenantID = tid // 以 ctx 为准
+	if w.LaneID == "" {
+		w.LaneID = workload.LaneDefault // 默认基线
+	}
 	s.workloads[w.ID] = w
 	return nil
 }
@@ -133,21 +139,22 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-// seed 生成跨两租户的示例工作负载。
-// acme: cs-api/rec-svc (service)；globex: etl-nightly(cronjob)/etl-backfill(job)/agent-gw(service)。
+// seed 生成跨两租户的示例工作负载，挂到环境（LaneID 均为 default 基线）。
+// acme: cs-api/rec-svc -> env-acme-test；globex: etl/agent -> env-globex-prod。
 func seed() []workload.Workload {
 	t := time.Now()
+	d := workload.LaneDefault
 	return []workload.Workload{
-		{ID: "wl-cs-api", TenantID: "t-acme", AppID: "app-cs", Type: workload.TypeService,
+		{ID: "wl-cs-api", TenantID: "t-acme", AppID: "app-cs", EnvID: "env-acme-test", LaneID: d, Type: workload.TypeService,
 			Name: "cs-api", Image: "paas/qwen-cs:7b", Replicas: 2, Ready: 2, Status: workload.StatusRunning, CreatedAt: t},
-		{ID: "wl-rec-svc", TenantID: "t-acme", AppID: "app-rec", Type: workload.TypeService,
+		{ID: "wl-rec-svc", TenantID: "t-acme", AppID: "app-rec", EnvID: "env-acme-test", LaneID: d, Type: workload.TypeService,
 			Name: "rec-svc", Image: "paas/rec:latest", Replicas: 4, Ready: 3, Status: workload.StatusDeploying, CreatedAt: t},
-		{ID: "wl-etl-nightly", TenantID: "t-globex", AppID: "app-etl", Type: workload.TypeCronJob,
+		{ID: "wl-etl-nightly", TenantID: "t-globex", AppID: "app-etl", EnvID: "env-globex-prod", LaneID: d, Type: workload.TypeCronJob,
 			Name: "etl-nightly", Image: "paas/etl:1.2", Replicas: 0, Ready: 0, Status: workload.StatusSucceeded,
 			Schedule: "0 2 * * *", CreatedAt: t},
-		{ID: "wl-etl-backfill", TenantID: "t-globex", AppID: "app-etl", Type: workload.TypeJob,
+		{ID: "wl-etl-backfill", TenantID: "t-globex", AppID: "app-etl", EnvID: "env-globex-prod", LaneID: d, Type: workload.TypeJob,
 			Name: "etl-backfill", Image: "paas/etl:1.2", Replicas: 2, Ready: 1, Status: workload.StatusRunning, CreatedAt: t},
-		{ID: "wl-agent-gw", TenantID: "t-globex", AppID: "app-agent", Type: workload.TypeService,
+		{ID: "wl-agent-gw", TenantID: "t-globex", AppID: "app-agent", EnvID: "env-globex-prod", LaneID: d, Type: workload.TypeService,
 			Name: "agent-gw", Image: "paas/agent:0.9", Replicas: 2, Ready: 2, Status: workload.StatusRunning, CreatedAt: t},
 	}
 }

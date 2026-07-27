@@ -22,7 +22,9 @@ type stubRepo struct {
 	updatedID string
 }
 
-func (s *stubRepo) List(context.Context, string, string) ([]Workload, error) { return s.list, nil }
+func (s *stubRepo) List(context.Context, string, string, string) ([]Workload, error) {
+	return s.list, nil
+}
 func (s *stubRepo) Get(_ context.Context, id string) (Workload, error) {
 	for _, w := range s.list {
 		if w.ID == id {
