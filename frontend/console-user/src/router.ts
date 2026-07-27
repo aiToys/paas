@@ -22,6 +22,14 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '应用详情' },
   },
 
+  // -- 环境：物理隔离单元（生产/测试） --
+  {
+    path: '/environments',
+    name: 'environments',
+    component: () => import('@/views/Environments.vue'),
+    meta: { title: '环境' },
+  },
+
   // —— 资源中心：数据服务（可绑定 Add-on） ——
   {
     path: '/resources/models',

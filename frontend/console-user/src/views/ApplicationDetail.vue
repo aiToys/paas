@@ -73,6 +73,8 @@ const totalBindings = computed(() => app.value?.bindings.length ?? 0)
 
 interface Workload {
   id: string
+  envId: string
+  laneId: string
   type: string
   name: string
   image: string
@@ -81,7 +83,24 @@ interface Workload {
   status: string
   schedule?: string
 }
+interface Env { id: string; name: string; type: string }
 const workloads = ref<Workload[]>([])
+const envs = ref<Env[]>([])
+
+// 部署 tab：按环境分组（基线 default 不单显，归到所属环境）
+const workloadsByEnv = computed(() => {
+  const groups = new Map<string, Workload[]>()
+  for (const w of workloads.value) {
+    if (!groups.has(w.envId)) groups.set(w.envId, [])
+    groups.get(w.envId)!.push(w)
+  }
+  return [...groups.entries()].map(([envId, items]) => ({
+    envId,
+    name: envs.value.find((e) => e.id === envId)?.name ?? envId,
+    type: envs.value.find((e) => e.id === envId)?.type ?? '',
+    items,
+  }))
+})
 
 async function load() {
   loading.value = true
@@ -90,11 +109,18 @@ async function load() {
     const resp = await fetchAuth(`/api/applications/${id}`)
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     app.value = (await resp.json()) as App
-    // 并行加载该应用的工作负载（部署 tab）
-    const wresp = await fetchAuth(`/api/applications/${id}/workloads`)
+    // 并行加载该应用的工作负载（部署 tab）与环境（分组映射）
+    const [wresp, eresp] = await Promise.all([
+      fetchAuth(`/api/applications/${id}/workloads`),
+      fetchAuth('/api/environments'),
+    ])
     if (wresp.ok) {
       const wjson = await wresp.json()
       workloads.value = (wjson.data ?? []) as Workload[]
+    }
+    if (eresp.ok) {
+      const ejson = await eresp.json()
+      envs.value = (ejson.data ?? []) as Env[]
     }
   } catch (e) {
     ElMessage.error('加载应用失败：' + (e as Error).message)
@@ -278,19 +304,28 @@ const activeTab = ref<(typeof tabs)[number]>('资源绑定')
           <Icon name="server" :size="28" />
           <p>该应用尚未部署工作负载</p>
         </div>
-        <div v-else class="wl-list">
-          <div v-for="w in workloads" :key="w.id" class="wl-row">
-            <div class="wl-main">
-              <span class="wl-name">{{ w.name }}</span>
-              <span class="wl-type">{{ w.type }}</span>
-              <span class="wl-img mono">{{ w.image }}</span>
-              <span v-if="w.schedule" class="wl-sched mono">{{ w.schedule }}</span>
+        <div v-else class="env-groups">
+          <section v-for="g in workloadsByEnv" :key="g.envId" class="env-group">
+            <div class="env-group-head">
+              <Icon v-if="g.type === 'prod'" name="shield" :size="14" />
+              <span class="env-group-name">{{ g.name }}</span>
+              <span class="env-group-count mono">{{ g.items.length }}</span>
             </div>
-            <div class="wl-side">
-              <span class="reps mono" :class="{ notready: w.ready < w.replicas }">{{ w.ready }}/{{ w.replicas }}</span>
-              <span class="wl-status">{{ w.status }}</span>
+            <div class="wl-list">
+              <div v-for="w in g.items" :key="w.id" class="wl-row">
+                <div class="wl-main">
+                  <span class="wl-name">{{ w.name }}</span>
+                  <span class="wl-type">{{ w.type }}</span>
+                  <span class="wl-img mono">{{ w.image }}</span>
+                  <span v-if="w.schedule" class="wl-sched mono">{{ w.schedule }}</span>
+                </div>
+                <div class="wl-side">
+                  <span class="reps mono" :class="{ notready: w.ready < w.replicas }">{{ w.ready }}/{{ w.replicas }}</span>
+                  <span class="wl-status">{{ w.status }}</span>
+                </div>
+              </div>
             </div>
-          </div>
+          </section>
         </div>
       </div>
 
@@ -850,6 +885,30 @@ const activeTab = ref<(typeof tabs)[number]>('资源绑定')
   gap: 8px;
   padding: 40px;
   color: var(--text-faint);
+}
+.env-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.env-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--text-dim);
+}
+.env-group-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.env-group-count {
+  font-size: 11px;
+  color: var(--text-faint);
+  padding: 1px 7px;
+  background: var(--surface-2, transparent);
+  border-radius: 8px;
 }
 .wl-list {
   display: flex;

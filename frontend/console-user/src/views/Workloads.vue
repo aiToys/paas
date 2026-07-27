@@ -2,6 +2,7 @@
 // 工作负载视图：跨应用列表，按类型分 Tab（服务/Job/CronJob）。
 // 数据来自 /api/workloads?type=；扩缩容 PUT、删除 DELETE。换 Key（租户）自动重载。
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import { fetchAuth } from '@/api'
@@ -9,6 +10,8 @@ import { fetchAuth } from '@/api'
 interface Workload {
   id: string
   appId: string
+  envId: string
+  laneId: string
   type: 'service' | 'job' | 'cronjob'
   name: string
   image: string
@@ -18,7 +21,16 @@ interface Workload {
   schedule?: string
 }
 
+interface Env {
+  id: string
+  name: string
+  type: 'prod' | 'test'
+  cluster?: string
+}
+
 const props = defineProps<{ type?: string }>()
+
+const route = useRoute()
 
 const tabs = [
   { key: 'service', label: '服务', icon: 'server', desc: '长驻工作负载（Deployment 语义）' },
@@ -27,6 +39,8 @@ const tabs = [
 ] as const
 
 const activeType = ref<string>(props.type || 'service')
+const activeEnv = ref<string>('') // 空表示全部环境
+const envs = ref<Env[]>([])
 const items = ref<Workload[]>([])
 const loading = ref(true)
 const scaling = ref<string>('') // 正在扩缩容的 id
@@ -39,12 +53,22 @@ const statusMeta: Record<Workload['status'], { label: string; cls: string }> = {
   pending: { label: '等待', cls: 'idle' },
 }
 
-const appName = computed(() => (id: string) => id) // 占位：appId 直接展示（跨应用视图）
+const envName = computed(() => (id: string) => envs.value.find((e) => e.id === id)?.name ?? id)
+
+async function loadEnvs() {
+  const resp = await fetchAuth('/api/environments')
+  if (resp.ok) {
+    const json = await resp.json()
+    envs.value = (json.data ?? []) as Env[]
+  }
+}
 
 async function load() {
   loading.value = true
   try {
-    const resp = await fetchAuth(`/api/workloads?type=${activeType.value}`)
+    const params = new URLSearchParams({ type: activeType.value })
+    if (activeEnv.value) params.set('envId', activeEnv.value)
+    const resp = await fetchAuth(`/api/workloads?${params}`)
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     const json = await resp.json()
     items.value = (json.data ?? []) as Workload[]
@@ -108,10 +132,20 @@ function switchType(key: string) {
   load()
 }
 
+function switchEnv(id: string) {
+  activeEnv.value = id
+  load()
+}
+
 function onKeyChanged() {
+  loadEnvs()
   load()
 }
 onMounted(() => {
+  // 环境视图跳转携带 ?env= 预选环境
+  const q = route.query.env as string
+  if (q) activeEnv.value = q
+  loadEnvs()
   load()
   window.addEventListener('paas:key-changed', onKeyChanged)
 })
@@ -120,6 +154,21 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
 
 <template>
   <div class="page">
+    <div class="env-bar">
+      <span class="env-label">环境</span>
+      <button class="env-pill" :class="{ on: !activeEnv }" @click="switchEnv('')">全部</button>
+      <button
+        v-for="e in envs"
+        :key="e.id"
+        class="env-pill"
+        :class="{ on: activeEnv === e.id, prod: e.type === 'prod' }"
+        @click="switchEnv(e.id)"
+      >
+        {{ e.name }}
+        <span v-if="e.cluster" class="env-cluster">{{ e.cluster }}</span>
+      </button>
+    </div>
+
     <div class="tabs">
       <button
         v-for="t in tabs"
@@ -149,6 +198,7 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
           <tr>
             <th>名称</th>
             <th>归属应用</th>
+            <th>环境</th>
             <th>镜像</th>
             <th v-if="activeType === 'cronjob'">调度</th>
             <th>副本</th>
@@ -164,7 +214,8 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
                 <span class="id mono">{{ w.id }}</span>
               </div>
             </td>
-            <td class="mono app-id">{{ appName(w.appId) }}</td>
+            <td class="mono app-id">{{ w.appId }}</td>
+            <td class="env-cell">{{ envName(w.envId) }}</td>
             <td class="mono img">{{ w.image }}</td>
             <td v-if="activeType === 'cronjob'" class="mono sched">{{ w.schedule }}</td>
             <td>
@@ -195,6 +246,56 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
 .page {
   max-width: 1200px;
   margin: 0 auto;
+}
+.env-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.env-label {
+  font-size: 12px;
+  color: var(--text-faint);
+  margin-right: 4px;
+}
+.env-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface);
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.env-pill:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.env-pill.on {
+  background: var(--brand-soft);
+  border-color: var(--brand);
+  color: var(--brand);
+}
+.env-pill.prod.on {
+  background: var(--warning-soft, rgba(245, 158, 11, 0.12));
+  border-color: var(--warning, #f59e0b);
+  color: var(--warning, #f59e0b);
+}
+.env-cluster {
+  font-size: 10px;
+  opacity: 0.7;
+  font-family: var(--mono, monospace);
+}
+.env-cell {
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
 }
 .tabs {
   display: flex;

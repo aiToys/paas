@@ -44,6 +44,7 @@ interface NavItem {
 
 const nav: NavItem[] = [
   { label: '应用', icon: 'deploy', to: '/applications' },
+  { label: '环境', icon: 'shield', to: '/environments' },
   {
     label: '资源中心',
     icon: 'database',
