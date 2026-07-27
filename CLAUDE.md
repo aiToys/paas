@@ -63,11 +63,13 @@ PAAS_API_KEY=sk-xxx ./bin/core   # 自定义 API Key
 端到端验证（core 启动后）：
 
 ```bash
-# 列模型
+# 列模型（OpenAI 兼容，含 owned_by=供应商）
 curl -H "Authorization: Bearer sk-paas-dev-key" http://localhost:8080/v1/models
-# 流式推理
+# 模型市场富信息（含通道列表）
+curl -H "Authorization: Bearer sk-paas-dev-key" http://localhost:8080/api/models
+# 流式推理（mock 通道）
 curl -N -H "Authorization: Bearer sk-paas-dev-key" -H "Content-Type: application/json" \
-  -d '{"model":"echo","messages":[{"role":"user","content":"你好"}],"stream":true}' \
+  -d '{"model":"qwen2.5-7b","messages":[{"role":"user","content":"你好"}],"stream":true}' \
   http://localhost:8080/v1/chat/completions
 ```
 
@@ -81,18 +83,30 @@ pnpm build                    # 构建三套
 
 ## 垂直切片（已落地）
 
-MaaS 端到端最小闭环已打通，验证了插件契约与数据流：
+### MaaS 端到端闭环 + 多通道模型市场
+
+三层抽象 `Model → Channel → Provider`，模型市场真实化已落地：
 
 ```
-console-user Playground → Gateway(OpenAI 兼容 SSE + API Key 鉴权 + Token 计量)
-                          → MaaS 插件(进程内编排) → echo Provider(回显) → 流式返回
+console-user 模型市场(/api/models) / Playground(/v1/chat/completions)
+  → Gateway(API Key 鉴权 + OpenAI 兼容 SSE + Token 计量 + 按通道路由)
+  → MaaS 插件(catalog seed 加载) → Channel(mock/echo Provider) → 流式返回
 ```
 
-- `pkg/provider/`：Provider / GatewayRegistrar 平台级公共契约（独立包避免 import 循环）。
-- `internal/core/gateway/`：API Gateway（路由表 / API Key 中间件 / OpenAI 流式 handler / Meter）。
-- `internal/maas/`：MaaS 插件（实现 `plugin.Plugin`，Init 阶段注册 echo provider）+ echo provider。
-- `pkg/plugin.CoreDeps` 新增 `Gateway()` 注入点（依赖倒置）。
-- 切片**不依赖 K8s/GPU**（进程内）；真实 vLLM 与 K8s 编排为下一切片。
+- `pkg/provider/`：`Provider`（`Name()+Chat()`）/ `Model` / `Channel` / `GatewayRegistrar`(`RegisterModel`) 平台级公共契约（独立包避免 import 循环）。
+- `internal/core/gateway/`：API Gateway（`map[model]*Model` 路由表 / `Resolve` 按通道优先级取首个健康 / `MarkChannelStatus` 调用失败被动降级 / API Key 中间件 / OpenAI 流式 handler / Meter / `/api/models` 富信息 + `/v1/models` OpenAI 兼容）。
+- `internal/maas/`：MaaS 插件（Init 阶段加载 `catalog()` 注册模型目录）+ `MockProvider`（按预设文本流式）+ `EchoProvider`（回显）。
+- `pkg/plugin.CoreDeps` 的 `Gateway()` 注入点（依赖倒置）。
+- 路由策略：通道按 `Priority` 升序，跳过 `offline`；全部 `offline` 报错；调用失败标记 `degraded`。
+- 切片**不依赖 K8s/GPU**（进程内 mock）；真实 vLLM 纳管 + K8s 编排为下一切片。
+
+### 应用为主线（统一控制台）
+
+应用是主线抽象，各类资源以绑定形式归属应用：
+
+- `internal/core/application/`：`Application` 领域（`Bindings` 真源 + `Resources` 派生计数）/ Repository / 内存实现（seed）。
+- REST API：`GET/POST /api/applications`、`GET /api/applications/{id}`、`POST /api/applications/{id}/bindings`、`DELETE /api/applications/{id}/bindings/{type}/{name}`。
+- console-user：应用列表 + 详情（资源绑定分组 + 绑定/解绑端到端）+ 模型市场 + Playground（模型下拉 + `?model=` 预选）。
 
 ## 前端架构
 
