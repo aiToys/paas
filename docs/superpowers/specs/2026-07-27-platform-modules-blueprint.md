@@ -71,20 +71,28 @@ Job / CronJob 是应用的工作负载形态（应用以什么方式跑），不
 
 ### 环境与联调模型
 
-应用 × 环境是**多对多**，不是父子树。三个正交维度 + 一个交叉点：
+应用 × 环境是**多对多**，不是父子树。三个正交维度：
 
 | 维度 | 实体 | 语义 |
 |---|---|---|
-| 隔离单元 | `Environment`（type: **prod \| test** 两类） | 物理隔离边界；staging 归 prod 带 subtype |
-| 物理落点 | `Environment.cluster` | prod-bj / prod-sh / prod-aws（区/云） |
-| 流量染色 | `Lane`（基线 / 联调泳道 / 灰度泳道） | 环境内流量逻辑分组 |
-| 交叉点 | `Deployment = App × Env × Lane` | 挂 Workload / Binding / AppConfig |
+| 隔离单元 | `Environment`（type: **prod \| test**） | 物理隔离边界 |
+| 物理落点 | `Environment.cluster` | prod-bj / prod-sh / prod-aws（可选，prod 多区才填） |
+| 流量染色 | `LaneID`（基线 / 联调泳道 / 灰度泳道） | 环境内流量逻辑分组 |
 
-**物理环境只分生产与测试两类**（不分 dev/staging/prod 多级）。**联调环境 = 测试环境上的命名泳道**：需求来 -> 拉项目分支 -> 自动创建联调泳道（只部署变更服务，未变更降级测试基线），需求合并即销毁。Lane 同时承载测试联调与生产灰度，机制相同（染色 + 标签路由 + 降级，借鉴 zeus cluster 路由），策略按环境分。
+**部署实例 = 应用 × 环境 × LaneID**：
+- `LaneID="default"` -> 基线部署（每应用每环境唯一，单例）
+- `LaneID≠"default"` -> 泳道部署（多例）
+- 选 `default` 不选空值：基线是真实存在的稳定链路（非缺失），路由降级统一无特判（找不到同 lane 部署 -> 降级 default），数据无非空歧义，与 zeus `cluster=default` / Istio `subset=default` 一致。`default` 为保留字。
 
-**联调基线规约**：联调前必须先合并最新基线代码，所有联调环境基于最新基线，**不锁定基线版本**。选 trunk-based 流派（用纪律换简化）。代价：基线动可能打断联调、结果不可复现、长周期需求痛；适用短分支 + 频繁合并 + 中小团队。逃生通道：基线破坏时优先修基线（trunk 纪律），而非钉版本；平台起步不实现钉版本，LaneID 预留未来。
+**命名**：物理层叫「环境」（生产环境/测试环境）；环境内分「基线」（单例，稳定默认）+「联调泳道」（测试，多例，per 需求，用完销毁）/「灰度泳道」（生产，多例）。不叫「项目环境」（项目实体悬空）。技术机制层用 lane，产品面统一「泳道」。
 
-**四概念承载**：`Environment`(prod\|test+cluster) + `Lane`(基线\|联调\|灰度) + `Release`(发布单=需求维度多应用+配置协同，原子/可回滚/可提升) + `EnvTemplate`(GitOps 声明，PR 触发联调创建/回收)。Release/EnvTemplate 后续切片，环境切片只建基座并预留 LaneID/cluster。
+**物理环境只分生产与测试两类**（不分 dev/staging/prod 多级；staging 归 prod 用 name 区分，不引入 subtype）。联调 = 测试环境的联调泳道：需求来 -> 拉项目分支 -> 创建联调泳道（只部署变更服务，未变更降级测试基线），需求合并即销毁。Lane 同时承载测试联调与生产灰度，机制相同（染色 + 标签路由 + 降级 default，借鉴 zeus cluster），策略按环境分。
+
+**演进原则**：实体只在「现在需要」时引入，字段可预留、实体不预留。起步期**不实体化 Deployment/Lane/Release/EnvTemplate**：Workload/Binding/AppConfig 直接带 (AppID, EnvID, LaneID)，LaneID 预留不实现路由。未来按需引入：泳道路由（服务治理切片）、Deployment+Release 发布单（DevOps 切片）、EnvTemplate 联调自动化（GitOps 切片）。
+
+**联调基线规约**：联调前必须先合并最新基线代码，所有联调环境基于最新基线，**不锁定基线版本**。trunk-based 流派（用纪律换简化）。代价：基线动可能打断联调、结果不可复现、长周期需求痛；适用短分支 + 频繁合并 + 中小团队。逃生通道：基线破坏时优先修基线（trunk 纪律），而非钉版本；平台起步不实现钉版本。耦合提示：trunk-based 与泳道模式（降级基线自动跟随）天然契合，未来项目环境须用泳道模式。
+
+**四概念承载**（未来）：`Environment`(prod\|test+cluster) + `Lane`(基线\|联调\|灰度) + `Release`(发布单=需求维度多应用+配置协同，原子/可回滚/可提升) + `EnvTemplate`(GitOps 声明，PR 触发联调创建/回收)。
 
 **已知盲点（后续覆盖）**：①数据泳道难（流量易染色，DB/MQ 数据难，靠影子库/独立 schema）；②联调环境生命周期回收（合并销毁+超时+配额）；③跨环境提升（联调->测试基线->生产，配置漂移检测）。
 
