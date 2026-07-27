@@ -9,4 +9,7 @@ type Repository interface {
 	Get(ctx context.Context, id string) (Environment, error)
 	Create(ctx context.Context, e Environment) error
 	Delete(ctx context.Context, id string) error
+	// EnvType 返回指定环境的生产/测试类型，供生产写权限校验（prod:write）。
+	// 环境不存在返回错误。
+	EnvType(ctx context.Context, id string) (string, error)
 }

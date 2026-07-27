@@ -10,6 +10,8 @@ import (
 const (
 	PermEnvironmentRead  = "environment:read"
 	PermEnvironmentWrite = "environment:write"
+	// PermProdWrite 生产环境写操作额外权限；developer 无此权限 -> 生产只读。
+	PermProdWrite = "prod:write"
 )
 
 // Handler 暴露环境 REST API。
@@ -71,6 +73,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		// 生产环境写操作需 prod:write（developer 被拦，生产只读）
+		if e.Type == TypeProd && !h.allow(w, r, PermProdWrite) {
+			return
+		}
 		if err := h.repo.Create(r.Context(), e); err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -100,6 +106,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodDelete && id != "" {
 		if !h.allow(w, r, PermEnvironmentWrite) {
 			return
+		}
+		// 生产环境删除需 prod:write（developer 被拦）
+		if etype, err := h.repo.EnvType(r.Context(), id); err == nil && etype == TypeProd {
+			if !h.allow(w, r, PermProdWrite) {
+				return
+			}
 		}
 		if err := h.repo.Delete(r.Context(), id); err != nil {
 			writeErr(w, http.StatusNotFound, err.Error())

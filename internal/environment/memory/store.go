@@ -101,6 +101,15 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// EnvType 返回环境类型（prod|test），跨租户访问同样返回错误（不泄漏）。
+func (s *Store) EnvType(ctx context.Context, id string) (string, error) {
+	e, err := s.Get(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	return e.Type, nil
+}
+
 // seed 生成跨两租户的环境。
 // acme: env-acme-prod-bj / env-acme-prod-sh / env-acme-test
 // globex: env-globex-prod / env-globex-test

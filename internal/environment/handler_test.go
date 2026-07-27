@@ -31,6 +31,14 @@ func (s *stubRepo) Get(_ context.Context, id string) (Environment, error) {
 }
 func (s *stubRepo) Create(_ context.Context, e Environment) error { s.saved = e; return nil }
 func (s *stubRepo) Delete(_ context.Context, id string) error     { s.deleted = id; return nil }
+func (s *stubRepo) EnvType(_ context.Context, id string) (string, error) {
+	for _, e := range s.list {
+		if e.ID == id {
+			return e.Type, nil
+		}
+	}
+	return "", errNotFound
+}
 
 type notFoundErr struct{}
 
@@ -95,4 +103,22 @@ func TestAuthorizeRejectsWrite(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, acmeReq(http.MethodPost, "/api/environments", `{"id":"x","name":"n","type":"test"}`))
 	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+func TestCreateProdRequiresProdWrite(t *testing.T) {
+	repo := &stubRepo{}
+	h := NewHandler(repo)
+	// 放行除 prod:write 外的所有权限（模拟 developer 角色）
+	h.Authorize = func(r *http.Request, perm string) bool { return perm != PermProdWrite }
+
+	// Create prod 环境 -> 需要 prod:write -> 被拦 403（developer 生产只读）
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, acmeReq(http.MethodPost, "/api/environments", `{"id":"env-prod","name":"prod","type":"prod"}`))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Empty(t, repo.saved.ID, "prod 环境不应被创建")
+
+	// Create test 环境 -> 不需 prod:write -> 放行 201
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, acmeReq(http.MethodPost, "/api/environments", `{"id":"env-test","name":"test","type":"test"}`))
+	assert.Equal(t, http.StatusCreated, rec2.Code)
 }
