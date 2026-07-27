@@ -47,7 +47,7 @@ func TestBootstrapInitializesAndRunsPlugins(t *testing.T) {
 
 func TestResolveAPIKeyDefaultsAndOverride(t *testing.T) {
 	t.Setenv("PAAS_API_KEY", "")
-	assert.Equal(t, "sk-paas-dev-key", resolveAPIKey())
+	assert.Equal(t, "sk-acme-admin", resolveAPIKey())
 
 	t.Setenv("PAAS_API_KEY", "sk-custom")
 	assert.Equal(t, "sk-custom", resolveAPIKey())

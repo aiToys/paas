@@ -15,6 +15,8 @@ import (
 	appmemory "github.com/aitoys/paas/internal/core/application/memory"
 	"github.com/aitoys/paas/internal/core/gateway"
 	"github.com/aitoys/paas/internal/core/health"
+	"github.com/aitoys/paas/internal/core/identity"
+	idmemory "github.com/aitoys/paas/internal/core/identity/memory"
 	coreplugin "github.com/aitoys/paas/internal/core/plugin"
 	"github.com/aitoys/paas/internal/maas"
 	"github.com/aitoys/paas/pkg/plugin"
@@ -38,7 +40,9 @@ func main() {
 
 // run 启动 HTTP 服务并引导插件；返回非 nil 则进程以 1 退出。
 func run(ctx context.Context, plugins []plugin.Plugin, deps plugin.CoreDeps, gw *gateway.Gateway, meter *gateway.Meter) error {
-	go serveHTTP(gw, meter)
+	idb := idmemory.NewStore()
+	seedIdentity(idb, resolveAPIKey())
+	go serveHTTP(gw, meter, idb)
 	ran, err := bootstrapCore(ctx, plugins, deps)
 	if err != nil {
 		return err
@@ -84,30 +88,33 @@ type realCoreDeps struct {
 func (d realCoreDeps) Logger() interface{}                { return nil }
 func (d realCoreDeps) Gateway() provider.GatewayRegistrar { return d.gw }
 
-// resolveAPIKey 解析 API Key：环境变量 PAAS_API_KEY 优先，否则用开发默认值。
+// resolveAPIKey 解析 API Key：环境变量 PAAS_API_KEY 优先，否则用开发默认值（sk-acme-admin）。
+// 返回值用于 seed 兼容（自定义 Key 追加为 t-acme admin）与日志展示。
 func resolveAPIKey() string {
 	if k := os.Getenv("PAAS_API_KEY"); k != "" {
 		return k
 	}
-	return "sk-paas-dev-key"
+	return "sk-acme-admin"
 }
 
-// serveHTTP 挂载 OpenAI 兼容端点（鉴权）与存活探针。
-func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter) {
+// serveHTTP 挂载 OpenAI 兼容端点（鉴权 + RBAC）与存活探针。
+// idb 提供 API Key → (租户, 角色) 解析；模型目录平台共享，应用按租户隔离。
+func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, idb identity.Repository) {
 	apiKey := resolveAPIKey()
 	mux := http.NewServeMux()
-	auth := gateway.APIKeyAuth(apiKey)
-	mux.Handle("/v1/chat/completions", auth(gateway.ChatCompletions(gw, meter)))
-	mux.Handle("/v1/models", auth(gateway.ListModels(gw)))
-	mux.Handle("/api/models", auth(gateway.CatalogModels(gw)))
-	// 应用为主线 REST API
+	auth := gateway.APIKeyAuth(idb)
+	mux.Handle("/v1/chat/completions", auth(gateway.Require("model:infer")(gateway.ChatCompletions(gw, meter))))
+	mux.Handle("/v1/models", auth(gateway.Require("model:read")(gateway.ListModels(gw))))
+	mux.Handle("/api/models", auth(gateway.Require("model:read")(gateway.CatalogModels(gw))))
+	// 应用为主线 REST API：方法级权限由 handler 内部按 application:*/binding:write 校验
 	appHandler := application.NewHandler(appmemory.NewStore())
+	appHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 	mux.Handle("/api/applications", auth(appHandler))
 	mux.Handle("/api/applications/", auth(appHandler))
 	mux.Handle("/livez", health.NewHandler())
 
 	srv := &http.Server{Addr: ":8080", Handler: mux}
-	log.Printf("HTTP 监听 :8080（API Key: %s）", apiKey)
+	log.Printf("HTTP 监听 :8080（默认 API Key: %s）", apiKey)
 	if err := srv.ListenAndServe(); err != nil {
 		log.Printf("HTTP 服务退出: %v", err)
 	}

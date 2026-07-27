@@ -48,3 +48,9 @@ func hasPermission(ctx context.Context, perm identity.Permission) bool {
 	}
 	return false
 }
+
+// RequestAllowed 供需方法级权限判定的 handler 复用（如应用 API 按方法区分读写权限）。
+// 以字符串形式接收权限标识，避免下游领域包反向依赖 identity。
+func RequestAllowed(r *http.Request, perm string) bool {
+	return hasPermission(r.Context(), identity.Permission(perm))
+}
