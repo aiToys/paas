@@ -36,8 +36,12 @@ func (m *MaaSPlugin) Init(_ context.Context, deps plugin.CoreDeps) error {
 	if m.gw == nil {
 		return fmt.Errorf("gateway registrar 未注入")
 	}
-	// 本切片只注册 echo provider；真实 vLLM provider 在下一切片接入
-	m.gw.Register("echo", EchoProvider{})
+	// 加载 seed 模型目录（含通道）注册到 Gateway；真实 vLLM provider 在下一切片接入
+	for _, model := range catalog() {
+		if err := m.gw.RegisterModel(model); err != nil {
+			return fmt.Errorf("注册模型 %s 失败: %w", model.ID, err)
+		}
+	}
 	return nil
 }
 

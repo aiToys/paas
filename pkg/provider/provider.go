@@ -30,7 +30,9 @@ type Provider interface {
 	Chat(ctx context.Context, req ChatRequest) (<-chan Chunk, error)
 }
 
-// GatewayRegistrar 由 API Gateway 实现，供插件在 Init 阶段注册 Provider。
+// GatewayRegistrar 由 API Gateway 实现，供插件在 Init 阶段注册模型目录。
 type GatewayRegistrar interface {
-	Register(model string, p Provider)
+	// RegisterModel 注册一个逻辑模型（含其全部通道）。
+	// 同 ID 视为覆盖更新。
+	RegisterModel(m *Model) error
 }

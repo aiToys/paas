@@ -99,6 +99,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter) {
 	auth := gateway.APIKeyAuth(apiKey)
 	mux.Handle("/v1/chat/completions", auth(gateway.ChatCompletions(gw, meter)))
 	mux.Handle("/v1/models", auth(gateway.ListModels(gw)))
+	mux.Handle("/api/models", auth(gateway.CatalogModels(gw)))
 	// 应用为主线 REST API
 	appHandler := application.NewHandler(appmemory.NewStore())
 	mux.Handle("/api/applications", auth(appHandler))
