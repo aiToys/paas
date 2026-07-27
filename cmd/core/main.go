@@ -115,8 +115,15 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, idb identity.Repositor
 	appHandler := application.NewHandler(appmemory.NewStore())
 	appHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
-	// 工作负载（应用运行形态）：方法级权限 workload:read/write。
-	wlHandler := workload.NewHandler(wlmemory.NewStore())
+	// 环境（物理隔离单元 prod|test）：方法级权限 environment:read/write + prod 写校验。
+	envStore := envmemory.NewStore()
+	envHandler := environment.NewHandler(envStore)
+	envHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+	mux.Handle("/api/environments", auth(envHandler))
+	mux.Handle("/api/environments/", auth(envHandler))
+
+	// 工作负载：注入 envStore 作 EnvTypeResolver，启用生产写校验（dev 生产只读）。
+	wlHandler := workload.NewHandler(wlmemory.NewStore(), workload.WithEnvResolver(envStore))
 	wlHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
 	// composite：/api/applications/{id}/workloads 段交工作负载 handler，其余交应用 handler。
@@ -131,12 +138,6 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, idb identity.Repositor
 	mux.Handle("/api/applications/", auth(composite))
 	mux.Handle("/api/workloads", auth(wlHandler))
 	mux.Handle("/api/workloads/", auth(wlHandler))
-
-	// 环境（物理隔离单元 prod|test）：方法级权限 environment:read/write。
-	envHandler := environment.NewHandler(envmemory.NewStore())
-	envHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
-	mux.Handle("/api/environments", auth(envHandler))
-	mux.Handle("/api/environments/", auth(envHandler))
 
 	mux.Handle("/livez", health.NewHandler())
 
