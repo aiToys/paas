@@ -3,8 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
-
-const API_KEY = 'sk-paas-dev-key'
+import { fetchAuth } from '@/api'
 
 const route = useRoute()
 const router = useRouter()
@@ -76,9 +75,7 @@ async function load() {
   loading.value = true
   const id = route.params.id as string
   try {
-    const resp = await fetch(`/api/applications/${id}`, {
-      headers: { Authorization: `Bearer ${API_KEY}` },
-    })
+    const resp = await fetchAuth(`/api/applications/${id}`)
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     app.value = (await resp.json()) as App
   } catch (e) {
@@ -118,9 +115,8 @@ async function submitBind() {
   }
   submitting.value = true
   try {
-    const resp = await fetch(`/api/applications/${app.value.id}/bindings`, {
+    const resp = await fetchAuth(`/api/applications/${app.value.id}/bindings`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: form.value.type, name }),
     })
     if (!resp.ok) {
@@ -149,9 +145,9 @@ async function unbind(b: Binding) {
     return // 用户取消
   }
   try {
-    const resp = await fetch(
+    const resp = await fetchAuth(
       `/api/applications/${app.value.id}/bindings/${b.type}/${encodeURIComponent(b.name)}`,
-      { method: 'DELETE', headers: { Authorization: `Bearer ${API_KEY}` } },
+      { method: 'DELETE' },
     )
     if (!resp.ok) {
       const err = await resp.json().catch(() => ({}))

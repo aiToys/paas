@@ -3,11 +3,11 @@ import { nextTick, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
+import { fetchAuth } from '@/api'
 
 // Playground：聊天式交互推理，直连 Platform Core Gateway（OpenAI 兼容 SSE）。
 // 模型列表来自 /v1/models；支持 ?model=<id> 预选（模型市场「试用」入口）。
-// 本切片 API Key 为开发默认值；生产应从用户会话/Identity 获取（Plan 2）。
-const API_KEY = 'sk-paas-dev-key'
+// API Key 来自顶栏会话（@/api），换 Key 即换租户/权限视角。
 
 interface Msg {
   role: 'user' | 'assistant'
@@ -32,7 +32,7 @@ async function scrollToBottom() {
 
 onMounted(async () => {
   try {
-    const resp = await fetch('/v1/models', { headers: { Authorization: `Bearer ${API_KEY}` } })
+    const resp = await fetchAuth('/v1/models')
     const json = await resp.json()
     modelOptions.value = (json.data ?? []).map((m: { id: string }) => m.id)
   } catch {
@@ -52,12 +52,8 @@ async function send() {
   messages.value.push(assistant)
   await scrollToBottom()
 
-  const resp = await fetch('/v1/chat/completions', {
+  const resp = await fetchAuth('/v1/chat/completions', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${API_KEY}`,
-    },
     body: JSON.stringify({
       model: model.value,
       messages: [{ role: 'user', content: text }],

@@ -3,8 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
-
-const API_KEY = 'sk-paas-dev-key'
+import { fetchAuth } from '@/api'
 
 interface Channel {
   id: string
@@ -62,7 +61,7 @@ const loading = ref(true)
 async function load() {
   loading.value = true
   try {
-    const resp = await fetch('/api/models', { headers: { Authorization: `Bearer ${API_KEY}` } })
+    const resp = await fetchAuth('/api/models')
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     const json = await resp.json()
     models.value = (json.data ?? []) as Model[]

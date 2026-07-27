@@ -1,10 +1,38 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
+import { ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
+import { auth, setApiKey, currentPreset, PRESET_KEYS } from '@/api'
 
 const route = useRoute()
 const collapsed = ref(false)
+
+// 当前身份视角（来自 API Key）：租户标签 + 头像首字母；自定义 Key 退化为通用展示。
+const identityLabel = computed(() => currentPreset()?.label ?? '自定义 Key')
+const identityInitial = computed(() => {
+  const p = currentPreset()
+  if (p) return p.tenant.replace('t-', '').charAt(0).toUpperCase()
+  return 'U'
+})
+
+async function onPickKey(cmd: string | number | object) {
+  const key = String(cmd)
+  if (key === '__custom') {
+    try {
+      const { value } = await ElMessageBox.prompt('输入 API Key（绑定租户与角色）', '切换 API Key', {
+        confirmButtonText: '切换',
+        cancelButtonText: '取消',
+        inputPlaceholder: 'sk-...',
+      })
+      if (value.trim()) setApiKey(value.trim())
+    } catch {
+      // 用户取消
+    }
+    return
+  }
+  setApiKey(key)
+}
 
 interface NavItem {
   label: string
@@ -137,11 +165,29 @@ function isActive(to: string) {
             <span>搜索应用、资源…</span>
             <kbd>⌘K</kbd>
           </div>
-          <div class="tenant-chip">
-            <div class="t-avatar">AC</div>
-            <span v-if="!collapsed">Acme Inc</span>
-          </div>
-          <div class="user-avatar">涛</div>
+          <el-dropdown trigger="click" @command="onPickKey">
+            <div class="tenant-chip">
+              <div class="t-avatar">{{ identityInitial }}</div>
+              <span v-if="!collapsed">{{ identityLabel }}</span>
+            </div>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item
+                  v-for="p in PRESET_KEYS"
+                  :key="p.key"
+                  :command="p.key"
+                  :disabled="p.key === auth.key"
+                >
+                  <div class="key-row">
+                    <span>{{ p.label }}</span>
+                    <span class="key-role">{{ p.role }}</span>
+                  </div>
+                </el-dropdown-item>
+                <el-dropdown-item command="__custom" divided>自定义 Key…</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+          <div class="user-avatar">{{ identityInitial }}</div>
         </div>
       </header>
 
@@ -429,6 +475,21 @@ function isActive(to: string) {
   font-weight: 600;
   color: #04130f;
   cursor: pointer;
+}
+
+.key-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+.key-role {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--surface-2, #1e2433);
+  color: var(--text-faint, #8b93a7);
+  font-size: 11px;
 }
 
 .content {

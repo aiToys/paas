@@ -1,10 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
-
-const API_KEY = 'sk-paas-dev-key'
+import { fetchAuth } from '@/api'
 
 interface App {
   id: string
@@ -25,9 +24,7 @@ const loading = ref(true)
 async function load() {
   loading.value = true
   try {
-    const resp = await fetch('/api/applications', {
-      headers: { Authorization: `Bearer ${API_KEY}` },
-    })
+    const resp = await fetchAuth('/api/applications')
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     const json = await resp.json()
     apps.value = json.data ?? []
@@ -38,7 +35,15 @@ async function load() {
   }
 }
 
-onMounted(load)
+// 切换 API Key（租户视角）后重载列表
+function onKeyChanged() {
+  load()
+}
+onMounted(() => {
+  load()
+  window.addEventListener('paas:key-changed', onKeyChanged)
+})
+onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
 
 const envs = ['全部', '生产', '预发', '开发'] as const
 const activeEnv = ref<string>('全部')
