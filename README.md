@@ -10,7 +10,14 @@
 
 🚧 早期开发中。本期范围：**Platform Core 底座 + MaaS 推理平台**，其余三个子系统（服务治理 / 中间件 / DevOps）后续作为插件接入。
 
-完整设计见 [设计规格](./docs/superpowers/specs/2026-07-26-maas-platform-foundation-design.md)，当前实施计划见 [Plan 1](./docs/superpowers/plans/2026-07-26-repo-and-core-foundation-implementation.md)。
+### 已落地能力
+
+- **MaaS 端到端闭环**：`Model → Channel → Provider` 三层抽象，OpenAI 兼容流式推理（SSE）+ API Key 鉴权 + Token 计量 + 按通道路由（优先级 + 故障降级）。当前用 mock/echo provider，真实 vLLM 为下一切片。
+- **多通道模型市场**：8 个 seed 模型（富信息卡片：供应商 / 上下文 / 能力 / 定价 / 通道健康状态），OpenAI 兼容 `/v1/models` + 富信息 `/api/models`。
+- **应用为主线**：应用是统一控制台主线抽象，各类资源以绑定形式归属应用（绑定/解绑 REST API 端到端）。
+- **Platform Core 插件机制**：插件契约 + Registry（拓扑排序 + 环检测）+ 依赖倒置注入。
+
+完整设计见 [设计规格](./docs/superpowers/specs/)，实施计划见 [Plans](./docs/superpowers/plans/)。
 
 ## 架构
 
@@ -41,13 +48,34 @@
 
 ## 快速开始
 
+环境要求：Go >= 1.22、Node >= 22、pnpm、GNU make。
+
+**后端**（Platform Core，暴露 :8080）：
+
 ```bash
-make build      # 编译 core 二进制到 bin/core
-make test       # 运行全部测试（含 race 检测）
-./bin/core      # 运行（最小骨架，暴露 :8080/livez）
+make build && ./bin/core          # 编译并运行，默认 API Key: sk-paas-dev-key
 ```
 
-环境要求：Go >= 1.22、GNU make。
+**前端**（console-user 用户控制台，:5174）：
+
+```bash
+cd frontend && pnpm install && pnpm dev:user
+```
+
+打开 http://localhost:5174 即可看到：模型市场（8 个模型卡片）→ 点「试用」进 Playground 流式推理；应用列表 → 应用详情（资源绑定/解绑）。
+
+**端到端验证（core 启动后）**：
+
+```bash
+# 模型市场富信息
+curl -H "Authorization: Bearer sk-paas-dev-key" http://localhost:8080/api/models
+# 流式推理（mock 通道）
+curl -N -H "Authorization: Bearer sk-paas-dev-key" -H "Content-Type: application/json" \
+  -d '{"model":"qwen2.5-7b","messages":[{"role":"user","content":"你好"}],"stream":true}' \
+  http://localhost:8080/v1/chat/completions
+```
+
+测试与检查：`make test`（含 race）、`make lint`（golangci-lint）。
 
 ## 贡献
 
