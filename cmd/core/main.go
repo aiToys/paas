@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/aitoys/paas/internal/core/application"
@@ -19,6 +20,8 @@ import (
 	idmemory "github.com/aitoys/paas/internal/core/identity/memory"
 	coreplugin "github.com/aitoys/paas/internal/core/plugin"
 	"github.com/aitoys/paas/internal/maas"
+	"github.com/aitoys/paas/internal/workload"
+	wlmemory "github.com/aitoys/paas/internal/workload/memory"
 	"github.com/aitoys/paas/pkg/plugin"
 	"github.com/aitoys/paas/pkg/provider"
 )
@@ -109,8 +112,23 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, idb identity.Repositor
 	// 应用为主线 REST API：方法级权限由 handler 内部按 application:*/binding:write 校验
 	appHandler := application.NewHandler(appmemory.NewStore())
 	appHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
-	mux.Handle("/api/applications", auth(appHandler))
-	mux.Handle("/api/applications/", auth(appHandler))
+
+	// 工作负载（应用运行形态）：方法级权限 workload:read/write。
+	wlHandler := workload.NewHandler(wlmemory.NewStore())
+	wlHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+
+	// composite：/api/applications/{id}/workloads 段交工作负载 handler，其余交应用 handler。
+	composite := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/workloads") {
+			wlHandler.ServeHTTP(w, r)
+			return
+		}
+		appHandler.ServeHTTP(w, r)
+	})
+	mux.Handle("/api/applications", auth(composite))
+	mux.Handle("/api/applications/", auth(composite))
+	mux.Handle("/api/workloads", auth(wlHandler))
+	mux.Handle("/api/workloads/", auth(wlHandler))
 	mux.Handle("/livez", health.NewHandler())
 
 	srv := &http.Server{Addr: ":8080", Handler: mux}

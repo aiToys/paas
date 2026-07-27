@@ -51,13 +51,17 @@ type APIKey struct {
 }
 
 // BuiltinRoles 返回内置角色定义（起步期固定）。
-// tenant-admin 通行；developer 覆盖应用读写与推理；viewer 只读。
+// tenant-admin 通行；developer 覆盖应用/工作负载读写与推理；viewer 只读。
 func BuiltinRoles() map[string]Role {
 	return map[string]Role{
 		"tenant-admin": {Name: "tenant-admin", Permissions: []Permission{"tenant:admin"}},
 		"developer": {Name: "developer", Permissions: []Permission{
-			"application:read", "application:write", "binding:write", "model:infer", "model:read",
+			"application:read", "application:write", "binding:write",
+			"workload:read", "workload:write",
+			"model:infer", "model:read",
 		}},
-		"viewer": {Name: "viewer", Permissions: []Permission{"application:read", "model:read"}},
+		"viewer": {Name: "viewer", Permissions: []Permission{
+			"application:read", "workload:read", "model:read",
+		}},
 	}
 }
