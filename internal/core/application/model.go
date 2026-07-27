@@ -22,6 +22,7 @@ type Binding struct {
 // Application 是平台应用实体。
 type Application struct {
 	ID        string        `json:"id"`
+	TenantID  string        `json:"tenantId,omitempty"` // 多租户隔离键；由 Repository 从 ctx 写入，请求体忽略
 	Name      string        `json:"name"`
 	Initial   string        `json:"initial"`
 	Env       string        `json:"env"`    // 生产 / 预发 / 开发
