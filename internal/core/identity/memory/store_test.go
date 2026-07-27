@@ -33,3 +33,42 @@ func TestUsersByTenantIsolation(t *testing.T) {
 	require.Len(t, users, 1)
 	assert.Equal(t, "alice", users[0].Name) // 不应泄漏 t2 的 bob
 }
+
+func TestLookupAPIKey(t *testing.T) {
+	s := NewStore()
+	require.NoError(t, s.CreateTenant(context.Background(), identity.Tenant{ID: "t-acme", Name: "Acme", CreatedAt: time.Now()}))
+	require.NoError(t, s.CreateAPIKey(context.Background(), identity.APIKey{
+		ID: "k1", TenantID: "t-acme", UserID: "u1", Roles: []string{"developer"}, Key: "sk-acme-dev",
+	}))
+
+	got, err := s.LookupAPIKey(context.Background(), "sk-acme-dev")
+	require.NoError(t, err)
+	assert.Equal(t, "t-acme", got.TenantID)
+	assert.Equal(t, []string{"developer"}, got.Roles)
+}
+
+func TestLookupAPIKeyUnknown(t *testing.T) {
+	_, err := NewStore().LookupAPIKey(context.Background(), "sk-nope")
+	assert.Error(t, err)
+}
+
+func TestBuiltinRoleAdminPassAll(t *testing.T) {
+	r := identity.BuiltinRoles()["tenant-admin"]
+	assert.Contains(t, r.Permissions, identity.Permission("tenant:admin"))
+	assert.True(t, r.Grants("application:write"))
+	assert.True(t, r.Grants("model:infer"))
+}
+
+func TestBuiltinRoleDeveloperScoped(t *testing.T) {
+	r := identity.BuiltinRoles()["developer"]
+	assert.True(t, r.Grants("model:infer"))
+	assert.True(t, r.Grants("application:write"))
+	assert.False(t, r.Grants("tenant:admin"))
+}
+
+func TestBuiltinRoleViewerReadonly(t *testing.T) {
+	r := identity.BuiltinRoles()["viewer"]
+	assert.True(t, r.Grants("application:read"))
+	assert.False(t, r.Grants("application:write"))
+	assert.False(t, r.Grants("model:infer"))
+}

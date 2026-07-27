@@ -15,11 +15,16 @@ type Store struct {
 	mu      sync.RWMutex
 	tenants map[string]identity.Tenant
 	users   map[string]identity.User
+	apiKeys map[string]identity.APIKey // 按 bearer key 索引
 }
 
 // NewStore 创建空仓储。
 func NewStore() *Store {
-	return &Store{tenants: map[string]identity.Tenant{}, users: map[string]identity.User{}}
+	return &Store{
+		tenants: map[string]identity.Tenant{},
+		users:   map[string]identity.User{},
+		apiKeys: map[string]identity.APIKey{},
+	}
 }
 
 func (s *Store) CreateTenant(_ context.Context, t identity.Tenant) error {
@@ -62,4 +67,27 @@ func (s *Store) UsersByTenant(_ context.Context, tenantID string) ([]identity.Us
 		}
 	}
 	return out, nil
+}
+
+func (s *Store) CreateAPIKey(_ context.Context, k identity.APIKey) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if k.Key == "" {
+		return fmt.Errorf("api key 不能为空")
+	}
+	if _, exists := s.apiKeys[k.Key]; exists {
+		return fmt.Errorf("api key 已存在")
+	}
+	s.apiKeys[k.Key] = k
+	return nil
+}
+
+func (s *Store) LookupAPIKey(_ context.Context, key string) (identity.APIKey, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	k, ok := s.apiKeys[key]
+	if !ok {
+		return identity.APIKey{}, fmt.Errorf("api key 不存在")
+	}
+	return k, nil
 }
