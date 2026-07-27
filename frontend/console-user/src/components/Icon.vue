@@ -97,5 +97,45 @@ defineProps<{ name: string; size?: number }>()
       <path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0" />
       <path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5" />
     </template>
+    <!-- 缓存：闪电 -->
+    <template v-else-if="name === 'zap'">
+      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+    </template>
+    <!-- 对象存储：桶 -->
+    <template v-else-if="name === 'storage'">
+      <path d="M5 5h14l-1.4 14.2a2 2 0 0 1-2 1.8H8.4a2 2 0 0 1-2-1.8L5 5z" />
+      <line x1="3" y1="5" x2="21" y2="5" />
+      <line x1="9" y1="11" x2="15" y2="11" />
+    </template>
+    <!-- 向量数据库：堆叠菱形 -->
+    <template v-else-if="name === 'layers'">
+      <polygon points="12 2 22 8 12 14 2 8 12 2" />
+      <polyline points="2 13 12 19 22 13" />
+    </template>
+    <!-- 服务（工作负载）：服务器 -->
+    <template v-else-if="name === 'server'">
+      <rect x="3" y="4" width="18" height="7" rx="2" />
+      <rect x="3" y="13" width="18" height="7" rx="2" />
+      <line x1="7" y1="7.5" x2="7.01" y2="7.5" />
+      <line x1="7" y1="16.5" x2="7.01" y2="16.5" />
+    </template>
+    <!-- 任务 Job：圆中播放 -->
+    <template v-else-if="name === 'job'">
+      <circle cx="12" cy="12" r="9" />
+      <polygon points="10 8 16 12 10 16 10 8" />
+    </template>
+    <!-- 定时 CronJob：时钟 -->
+    <template v-else-if="name === 'clock'">
+      <circle cx="12" cy="12" r="9" />
+      <polyline points="12 7 12 12 16 14" />
+    </template>
+    <!-- 可观测：波形 -->
+    <template v-else-if="name === 'activity'">
+      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+    </template>
+    <!-- 安全：盾牌 -->
+    <template v-else-if="name === 'shield'">
+      <path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z" />
+    </template>
   </svg>
 </template>

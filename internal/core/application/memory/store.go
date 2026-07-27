@@ -11,12 +11,19 @@ import (
 	"github.com/aitoys/paas/internal/core/application"
 )
 
-// 支持绑定的资源类型。models/mq/dal 计入列表计数；gov 仅为绑定项展示。
+// 支持绑定的资源类型（资源中心 = 数据服务全集）。
+// models/mq/dal 计入列表摘要计数；其余类型仅在应用详情 bindings 展示。
+// dal/gov 保留以兼容历史 seed 与「应用接入治理」语义。
 var supportedTypes = map[string]struct{}{
-	"models": {},
-	"mq":     {},
-	"dal":    {},
-	"gov":    {},
+	"models":  {},
+	"db":      {},
+	"cache":   {},
+	"mq":      {},
+	"storage": {},
+	"vector":  {},
+	"search":  {},
+	"dal":     {},
+	"gov":     {},
 }
 
 type Store struct {

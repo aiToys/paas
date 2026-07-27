@@ -21,12 +21,33 @@ const nav: NavItem[] = [
     icon: 'database',
     children: [
       { label: '模型推理', icon: 'market', to: '/resources/models' },
+      { label: '数据库', icon: 'database', to: '/resources/db', soon: true },
+      { label: '缓存', icon: 'zap', to: '/resources/cache', soon: true },
       { label: '消息队列', icon: 'message', to: '/resources/mq', soon: true },
-      { label: '数据访问层', icon: 'database', to: '/resources/dal', soon: true },
-      { label: '服务治理', icon: 'service', to: '/resources/gov', soon: true },
+      { label: '对象存储', icon: 'storage', to: '/resources/storage', soon: true },
+      { label: '向量数据库', icon: 'layers', to: '/resources/vector', soon: true },
+      { label: '搜索引擎', icon: 'search', to: '/resources/search', soon: true },
     ],
   },
-  { label: 'DevOps', icon: 'pipeline', to: '/coming-soon' as string, soon: true },
+  {
+    label: '工作负载',
+    icon: 'server',
+    children: [
+      { label: '服务', icon: 'server', to: '/workloads/services', soon: true },
+      { label: '任务', icon: 'job', to: '/workloads/jobs', soon: true },
+      { label: '定时', icon: 'clock', to: '/workloads/cronjobs', soon: true },
+    ],
+  },
+  {
+    label: '平台能力',
+    icon: 'service',
+    children: [
+      { label: '服务治理', icon: 'service', to: '/platform/governance', soon: true },
+      { label: '可观测', icon: 'activity', to: '/platform/observability', soon: true },
+      { label: '安全', icon: 'shield', to: '/platform/security', soon: true },
+    ],
+  },
+  { label: 'DevOps', icon: 'pipeline', to: '/devops', soon: true },
   { label: 'Playground', icon: 'playground', to: '/playground' },
 ]
 

@@ -9,7 +9,7 @@ const API_KEY = 'sk-paas-dev-key'
 const route = useRoute()
 const router = useRouter()
 
-type TypeKey = 'models' | 'mq' | 'dal' | 'gov'
+type TypeKey = 'models' | 'db' | 'cache' | 'mq' | 'storage' | 'vector' | 'search' | 'dal' | 'gov'
 
 interface Binding {
   type: string
@@ -34,10 +34,16 @@ interface App {
 const app = ref<App | null>(null)
 const loading = ref(true)
 
-// 资源类型元信息：图标 / 标签 / 主色。gov 不计入列表计数但仍可在详情绑定展示。
+// 资源类型元信息：图标 / 标签 / 主色。
+// 资源中心 = 数据服务；dal 兼容历史 seed，gov 兼容「应用接入治理」语义。
 const typeMeta: Record<string, { label: string; icon: string; color: string }> = {
   models: { label: '模型推理', icon: 'market', color: '#6366f1' },
+  db: { label: '数据库', icon: 'database', color: '#f59e0b' },
+  cache: { label: '缓存', icon: 'zap', color: '#ef4444' },
   mq: { label: '消息队列', icon: 'message', color: '#10b981' },
+  storage: { label: '对象存储', icon: 'storage', color: '#0ea5e9' },
+  vector: { label: '向量数据库', icon: 'layers', color: '#8b5cf6' },
+  search: { label: '搜索引擎', icon: 'search', color: '#06b6d4' },
   dal: { label: '数据访问层', icon: 'database', color: '#f59e0b' },
   gov: { label: '服务治理', icon: 'service', color: '#ec4899' },
 }
@@ -57,8 +63,8 @@ const groups = computed(() => {
     arr.push(b)
     byType.set(b.type, arr)
   }
-  // 固定顺序：models / mq / dal / gov
-  const order = ['models', 'mq', 'dal', 'gov']
+  // 固定顺序：数据服务全集
+  const order = ['models', 'db', 'cache', 'mq', 'storage', 'vector', 'search', 'dal', 'gov']
   return order
     .filter((t) => byType.has(t))
     .map((t) => ({ key: t, meta: typeMeta[t], items: byType.get(t)! }))
@@ -91,9 +97,11 @@ const submitting = ref(false)
 
 const addOptions: { typeKey: TypeKey; label: string; icon: string; hint: string; color: string }[] = [
   { typeKey: 'models', label: '模型推理', icon: 'market', hint: '部署 LLM / Embedding 模型', color: '#6366f1' },
+  { typeKey: 'db', label: '数据库', icon: 'database', hint: 'PostgreSQL / MySQL 实例', color: '#f59e0b' },
+  { typeKey: 'cache', label: '缓存', icon: 'zap', hint: 'Redis 实例与集群', color: '#ef4444' },
   { typeKey: 'mq', label: '消息队列', icon: 'message', hint: '创建 Topic / 申请 MQ 实例', color: '#10b981' },
-  { typeKey: 'dal', label: '数据访问层', icon: 'database', hint: '接入数据源 / SQL 工作台', color: '#f59e0b' },
-  { typeKey: 'gov', label: '服务治理', icon: 'service', hint: '注册发现 / 配置中心', color: '#ec4899' },
+  { typeKey: 'storage', label: '对象存储', icon: 'storage', hint: 'Bucket / CDN / 生命周期', color: '#0ea5e9' },
+  { typeKey: 'vector', label: '向量数据库', icon: 'layers', hint: '索引 / 检索 / Embedding', color: '#8b5cf6' },
 ]
 
 function openAdd() {
