@@ -15,8 +15,8 @@ import (
 )
 
 type stubRepo struct {
-	list []Environment
-	saved Environment
+	list    []Environment
+	saved   Environment
 	deleted string
 }
 
@@ -30,7 +30,7 @@ func (s *stubRepo) Get(_ context.Context, id string) (Environment, error) {
 	return Environment{}, errNotFound
 }
 func (s *stubRepo) Create(_ context.Context, e Environment) error { s.saved = e; return nil }
-func (s *stubRepo) Delete(_ context.Context, id string) error { s.deleted = id; return nil }
+func (s *stubRepo) Delete(_ context.Context, id string) error     { s.deleted = id; return nil }
 
 type notFoundErr struct{}
 

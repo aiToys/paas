@@ -149,6 +149,23 @@ internal/workload/  领域（Type/Status 常量 + Validate）+ Repository（租�
 - console-user：`Workloads.vue`（按类型 tab 接真实 API + 扩缩容/删除）+ 应用详情「部署」tab 渲染该应用工作负载。
 - 切片**不依赖 K8s**（进程内 mock）；真实 vLLM 纳管 + K8s 编排为下一切片。
 
+### 环境（物理隔离单元）
+
+环境是独立一等公民（非应用子节点），应用 × 环境多对多，交叉点 = 部署实例（Workload/Binding 带 EnvID）：
+
+```
+internal/environment/  领域(type prod|test + cluster) + Repository(租户隔离) + 内存 seed
+  -> handler: /api/environments（CRUD）
+  -> Workload/Binding 带 EnvID + LaneID(default=基线，预留不实现路由)
+```
+
+- `internal/environment/`：`Environment`（type: prod|test，cluster 物理落点 prod-bj/prod-sh）/ Repository / 内存实现（seed 跨两租户五环境）/ handler。
+- `Workload` 加 `EnvID` + `LaneID`（`LaneID="default"` = 基线单例，其他 = 泳道，本期不创建非 default）；Repository `List(ctx, envID, appID, wtype)` 按 envID 过滤。
+- 命名定稿（见蓝图「环境与联调模型」）：物理环境生产/测试；环境内基线（`LaneID=default`，单例）+ 联调泳道（测试，多例）/灰度泳道（生产，多例）。选 `default` 不选空值：显式存在、路由降级无特判、业界一致（zeus/Istio）。
+- REST：`GET/POST /api/environments`、`GET /api/environments/{id}`、`DELETE /api/environments/{id}`；`GET /api/workloads?envId=&type=` 按环境+类型过滤。
+- console-user：`Environments.vue`（环境列表）+ `Workloads.vue` 环境过滤 pill + 应用详情部署 tab 按环境分组。
+- **LaneID 预留不实现路由**：泳道（染色+降级）归后续服务治理切片；Release/EnvTemplate 归 DevOps/GitOps。起步只建环境基座。
+
 ## 前端架构
 
 三套独立 SPA，共享设计系统（Element Plus + 暗黑模式）：
@@ -173,7 +190,7 @@ console-user 导航采用**三层信息架构**（避免「资源」概念被滥
 
 ## 平台模块全景
 
-见 [平台模块蓝图](./docs/superpowers/specs/2026-07-27-platform-modules-blueprint.md)。当前完成度约 35%（Core 骨架 + 多租户身份骨架 + MaaS + 应用主线 + 工作负载），其余模块按蓝图优先级推进。
+见 [平台模块蓝图](./docs/superpowers/specs/2026-07-27-platform-modules-blueprint.md)。当前完成度约 40%（Core 骨架 + 多租户身份骨架 + MaaS + 应用主线 + 工作负载 + 环境），其余模块按蓝图优先级推进。
 
 ## 开发约定
 

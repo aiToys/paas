@@ -80,6 +80,9 @@ curl -H "Authorization: Bearer sk-globex-admin" http://localhost:8080/api/applic
 curl -H "Authorization: Bearer sk-acme-admin" "http://localhost:8080/api/workloads?type=service"
 curl -X PUT -H "Authorization: Bearer sk-acme-admin" -H "Content-Type: application/json" \
   -d '{"replicas":6,"status":"running"}' http://localhost:8080/api/workloads/wl-rec-svc
+# 环境（物理隔离单元 prod|test）+ 按环境过滤工作负载
+curl -H "Authorization: Bearer sk-acme-admin" http://localhost:8080/api/environments
+curl -H "Authorization: Bearer sk-acme-admin" "http://localhost:8080/api/workloads?envId=env-acme-test&type=service"
 ```
 
 测试与检查：`make test`（含 race）、`make lint`（golangci-lint）。
