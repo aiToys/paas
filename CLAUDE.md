@@ -115,11 +115,24 @@ console-user 模型市场(/api/models) / Playground(/v1/chat/completions)
 | 应用 | 定位 | 端口 |
 |------|------|------|
 | console-admin | 平台运维/管理员（基于 `vue-admin` 基座，RBAC/JWT/动态路由已就绪） | 5173 |
-| console-user | 租户开发者（模型市场/部署/Playground/API Key/用量计费） | 5174 |
+| console-user | 租户开发者（应用为主线 + 三层信息架构，见下） | 5174 |
 | landing | 访客官网展示页（静态、SEO 友好） | 5175 |
+
+console-user 导航采用**三层信息架构**（避免「资源」概念被滥用）：
+
+- **资源中心** = 数据服务（可绑定 Add-on）：模型推理 / 数据库 / 缓存 / 消息队列 / 对象存储 / 向量数据库 / 搜索引擎
+- **工作负载** = 应用运行形态：服务（Deployment）/ 任务（Job）/ 定时（CronJob）
+- **平台能力** = 横切基础设施：服务治理（含注册发现/配置中心/API网关/熔断）/ 可观测 / 安全
+- 另有：应用（主线）/ DevOps / Playground
+
+关键区分：**配置中心属服务治理**（运行时动态、跨实例、版本灰度），与**应用详情的「应用配置」**（env/Secret、工作负载级、静态）是两个层面，勿混。
 
 - API 契约：后端 OpenAPI 自动生成前端 TS 类型（Plan 4 起接入 Gateway）。
 - console-admin 的基座源码自带其 `CLAUDE.md` 与 `docs/standards/`（四层架构 lib/app/modules/shared），改它时遵循其自身规范。
+
+## 平台模块全景
+
+见 [平台模块蓝图](./docs/superpowers/specs/2026-07-27-platform-modules-blueprint.md)。当前完成度约 20%（Core 骨架 + MaaS + 应用主线），其余模块按蓝图优先级推进。
 
 ## 开发约定
 
