@@ -129,3 +129,30 @@ func TestAuthorizeRejectsWrite(t *testing.T) {
 	h.ServeHTTP(rec, acmeReq(http.MethodPost, "/api/applications/app-cs/workloads", `{"id":"x","type":"service","name":"n","image":"i"}`))
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
+
+// stubEnvResolver 模拟环境类型解析。
+type stubEnvResolver struct{ typ string }
+
+func (s stubEnvResolver) EnvType(context.Context, string) (string, error) { return s.typ, nil }
+
+func TestCreateProdWorkloadRequiresProdWrite(t *testing.T) {
+	repo := &stubRepo{}
+	// 注入 prod 环境解析器；Authorize 放行除 prod:write 外的权限（模拟 developer）
+	h := NewHandler(repo, WithEnvResolver(stubEnvResolver{"prod"}))
+	h.Authorize = func(r *http.Request, perm string) bool { return perm != PermProdWrite }
+
+	// 创建 prod 环境的工作负载 -> 需要 prod:write -> 被拦 403
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, acmeReq(http.MethodPost, "/api/applications/app-cs/workloads",
+		`{"id":"wl-x","envId":"env-prod","type":"service","name":"n","image":"img","replicas":1}`))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Empty(t, repo.saved.ID, "prod 工作负载不应被创建")
+
+	// 创建 test 环境的工作负载 -> 不需 prod:write -> 放行 201
+	h2 := NewHandler(repo, WithEnvResolver(stubEnvResolver{"test"}))
+	h2.Authorize = func(r *http.Request, perm string) bool { return perm != PermProdWrite }
+	rec2 := httptest.NewRecorder()
+	h2.ServeHTTP(rec2, acmeReq(http.MethodPost, "/api/applications/app-cs/workloads",
+		`{"id":"wl-y","envId":"env-test","type":"service","name":"n","image":"img","replicas":1}`))
+	assert.Equal(t, http.StatusCreated, rec2.Code)
+}
