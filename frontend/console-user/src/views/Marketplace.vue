@@ -1,31 +1,79 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
+
+const API_KEY = 'sk-paas-dev-key'
+
+interface Channel {
+  id: string
+  type: string
+  priority: number
+  status: 'healthy' | 'degraded' | 'offline'
+}
 
 interface Model {
   id: string
   name: string
-  short: string
-  provider: string
-  params: string
-  context: string
-  category: 'dialogue' | 'reasoning' | 'code' | 'embed'
-  tags: string[]
-  active: number // 活跃实例数
-  gradient: string
+  vendor: string
+  contextWindow: number
+  capabilities: string[]
+  inputPrice: number
+  outputPrice: number
+  description: string
+  channels: Channel[]
 }
 
-const models = ref<Model[]>([
-  { id: 'qwen2.5-7b', name: 'Qwen2.5-7B-Instruct', short: 'Qwen', provider: '阿里云', params: '7B', context: '32K', category: 'dialogue', tags: ['对话', '中文'], active: 12, gradient: 'linear-gradient(135deg,#6366f1,#8b5cf6)' },
-  { id: 'qwen2.5-72b', name: 'Qwen2.5-72B-Instruct', short: 'Qwen', provider: '阿里云', params: '72B', context: '128K', category: 'dialogue', tags: ['旗舰', '对话'], active: 3, gradient: 'linear-gradient(135deg,#6366f1,#8b5cf6)' },
-  { id: 'deepseek-v3', name: 'DeepSeek-V3', short: 'DS', provider: 'DeepSeek', params: '671B·MoE', context: '64K', category: 'reasoning', tags: ['推理', 'MoE'], active: 8, gradient: 'linear-gradient(135deg,#10b981,#06b6d4)' },
-  { id: 'deepseek-r1', name: 'DeepSeek-R1', short: 'DS', provider: 'DeepSeek', params: '671B', context: '128K', category: 'reasoning', tags: ['推理', '深度思考'], active: 5, gradient: 'linear-gradient(135deg,#10b981,#06b6d4)' },
-  { id: 'llama3.3-70b', name: 'Llama-3.3-70B', short: 'Lm', provider: 'Meta', params: '70B', context: '128K', category: 'dialogue', tags: ['对话'], active: 2, gradient: 'linear-gradient(135deg,#f59e0b,#f43f5e)' },
-  { id: 'glm-4-9b', name: 'GLM-4-9B-Chat', short: 'GLM', provider: '智谱', params: '9B', context: '128K', category: 'dialogue', tags: ['对话', '中文'], active: 6, gradient: 'linear-gradient(135deg,#ec4899,#8b5cf6)' },
-  { id: 'qwen2.5-coder-32b', name: 'Qwen2.5-Coder-32B', short: 'Qwen', provider: '阿里云', params: '32B', context: '128K', category: 'code', tags: ['代码', '补全'], active: 4, gradient: 'linear-gradient(135deg,#06b6d4,#3b82f6)' },
-  { id: 'bge-m3', name: 'BGE-M3', short: 'BGE', provider: 'BAAI', params: '568M', context: '8K', category: 'embed', tags: ['Embedding', '检索'], active: 15, gradient: 'linear-gradient(135deg,#64748b,#475569)' },
-])
+type Category = 'dialogue' | 'reasoning' | 'code' | 'embed'
+
+// capability → 分类映射（优先级：embedding > code > reasoning > chat）
+function categoryOf(caps: string[]): Category {
+  if (caps.includes('embedding')) return 'embed'
+  if (caps.includes('code')) return 'code'
+  if (caps.includes('reasoning')) return 'reasoning'
+  return 'dialogue'
+}
+
+// 分类配色（与原卡片视觉一致）
+const gradOf: Record<Category, string> = {
+  dialogue: 'linear-gradient(135deg,#6366f1,#8b5cf6)',
+  reasoning: 'linear-gradient(135deg,#10b981,#06b6d4)',
+  code: 'linear-gradient(135deg,#06b6d4,#3b82f6)',
+  embed: 'linear-gradient(135deg,#64748b,#475569)',
+}
+
+// 供应商首字作图标文字
+function shortOf(vendor: string): string {
+  return vendor ? vendor[0] : '?'
+}
+
+function activeOf(channels: Channel[]): number {
+  return channels.filter((c) => c.status === 'healthy').length
+}
+
+function ctxLabel(n: number): string {
+  return n >= 1024 ? `${Math.round(n / 1024)}K` : String(n)
+}
+
+const models = ref<Model[]>([])
+const loading = ref(true)
+
+async function load() {
+  loading.value = true
+  try {
+    const resp = await fetch('/api/models', { headers: { Authorization: `Bearer ${API_KEY}` } })
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    const json = await resp.json()
+    models.value = (json.data ?? []) as Model[]
+  } catch (e) {
+    ElMessage.error('加载模型失败：' + (e as Error).message)
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(load)
 
 const categories = [
   { key: 'all', label: '全部' },
@@ -36,13 +84,14 @@ const categories = [
 ] as const
 
 const activeCat = ref<string>('all')
-const filtered = computed(() =>
-  activeCat.value === 'all' ? models.value : models.value.filter((m) => m.category === activeCat.value)
-)
+const filtered = computed(() => {
+  const all = models.value.map((m) => ({ m, cat: categoryOf(m.capabilities) }))
+  return activeCat.value === 'all' ? all : all.filter((x) => x.cat === activeCat.value)
+})
 
 const router = useRouter()
-function deploy(m: Model) {
-  router.push({ path: '/deployments', query: { model: m.id } })
+function tryout(id: string) {
+  router.push({ path: '/playground', query: { model: id } })
 }
 </script>
 
@@ -63,33 +112,45 @@ function deploy(m: Model) {
       <div class="count mono">{{ filtered.length }} 个模型</div>
     </div>
 
-    <div class="grid">
-      <article v-for="m in filtered" :key="m.id" class="card">
+    <div v-if="loading" class="grid">
+      <div v-for="i in 8" :key="i" class="skel" />
+    </div>
+    <div v-else class="grid">
+      <article
+        v-for="{ m, cat } in filtered"
+        :key="m.id"
+        class="card"
+        :class="{ off: activeOf(m.channels) === 0 }"
+      >
         <div class="card-head">
-          <div class="m-icon" :style="{ background: m.gradient }">{{ m.short }}</div>
+          <div class="m-icon" :style="{ background: gradOf[cat] }">{{ shortOf(m.vendor) }}</div>
           <div class="m-titles">
             <h3 class="m-name">{{ m.name }}</h3>
-            <div class="m-provider">{{ m.provider }}</div>
+            <div class="m-provider">{{ m.vendor }}</div>
           </div>
-          <span v-if="m.active > 0" class="live" :title="`${m.active} 个运行中实例`">
+          <span v-if="activeOf(m.channels) > 0" class="live" :title="`${activeOf(m.channels)} 个健康通道`">
             <span class="pulse-dot" />
-            <span class="mono">{{ m.active }}</span>
+            <span class="mono">{{ activeOf(m.channels) }}</span>
           </span>
+          <span v-else class="off-tag">离线</span>
         </div>
 
+        <p class="m-desc">{{ m.description }}</p>
+
         <div class="m-meta mono">
-          <span>{{ m.params }}</span>
+          <span>{{ ctxLabel(m.contextWindow) }} 上下文</span>
           <i />
-          <span>{{ m.context }} 上下文</span>
+          <span>¥{{ m.inputPrice }} / M in</span>
         </div>
 
         <div class="m-tags">
-          <span v-for="t in m.tags" :key="t" class="tag">{{ t }}</span>
+          <span v-for="c in m.capabilities" :key="c" class="tag">{{ c }}</span>
+          <span class="tag ch">通道 {{ m.channels.length }}</span>
         </div>
 
-        <button class="deploy-btn" @click="deploy(m)">
-          部署
-          <Icon name="deploy" :size="15" />
+        <button class="deploy-btn" :disabled="activeOf(m.channels) === 0" @click="tryout(m.id)">
+          试用
+          <Icon name="playground" :size="15" />
         </button>
       </article>
     </div>
@@ -145,6 +206,24 @@ function deploy(m: Model) {
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 16px;
 }
+.skel {
+  height: 230px;
+  border-radius: var(--radius-lg);
+  background: linear-gradient(90deg, var(--surface) 25%, var(--surface-2) 50%, var(--surface) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s infinite;
+  border: 1px solid var(--border);
+}
+@keyframes shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skel {
+    animation: none;
+  }
+}
 .card {
   position: relative;
   padding: 20px;
@@ -157,6 +236,9 @@ function deploy(m: Model) {
   border-color: var(--border-strong);
   transform: translateY(-2px);
   box-shadow: var(--shadow);
+}
+.card.off {
+  opacity: 0.55;
 }
 .card-head {
   display: flex;
@@ -171,7 +253,7 @@ function deploy(m: Model) {
   display: grid;
   place-items: center;
   font-weight: 700;
-  font-size: 14px;
+  font-size: 16px;
   color: #fff;
 }
 .m-name {
@@ -193,11 +275,26 @@ function deploy(m: Model) {
   color: var(--success);
   font-size: 12px;
 }
+.off-tag {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-faint);
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--surface-2);
+}
+.m-desc {
+  margin: 14px 0 12px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  min-height: 38px;
+}
 .m-meta {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin: 16px 0 12px;
+  margin-bottom: 12px;
   font-size: 12.5px;
   color: var(--text-dim);
 }
@@ -221,6 +318,9 @@ function deploy(m: Model) {
   font-size: 11.5px;
   color: var(--text-dim);
 }
+.tag.ch {
+  color: var(--text-faint);
+}
 .deploy-btn {
   margin-top: 18px;
   width: 100%;
@@ -239,10 +339,14 @@ function deploy(m: Model) {
   cursor: pointer;
   transition: all 0.12s;
 }
-.deploy-btn:hover {
+.deploy-btn:hover:not(:disabled) {
   background: var(--brand);
   border-color: var(--brand);
   color: #fff;
   box-shadow: 0 4px 14px var(--brand-glow);
+}
+.deploy-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 </style>

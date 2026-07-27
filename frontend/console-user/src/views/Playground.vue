@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { nextTick, ref } from 'vue'
+import { nextTick, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 
 // Playground：聊天式交互推理，直连 Platform Core Gateway（OpenAI 兼容 SSE）。
+// 模型列表来自 /v1/models；支持 ?model=<id> 预选（模型市场「试用」入口）。
 // 本切片 API Key 为开发默认值；生产应从用户会话/Identity 获取（Plan 2）。
 const API_KEY = 'sk-paas-dev-key'
 
@@ -12,12 +14,14 @@ interface Msg {
   content: string
 }
 
-const model = ref('echo')
+const route = useRoute()
+const model = ref('')
+const modelOptions = ref<string[]>([])
 const input = ref('')
 const loading = ref(false)
 const lastTokens = ref(0)
 const messages = ref<Msg[]>([
-  { role: 'assistant', content: '在下方输入提示词，我会以流式返回结果。当前连接 echo 模型（回显，用于切片验证）。' },
+  { role: 'assistant', content: '在下方输入提示词，我会以流式返回结果。上方可切换模型。' },
 ])
 const scrollRef = ref<HTMLElement | null>(null)
 
@@ -26,9 +30,21 @@ async function scrollToBottom() {
   if (scrollRef.value) scrollRef.value.scrollTop = scrollRef.value.scrollHeight
 }
 
+onMounted(async () => {
+  try {
+    const resp = await fetch('/v1/models', { headers: { Authorization: `Bearer ${API_KEY}` } })
+    const json = await resp.json()
+    modelOptions.value = (json.data ?? []).map((m: { id: string }) => m.id)
+  } catch {
+    ElMessage.error('加载模型列表失败')
+  }
+  const q = route.query.model as string
+  model.value = q && modelOptions.value.includes(q) ? q : modelOptions.value[0] ?? ''
+})
+
 async function send() {
   const text = input.value.trim()
-  if (!text || loading.value) return
+  if (!text || loading.value || !model.value) return
   loading.value = true
   messages.value.push({ role: 'user', content: text })
   input.value = ''
@@ -104,7 +120,9 @@ function onKey(e: KeyboardEvent) {
     <div class="chat-bar">
       <div class="model-pill">
         <span class="pulse-dot" />
-        <span class="mono">{{ model }}</span>
+        <el-select v-model="model" size="small" class="model-select" placeholder="选择模型">
+          <el-option v-for="m in modelOptions" :key="m" :label="m" :value="m" />
+        </el-select>
         <span class="muted">· 已就绪</span>
       </div>
       <div v-if="lastTokens > 0" class="tokens mono">{{ lastTokens }} tokens</div>
@@ -129,11 +147,11 @@ function onKey(e: KeyboardEvent) {
           placeholder="发送消息…  (Enter 发送，Shift+Enter 换行)"
           @keydown="onKey"
         />
-        <button class="send" :disabled="!input.trim() || loading" @click="send">
+        <button class="send" :disabled="!input.trim() || loading || !model" @click="send">
           <Icon name="playground" :size="18" />
         </button>
       </div>
-      <div class="hint">输出由 echo 模型生成，仅用于端到端验证</div>
+      <div class="hint">输出由所选模型的 mock 通道生成，用于端到端验证</div>
     </div>
   </div>
 </template>
@@ -156,10 +174,23 @@ function onKey(e: KeyboardEvent) {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
+  padding: 5px 12px;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 20px;
+  font-size: 13px;
+}
+.model-select {
+  width: 200px;
+}
+.model-select :deep(.el-select__wrapper) {
+  background: transparent;
+  box-shadow: none !important;
+  min-height: 24px;
+  padding: 0;
+}
+.model-select :deep(.el-select__placeholder) {
+  font-family: var(--font-mono);
   font-size: 13px;
 }
 .muted {
