@@ -19,6 +19,8 @@ import (
 	"github.com/aitoys/paas/internal/core/identity"
 	idmemory "github.com/aitoys/paas/internal/core/identity/memory"
 	coreplugin "github.com/aitoys/paas/internal/core/plugin"
+	"github.com/aitoys/paas/internal/environment"
+	envmemory "github.com/aitoys/paas/internal/environment/memory"
 	"github.com/aitoys/paas/internal/maas"
 	"github.com/aitoys/paas/internal/workload"
 	wlmemory "github.com/aitoys/paas/internal/workload/memory"
@@ -129,6 +131,13 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, idb identity.Repositor
 	mux.Handle("/api/applications/", auth(composite))
 	mux.Handle("/api/workloads", auth(wlHandler))
 	mux.Handle("/api/workloads/", auth(wlHandler))
+
+	// 环境（物理隔离单元 prod|test）：方法级权限 environment:read/write。
+	envHandler := environment.NewHandler(envmemory.NewStore())
+	envHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+	mux.Handle("/api/environments", auth(envHandler))
+	mux.Handle("/api/environments/", auth(envHandler))
+
 	mux.Handle("/livez", health.NewHandler())
 
 	srv := &http.Server{Addr: ":8080", Handler: mux}
