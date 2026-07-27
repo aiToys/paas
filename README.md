@@ -76,6 +76,10 @@ curl -N -H "Authorization: Bearer sk-acme-dev" -H "Content-Type: application/jso
 # 多租户隔离：不同租户 Key 看到不同应用
 curl -H "Authorization: Bearer sk-acme-admin"   http://localhost:8080/api/applications   # Acme
 curl -H "Authorization: Bearer sk-globex-admin" http://localhost:8080/api/applications   # Globex
+# 工作负载（应用运行形态）：跨应用按类型查询 + 扩缩容
+curl -H "Authorization: Bearer sk-acme-admin" "http://localhost:8080/api/workloads?type=service"
+curl -X PUT -H "Authorization: Bearer sk-acme-admin" -H "Content-Type: application/json" \
+  -d '{"replicas":6,"status":"running"}' http://localhost:8080/api/workloads/wl-rec-svc
 ```
 
 测试与检查：`make test`（含 race）、`make lint`（golangci-lint）。

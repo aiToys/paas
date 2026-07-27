@@ -16,9 +16,9 @@ import (
 
 // stubRepo 用于 handler 测试，固定返回 acme 租户的一条 service。
 type stubRepo struct {
-	list []Workload
-	saved Workload
-	deleted string
+	list      []Workload
+	saved     Workload
+	deleted   string
 	updatedID string
 }
 

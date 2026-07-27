@@ -11,7 +11,7 @@ import (
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
-func acmeCtx() context.Context  { return tenant.WithTenant(context.Background(), "t-acme") }
+func acmeCtx() context.Context   { return tenant.WithTenant(context.Background(), "t-acme") }
 func globexCtx() context.Context { return tenant.WithTenant(context.Background(), "t-globex") }
 
 func TestListByType(t *testing.T) {

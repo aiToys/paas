@@ -133,6 +133,22 @@ Authorization: Bearer <key>
 - `cmd/core/seed.go`：两租户（Acme/Globex）+ 三演示 Key。
 - **模型目录平台级共享**（`/api/models` `/v1/models` 不按租户过滤）；租户私有的是应用及其绑定。
 
+### 工作负载（应用运行形态）
+
+工作负载归属应用，分三类（Service/Job/CronJob），本期进程内 mock，真实 K8s 编排为下一切片：
+
+```
+internal/workload/  领域（Type/Status 常量 + Validate）+ Repository（租户隔离）+ 内存 seed
+  -> handler: /api/applications/{id}/workloads（应用下）+ /api/workloads?type=（跨应用）
+  -> 权限 workload:read/write（方法级 Authorize 注入）
+```
+
+- `internal/workload/`：`Workload`（期望 Replicas vs 就绪 Ready 分离，为 controller-runtime 铺路）/ Repository / 内存实现（seed 5 条跨两租户）/ handler。
+- 路由：`GET/POST /api/applications/{id}/workloads`、`GET /api/workloads?type=`、`PUT /api/workloads/{id}`（扩缩容/状态）、`DELETE /api/workloads/{id}`。
+- cmd/core 用 composite handler 按 `/workloads` 后缀分发，避免与 application 的 `/api/applications/` 前缀冲突。
+- console-user：`Workloads.vue`（按类型 tab 接真实 API + 扩缩容/删除）+ 应用详情「部署」tab 渲染该应用工作负载。
+- 切片**不依赖 K8s**（进程内 mock）；真实 vLLM 纳管 + K8s 编排为下一切片。
+
 ## 前端架构
 
 三套独立 SPA，共享设计系统（Element Plus + 暗黑模式）：
@@ -157,7 +173,7 @@ console-user 导航采用**三层信息架构**（避免「资源」概念被滥
 
 ## 平台模块全景
 
-见 [平台模块蓝图](./docs/superpowers/specs/2026-07-27-platform-modules-blueprint.md)。当前完成度约 28%（Core 骨架 + 多租户身份骨架 + MaaS + 应用主线），其余模块按蓝图优先级推进。
+见 [平台模块蓝图](./docs/superpowers/specs/2026-07-27-platform-modules-blueprint.md)。当前完成度约 35%（Core 骨架 + 多租户身份骨架 + MaaS + 应用主线 + 工作负载），其余模块按蓝图优先级推进。
 
 ## 开发约定
 

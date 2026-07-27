@@ -15,11 +15,11 @@ const (
 
 // 工作负载状态。
 const (
-	StatusRunning    = "running"    // 运行中
-	StatusDeploying  = "deploying"  // 部署中
-	StatusFailed     = "failed"     // 异常
-	StatusSucceeded  = "succeeded"  // 成功完成（job/cronjob）
-	StatusPending    = "pending"    // 等待调度
+	StatusRunning   = "running"   // 运行中
+	StatusDeploying = "deploying" // 部署中
+	StatusFailed    = "failed"    // 异常
+	StatusSucceeded = "succeeded" // 成功完成（job/cronjob）
+	StatusPending   = "pending"   // 等待调度
 )
 
 var validTypes = map[string]struct{}{
@@ -36,8 +36,8 @@ type Workload struct {
 	Type      string    `json:"type"`               // service / job / cronjob
 	Name      string    `json:"name"`
 	Image     string    `json:"image"`
-	Replicas  int       `json:"replicas"`           // 期望副本（service）；job 并行度；cronjob=0
-	Ready     int       `json:"ready"`              // 就绪副本
+	Replicas  int       `json:"replicas"` // 期望副本（service）；job 并行度；cronjob=0
+	Ready     int       `json:"ready"`    // 就绪副本
 	Status    string    `json:"status"`
 	Schedule  string    `json:"schedule,omitempty"` // cronjob 专属 cron 表达式
 	Command   string    `json:"command,omitempty"`  // 启动命令（可选）

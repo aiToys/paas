@@ -32,13 +32,15 @@ Platform Core（底座 · 所有子系统依赖）
   ✅ 生命周期 + 资源绑定（绑定/解绑端到端）
   ✅ 多租户隔离（TenantID + Repository 强制过滤）
   ❌ 应用配置（env/Secret tab）
-  ❌ 工作负载编排
+  ✅ 工作负载编排（Service/Job/CronJob 领域 + API + 视图，mock）
 
 资源中心（数据服务 Add-on）
   ✅ 模型推理 MaaS（Model→Channel→Provider 三层）
   ❌ 数据库 RDS / 缓存 Redis / 消息队列 / 对象存储 / 向量数据库 / 搜索引擎
 
-工作负载 ❌
+工作负载 ✅
+  ✅ Service/Job/CronJob 领域 + 跨应用视图 + 应用详情部署 tab（mock）
+  ❌ K8s 真实编排 / 日志事件 / HPA / 灰度
   服务 Deployment / 任务 Job / 定时 CronJob / 函数 FaaS*
 
 DevOps ❌
@@ -72,7 +74,7 @@ Job / CronJob 是应用的工作负载形态（应用以什么方式跑），不
 按「不做就不算完整 PaaS」与依赖关系排序：
 
 1. ~~**身份与 RBAC** — 多租户隔离根基，Core~~ ✅ 已落地
-2. **工作负载** — 没有它应用只是个壳
+2. ~~**工作负载** — 没有它应用只是个壳~~ ✅ 已落地（mock）
 3. **DevOps CI/CD** — 代码到上线主链路
 4. **服务治理**（含配置中心）— 微服务核心
 5. **可观测** — 运维必备
@@ -81,7 +83,7 @@ Job / CronJob 是应用的工作负载形态（应用以什么方式跑），不
 8. **数据服务资源** — DB/缓存/MQ/存储/向量/搜索（逐个接）
 9. **真实 vLLM 纳管 + K8s 编排** — MaaS 数据面落地
 
-当前：✅ Core 骨架 + 多租户身份骨架（RBAC + 隔离）+ MaaS（mock）+ 应用主线（约 28%）。
+当前：✅ Core 骨架 + 多租户身份骨架（RBAC + 隔离）+ MaaS（mock）+ 应用主线 + 工作负载（mock，约 35%）。
 
 ## 架构约束（不变）
 
