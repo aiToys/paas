@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/aitoys/paas/pkg/provider"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 type chatReq struct {
@@ -71,7 +72,8 @@ func ChatCompletions(gw *Gateway, meter *Meter) http.HandlerFunc {
 		if flusher != nil {
 			flusher.Flush()
 		}
-		meter.Record("default", req.Model, tokens)
+		tid, _ := tenant.TenantFrom(r.Context())
+		meter.Record(tid, req.Model, tokens)
 	}
 }
 

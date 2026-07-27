@@ -1,22 +1,50 @@
 package gateway
 
 import (
+	"context"
 	"net/http"
 	"strings"
+
+	"github.com/aitoys/paas/internal/core/identity"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
-// APIKeyAuth 返回一个中间件，校验 Authorization: Bearer <key>。
-// 失败返回 401 JSON。
-func APIKeyAuth(key string) func(http.Handler) http.Handler {
+// APIKeyAuth 校验 Authorization: Bearer <key>，解析为 (租户, 用户, 角色) 注入 ctx。
+// API Key 是身份三元组的唯一凭证；失败返回 401。
+func APIKeyAuth(idb identity.Repository) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			h := r.Header.Get("Authorization")
 			const prefix = "Bearer "
-			if !strings.HasPrefix(h, prefix) || strings.TrimPrefix(h, prefix) != key {
+			if !strings.HasPrefix(h, prefix) {
+				writeErr(w, http.StatusUnauthorized, "missing api key")
+				return
+			}
+			k, err := idb.LookupAPIKey(r.Context(), strings.TrimPrefix(h, prefix))
+			if err != nil {
 				writeErr(w, http.StatusUnauthorized, "invalid api key")
 				return
 			}
-			next.ServeHTTP(w, r)
+			ctx := tenant.WithTenant(r.Context(), k.TenantID)
+			ctx = WithRoles(ctx, k.Roles)
+			ctx = WithUserID(ctx, k.UserID)
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// hasPermission 校验 ctx 中角色是否持有某权限（tenant-admin 通行）。
+// 供方法级权限校验与 Require 中间件复用。
+func hasPermission(ctx context.Context, perm identity.Permission) bool {
+	roles, ok := RolesFrom(ctx)
+	if !ok {
+		return false
+	}
+	builtin := identity.BuiltinRoles()
+	for _, name := range roles {
+		if r, ok := builtin[name]; ok && r.Grants(perm) {
+			return true
+		}
+	}
+	return false
 }
