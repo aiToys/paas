@@ -51,18 +51,24 @@ type APIKey struct {
 }
 
 // BuiltinRoles 返回内置角色定义（起步期固定）。
-// tenant-admin 通行；developer 覆盖应用/工作负载/环境读写与推理；viewer 只读。
+// tenant-admin 通行（含生产写）；developer 覆盖应用/工作负载/环境读写与推理，但**生产只读**（无 prod:write）；
+// viewer 全只读。
 func BuiltinRoles() map[string]Role {
 	return map[string]Role{
-		"tenant-admin": {Name: "tenant-admin", Permissions: []Permission{"tenant:admin"}},
+		"tenant-admin": {Name: "tenant-admin", Permissions: []Permission{"tenant:admin", "prod:write"}},
 		"developer": {Name: "developer", Permissions: []Permission{
 			"application:read", "application:write", "binding:write",
 			"workload:read", "workload:write",
 			"environment:read", "environment:write",
 			"model:infer", "model:read",
+			// 无 prod:write：developer 在生产环境只读，防误操作
 		}},
 		"viewer": {Name: "viewer", Permissions: []Permission{
 			"application:read", "workload:read", "environment:read", "model:read",
 		}},
 	}
 }
+
+// PermProdWrite 是生产环境写操作所需的额外权限。
+// 生产环境的写操作（创建/更新/删除）除基础权限外需持有此权限，防止误操作生产。
+const PermProdWrite = "prod:write"

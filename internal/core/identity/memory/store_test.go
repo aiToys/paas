@@ -72,3 +72,17 @@ func TestBuiltinRoleViewerReadonly(t *testing.T) {
 	assert.False(t, r.Grants("application:write"))
 	assert.False(t, r.Grants("model:infer"))
 }
+
+func TestBuiltinRoleDeveloperNoProdWrite(t *testing.T) {
+	r := identity.BuiltinRoles()["developer"]
+	// developer 测试环境可写
+	assert.True(t, r.Grants("workload:write"))
+	assert.True(t, r.Grants("environment:write"))
+	// developer 生产环境只读：无 prod:write
+	assert.False(t, r.Grants("prod:write"))
+}
+
+func TestBuiltinRoleAdminHasProdWrite(t *testing.T) {
+	r := identity.BuiltinRoles()["tenant-admin"]
+	assert.True(t, r.Grants("prod:write"), "admin 应有生产写权限")
+}

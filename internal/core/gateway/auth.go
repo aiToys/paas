@@ -54,3 +54,10 @@ func hasPermission(ctx context.Context, perm identity.Permission) bool {
 func RequestAllowed(r *http.Request, perm string) bool {
 	return hasPermission(r.Context(), identity.Permission(perm))
 }
+
+// RequestAllowedProd 校验当前请求是否持有生产写权限（prod:write）。
+// 生产环境的写操作除基础权限外需调用此校验，防误操作生产。
+// developer 角色无此权限 -> 生产只读。
+func RequestAllowedProd(r *http.Request) bool {
+	return hasPermission(r.Context(), identity.PermProdWrite)
+}
