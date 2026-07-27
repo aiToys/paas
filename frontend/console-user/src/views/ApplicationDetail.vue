@@ -71,6 +71,18 @@ const groups = computed(() => {
 
 const totalBindings = computed(() => app.value?.bindings.length ?? 0)
 
+interface Workload {
+  id: string
+  type: string
+  name: string
+  image: string
+  replicas: number
+  ready: number
+  status: string
+  schedule?: string
+}
+const workloads = ref<Workload[]>([])
+
 async function load() {
   loading.value = true
   const id = route.params.id as string
@@ -78,6 +90,12 @@ async function load() {
     const resp = await fetchAuth(`/api/applications/${id}`)
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     app.value = (await resp.json()) as App
+    // 并行加载该应用的工作负载（部署 tab）
+    const wresp = await fetchAuth(`/api/applications/${id}/workloads`)
+    if (wresp.ok) {
+      const wjson = await wresp.json()
+      workloads.value = (wjson.data ?? []) as Workload[]
+    }
   } catch (e) {
     ElMessage.error('加载应用失败：' + (e as Error).message)
   } finally {
@@ -249,6 +267,28 @@ const activeTab = ref<(typeof tabs)[number]>('资源绑定')
                 <span>{{ g.meta.label }}</span>
                 <span class="topo-n mono">{{ g.items.length }}</span>
               </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 部署 = 工作负载运行形态 -->
+      <div v-else-if="activeTab === '部署'" class="deploy-view">
+        <div v-if="!workloads.length" class="empty">
+          <Icon name="server" :size="28" />
+          <p>该应用尚未部署工作负载</p>
+        </div>
+        <div v-else class="wl-list">
+          <div v-for="w in workloads" :key="w.id" class="wl-row">
+            <div class="wl-main">
+              <span class="wl-name">{{ w.name }}</span>
+              <span class="wl-type">{{ w.type }}</span>
+              <span class="wl-img mono">{{ w.image }}</span>
+              <span v-if="w.schedule" class="wl-sched mono">{{ w.schedule }}</span>
+            </div>
+            <div class="wl-side">
+              <span class="reps mono" :class="{ notready: w.ready < w.replicas }">{{ w.ready }}/{{ w.replicas }}</span>
+              <span class="wl-status">{{ w.status }}</span>
             </div>
           </div>
         </div>
@@ -800,5 +840,70 @@ const activeTab = ref<(typeof tabs)[number]>('资源绑定')
   justify-content: flex-end;
   gap: 8px;
   margin-top: 20px;
+}
+
+/* —— 部署 tab：工作负载列表 —— */
+.deploy-view .empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 40px;
+  color: var(--text-faint);
+}
+.wl-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.wl-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.wl-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.wl-name {
+  font-weight: 600;
+  color: var(--text);
+}
+.wl-type {
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--brand-soft);
+  color: var(--brand);
+  font-size: 11px;
+}
+.wl-img {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.wl-sched {
+  font-size: 12px;
+  color: var(--brand);
+}
+.wl-side {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.reps {
+  font-weight: 600;
+  color: var(--success);
+}
+.reps.notready {
+  color: var(--warning);
+}
+.wl-status {
+  font-size: 12px;
+  color: var(--text-dim);
 }
 </style>

@@ -82,22 +82,22 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/workloads/services',
     name: 'wl-services',
-    component: () => import('@/views/ComingSoon.vue'),
-    props: { product: '服务（长驻工作负载）', features: ['副本与弹性 HPA', '灰度与流量调度', '健康检查', '版本与回滚'] },
+    component: () => import('@/views/Workloads.vue'),
+    props: { type: 'service' },
     meta: { title: '服务' },
   },
   {
     path: '/workloads/jobs',
     name: 'wl-jobs',
-    component: () => import('@/views/ComingSoon.vue'),
-    props: { product: '任务 Job', features: ['一次性批处理', '并行与重试', '运行日志', '资源配额'] },
+    component: () => import('@/views/Workloads.vue'),
+    props: { type: 'job' },
     meta: { title: '任务' },
   },
   {
     path: '/workloads/cronjobs',
     name: 'wl-cronjobs',
-    component: () => import('@/views/ComingSoon.vue'),
-    props: { product: '定时 CronJob', features: ['Cron 调度', '执行历史', '失败告警', '并发控制'] },
+    component: () => import('@/views/Workloads.vue'),
+    props: { type: 'cronjob' },
     meta: { title: '定时任务' },
   },
 
