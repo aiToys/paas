@@ -1,12 +1,26 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import { auth, setApiKey, currentPreset, PRESET_KEYS } from '@/api'
+import { useEnvStore } from '@/stores/env'
 
 const route = useRoute()
 const collapsed = ref(false)
+const envStore = useEnvStore()
+
+// 生产会话超时检查定时器
+let prodTimer: number | undefined
+onMounted(async () => {
+  await envStore.loadEnvs()
+  prodTimer = window.setInterval(() => {
+    if (envStore.checkProdTimeout()) {
+      ElMessageBox.alert('生产会话已超时，已自动切回。如需继续操作生产请重新进入。', '生产超时', { type: 'info' })
+    }
+  }, 5000)
+})
+onUnmounted(() => { if (prodTimer) window.clearInterval(prodTimer) })
 
 // 当前身份视角（来自 API Key）：租户标签 + 头像首字母；自定义 Key 退化为通用展示。
 const identityLabel = computed(() => currentPreset()?.label ?? '自定义 Key')
@@ -15,6 +29,26 @@ const identityInitial = computed(() => {
   if (p) return p.tenant.replace('t-', '').charAt(0).toUpperCase()
   return 'U'
 })
+
+// 环境选择器
+const envLabel = computed(() => envStore.currentEnv?.name ?? '全部环境')
+const prodRemaining = computed(() => {
+  const s = envStore.prodRemainingSec
+  if (s <= 0) return ''
+  const m = Math.floor(s / 60)
+  const sec = s % 60
+  return `${m}:${sec.toString().padStart(2, '0')}`
+})
+
+async function onPickEnv(cmd: string | number | object) {
+  const id = String(cmd)
+  if (id === '__all') {
+    await envStore.switchEnv(null)
+    return
+  }
+  const env = envStore.envs.find((e) => e.id === id)
+  if (env) await envStore.switchEnv(env)
+}
 
 async function onPickKey(cmd: string | number | object) {
   const key = String(cmd)
@@ -94,7 +128,7 @@ function isActive(to: string) {
 </script>
 
 <template>
-  <div class="app" :class="{ collapsed }">
+  <div class="app" :class="{ collapsed, 'env-prod': envStore.isProd }">
     <aside class="sidebar">
       <div class="brand">
         <div class="brand-mark">P</div>
@@ -161,6 +195,29 @@ function isActive(to: string) {
           <h1 class="page-title">{{ pageTitle }}</h1>
         </div>
         <div class="topbar-right">
+          <el-dropdown trigger="click" @command="onPickEnv">
+            <div class="env-chip" :class="{ prod: envStore.isProd }">
+              <Icon :name="envStore.isProd ? 'shield' : 'server'" :size="14" />
+              <span v-if="!collapsed">{{ envLabel }}</span>
+              <span v-if="envStore.isProd && prodRemaining" class="prod-timer mono">{{ prodRemaining }}</span>
+            </div>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="__all" :disabled="!envStore.currentEnv">全部环境</el-dropdown-item>
+                <el-dropdown-item
+                  v-for="e in envStore.envs"
+                  :key="e.id"
+                  :command="e.id"
+                  :disabled="envStore.currentEnv?.id === e.id"
+                >
+                  <div class="key-row">
+                    <span>{{ e.name }}</span>
+                    <span class="key-role" :class="{ prodtag: e.type === 'prod' }">{{ e.type === 'prod' ? '生产' : '测试' }}</span>
+                  </div>
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
           <div class="search">
             <Icon name="search" :size="16" />
             <span>搜索应用、资源…</span>
@@ -191,6 +248,12 @@ function isActive(to: string) {
           <div class="user-avatar">{{ identityInitial }}</div>
         </div>
       </header>
+
+      <div v-if="envStore.isProd" class="prod-banner">
+        <Icon name="shield" :size="14" />
+        <span>⚠️ 您正在生产环境，操作请谨慎</span>
+        <span v-if="prodRemaining" class="prod-banner-timer mono">会话剩余 {{ prodRemaining }}</span>
+      </div>
 
       <main class="content">
         <RouterView v-slot="{ Component }">
@@ -524,5 +587,63 @@ function isActive(to: string) {
   .topbar {
     padding: 14px 16px;
   }
+}
+
+/* -- 生产安全防护：环境选择器 + 视觉强隔离 -- */
+.env-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.env-chip:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.env-chip.prod {
+  background: rgba(244, 63, 94, 0.12);
+  border-color: #f43f5e;
+  color: #f43f5e;
+  font-weight: 600;
+}
+.prod-timer {
+  font-size: 11px;
+  opacity: 0.8;
+}
+.key-role.prodtag {
+  background: rgba(244, 63, 94, 0.12);
+  color: #f43f5e;
+}
+
+/* 生产环境整页强隔离：红色边框 + 顶栏红条 */
+.app.env-prod {
+  box-shadow: inset 0 0 0 3px #f43f5e;
+}
+.app.env-prod .topbar {
+  border-bottom: 2px solid #f43f5e;
+  box-shadow: 0 2px 12px rgba(244, 63, 94, 0.25);
+}
+.prod-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 20px;
+  background: rgba(244, 63, 94, 0.1);
+  color: #f43f5e;
+  font-size: 13px;
+  font-weight: 500;
+  border-bottom: 1px solid rgba(244, 63, 94, 0.3);
+}
+.prod-banner-timer {
+  margin-left: auto;
+  font-size: 12px;
+  opacity: 0.85;
 }
 </style>

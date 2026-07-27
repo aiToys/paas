@@ -6,6 +6,7 @@ import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import { fetchAuth } from '@/api'
+import { useEnvStore } from '@/stores/env'
 
 interface Workload {
   id: string
@@ -21,16 +22,10 @@ interface Workload {
   schedule?: string
 }
 
-interface Env {
-  id: string
-  name: string
-  type: 'prod' | 'test'
-  cluster?: string
-}
-
 const props = defineProps<{ type?: string }>()
 
 const route = useRoute()
+const envStore = useEnvStore()
 
 const tabs = [
   { key: 'service', label: '服务', icon: 'server', desc: '长驻工作负载（Deployment 语义）' },
@@ -39,8 +34,9 @@ const tabs = [
 ] as const
 
 const activeType = ref<string>(props.type || 'service')
-const activeEnv = ref<string>('') // 空表示全部环境
-const envs = ref<Env[]>([])
+// 环境来自全局 store（顶栏环境选择器），页面不再各自管理
+const activeEnv = computed(() => envStore.currentEnvId)
+const envs = computed(() => envStore.envs)
 const items = ref<Workload[]>([])
 const loading = ref(true)
 const scaling = ref<string>('') // 正在扩缩容的 id
@@ -54,14 +50,6 @@ const statusMeta: Record<Workload['status'], { label: string; cls: string }> = {
 }
 
 const envName = computed(() => (id: string) => envs.value.find((e) => e.id === id)?.name ?? id)
-
-async function loadEnvs() {
-  const resp = await fetchAuth('/api/environments')
-  if (resp.ok) {
-    const json = await resp.json()
-    envs.value = (json.data ?? []) as Env[]
-  }
-}
 
 async function load() {
   loading.value = true
@@ -132,24 +120,33 @@ function switchType(key: string) {
   load()
 }
 
-function switchEnv(id: string) {
-  activeEnv.value = id
-  load()
+async function switchEnv(id: string) {
+  const env = id ? envStore.envs.find((e) => e.id === id) ?? null : null
+  if (await envStore.switchEnv(env)) load()
 }
 
 function onKeyChanged() {
-  loadEnvs()
+  envStore.loadEnvs()
+  load()
+}
+function onEnvChanged() {
   load()
 }
 onMounted(() => {
   // 环境视图跳转携带 ?env= 预选环境
   const q = route.query.env as string
-  if (q) activeEnv.value = q
-  loadEnvs()
-  load()
+  if (q) {
+    envStore.switchEnv(envStore.envs.find((e) => e.id === q) ?? null).then(() => load())
+  } else {
+    load()
+  }
   window.addEventListener('paas:key-changed', onKeyChanged)
+  window.addEventListener('paas:env-changed', onEnvChanged)
 })
-onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
+onUnmounted(() => {
+  window.removeEventListener('paas:key-changed', onKeyChanged)
+  window.removeEventListener('paas:env-changed', onEnvChanged)
+})
 </script>
 
 <template>
