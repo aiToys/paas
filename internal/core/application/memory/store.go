@@ -42,6 +42,16 @@ func NewStore() *Store {
 	return s
 }
 
+// cloneBindings 深拷贝绑定切片，确保返回值与 store 内底层数组独立（并发读写安全）。
+func cloneBindings(bs []application.Binding) []application.Binding {
+	if len(bs) == 0 {
+		return nil
+	}
+	cp := make([]application.Binding, len(bs))
+	copy(cp, bs)
+	return cp
+}
+
 func (s *Store) List(ctx context.Context) ([]application.Application, error) {
 	tid, ok := tenant.TenantFrom(ctx)
 	if !ok {
@@ -52,6 +62,7 @@ func (s *Store) List(ctx context.Context) ([]application.Application, error) {
 	out := make([]application.Application, 0, len(s.apps))
 	for _, a := range s.apps {
 		if a.TenantID == tid {
+			a.Bindings = cloneBindings(a.Bindings)
 			out = append(out, a)
 		}
 	}
@@ -72,6 +83,7 @@ func (s *Store) Get(ctx context.Context, id string) (application.Application, er
 	if !hit || a.TenantID != tid {
 		return application.Application{}, fmt.Errorf("应用不存在: %s", id)
 	}
+	a.Bindings = cloneBindings(a.Bindings)
 	return a, nil
 }
 
@@ -120,6 +132,7 @@ func (s *Store) BindResource(ctx context.Context, id, resourceType, name string)
 	a.Bindings = append(a.Bindings, application.Binding{Type: resourceType, Name: name})
 	a.Recount()
 	s.apps[id] = a
+	a.Bindings = cloneBindings(a.Bindings) // 返回前深拷贝，与 store 独立
 	return a, nil
 }
 
@@ -134,7 +147,8 @@ func (s *Store) Unbind(ctx context.Context, id, resourceType, name string) (appl
 	if !hit || a.TenantID != tid {
 		return application.Application{}, fmt.Errorf("应用不存在: %s", id)
 	}
-	next := a.Bindings[:0]
+	// 构建新 slice，避免原地 filter（a.Bindings[:0]）污染与 store 共享的底层数组。
+	next := make([]application.Binding, 0, len(a.Bindings))
 	removed := false
 	for _, b := range a.Bindings {
 		if b.Type == resourceType && b.Name == name {
@@ -149,8 +163,13 @@ func (s *Store) Unbind(ctx context.Context, id, resourceType, name string) (appl
 	a.Bindings = next
 	a.Recount()
 	s.apps[id] = a
+	a.Bindings = cloneBindings(a.Bindings) // 返回前深拷贝，与 store 独立
 	return a, nil
 }
+
+// SeedApps 返回平台预置示例应用，供内存仓储自灌与 PG 仓储迁移后 seed 复用同一真源。
+// 导出以避免 seed 数据在 cmd/core 重复定义（DRY）。
+func SeedApps() []application.Application { return seed() }
 
 func seed() []application.Application {
 	return []application.Application{

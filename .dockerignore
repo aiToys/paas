@@ -1,0 +1,25 @@
+# 构建产物与缓存，不进镜像层（加速构建、减小上下文）
+bin/
+dist/
+coverage.out
+coverage.html
+
+# 本地运行时产物
+*.log
+.playwright-mcp/
+
+# 前端 node_modules（容器内重新安装，避免平台差异）
+frontend/**/node_modules/
+frontend/**/dist/
+
+# 版本控制与编辑器
+.git/
+.gitignore
+.idea/
+.vscode/
+.DS_Store
+
+# 文档源（不影响构建）
+docs/
+*.md
+!README.md

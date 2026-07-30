@@ -51,8 +51,10 @@ Platform Core（底座 · 所有子系统依赖）
   ✅ 生产安全防护（横切）：prod:write RBAC + gated + 视觉强隔离 + 危险确认
   ❌ 泳道路由（染色+降级）/ 联调自动化 / 多区容灾
 
-DevOps ❌
-  CI/CD 流水线 / 制品镜像仓库 / 发布编排（蓝绿/灰度/金丝雀）/ 回滚
+DevOps 🔶
+  ✅ 代码仓库绑定 / 构建流水线（mock CI runner 异步流转）/ 制品镜像仓库（Image digest 不可变真源）/ 发布编排（rolling）/ 回滚
+  ✅ 生产安全横切：发布/回滚到 prod 受 prod:write + 危险确认（横切继承）
+  ❌ 真实 Git/Docker/OCI registry 接入 / 蓝绿·金丝雀流量切分 / GitOps（Release CRD 化）
 
 平台能力（横切）
   ❌ 服务治理：注册发现 / 配置中心 / API 网关 / 熔断降级

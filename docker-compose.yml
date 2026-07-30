@@ -1,0 +1,49 @@
+# 一键启动 Platform Core + PostgreSQL（开源快速体验，数据持久化）。
+# core 默认连 postgres 服务做持久化（identity + application 迁 PG，其余模块仍内存）。
+# 想回到纯内存零依赖模式：注释 core.environment.PAAS_DB_URL 并停掉 postgres 服务。
+#
+# 启动：docker compose up --build
+# 验证：curl -H "Authorization: Bearer sk-acme-admin" http://localhost:8080/livez
+#       重启后应用数据仍在：docker compose down && docker compose up → /api/applications 不丢
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: paas-postgres
+    environment:
+      POSTGRES_DB: paas
+      POSTGRES_USER: paas
+      POSTGRES_PASSWORD: paas-dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - paas-pg:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready 判活，core 依赖健康后才启动（等迁移就绪）。
+      test: ["CMD-SHELL", "pg_isready -U paas"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  core:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aitoys/paas-core:dev
+    container_name: paas-core
+    ports:
+      - "8080:8080"
+    environment:
+      # 默认演示 API Key（绑定 Acme 租户管理员）；生产请改用强随机值或 secret。
+      PAAS_API_KEY: sk-acme-admin
+      # 持久化：非空则 identity + application 走 PostgreSQL；留空则纯内存。
+      # 生产请改用 secret 注入强密码 + 启用 sslmode=require。
+      PAAS_DB_URL: postgres://paas:paas-dev@postgres:5432/paas?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    # 存活探针：distroless 无 shell/curl，compose 层不配 healthcheck。
+    # 生产 K8s 部署用 httpGet /livez 探针（见 deploy/ 后续切片）。
+
+volumes:
+  paas-pg:

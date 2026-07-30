@@ -61,11 +61,62 @@ func TestChatCompletionsUnknownModel(t *testing.T) {
 	gw := New()
 	h := ChatCompletions(gw, &Meter{})
 	rec := httptest.NewRecorder()
-	body := strings.NewReader(`{"model":"ghost","messages":[]}`)
+	body := strings.NewReader(`{"model":"ghost","messages":[{"role":"user","content":"x"}]}`)
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
 
 	require.Equal(t, http.StatusNotFound, rec.Code)
 	assert.Contains(t, rec.Body.String(), "not found")
+}
+
+// errProvider 调用即返回预设错误，模拟上游故障通道。
+type errProvider struct{ err error }
+
+func (errProvider) Name() string { return "err" }
+func (e errProvider) Chat(_ context.Context, _ provider.ChatRequest) (<-chan provider.Chunk, error) {
+	return nil, e.err
+}
+
+// TestChatCompletionsFailoverOnDegraded 验证请求级 failover：
+// 主通道返回 degraded 类错误（ErrUpstreamUnavailable）→ 自动切备通道，用户拿到备通道内容。
+func TestChatCompletionsFailoverOnDegraded(t *testing.T) {
+	gw := New()
+	primary := &provider.Channel{ID: "m#primary", Priority: 0, Status: provider.StatusHealthy}
+	primary.SetImpl(errProvider{err: provider.ErrUpstreamUnavailable})
+	backup := &provider.Channel{ID: "m#backup", Priority: 1, Status: provider.StatusHealthy}
+	backup.SetImpl(fakeStreamProvider{chunks: []provider.Chunk{{Content: "备通道OK"}}})
+	require.NoError(t, gw.RegisterModel(&provider.Model{
+		ID: "m", Vendor: "test", Channels: []*provider.Channel{primary, backup},
+	}))
+
+	rec := httptest.NewRecorder()
+	body := strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"x"}]}`)
+	ChatCompletions(gw, &Meter{}).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
+
+	assert.Contains(t, rec.Body.String(), "备通道OK")
+	assert.Contains(t, rec.Body.String(), "data: [DONE]")
+	// 主通道应被标 degraded（degraded 类错误）
+	assert.Equal(t, provider.StatusDegraded, primary.Status)
+}
+
+// TestChatCompletionsAllChannelsFail 验证全部通道失败 → 503。
+func TestChatCompletionsAllChannelsFail(t *testing.T) {
+	gw := New()
+	a := &provider.Channel{ID: "m#a", Priority: 0, Status: provider.StatusHealthy}
+	a.SetImpl(errProvider{err: provider.ErrUpstreamUnavailable})
+	b := &provider.Channel{ID: "m#b", Priority: 1, Status: provider.StatusHealthy}
+	b.SetImpl(errProvider{err: provider.ErrCredentialMissing})
+	require.NoError(t, gw.RegisterModel(&provider.Model{
+		ID: "m", Vendor: "test", Channels: []*provider.Channel{a, b},
+	}))
+
+	rec := httptest.NewRecorder()
+	body := strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"x"}]}`)
+	ChatCompletions(gw, &Meter{}).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
+
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	// degraded 类标 degraded，offline 类（凭证缺失）标 offline
+	assert.Equal(t, provider.StatusDegraded, a.Status)
+	assert.Equal(t, provider.StatusOffline, b.Status)
 }
 
 func TestListModelsOpenAICompat(t *testing.T) {

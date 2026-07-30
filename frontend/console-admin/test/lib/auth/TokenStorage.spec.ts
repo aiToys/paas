@@ -33,10 +33,10 @@ describe('MemorySessionTokenStorage', () => {
     expect(storage.getRefreshToken()).toBeNull()
   })
 
-  it('sessionStorage key 带命名空间 va:', () => {
+  it('sessionStorage key 带命名空间 paas:', () => {
     storage.setTokens('a1', 'r1')
-    expect(sessionStorage.getItem('va:access')).toBe('a1')
-    expect(sessionStorage.getItem('va:refresh')).toBe('r1')
+    expect(sessionStorage.getItem('paas:access')).toBe('a1')
+    expect(sessionStorage.getItem('paas:refresh')).toBe('r1')
   })
 
   it('新建实例从 sessionStorage 恢复', () => {

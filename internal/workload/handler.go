@@ -3,8 +3,10 @@ package workload
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -34,6 +36,9 @@ type Handler struct {
 	envResolver EnvTypeResolver // 可选；注入后写操作校验生产权限
 	// Authorize 校验当前请求是否持有权限；nil 跳过（测试场景）。
 	Authorize func(r *http.Request, perm string) bool
+	// QuotaCheck 工作负载数配额检查（横切，可选）；nil 跳过。由 cmd/core 桥接 billing.CheckAndInc，
+	// 创建工作负载前拦截超配额。返回 error 时 Create 中止并回 429。
+	QuotaCheck func(ctx context.Context, delta int) error
 }
 
 // NewHandler 创建工作负载 handler。可选 envResolver 注入启用生产写校验。
@@ -53,6 +58,11 @@ func WithEnvResolver(r EnvTypeResolver) HandlerOpt {
 	return func(h *Handler) { h.envResolver = r }
 }
 
+// WithQuotaCheck 注入工作负载数配额检查（横切配额拦截）。
+func WithQuotaCheck(f func(ctx context.Context, delta int) error) HandlerOpt {
+	return func(h *Handler) { h.QuotaCheck = f }
+}
+
 func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) bool {
 	if h.Authorize == nil || h.Authorize(r, perm) {
 		return true
@@ -63,17 +73,18 @@ func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) boo
 
 // allowProd 校验目标环境的生产写权限。
 // 未注入 envResolver 或 envID 为空时跳过（兼容旧测试）；
-// 目标环境非生产或不存在时放行（不存在由后续 repo 报错）；
-// 目标环境是生产时校验 prod:write（developer 被拦 -> 生产只读）。
+// 否则查询环境类型：生产或查不到（不存在/跨租户）均要求 prod:write（fail-closed，
+// developer 被拦 -> 生产只读）；非生产放行。
 func (h *Handler) allowProd(w http.ResponseWriter, r *http.Request, envID string) bool {
 	if h.envResolver == nil || envID == "" {
 		return true
 	}
 	etype, err := h.envResolver.EnvType(r.Context(), envID)
-	if err != nil || etype != "prod" {
-		return true
+	// fail-closed：环境查不到（不存在/跨租户）保守按生产处理，需 prod:write。
+	if err != nil || etype == "prod" {
+		return h.allow(w, r, PermProdWrite)
 	}
-	return h.allow(w, r, PermProdWrite)
+	return true
 }
 
 // ServeHTTP 按路径前缀分发到应用子路由或跨应用工作负载路由。
@@ -131,7 +142,24 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 		if !h.allowProd(w, r, w0.EnvID) {
 			return
 		}
+		// 横切配额拦截：创建前检查工作负载数配额，超限回 429（不创建）。
+		if h.QuotaCheck != nil {
+			if err := h.QuotaCheck(r.Context(), 1); err != nil {
+				writeErr(w, http.StatusTooManyRequests, err.Error())
+				return
+			}
+		}
+		// handler 负责生成 ID + CreatedAt（store 仅校验非空/不重复）。
+		if w0.ID == "" {
+			w0.ID = fmt.Sprintf("wl-%d", time.Now().UnixNano())
+		}
+		if w0.CreatedAt.IsZero() {
+			w0.CreatedAt = time.Now()
+		}
 		if err := h.repo.Create(r.Context(), w0); err != nil {
+			if h.QuotaCheck != nil {
+				_ = h.QuotaCheck(r.Context(), -1) // Create 失败回滚已递增的配额
+			}
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -170,11 +198,14 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 		if !h.allow(w, r, PermWorkloadWrite) {
 			return
 		}
-		// 生产环境扩缩容需 prod:write（先查 workload 所属环境）
-		if existing, err := h.repo.Get(r.Context(), id); err == nil {
-			if !h.allowProd(w, r, existing.EnvID) {
-				return
-			}
+		// 生产环境扩缩容需 prod:write（先查 workload 所属环境；Get 失败直接 404，不跳过校验）
+		existing, err := h.repo.Get(r.Context(), id)
+		if err != nil {
+			writeErr(w, http.StatusNotFound, err.Error())
+			return
+		}
+		if !h.allowProd(w, r, existing.EnvID) {
+			return
 		}
 		var body struct {
 			Replicas int    `json:"replicas"`
@@ -197,11 +228,14 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 		if !h.allow(w, r, PermWorkloadWrite) {
 			return
 		}
-		// 生产环境删除需 prod:write（先查 workload 所属环境）
-		if existing, err := h.repo.Get(r.Context(), id); err == nil {
-			if !h.allowProd(w, r, existing.EnvID) {
-				return
-			}
+		// 生产环境删除需 prod:write（先查 workload 所属环境；Get 失败直接 404，不跳过校验）
+		existing, err := h.repo.Get(r.Context(), id)
+		if err != nil {
+			writeErr(w, http.StatusNotFound, err.Error())
+			return
+		}
+		if !h.allowProd(w, r, existing.EnvID) {
+			return
 		}
 		if err := h.repo.Delete(r.Context(), id); err != nil {
 			writeErr(w, http.StatusNotFound, err.Error())

@@ -9,14 +9,19 @@ import (
 type Meter struct {
 	mu    sync.Mutex
 	total int
+	// OnTokens 用量回写钩子（main.go 注入 billing.IncUsage，P3-2 计量采集）；nil 则不回写。
+	OnTokens func(tenantID string, tokens int)
 }
 
-// Record 记录一次请求的 token 用量。
+// Record 记录一次请求的 token 用量，并可选回写计费用量。
 func (m *Meter) Record(tenantID, model string, tokens int) {
 	m.mu.Lock()
 	m.total += tokens
 	m.mu.Unlock()
 	log.Printf("[meter] tenant=%s model=%s tokens=%d", tenantID, model, tokens)
+	if m.OnTokens != nil && tenantID != "" {
+		m.OnTokens(tenantID, tokens)
+	}
 }
 
 // Count 返回累计 token（测试用）。

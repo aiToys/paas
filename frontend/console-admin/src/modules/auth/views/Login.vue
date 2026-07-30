@@ -108,9 +108,10 @@ const validatePassword: NonNullable<FormItemRule['validator']> = (
   }
 }
 
+// 开发环境预填演示账号（admin/123456，PaaS core seed）；生产留空。
 const ruleForm = reactive({
-  username: '',
-  password: '',
+  username: import.meta.env.DEV ? 'admin' : '',
+  password: import.meta.env.DEV ? '123456' : ''
 })
 
 const rules = reactive<FormRules>({

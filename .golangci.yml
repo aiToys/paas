@@ -12,7 +12,8 @@ linters:
     - staticcheck
     - unused
     - misspell
-    - govet
+    - unconvert
+    - gosec
 
 formatters:
   enable:

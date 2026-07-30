@@ -1,9 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import { fetchAuth } from '@/api'
+import AppRepositories from './app-tabs/AppRepositories.vue'
+import AppBuilds from './app-tabs/AppBuilds.vue'
+import AppImages from './app-tabs/AppImages.vue'
+import AppReleases from './app-tabs/AppReleases.vue'
+import AppConfigs from './app-tabs/AppConfigs.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -204,8 +209,17 @@ async function unbind(b: Binding) {
   }
 }
 
-const tabs = ['概览', '资源绑定', '部署', '日志', '监控'] as const
+const tabs = ['概览', '资源绑定', '部署', '代码仓库', '构建', '镜像', '发布', '配置'] as const
 const activeTab = ref<(typeof tabs)[number]>('资源绑定')
+
+// 镜像 tab 点「发布」-> 切到发布 tab 并预选镜像（pickedImageId 变化触发 AppReleases 打开创建弹窗）
+const pickedImageId = ref('')
+async function pickImage(img: { id: string }) {
+  pickedImageId.value = ''
+  await nextTick()
+  pickedImageId.value = img.id
+  activeTab.value = '发布'
+}
 </script>
 
 <template>
@@ -329,12 +343,29 @@ const activeTab = ref<(typeof tabs)[number]>('资源绑定')
         </div>
       </div>
 
-      <!-- 占位 Tab -->
-      <div v-else class="placeholder">
-        <div class="ph-card">
-          <Icon name="rocket" :size="32" />
-          <p>{{ activeTab }} 视图开发中</p>
-        </div>
+      <!-- 代码仓库 -->
+      <div v-else-if="activeTab === '代码仓库'">
+        <AppRepositories :app-id="app.id" />
+      </div>
+
+      <!-- 构建 -->
+      <div v-else-if="activeTab === '构建'">
+        <AppBuilds :app-id="app.id" />
+      </div>
+
+      <!-- 镜像（构建产物） -->
+      <div v-else-if="activeTab === '镜像'">
+        <AppImages :app-id="app.id" @pick="pickImage" />
+      </div>
+
+      <!-- 发布 -->
+      <div v-else-if="activeTab === '发布'">
+        <AppReleases :app-id="app.id" :picked-image-id="pickedImageId" />
+      </div>
+
+      <!-- 配置（工作负载级 env/Secret） -->
+      <div v-else-if="activeTab === '配置'">
+        <AppConfigs :app-id="app.id" />
       </div>
     </template>
 

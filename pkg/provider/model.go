@@ -17,12 +17,15 @@ type Model struct {
 // Channel 是模型的某个推理实例通道。
 // impl 持有实际 Provider，不参与 JSON 序列化。
 type Channel struct {
-	ID       string   `json:"id"`                 // 如 "qwen2.5-7b#mock-a"
-	Type     string   `json:"type"`               // echo/mock/vllm
-	Priority int      `json:"priority"`           // 数字越小优先级越高
-	Status   string   `json:"status"`             // healthy/degraded/offline
-	Endpoint string   `json:"endpoint,omitempty"` // 未来 vllm 远端地址
-	impl     Provider `json:"-"`                  // 实际执行者
+	ID       string `json:"id"`                 // 如 "qwen2.5-7b#mock-a"
+	Type     string `json:"type"`               // echo/mock/openai-compatible
+	Priority int    `json:"priority"`           // 数字越小优先级越高
+	Status   string `json:"status"`             // healthy/degraded/offline
+	Endpoint string `json:"endpoint,omitempty"` // 供应商 BaseURL（如 https://api.deepseek.com）
+	// 第三方供应商通道配置（mock/echo 通道为零值）。
+	UpstreamModel string   `json:"upstreamModel,omitempty"` // 供应商侧模型名（deepseek-chat / qwen-plus / gpt-4o）
+	CredentialRef string   `json:"credentialRef,omitempty"` // 凭证引用（security 平台级 Secret ID）
+	impl          Provider `json:"-"`                       // 实际执行者
 }
 
 // Impl 返回通道绑定的 Provider。

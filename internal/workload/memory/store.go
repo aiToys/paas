@@ -124,6 +124,27 @@ func (s *Store) Update(ctx context.Context, id string, replicas int, status stri
 	return w, nil
 }
 
+// UpdateImage 更新工作负载镜像（display + digest）。供 devops.Release 编排调用。
+// imageRef 为空时不覆盖已有 digest（兼容仅刷新 display 的场景）。
+func (s *Store) UpdateImage(ctx context.Context, id, image, imageRef string) (workload.Workload, error) {
+	tid, err := tenantOrErr(ctx)
+	if err != nil {
+		return workload.Workload{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w, hit := s.workloads[id]
+	if !hit || w.TenantID != tid {
+		return workload.Workload{}, fmt.Errorf("工作负载不存在: %s", id)
+	}
+	w.Image = image
+	if imageRef != "" {
+		w.ImageRef = imageRef
+	}
+	s.workloads[id] = w
+	return w, nil
+}
+
 func (s *Store) Delete(ctx context.Context, id string) error {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {
@@ -138,6 +159,9 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	delete(s.workloads, id)
 	return nil
 }
+
+// SeedWorkloads 返回平台预置示例工作负载，供内存仓储自灌与 PG 仓储迁移后 seed 复用同一真源。
+func SeedWorkloads() []workload.Workload { return seed() }
 
 // seed 生成跨两租户的示例工作负载，挂到环境（LaneID 均为 default 基线）。
 // acme: cs-api/rec-svc -> env-acme-test；globex: etl/agent -> env-globex-prod。

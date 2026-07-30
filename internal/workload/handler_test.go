@@ -46,6 +46,16 @@ func (s *stubRepo) Update(_ context.Context, id string, r int, st string) (Workl
 	return Workload{}, errNotFound
 }
 func (s *stubRepo) Delete(_ context.Context, id string) error { s.deleted = id; return nil }
+func (s *stubRepo) UpdateImage(_ context.Context, id, image, imageRef string) (Workload, error) {
+	for _, w := range s.list {
+		if w.ID == id {
+			w.Image = image
+			w.ImageRef = imageRef
+			return w, nil
+		}
+	}
+	return Workload{}, errNotFound
+}
 
 type notFoundErr struct{}
 

@@ -107,8 +107,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !h.allow(w, r, PermEnvironmentWrite) {
 			return
 		}
-		// 生产环境删除需 prod:write（developer 被拦）
-		if etype, err := h.repo.EnvType(r.Context(), id); err == nil && etype == TypeProd {
+		// 生产环境删除需 prod:write（developer 被拦）。
+		// fail-closed：EnvType 查不到（不存在/跨租户）保守按生产处理，需 prod:write。
+		etype, err := h.repo.EnvType(r.Context(), id)
+		if err != nil || etype == TypeProd {
 			if !h.allow(w, r, PermProdWrite) {
 				return
 			}

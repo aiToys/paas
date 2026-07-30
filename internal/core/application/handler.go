@@ -1,6 +1,7 @@
 package application
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -13,12 +14,18 @@ const (
 	PermBindingWrite     = "binding:write"
 )
 
+// ErrQuotaExceededMarker 配额超限的 HTTP 语义：429（资源创建被配额拦截）。
+const StatusQuotaExceeded = http.StatusTooManyRequests
+
 // Handler 暴露应用 REST API：列表、详情、创建、绑定资源。
 type Handler struct {
 	repo Repository
 	// Authorize 校验当前请求是否持有权限；nil 时跳过（测试场景）。
 	// 由 cmd/core 注入 gateway 的请求级权限校验，避免本包依赖身份/网关实现。
 	Authorize func(r *http.Request, perm string) bool
+	// QuotaCheck 应用数配额检查（横切，可选）；nil 跳过。由 cmd/core 桥接 billing.CheckAndInc，
+	// 创建应用前拦截超配额。返回 error 时 Create 中止并回 429。
+	QuotaCheck func(ctx context.Context, delta int) error
 }
 
 // NewHandler 创建应用 API handler。
@@ -65,7 +72,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "invalid body")
 			return
 		}
+		// 横切配额拦截：创建前检查应用数配额，超限回 429（不创建）。
+		if h.QuotaCheck != nil {
+			if err := h.QuotaCheck(r.Context(), 1); err != nil {
+				writeErr(w, StatusQuotaExceeded, err.Error())
+				return
+			}
+		}
 		if err := h.repo.Create(r.Context(), a); err != nil {
+			// 配额已递增但 Create 失败 → 回滚（保持用量与实际一致）
+			if h.QuotaCheck != nil {
+				_ = h.QuotaCheck(r.Context(), -1)
+			}
 			writeErr(w, http.StatusConflict, err.Error())
 			return
 		}

@@ -15,7 +15,12 @@ export default defineConfig({
   server: {
     host: true,
     watch: { usePolling: true },
-    hmr: true
+    hmr: true,
+    // 开发期代理到 PaaS core（:8080）。VITE_API_BASE_URL 为空走相对路径 → 经此代理。
+    proxy: {
+      '/api': { target: 'http://localhost:8080', changeOrigin: true },
+      '/v1': { target: 'http://localhost:8080', changeOrigin: true }
+    }
   },
   plugins: [
     vue(),

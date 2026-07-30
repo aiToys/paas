@@ -1,0 +1,326 @@
+<script setup lang="ts">
+// 平台能力 → 配置中心（治理四件套：运行时动态配置）。
+// 命名空间列表 + 命名空间详情（draft 配置项编辑 + 发布历史 + 发布/回滚 + 客户端发现视图）。
+// 与 appconfig（工作负载级、静态、重启注入）正交：本页是版本化动态配置，跨实例共享，热更新。
+// 配置中心独立于物理环境；发布/回滚高危走 confirmDangerous（统一二次确认）。
+import { onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
+import { fetchAuth } from '@/api'
+import { confirmDangerous } from '@/composables/useDangerConfirm'
+
+const route = useRoute()
+const router = useRouter()
+
+interface Namespace { id: string; name: string; desc?: string; updatedAt: string }
+interface ConfigItem { id: string; namespaceId: string; key: string; value: string; type: string; updatedAt: string }
+interface Publish {
+  id: string; namespaceId: string; version: number;
+  snapshot: Record<string, string>; status: string; createdAt: string
+}
+interface Published { published: boolean; version?: number; snapshot?: Record<string, string>; publishId?: string }
+
+const namespaces = ref<Namespace[]>([])
+const cur = ref<Namespace | null>(null)
+const items = ref<ConfigItem[]>([])
+const publishes = ref<Publish[]>([])
+const published = ref<Published | null>(null)
+const loading = ref(false)
+
+const showItem = ref(false)
+const itemForm = ref({ id: '', key: '', value: '', type: 'text' })
+const itemSubmitting = ref(false)
+
+const types = [
+  { value: 'text', label: 'Text' },
+  { value: 'json', label: 'JSON' },
+  { value: 'yaml', label: 'YAML' },
+]
+
+function isDetail() {
+  return !!route.params.nsId
+}
+
+async function loadNamespaces() {
+  const resp = await fetchAuth('/api/configcenter/namespaces')
+  if (resp.ok) namespaces.value = (await resp.json()).data ?? []
+}
+
+async function loadDetail() {
+  const id = route.params.nsId as string
+  if (!id) return
+  loading.value = true
+  try {
+    const [nr, ir, pr, drr] = await Promise.all([
+      fetchAuth(`/api/configcenter/namespaces/${id}`),
+      fetchAuth(`/api/configcenter/namespaces/${id}/items`),
+      fetchAuth(`/api/configcenter/namespaces/${id}/publishes`),
+      fetchAuth(`/api/configcenter/namespaces/${id}/published`),
+    ])
+    if (nr.ok) cur.value = await nr.json()
+    if (ir.ok) items.value = (await ir.json()).data ?? []
+    if (pr.ok) publishes.value = (await pr.json()).data ?? []
+    if (drr.ok) published.value = await drr.json()
+  } finally {
+    loading.value = false
+  }
+}
+
+async function load() {
+  if (isDetail()) await loadDetail()
+  else await loadNamespaces()
+}
+
+function openNamespace(id: string) {
+  router.push(`/platform/config-center/${id}`)
+}
+
+async function createNamespace() {
+  const name = window.prompt('命名空间名称（租户内唯一）')
+  if (!name) return
+  const resp = await fetchAuth('/api/configcenter/namespaces', {
+    method: 'POST', body: JSON.stringify({ name }),
+  })
+  if (resp.ok) {
+    ElMessage.success('已创建')
+    loadNamespaces()
+  } else {
+    const err = await resp.json().catch(() => ({}))
+    ElMessage.error(err.error || '创建失败')
+  }
+}
+
+function openItem(existing?: ConfigItem) {
+  itemForm.value = existing
+    ? { id: existing.id, key: existing.key, value: existing.value, type: existing.type }
+    : { id: '', key: '', value: '', type: 'text' }
+  showItem.value = true
+}
+
+async function saveItem() {
+  if (!itemForm.value.key.trim() || !itemForm.value.value) {
+    ElMessage.warning('请填写 Key 和 Value')
+    return
+  }
+  itemSubmitting.value = true
+  try {
+    const resp = await fetchAuth(`/api/configcenter/namespaces/${cur.value!.id}/items`, {
+      method: 'POST',
+      body: JSON.stringify({ key: itemForm.value.key, value: itemForm.value.value, type: itemForm.value.type }),
+    })
+    if (resp.ok) {
+      ElMessage.success('已保存（draft）')
+      showItem.value = false
+      loadDetail()
+    } else {
+      const err = await resp.json().catch(() => ({}))
+      ElMessage.error(err.error || '保存失败')
+    }
+  } finally {
+    itemSubmitting.value = false
+  }
+}
+
+async function deleteItem(row: ConfigItem) {
+  const ok = await confirmDangerous({ action: '删除配置项', target: row.key })
+  if (!ok) return
+  const resp = await fetchAuth(`/api/configcenter/namespaces/${cur.value!.id}/items/${row.id}`, { method: 'DELETE' })
+  if (resp.ok) {
+    ElMessage.success('已删除')
+    loadDetail()
+  }
+}
+
+async function publish() {
+  const ok = await confirmDangerous({ action: '发布', target: cur.value?.name ?? '' })
+  if (!ok) return
+  const resp = await fetchAuth(`/api/configcenter/namespaces/${cur.value!.id}/publish`, { method: 'POST' })
+  if (resp.ok) {
+    ElMessage.success('已发布新版本')
+    loadDetail()
+  } else {
+    const err = await resp.json().catch(() => ({}))
+    ElMessage.error(err.error || '发布失败')
+  }
+}
+
+async function rollback(p: Publish) {
+  const ok = await confirmDangerous({ action: '回滚到', target: `v${p.version}` })
+  if (!ok) return
+  const resp = await fetchAuth(`/api/configcenter/publishes/${p.id}/rollback`, { method: 'POST' })
+  if (resp.ok) {
+    ElMessage.success(`已回滚到 v${p.version}`)
+    loadDetail()
+  } else {
+    const err = await resp.json().catch(() => ({}))
+    ElMessage.error(err.error || '回滚失败')
+  }
+}
+
+const snapshotEntries = (snap?: Record<string, string>) => (snap ? Object.entries(snap) : [])
+
+onMounted(load)
+watch(() => route.params.nsId, load)
+</script>
+
+<template>
+  <div class="cc-page">
+    <!-- 列表视图 -->
+    <template v-if="!isDetail()">
+      <div class="page-head">
+        <div>
+          <h2>配置中心</h2>
+          <p class="sub">运行时动态配置 · 版本/发布/回滚 · 跨实例共享（区别于应用配置的静态注入）</p>
+        </div>
+        <el-button type="primary" @click="createNamespace">+ 创建命名空间</el-button>
+      </div>
+      <el-table :data="namespaces" v-loading="loading" size="default" empty-text="暂无命名空间">
+        <el-table-column label="命名空间" min-width="180">
+          <template #default="{ row }">
+            <a class="link" @click="openNamespace(row.id)">{{ row.name }}</a>
+          </template>
+        </el-table-column>
+        <el-table-column prop="desc" label="描述" min-width="200" show-overflow-tooltip />
+        <el-table-column label="更新时间" width="180">
+          <template #default="{ row }">{{ new Date(row.updatedAt).toLocaleString() }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="100">
+          <template #default="{ row }">
+            <el-button text type="primary" size="small" @click="openNamespace(row.id)">进入</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </template>
+
+    <!-- 详情视图 -->
+    <template v-else>
+      <button class="back" @click="router.push('/platform/config-center')">← 返回命名空间列表</button>
+      <div v-if="cur" class="ns-head">
+        <h2>{{ cur.name }}</h2>
+        <p v-if="cur.desc" class="sub">{{ cur.desc }}</p>
+      </div>
+
+      <div v-loading="loading">
+        <!-- 当前生效配置（客户端发现） -->
+        <section class="block">
+          <div class="block-head">
+            <span class="block-title">当前生效配置（客户端发现）</span>
+            <span v-if="published?.published" class="ver-tag mono">v{{ published.version }}</span>
+            <span v-else class="none">未发布</span>
+          </div>
+          <div v-if="published?.published && snapshotEntries(published.snapshot).length" class="kv-list">
+            <div v-for="[k, v] in snapshotEntries(published.snapshot)" :key="k" class="kv-row">
+              <span class="kv-key mono">{{ k }}</span>
+              <span class="kv-val mono">{{ v }}</span>
+            </div>
+          </div>
+          <el-empty v-else description="尚未发布任何版本" :image-size="48" />
+        </section>
+
+        <!-- draft 配置项 -->
+        <section class="block">
+          <div class="block-head">
+            <span class="block-title">配置项（draft）</span>
+            <div>
+              <el-button size="small" @click="publish">发布当前 draft</el-button>
+              <el-button size="small" type="primary" @click="openItem()">+ 新增配置项</el-button>
+            </div>
+          </div>
+          <el-table :data="items" size="small" empty-text="暂无配置项">
+            <el-table-column prop="key" label="Key" min-width="160">
+              <template #default="{ row }"><span class="mono">{{ row.key }}</span></template>
+            </el-table-column>
+            <el-table-column prop="type" label="类型" width="80" />
+            <el-table-column prop="value" label="Value" min-width="200" show-overflow-tooltip />
+            <el-table-column label="更新时间" width="170">
+              <template #default="{ row }">{{ new Date(row.updatedAt).toLocaleString() }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="120">
+              <template #default="{ row }">
+                <el-button text type="primary" size="small" @click="openItem(row)">编辑</el-button>
+                <el-button text type="danger" size="small" @click="deleteItem(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </section>
+
+        <!-- 发布历史 -->
+        <section class="block">
+          <div class="block-head">
+            <span class="block-title">发布历史</span>
+          </div>
+          <el-table :data="publishes" size="small" empty-text="暂无发布记录">
+            <el-table-column label="版本" width="80">
+              <template #default="{ row }"><span class="mono">v{{ row.version }}</span></template>
+            </el-table-column>
+            <el-table-column label="状态" width="120">
+              <template #default="{ row }">
+                <el-tag :type="row.status === 'active' ? 'success' : 'info'" size="small">{{ row.status }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="配置项数" width="100">
+              <template #default="{ row }">{{ snapshotEntries(row.snapshot).length }}</template>
+            </el-table-column>
+            <el-table-column label="发布时间" width="180">
+              <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="90">
+              <template #default="{ row }">
+                <el-button
+                  v-if="row.status !== 'active'"
+                  text type="warning" size="small"
+                  @click="rollback(row)"
+                >回滚到此</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </section>
+      </div>
+
+      <!-- 配置项编辑弹窗 -->
+      <el-dialog v-model="showItem" :title="itemForm.id ? '编辑配置项' : '新增配置项'" width="500px">
+        <el-form label-width="70px">
+          <el-form-item label="Key">
+            <el-input v-model="itemForm.key" :disabled="!!itemForm.id" placeholder="如 feature.newui" />
+          </el-form-item>
+          <el-form-item label="类型">
+            <el-select v-model="itemForm.type" style="width: 100%">
+              <el-option v-for="t in types" :key="t.value" :label="t.label" :value="t.value" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="Value">
+            <el-input v-model="itemForm.value" type="textarea" :rows="4" />
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="showItem = false">取消</el-button>
+          <el-button type="primary" :disabled="itemSubmitting" @click="saveItem">
+            {{ itemSubmitting ? '保存中…' : '保存' }}
+          </el-button>
+        </template>
+      </el-dialog>
+    </template>
+  </div>
+</template>
+
+<style scoped>
+.cc-page { max-width: 1100px; margin: 0 auto; }
+.page-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+.page-head h2 { margin: 0 0 4px; font-size: 18px; }
+.sub { margin: 0; font-size: 12.5px; color: var(--text-dim); }
+.link { font-weight: 600; color: var(--brand); cursor: pointer; }
+.link:hover { text-decoration: underline; }
+.back { border: none; background: transparent; color: var(--text-faint); font-family: inherit; font-size: 13px; cursor: pointer; margin-bottom: 12px; }
+.back:hover { color: var(--text); }
+.ns-head { margin-bottom: 18px; }
+.ns-head h2 { margin: 0 0 4px; font-size: 18px; }
+.block { margin-bottom: 24px; }
+.block-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.block-title { font-size: 14px; font-weight: 600; }
+.ver-tag { padding: 2px 8px; background: var(--success-soft); color: var(--success); border-radius: 4px; font-size: 12px; }
+.none { font-size: 12px; color: var(--text-faint); }
+.kv-list { display: flex; flex-direction: column; gap: 6px; padding: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.kv-row { display: flex; gap: 16px; font-size: 13px; }
+.kv-key { color: var(--brand); min-width: 200px; }
+.kv-val { color: var(--text); word-break: break-all; }
+</style>

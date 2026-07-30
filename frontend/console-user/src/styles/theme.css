@@ -139,6 +139,47 @@ a {
   font-feature-settings: 'tnum';
 }
 
+/* -- DevOps tab（应用详情：仓库/构建/镜像/发布）-- */
+.devops-tab .tab-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.devops-tab .tab-title {
+  font-weight: 600;
+  font-size: 15px;
+}
+.devops-tab .tab-hint {
+  font-size: 12px;
+  opacity: 0.55;
+}
+.devops-tab .img-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.devops-tab .digest {
+  font-size: 11px;
+  opacity: 0.55;
+}
+.devops-tab .build-log {
+  background: rgba(0, 0, 0, 0.25);
+  padding: 12px 14px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+}
+.devops-tab .empty-hint {
+  font-size: 13px;
+  margin-top: 8px;
+  opacity: 0.7;
+}
+
 /* —— 路由切换过渡 —— */
 .route-enter-active,
 .route-leave-active {

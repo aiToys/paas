@@ -86,3 +86,28 @@ func TestBuiltinRoleAdminHasProdWrite(t *testing.T) {
 	r := identity.BuiltinRoles()["tenant-admin"]
 	assert.True(t, r.Grants("prod:write"), "admin 应有生产写权限")
 }
+
+func TestGetUserByNameAndIsolation(t *testing.T) {
+	s := NewStore()
+	require.NoError(t, s.CreateUser(context.Background(), identity.User{
+		ID: "u1", TenantID: "t1", Name: "alice", Status: identity.StatusActive,
+		Email: "a@x.com", PasswordHash: "h",
+	}))
+
+	got, err := s.GetUserByName(context.Background(), "alice")
+	require.NoError(t, err)
+	assert.Equal(t, "u1", got.ID)
+	assert.Equal(t, "a@x.com", got.Email)
+	assert.Equal(t, "h", got.PasswordHash)
+	assert.Equal(t, identity.StatusActive, got.Status)
+
+	_, err = s.GetUserByName(context.Background(), "nobody")
+	assert.Error(t, err)
+
+	// GetUser 租户内隔离：正确租户命中，跨租户不泄漏
+	got2, err := s.GetUser(context.Background(), "t1", "u1")
+	require.NoError(t, err)
+	assert.Equal(t, "alice", got2.Name)
+	_, err = s.GetUser(context.Background(), "t2", "u1")
+	assert.Error(t, err)
+}

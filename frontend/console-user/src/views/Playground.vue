@@ -1,29 +1,37 @@
 <script setup lang="ts">
-import { nextTick, onMounted, ref } from 'vue'
+import { nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import { fetchAuth } from '@/api'
 
 // Playground：聊天式交互推理，直连 Platform Core Gateway（OpenAI 兼容 SSE）。
-// 模型列表来自 /v1/models；支持 ?model=<id> 预选（模型市场「试用」入口）。
+// 模型列表来自 /api/models（富信息：id + 供应商 + 描述）；支持 ?model=<id> 预选。
 // API Key 来自顶栏会话（@/api），换 Key 即换租户/权限视角。
 
 interface Msg {
   role: 'user' | 'assistant'
   content: string
 }
+interface ModelOpt {
+  id: string
+  name: string
+  vendor: string
+}
 
 const route = useRoute()
 const model = ref('')
-const modelOptions = ref<string[]>([])
+const modelOptions = ref<ModelOpt[]>([])
 const input = ref('')
 const loading = ref(false)
 const lastTokens = ref(0)
-const messages = ref<Msg[]>([
-  { role: 'assistant', content: '在下方输入提示词，我会以流式返回结果。上方可切换模型。' },
-])
+const messages = ref<Msg[]>([])
+// 推理参数（null = 不传，用上游默认）；多轮对话累积完整历史下发。
+const temperature = ref<number | null>(null)
+const maxTokens = ref<number | null>(null)
 const scrollRef = ref<HTMLElement | null>(null)
+// 跟踪当前 SSE 请求，切模型/重发/卸载时中断旧流，避免并发写入与泄漏。
+let activeCtrl: AbortController | null = null
 
 async function scrollToBottom() {
   await nextTick()
@@ -32,82 +40,123 @@ async function scrollToBottom() {
 
 onMounted(async () => {
   try {
-    const resp = await fetchAuth('/v1/models')
+    const resp = await fetchAuth('/api/models')
     const json = await resp.json()
-    modelOptions.value = (json.data ?? []).map((m: { id: string }) => m.id)
+    modelOptions.value = (json.data ?? []).map((m: any) => ({ id: m.id, name: m.name, vendor: m.vendor }))
   } catch {
     ElMessage.error('加载模型列表失败')
   }
   const q = route.query.model as string
-  model.value = q && modelOptions.value.includes(q) ? q : modelOptions.value[0] ?? ''
+  const ids = modelOptions.value.map((m) => m.id)
+  model.value = q && ids.includes(q) ? q : modelOptions.value[0]?.id ?? ''
 })
 
 async function send() {
   const text = input.value.trim()
   if (!text || loading.value || !model.value) return
+  // 中断上一条未完成的流（切模型/重发场景）
+  if (activeCtrl) activeCtrl.abort()
+  activeCtrl = new AbortController()
+  const ctrl = activeCtrl
   loading.value = true
+  // 多轮：下发完整对话历史（过滤空占位），上游据此维持上下文。
+  const hist = messages.value
+    .filter((m) => m.content.trim() !== '')
+    .map((m) => ({ role: m.role, content: m.content }))
+  hist.push({ role: 'user', content: text })
   messages.value.push({ role: 'user', content: text })
   input.value = ''
   const assistant: Msg = { role: 'assistant', content: '' }
   messages.value.push(assistant)
   await scrollToBottom()
 
-  const resp = await fetchAuth('/v1/chat/completions', {
-    method: 'POST',
-    body: JSON.stringify({
+  try {
+    const body: Record<string, unknown> = {
       model: model.value,
-      messages: [{ role: 'user', content: text }],
+      messages: hist,
       stream: true,
-    }),
-  })
+    }
+    if (temperature.value !== null) body.temperature = temperature.value
+    if (maxTokens.value !== null) body.max_tokens = maxTokens.value
+    const resp = await fetchAuth('/v1/chat/completions', {
+      method: 'POST',
+      signal: ctrl.signal,
+      body: JSON.stringify(body),
+    })
 
-  if (!resp.ok || !resp.body) {
-    loading.value = false
-    assistant.content = `请求失败：HTTP ${resp.status}`
-    ElMessage.error(`请求失败：HTTP ${resp.status}`)
-    return
-  }
-
-  const reader = resp.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  let tokens = 0
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const parts = buffer.split('\n\n')
-    buffer = parts.pop() ?? ''
-    for (const part of parts) {
-      const line = part.trim()
-      if (!line.startsWith('data:')) continue
-      const data = line.slice(5).trim()
-      if (data === '[DONE]') {
-        loading.value = false
-        lastTokens.value = tokens
-        return
+    if (!resp.ok || !resp.body) {
+      // 503 = 全部通道不可用（常见：第三方供应商凭证未配置）→ 友好引导。
+      if (resp.status === 503) {
+        assistant.content = '模型无可用通道：可能供应商 API Key 未配置。请联系管理员在「平台能力 → 安全」填写平台级供应商凭证。'
+        ElMessage.warning('供应商凭证可能未配置，详见对话区提示')
+      } else {
+        assistant.content = `请求失败：HTTP ${resp.status}`
+        ElMessage.error(`请求失败：HTTP ${resp.status}`)
       }
-      try {
-        const delta = JSON.parse(data).choices?.[0]?.delta?.content
-        if (delta) {
-          assistant.content += delta
-          tokens += [...delta].length
-          await scrollToBottom()
+      return
+    }
+
+    const reader = resp.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let tokens = 0
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const parts = buffer.split('\n\n')
+      buffer = parts.pop() ?? ''
+      for (const part of parts) {
+        const line = part.trim()
+        if (!line.startsWith('data:')) continue
+        const data = line.slice(5).trim()
+        if (data === '[DONE]') {
+          lastTokens.value = tokens
+          return
         }
-      } catch {
-        /* 流式分片，忽略不完整 JSON */
+        try {
+          const delta = JSON.parse(data).choices?.[0]?.delta?.content
+          if (delta) {
+            assistant.content += delta
+            tokens += [...delta].length
+            await scrollToBottom()
+          }
+        } catch {
+          /* 流式分片，忽略不完整 JSON */
+        }
       }
     }
+    lastTokens.value = tokens
+  } catch (e) {
+    // abort（被新请求接管或组件卸载）静默；其它错误提示。
+    if (!ctrl.signal.aborted) {
+      assistant.content = '请求失败：' + (e as Error).message
+      ElMessage.error('请求失败：' + (e as Error).message)
+    }
+  } finally {
+    if (activeCtrl === ctrl) {
+      loading.value = false
+      activeCtrl = null
+    }
   }
-  loading.value = false
-  lastTokens.value = tokens
 }
+
+onUnmounted(() => {
+  // 离开页面中断未完成流，避免往已卸载组件写入。
+  if (activeCtrl) activeCtrl.abort()
+})
 
 function onKey(e: KeyboardEvent) {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault()
     send()
   }
+}
+
+function clearChat() {
+  if (activeCtrl) activeCtrl.abort()
+  messages.value = []
+  lastTokens.value = 0
 }
 </script>
 
@@ -117,14 +166,46 @@ function onKey(e: KeyboardEvent) {
       <div class="model-pill">
         <span class="pulse-dot" />
         <el-select v-model="model" size="small" class="model-select" placeholder="选择模型">
-          <el-option v-for="m in modelOptions" :key="m" :label="m" :value="m" />
+          <el-option v-for="m in modelOptions" :key="m.id" :label="`${m.name}（${m.vendor}）`" :value="m.id" />
         </el-select>
         <span class="muted">· 已就绪</span>
       </div>
-      <div v-if="lastTokens > 0" class="tokens mono">{{ lastTokens }} tokens</div>
+      <div class="bar-actions">
+        <el-popover trigger="click" placement="bottom" :width="280">
+          <template #reference>
+            <el-button text size="small" class="param-btn">参数</el-button>
+          </template>
+          <div class="param-panel">
+            <div class="param-row">
+              <span class="param-label">温度 {{ temperature === null ? '（默认）' : temperature.toFixed(2) }}</span>
+              <el-slider v-model="temperature" :min="0" :max="2" :step="0.05" />
+              <el-button text size="small" @click="temperature = null">重置</el-button>
+            </div>
+            <div class="param-row">
+              <span class="param-label">最大 token</span>
+              <el-input-number
+                v-model="maxTokens"
+                :min="1"
+                :max="32768"
+                :step="128"
+                placeholder="不限"
+                controls-position="right"
+                size="small"
+              />
+              <el-button text size="small" @click="maxTokens = null">重置</el-button>
+            </div>
+            <p class="param-tip">留空则用供应商默认值。多轮对话自动携带完整历史。</p>
+          </div>
+        </el-popover>
+        <el-button text size="small" :disabled="!messages.length" @click="clearChat">清空</el-button>
+        <span v-if="lastTokens > 0" class="tokens mono">{{ lastTokens }} tokens</span>
+      </div>
     </div>
 
     <div ref="scrollRef" class="messages">
+      <div v-if="!messages.length" class="empty-hint">
+        选择模型后发送消息即可开始对话。支持多轮上下文与参数调节。
+      </div>
       <div v-for="(m, i) in messages" :key="i" class="msg" :class="m.role">
         <div class="bubble">
           <span v-if="m.role === 'assistant' && m.content === '' && loading" class="typing">
@@ -147,7 +228,7 @@ function onKey(e: KeyboardEvent) {
           <Icon name="playground" :size="18" />
         </button>
       </div>
-      <div class="hint">输出由所选模型的 mock 通道生成，用于端到端验证</div>
+      <div class="hint">流式推理 · 多轮上下文 · Enter 发送 / Shift+Enter 换行</div>
     </div>
   </div>
 </template>
@@ -205,6 +286,23 @@ function onKey(e: KeyboardEvent) {
   flex-direction: column;
   gap: 14px;
 }
+.empty-hint {
+  margin: auto;
+  color: var(--text-dim);
+  font-size: 13.5px;
+  text-align: center;
+  line-height: 1.8;
+}
+.bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.param-btn { color: var(--text-dim); }
+.param-panel { display: flex; flex-direction: column; gap: 14px; }
+.param-row { display: flex; flex-direction: column; gap: 6px; }
+.param-label { font-size: 12.5px; color: var(--text-dim); }
+.param-tip { margin: 0; font-size: 12px; color: var(--text-faint); line-height: 1.5; }
 .msg {
   display: flex;
 }

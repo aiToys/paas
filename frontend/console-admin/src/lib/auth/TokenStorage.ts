@@ -8,8 +8,8 @@ export interface TokenStorage {
   clear(): void
 }
 
-const KEY_ACCESS = 'va:access'
-const KEY_REFRESH = 'va:refresh'
+const KEY_ACCESS = 'paas:access'
+const KEY_REFRESH = 'paas:refresh'
 
 // 默认实现：access token 同时存内存（关闭标签前的快速访问）+ sessionStorage（刷新页面恢复）
 // refresh token 仅存 sessionStorage

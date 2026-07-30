@@ -61,3 +61,24 @@ func RequestAllowed(r *http.Request, perm string) bool {
 func RequestAllowedProd(r *http.Request) bool {
 	return hasPermission(r.Context(), identity.PermProdWrite)
 }
+
+// IsAdmin 校验当前请求是否来自平台管理员（tenant-admin 角色持 tenant:admin 权限）。
+// 平台级 Secret 写操作（如第三方供应商凭证）仅 admin 可执行。
+func IsAdmin(r *http.Request) bool {
+	return hasPermission(r.Context(), identity.Permission("tenant:admin"))
+}
+
+// IsPlatformAdmin 判定调用者是否平台超管（token 携带 super_admin 标记角色，仅 IsAdmin 用户签发）。
+// identity 管理 API 据此区分：平台超管可跨租户管理；普通 tenant-admin 仅限本租户。
+func IsPlatformAdmin(r *http.Request) bool {
+	roles, ok := RolesFrom(r.Context())
+	if !ok {
+		return false
+	}
+	for _, name := range roles {
+		if name == "super_admin" {
+			return true
+		}
+	}
+	return false
+}

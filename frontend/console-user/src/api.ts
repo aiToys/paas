@@ -45,6 +45,17 @@ export async function fetchAuth(path: string, opts: RequestInit = {}): Promise<R
     ElMessage.error('API Key 无效，请在顶栏切换')
   } else if (resp.status === 403) {
     ElMessage.error('权限不足：当前 Key 缺少所需权限')
+  } else if (resp.status === 429) {
+    // 配额超限（资源 Create 横切拦截）：引导去配额页调整上限。所有写操作统一生效。
+    ElMessage.warning('配额超限：可在「设置 → 配额与账单」调整配额上限')
   }
   return resp
+}
+
+// fetchJSON 是 fetchAuth 的类型化封装：自动解 JSON 并按生成的契约类型 T 标注响应。
+// T 取自 src/api/types.gen.ts（pnpm gen:api 从后端 /openapi.json 生成）。
+// 401/403/429 的全局提示同 fetchAuth；非 2xx 抛错由调用方 catch。
+export async function fetchJSON<T>(path: string, opts?: RequestInit): Promise<T> {
+  const resp = await fetchAuth(path, opts)
+  return (await resp.json()) as T
 }

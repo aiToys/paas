@@ -122,3 +122,28 @@ func TestCreateProdRequiresProdWrite(t *testing.T) {
 	h.ServeHTTP(rec2, acmeReq(http.MethodPost, "/api/environments", `{"id":"env-test","name":"test","type":"test"}`))
 	assert.Equal(t, http.StatusCreated, rec2.Code)
 }
+
+// TestDeleteProdRequiresProdWrite 验证删除生产环境需 prod:write（developer 被拦）。
+func TestDeleteProdRequiresProdWrite(t *testing.T) {
+	repo := &stubRepo{list: []Environment{{ID: "env-prod", Type: TypeProd}}}
+	h := NewHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return perm != PermProdWrite }
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, acmeReq(http.MethodDelete, "/api/environments/env-prod", ""))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Empty(t, repo.deleted, "生产环境无 prod:write 不应被删除")
+}
+
+// TestDeleteFailClosedOnUnknownEnv 验证删除不存在环境时 fail-closed：
+// EnvType 返回 err 应保守按生产处理，需 prod:write（developer 被拦）。
+func TestDeleteFailClosedOnUnknownEnv(t *testing.T) {
+	// 空 list → EnvType 对任何 id 返回 errNotFound。
+	repo := &stubRepo{list: nil}
+	h := NewHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return perm != PermProdWrite }
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, acmeReq(http.MethodDelete, "/api/environments/env-ghost", ""))
+	assert.Equal(t, http.StatusForbidden, rec.Code, "未知环境 fail-closed 应要求 prod:write")
+}

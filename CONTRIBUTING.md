@@ -28,6 +28,25 @@
 - **禁止引入 GPL/AGPL 等强 copyleft 依赖**；CI 会通过 `go-licenses` 校验。新增依赖前请确认其 license 兼容 Apache 2.0。
 - 新增依赖后运行 `go mod tidy`。
 
+## CI 流水线
+
+每次 push 到 `main` 或提 PR，GitHub Actions（`.github/workflows/ci.yml`）自动跑以下 job：
+
+| Job | 作用 |
+|------|------|
+| `test` | 内存后端全量测试（`-race`，零外部依赖） |
+| `test-pg` | PostgreSQL 集成测试（11 模块，postgres service container，`-p 1` 串行） |
+| `lint` | golangci-lint |
+| `license-check` | go-licenses 拦截 GPL/AGPL 等强 copyleft |
+| `build` | 编译 `bin/core`（依赖 `test`/`lint`/`test-pg` 通过） |
+| `coverage` | 跑测试生成 `coverage.out` + artifact + 日志总覆盖率 |
+| `frontend` | pnpm 构建三套前端 |
+| `release-image` | **仅推 tag `v*` 触发**，多平台 buildx 推 `ghcr.io/aitoys/paas-core` |
+
+- 本地复现 PG 集成测试：`make test-pg`（自动拉起 compose 的 postgres）。
+- 本地复现覆盖率：`make cover`（生成 HTML 报告）。
+- 发版镜像：`git tag v0.1.0 && git push origin v0.1.0` → CI 自动构建并推送 `ghcr.io/aitoys/paas-core:0.1.0` / `:0.1` / `:0`（amd64+arm64）。`release-image` 依赖全部检查 job，任一失败不发布。
+
 ## 代码风格
 
 - 注释与文档使用**中文**（与现有代码库一致）。

@@ -96,3 +96,44 @@ func TestUnbindHandler(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"mq":0`)
 }
+
+// TestCreateHandlerQuotaExceeded 验证横切配额拦截：QuotaCheck 返回错误时
+// Create 中止、回 429、不调用 repo.Create。
+func TestCreateHandlerQuotaExceeded(t *testing.T) {
+	repo := &stubRepo{}
+	h := NewHandler(repo)
+	h.QuotaCheck = func(_ context.Context, _ int) error {
+		return assertNotFoundErr // 模拟 billing.ErrQuotaExceeded
+	}
+	rec := httptest.NewRecorder()
+	body := strings.NewReader(`{"id":"a-new","name":"A"}`)
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/applications", body))
+
+	require.Equal(t, StatusQuotaExceeded, rec.Code)
+	assert.Empty(t, repo.apps, "配额超限时不应调用 repo.Create")
+}
+
+// TestCreateHandlerQuotaRollback 验证 repo.Create 失败时回滚已递增的配额（delta=-1）。
+func TestCreateHandlerQuotaRollback(t *testing.T) {
+	// failRepo.Create 总是失败。
+	repo := &failCreateRepo{}
+	h := NewHandler(repo)
+	var net int
+	h.QuotaCheck = func(_ context.Context, delta int) error {
+		net += delta
+		return nil
+	}
+	rec := httptest.NewRecorder()
+	body := strings.NewReader(`{"id":"a-new","name":"A"}`)
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/applications", body))
+
+	require.Equal(t, http.StatusConflict, rec.Code) // Create 失败 -> 409
+	assert.Equal(t, 0, net, "Create 失败应回滚配额（+1 -1 = 0）")
+}
+
+// failCreateRepo.Create 总返回错误，用于触发回滚路径。
+type failCreateRepo struct{ stubRepo }
+
+func (f *failCreateRepo) Create(_ context.Context, _ Application) error {
+	return assertNotFoundErr
+}

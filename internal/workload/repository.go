@@ -11,5 +11,7 @@ type Repository interface {
 	Create(ctx context.Context, w Workload) error
 	// Update 调整期望副本与状态（扩缩容/暂停/恢复）。返回更新后的工作负载。
 	Update(ctx context.Context, id string, replicas int, status string) (Workload, error)
+	// UpdateImage 更新工作负载镜像（display 字符串 + 不可变 digest）。供 Release 编排调用。
+	UpdateImage(ctx context.Context, id, image, imageRef string) (Workload, error)
 	Delete(ctx context.Context, id string) error
 }

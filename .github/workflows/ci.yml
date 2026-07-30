@@ -2,6 +2,8 @@ name: CI
 on:
   push:
     branches: [main]
+    tags:
+      - "v*"
   pull_request:
     branches: [main]
 jobs:
@@ -11,7 +13,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.25"
       - run: go mod download
       - run: go test ./... -race -count=1
   lint:
@@ -20,7 +22,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.25"
       - uses: golangci/golangci-lint-action@v6
         with:
           version: latest
@@ -30,17 +32,112 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.25"
       - name: 安装 go-licenses 并校验依赖协议（拦截 GPL/AGPL 等强 copyleft）
         run: |
           go install github.com/google/go-licenses@latest
           go-licenses check ./... --disallowed_types=forbidden,reciprocal,restricted
-  build:
+  test-pg:
     runs-on: ubuntu-latest
-    needs: [test, lint]
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: paas
+          POSTGRES_USER: paas
+          POSTGRES_PASSWORD: paas-dev
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U paas"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.25"
+      - run: go mod download
+      - name: PG 集成测试（11 包，-p 1 串行避免 resetSchema 共享 db 互清）
+        env:
+          PAAS_TEST_PG_URL: postgres://paas:paas-dev@localhost:5432/paas?sslmode=disable
+        run: |
+          go test -tags=integration -p 1 -count=1 \
+            ./internal/core/identity/pg/ ./internal/core/application/pg/ \
+            ./internal/environment/pg/ ./internal/appconfig/pg/ ./internal/dataservice/pg/ \
+            ./internal/workload/pg/ ./internal/devops/pg/ ./internal/governance/pg/ \
+            ./internal/configcenter/pg/ ./internal/billing/pg/ ./internal/security/pg/
+  build:
+    runs-on: ubuntu-latest
+    needs: [test, lint, test-pg]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
       - run: mkdir -p bin && go build -o bin/core ./cmd/core
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+      - name: 跑测试并生成覆盖率
+        run: go test ./... -race -count=1 -coverprofile=coverage.out
+      - name: 上传 coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+      - name: 打印总覆盖率到日志
+        run: go tool cover -func=coverage.out | tail -1
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v3
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+        working-directory: frontend
+      - name: 构建三套前端
+        run: pnpm build
+        working-directory: frontend
+  release-image:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, lint, license-check, build, frontend, test-pg, coverage]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}-core
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64

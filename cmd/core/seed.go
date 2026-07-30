@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/aitoys/paas/internal/core/auth"
 	"github.com/aitoys/paas/internal/core/identity"
 )
 
@@ -12,7 +13,7 @@ import (
 //
 //	两租户：Acme(t-acme) / Globex(t-globex)
 //	三 Key：sk-acme-admin / sk-globex-admin / sk-acme-dev（developer，验证权限差异）
-//
+//	一密码登录用户：admin/123456（t-acme 管理员，供 console-admin 登录）
 // extraKey（来自 PAAS_API_KEY）若非内置 Key，追加为 t-acme 的 admin Key，兼容自定义部署。
 func seedIdentity(idb identity.Repository, extraKey string) {
 	ctx := context.Background()
@@ -23,6 +24,19 @@ func seedIdentity(idb identity.Repository, extraKey string) {
 		{ID: "t-globex", Name: "Globex", CreatedAt: now},
 	} {
 		if err := idb.CreateTenant(ctx, t); err != nil {
+			log.Printf("[seed] %v", err)
+		}
+	}
+
+	// 密码登录用户 admin/123456（幂等：已存在跳过，避免重复 bcrypt）。
+	if _, err := idb.GetUserByName(ctx, "admin"); err != nil {
+		hash, hErr := auth.HashPassword("123456")
+		if hErr != nil {
+			log.Printf("[seed] hash admin 密码失败: %v", hErr)
+		} else if err := idb.CreateUser(ctx, identity.User{
+			ID: "u-acme-admin", TenantID: "t-acme", Name: "admin",
+			PasswordHash: hash, IsAdmin: true, Roles: []string{"tenant-admin"}, Status: identity.StatusActive,
+		}); err != nil {
 			log.Printf("[seed] %v", err)
 		}
 	}

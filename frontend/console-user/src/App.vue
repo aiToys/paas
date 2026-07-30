@@ -1,14 +1,21 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import { auth, setApiKey, currentPreset, PRESET_KEYS } from '@/api'
 import { useEnvStore } from '@/stores/env'
 
 const route = useRoute()
+const router = useRouter()
 const collapsed = ref(false)
 const envStore = useEnvStore()
+const searchQuery = ref('')
+
+function onSearch() {
+  const q = searchQuery.value.trim()
+  router.push({ path: '/applications', query: q ? { q } : {} })
+}
 
 // 生产会话超时检查定时器
 let prodTimer: number | undefined
@@ -72,8 +79,7 @@ interface NavItem {
   label: string
   icon: string
   to?: string
-  soon?: boolean
-  children?: { label: string; icon: string; to: string; soon?: boolean }[]
+  children?: { label: string; icon: string; to: string }[]
 }
 
 const nav: NavItem[] = [
@@ -84,45 +90,45 @@ const nav: NavItem[] = [
     icon: 'database',
     children: [
       { label: '模型推理', icon: 'market', to: '/resources/models' },
-      { label: '数据库', icon: 'database', to: '/resources/db', soon: true },
-      { label: '缓存', icon: 'zap', to: '/resources/cache', soon: true },
-      { label: '消息队列', icon: 'message', to: '/resources/mq', soon: true },
-      { label: '对象存储', icon: 'storage', to: '/resources/storage', soon: true },
-      { label: '向量数据库', icon: 'layers', to: '/resources/vector', soon: true },
-      { label: '搜索引擎', icon: 'search', to: '/resources/search', soon: true },
+      { label: '数据库', icon: 'database', to: '/resources/db' },
+      { label: '缓存', icon: 'zap', to: '/resources/cache' },
+      { label: '消息队列', icon: 'message', to: '/resources/mq' },
+      { label: '对象存储', icon: 'storage', to: '/resources/storage' },
+      { label: '向量数据库', icon: 'layers', to: '/resources/vector' },
+      { label: '搜索引擎', icon: 'search', to: '/resources/search' },
     ],
   },
   {
     label: '工作负载',
     icon: 'server',
     children: [
-      { label: '服务', icon: 'server', to: '/workloads/services', soon: true },
-      { label: '任务', icon: 'job', to: '/workloads/jobs', soon: true },
-      { label: '定时', icon: 'clock', to: '/workloads/cronjobs', soon: true },
+      { label: '服务', icon: 'server', to: '/workloads/services' },
+      { label: '任务', icon: 'job', to: '/workloads/jobs' },
+      { label: '定时', icon: 'clock', to: '/workloads/cronjobs' },
     ],
   },
   {
     label: '平台能力',
     icon: 'service',
     children: [
-      { label: '服务治理', icon: 'service', to: '/platform/governance', soon: true },
-      { label: '可观测', icon: 'activity', to: '/platform/observability', soon: true },
-      { label: '安全', icon: 'shield', to: '/platform/security', soon: true },
+      { label: '服务治理', icon: 'service', to: '/platform/governance' },
+      { label: '配置中心', icon: 'layers', to: '/platform/config-center' },
+      { label: '可观测', icon: 'activity', to: '/platform/observability' },
+      { label: '安全', icon: 'shield', to: '/platform/security' },
     ],
   },
-  { label: 'DevOps', icon: 'pipeline', to: '/devops', soon: true },
+  { label: 'DevOps', icon: 'pipeline', to: '/devops' },
   { label: 'Playground', icon: 'playground', to: '/playground' },
 ]
 
 const settings = [
   { label: 'API 密钥', icon: 'key', to: '/settings/api-keys' },
-  { label: '用量', icon: 'usage', to: '/settings/usage' },
+  { label: '配额与账单', icon: 'zap', to: '/settings/billing' },
 ]
 
 const pageTitle = computed(() => (route.meta.title as string) || '控制台')
 
 function isActive(to: string) {
-  if (to === '/coming-soon') return false
   return route.path === to || route.path.startsWith(to + '/')
 }
 </script>
@@ -144,7 +150,6 @@ function isActive(to: string) {
             <span class="nav-bar" />
             <Icon :name="item.icon" :size="19" class="nav-icon" />
             <span v-if="!collapsed" class="nav-label">{{ item.label }}</span>
-            <span v-if="!collapsed && item.soon" class="soon-tag">即将</span>
           </RouterLink>
 
           <div v-else class="nav-group">
@@ -162,7 +167,6 @@ function isActive(to: string) {
               >
                 <Icon :name="c.icon" :size="15" />
                 <span>{{ c.label }}</span>
-                <span v-if="c.soon" class="soon-tag">即将</span>
               </RouterLink>
             </div>
           </div>
@@ -220,8 +224,13 @@ function isActive(to: string) {
           </el-dropdown>
           <div class="search">
             <Icon name="search" :size="16" />
-            <span>搜索应用、资源…</span>
-            <kbd>⌘K</kbd>
+            <input
+              v-model="searchQuery"
+              class="search-input"
+              placeholder="搜索应用…"
+              @keydown.enter="onSearch"
+            />
+            <kbd>⏎</kbd>
           </div>
           <el-dropdown trigger="click" @command="onPickKey">
             <div class="tenant-chip">
@@ -385,15 +394,6 @@ function isActive(to: string) {
   justify-content: center;
   padding: 11px;
 }
-.soon-tag {
-  margin-left: auto;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: var(--surface-2);
-  color: var(--text-faint);
-  font-size: 10px;
-  font-weight: 500;
-}
 
 .sub-nav {
   display: flex;
@@ -418,9 +418,6 @@ function isActive(to: string) {
 }
 .sub-item.active {
   color: var(--brand);
-}
-.sub-item .soon-tag {
-  margin-left: auto;
 }
 
 .collapse-btn {
@@ -483,18 +480,29 @@ function isActive(to: string) {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 12px;
+  padding: 4px 12px;
   border-radius: var(--radius);
   background: var(--surface);
   border: 1px solid var(--border);
   color: var(--text-faint);
   font-size: 13px;
   min-width: 260px;
-  cursor: pointer;
   transition: border-color 0.15s;
 }
-.search:hover {
-  border-color: var(--border-strong);
+.search:focus-within {
+  border-color: var(--brand);
+}
+.search-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+}
+.search-input::placeholder {
+  color: var(--text-faint);
 }
 .search kbd {
   margin-left: auto;
@@ -571,7 +579,6 @@ function isActive(to: string) {
   .nav-label,
   .sub-nav,
   .nav-section-label,
-  .soon-tag,
   .collapse-btn span,
   .search,
   .tenant-chip span {

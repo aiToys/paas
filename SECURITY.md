@@ -2,7 +2,7 @@
 
 ## 报告漏洞
 
-请**勿**通过公开 issue 报告安全漏洞。请发送邮件至 **security@example.com**，我们会在 24 小时内响应。
+请**勿**通过公开 issue 报告安全漏洞。请通过 **GitHub Security Advisory** 私下报告（仓库 `Security` 标签页 → `Report a vulnerability`，仓库地址 https://github.com/aitoys/paas ）。我们会在 24 小时内响应。
 
 报告中请包含：
 - 受影响的版本与组件

@@ -1,0 +1,17 @@
+apiVersion: v2
+name: paas
+description: 一站式 PaaS 平台控制面（Platform Core + MaaS）
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/aitoys/paas
+sources:
+  - https://github.com/aitoys/paas
+keywords:
+  - paas
+  - maas
+  - llm
+  - platform
+maintainers:
+  - name: aitoys
+    url: https://github.com/aitoys

@@ -23,11 +23,18 @@ const routes: RouteRecordRaw[] = [
   },
 
   // -- 环境：物理隔离单元（生产/测试） --
+  // 管理面：列表（CRUD+总览）+ 详情（单环境深度视图）。切换工作环境走顶栏 scope。
   {
     path: '/environments',
     name: 'environments',
     component: () => import('@/views/Environments.vue'),
     meta: { title: '环境' },
+  },
+  {
+    path: '/environments/:id',
+    name: 'environment-detail',
+    component: () => import('@/views/EnvironmentDetail.vue'),
+    meta: { title: '环境详情' },
   },
 
   // —— 资源中心：数据服务（可绑定 Add-on） ——
@@ -38,51 +45,45 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '模型推理' },
   },
   {
-    path: '/resources/deployments',
-    name: 'res-deployments',
-    component: () => import('@/views/Deployments.vue'),
-    meta: { title: '模型部署' },
-  },
-  {
     path: '/resources/db',
     name: 'res-db',
-    component: () => import('@/views/ComingSoon.vue'),
-    props: { product: '数据库 RDS', features: ['PostgreSQL / MySQL 实例', '自动备份与回溯', '读写分离', '慢查询分析'] },
+    component: () => import('@/views/DataServices.vue'),
+    props: { kind: 'db' },
     meta: { title: '数据库' },
   },
   {
     path: '/resources/cache',
     name: 'res-cache',
-    component: () => import('@/views/ComingSoon.vue'),
-    props: { product: '缓存 Redis', features: ['实例与集群', '持久化与容灾', '大 Key 诊断', '配额与限流'] },
+    component: () => import('@/views/DataServices.vue'),
+    props: { kind: 'cache' },
     meta: { title: '缓存' },
   },
   {
     path: '/resources/mq',
     name: 'res-mq',
-    component: () => import('@/views/ComingSoon.vue'),
-    props: { product: '消息队列', features: ['Topic 与分区管理', '消费组与重平衡', '消息回溯与追踪', '配额与限流'] },
+    component: () => import('@/views/DataServices.vue'),
+    props: { kind: 'mq' },
     meta: { title: '消息队列' },
   },
   {
     path: '/resources/storage',
     name: 'res-storage',
-    component: () => import('@/views/ComingSoon.vue'),
-    props: { product: '对象存储', features: ['Bucket 管理', 'CDN 加速', '生命周期策略', '访问授权'] },
+    component: () => import('@/views/DataServices.vue'),
+    props: { kind: 'storage' },
     meta: { title: '对象存储' },
   },
   {
     path: '/resources/vector',
     name: 'res-vector',
-    component: () => import('@/views/ComingSoon.vue'),
-    props: { product: '向量数据库', features: ['索引与检索', 'Embedding 入库', '相似度召回', '分区与副本'] },
+    component: () => import('@/views/DataServices.vue'),
+    props: { kind: 'vector' },
     meta: { title: '向量数据库' },
   },
   {
     path: '/resources/search',
     name: 'res-search',
-    component: () => import('@/views/ComingSoon.vue'),
-    props: { product: '搜索引擎', features: ['索引与分词', '聚合分析', '全文检索', '数据同步'] },
+    component: () => import('@/views/DataServices.vue'),
+    props: { kind: 'search' },
     meta: { title: '搜索引擎' },
   },
 
@@ -113,22 +114,37 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/platform/governance',
     name: 'plat-governance',
-    component: () => import('@/views/ComingSoon.vue'),
-    props: { product: '服务治理', features: ['注册发现', '配置中心', 'API 网关', '熔断降级'] },
+    component: () => import('@/views/ServiceRegistry.vue'),
     meta: { title: '服务治理' },
+  },
+  {
+    path: '/platform/governance/services/:id',
+    name: 'service-detail',
+    component: () => import('@/views/ServiceDetail.vue'),
+    meta: { title: '服务详情' },
+  },
+  {
+    path: '/platform/config-center',
+    name: 'plat-config-center',
+    component: () => import('@/views/ConfigCenter.vue'),
+    meta: { title: '配置中心' },
+  },
+  {
+    path: '/platform/config-center/:nsId',
+    name: 'config-center-detail',
+    component: () => import('@/views/ConfigCenter.vue'),
+    meta: { title: '命名空间详情' },
   },
   {
     path: '/platform/observability',
     name: 'plat-observability',
-    component: () => import('@/views/ComingSoon.vue'),
-    props: { product: '可观测', features: ['指标监控', '日志聚合', '链路追踪', '告警通知'] },
+    component: () => import('@/views/Observability.vue'),
     meta: { title: '可观测' },
   },
   {
     path: '/platform/security',
     name: 'plat-security',
-    component: () => import('@/views/ComingSoon.vue'),
-    props: { product: '安全', features: ['密钥与证书', 'IAM 访问控制', '网络与防火墙', '审计日志'] },
+    component: () => import('@/views/Security.vue'),
     meta: { title: '安全' },
   },
 
@@ -136,9 +152,8 @@ const routes: RouteRecordRaw[] = [
   {
     path: '/devops',
     name: 'devops',
-    component: () => import('@/views/ComingSoon.vue'),
-    props: { product: 'DevOps 应用中心', features: ['CI/CD 流水线', '发布编排', '灰度与回滚', '制品与镜像管理'] },
-    meta: { title: 'DevOps' },
+    component: () => import('@/views/DevOps.vue'),
+    meta: { title: 'DevOps 中心' },
   },
   {
     path: '/playground',
@@ -153,10 +168,10 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'API 密钥' },
   },
   {
-    path: '/settings/usage',
-    name: 'usage',
-    component: () => import('@/views/Usage.vue'),
-    meta: { title: '用量' },
+    path: '/settings/billing',
+    name: 'billing',
+    component: () => import('@/views/Billing.vue'),
+    meta: { title: '配额与账单' },
   },
 ]
 

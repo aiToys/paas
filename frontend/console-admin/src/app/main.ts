@@ -56,7 +56,8 @@ watch(
 )
 
 async function bootstrap() {
-  const enableMock = import.meta.env.DEV || import.meta.env.VITE_ENABLE_MOCK === 'true'
+  // MSW 仅在显式 VITE_ENABLE_MOCK=true 时启用；默认走真实后端（PaaS core）。
+  const enableMock = import.meta.env.VITE_ENABLE_MOCK === 'true'
   if (enableMock) {
     const { worker } = await import('@/mock/browser')
     await worker.start({

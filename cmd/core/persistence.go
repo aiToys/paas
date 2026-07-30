@@ -1,0 +1,362 @@
+// 持久化后端选择与 seed 编排。
+//
+// PAAS_DB_URL 非空 → PostgreSQL（迁移 + 表空才 seed，幂等）；为空 → 内存（与现状一致）。
+// Repository 接口是切换点：PG 实现对 handler/路由/鉴权透明。
+//
+// buildAllStores 是后端切换唯一收口：构造全部 11 个模块 store + 跨模块依赖注入
+// （devops PG 注入 workload 仓储）+ SeedIfEmpty 编排，返回 *Stores + closeFn。
+package main
+
+import (
+	"context"
+	"log"
+	"os"
+	"strings"
+
+	"github.com/aitoys/paas/internal/appconfig"
+	appcfgmemory "github.com/aitoys/paas/internal/appconfig/memory"
+	appcfgpg "github.com/aitoys/paas/internal/appconfig/pg"
+	"github.com/aitoys/paas/internal/billing"
+	billingmemory "github.com/aitoys/paas/internal/billing/memory"
+	billingpg "github.com/aitoys/paas/internal/billing/pg"
+	"github.com/aitoys/paas/internal/configcenter"
+	ccmemory "github.com/aitoys/paas/internal/configcenter/memory"
+	ccpg "github.com/aitoys/paas/internal/configcenter/pg"
+	"github.com/aitoys/paas/internal/core/application"
+	appmemory "github.com/aitoys/paas/internal/core/application/memory"
+	applicationpg "github.com/aitoys/paas/internal/core/application/pg"
+	"github.com/aitoys/paas/internal/core/identity"
+	idmemory "github.com/aitoys/paas/internal/core/identity/memory"
+	identitypg "github.com/aitoys/paas/internal/core/identity/pg"
+	"github.com/aitoys/paas/internal/dataservice"
+	dsmemory "github.com/aitoys/paas/internal/dataservice/memory"
+	dspg "github.com/aitoys/paas/internal/dataservice/pg"
+	"github.com/aitoys/paas/internal/devops"
+	"github.com/aitoys/paas/internal/devops/builder"
+	devopsmemory "github.com/aitoys/paas/internal/devops/memory"
+	devopspg "github.com/aitoys/paas/internal/devops/pg"
+	"github.com/aitoys/paas/internal/environment"
+	envmemory "github.com/aitoys/paas/internal/environment/memory"
+	envpg "github.com/aitoys/paas/internal/environment/pg"
+	"github.com/aitoys/paas/internal/governance"
+	govmemory "github.com/aitoys/paas/internal/governance/memory"
+	govpg "github.com/aitoys/paas/internal/governance/pg"
+	"github.com/aitoys/paas/internal/messaging"
+	msgmemory "github.com/aitoys/paas/internal/messaging/memory"
+	bkmemory "github.com/aitoys/paas/internal/backup/memory"
+	"github.com/aitoys/paas/internal/backup"
+	"github.com/aitoys/paas/internal/security"
+	secmemory "github.com/aitoys/paas/internal/security/memory"
+	secpg "github.com/aitoys/paas/internal/security/pg"
+	storagepg "github.com/aitoys/paas/internal/storage/pg"
+	"github.com/aitoys/paas/internal/workload"
+	wlmemory "github.com/aitoys/paas/internal/workload/memory"
+	wlpg "github.com/aitoys/paas/internal/workload/pg"
+	"github.com/aitoys/paas/pkg/tenant"
+)
+
+// Stores 聚合全 11 模块 store，由 buildAllStores 构造（PG 或内存两路径统一形态）。
+// 字段类型为各模块 Repository 接口；handler 注入点对后端透明。
+// devops 是四子接口合集，无单一 Repository 接口，故拆 4 字段（同一 store 实例同时实现全部）。
+type Stores struct {
+	Identity       identity.Repository
+	Application    application.Repository
+	Environment    environment.Repository
+	AppConfig      appconfig.Repository
+	DataService    dataservice.Repository
+	Workload       workload.Repository
+	DevOpsRepos    devops.CodeRepoRepository
+	DevOpsBuilds   devops.BuildRunRepository
+	DevOpsImages   devops.ImageRepository
+	DevOpsReleases devops.ReleaseRepository
+	Governance     governance.Repository
+	ConfigCenter   configcenter.Repository
+	Billing        billing.Repository
+	Security       security.Repository
+	Messaging      messaging.Repository
+	Backup         backup.Repository
+}
+
+// buildAllStores 选择持久化后端、构造全模块 store 并完成 seed。
+// 返回 closeFn 用于释放连接池（内存路径返回 nil，调用方判空）。
+//
+// 横切依赖：devops store 依赖 workload.Repository（Release 编排找/建/更新 Workload），
+// 两路径下注入的 workload store 与 wlHandler 共享同一实例（用量/编排真源唯一）。
+func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(), error) {
+	devopsPipeline := newDevOpsPipeline() // PAAS_DEVOPS_REAL=true 用真实 git/docker，否则 nil=Mock
+	if dsn := os.Getenv("PAAS_DB_URL"); dsn != "" {
+		db, err := storagepg.Open(ctx, dsn)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := storagepg.RunMigrations(ctx, db); err != nil {
+			db.Close()
+			return nil, nil, err
+		}
+
+		// 构造全 11 PG store（devops 注入 workload PG store，与 handler 共享）。
+		idb := identitypg.NewStore(db)
+		appRepo := applicationpg.NewStore(db)
+		envRepo := envpg.NewStore(db)
+		appcfgRepo := appcfgpg.NewStore(db)
+		rawDs := dspg.NewStore(db)
+		var dsRepo dataservice.Repository = rawDs
+		if appliers.dataservice != nil {
+			dsRepo = dataservice.NewApplyRepo(dsRepo, appliers.dataservice) // K8s 启用：dataservice 写投影 CRD
+		}
+		rawWl := wlpg.NewStore(db)
+		var wlRepo workload.Repository = rawWl
+		if appliers.workload != nil {
+			wlRepo = workload.NewApplyRepo(wlRepo, appliers.workload) // K8s 启用：workload 写操作投影 CRD 期望状态
+		}
+		devopsRepo := devopspg.NewStore(db, wlRepo) // Release 编排经 workload.Repository 接口透明
+		devopsRepo.SetPipeline(devopsPipeline)      // PAAS_DEVOPS_REAL=true 接真实 git/docker
+		govRepo := govpg.NewStore(db)
+		ccRepo := ccpg.NewStore(db)
+		billingRepo := billingpg.NewStore(db)
+		secRepo := secpg.NewStore(db)
+		msgRepo := messaging.Repository(msgmemory.NewStore())
+	bkRepo := backup.Repository(bkmemory.NewStore())
+
+		seedPGAllIfEmpty(ctx, idb, appRepo, envRepo, appcfgRepo, rawDs, rawWl,
+			devopsRepo, govRepo, ccRepo, billingRepo, secRepo)
+		log.Println("持久化后端: PostgreSQL（全 11 模块已迁移）")
+
+		stores := &Stores{
+			Identity:       idb,
+			Application:    appRepo,
+			Environment:    envRepo,
+			AppConfig:      appcfgRepo,
+			DataService:    dsRepo,
+			Workload:       wlRepo,
+			DevOpsRepos:    devopsRepo,
+			DevOpsBuilds:   devopsRepo,
+			DevOpsImages:   devopsRepo,
+			DevOpsReleases: devopsRepo,
+			Governance:     govRepo,
+			ConfigCenter:   ccRepo,
+			Billing:        billingRepo,
+			Security:       secRepo,
+			Messaging:      msgRepo,
+		Backup:         bkRepo,
+		}
+		return stores, db.Close, nil
+	}
+
+	// 内存路径：identity 走 seedIdentity，其余模块由 NewStore 内联 seed（保持现状）。
+	idb := idmemory.NewStore()
+	seedIdentity(idb, resolveAPIKey())
+	appRepo := appmemory.NewStore()
+	envRepo := envmemory.NewStore()
+	appcfgRepo := appcfgmemory.NewStore()
+	var dsRepo dataservice.Repository = dsmemory.NewStore()
+	if appliers.dataservice != nil {
+		dsRepo = dataservice.NewApplyRepo(dsRepo, appliers.dataservice) // K8s 启用：dataservice 写投影 CRD
+	}
+	var wlRepo workload.Repository = wlmemory.NewStore() // 与 devops 共享：Release 编排更新 Workload.ImageRef
+	if appliers.workload != nil {
+		wlRepo = workload.NewApplyRepo(wlRepo, appliers.workload) // K8s 启用：workload 写操作投影 CRD 期望状态
+	}
+	devopsRepo := devopsmemory.NewStore(wlRepo)
+	devopsRepo.SetPipeline(devopsPipeline) // PAAS_DEVOPS_REAL=true 接真实 git/docker
+	govRepo := govmemory.NewStore()
+	ccRepo := ccmemory.NewStore()
+	billingRepo := billingmemory.NewStore()
+	secRepo := secmemory.NewStore()
+	msgRepo := messaging.Repository(msgmemory.NewStore())
+	bkRepo := backup.Repository(bkmemory.NewStore())
+	log.Println("持久化后端: 内存（dev/echo 路径，零依赖）")
+
+	stores := &Stores{
+		Identity:       idb,
+		Application:    appRepo,
+		Environment:    envRepo,
+		AppConfig:      appcfgRepo,
+		DataService:    dsRepo,
+		Workload:       wlRepo,
+		DevOpsRepos:    devopsRepo,
+		DevOpsBuilds:   devopsRepo,
+		DevOpsImages:   devopsRepo,
+		DevOpsReleases: devopsRepo,
+		Governance:     govRepo,
+		ConfigCenter:   ccRepo,
+		Billing:        billingRepo,
+		Security:       secRepo,
+		Messaging:      msgRepo,
+		Backup:         bkRepo,
+	}
+	return stores, nil, nil
+}
+
+// newDevOpsPipeline 按 PAAS_DEVOPS_REAL 选择构建流水线。
+// 非空（true/1/yes）→ Real（git clone + docker build + push，凭证从 env 读）；
+// 空 → nil（Store 默认用 Mock，与历史行为一致）。
+//
+// Real 凭证 env：PAAS_REGISTRY（镜像仓库）、PAAS_GIT_TOKEN（私有仓库 HTTPS token）、
+// PAAS_REGISTRY_USER / PAAS_REGISTRY_PASS（docker login）。
+func newDevOpsPipeline() builder.Pipeline {
+	if !envEnabled("PAAS_DEVOPS_REAL") {
+		return nil
+	}
+	log.Printf("DevOps: 真实构建流水线已启用（git clone + docker build + push，registry=%s）", os.Getenv("PAAS_REGISTRY"))
+	return &builder.Real{
+		Registry:     os.Getenv("PAAS_REGISTRY"),
+		GitToken:     os.Getenv("PAAS_GIT_TOKEN"),
+		RegistryUser: os.Getenv("PAAS_REGISTRY_USER"),
+		RegistryPass: os.Getenv("PAAS_REGISTRY_PASS"),
+	}
+}
+
+// envEnabled 判定布尔 env（true/1/yes/on，大小写不敏感）。
+func envEnabled(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "true", "1", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// seedPGAllIfEmpty 仅在对应表为空时灌入预置数据（幂等，重启不重复灌、不刷日志）。
+//
+// 简单模块（identity/application/environment/appconfig/dataservice/workload/governance）
+// 走 PG store 的 Count 判空 + Repository.Create 方法（无副作用）。
+// 复杂模块（devops/configcenter/billing/security）调各自 SeedIfEmpty（直接 SQL INSERT，
+// 绕过编排/状态机，保留 paid 历史账单、BuildSuccess 已完成状态、平台级 Secret NULL tenant_id 等特殊数据）。
+//
+// 入参为 PG store 具体类型（已在 buildAllStores 构造完毕），无需再做类型断言。
+func seedPGAllIfEmpty(
+	ctx context.Context,
+	idb *identitypg.Store, appRepo *applicationpg.Store,
+	envRepo *envpg.Store, appcfgRepo *appcfgpg.Store,
+	dsRepo *dspg.Store, wlRepo *wlpg.Store,
+	devopsRepo *devopspg.Store, govRepo *govpg.Store, ccRepo *ccpg.Store,
+	billingRepo *billingpg.Store, secRepo *secpg.Store,
+) {
+	// identity：表空才灌，幂等。
+	if n, err := idb.TenantsCount(ctx); err != nil {
+		log.Printf("[seed] 统计租户失败: %v", err)
+	} else if n == 0 {
+		seedIdentity(idb, resolveAPIKey())
+	}
+	// application：以 seed.TenantID 建 ctx，PG Create 以 ctx 为准。
+	if n, err := appRepo.AppsCount(ctx); err != nil {
+		log.Printf("[seed] 统计应用失败: %v", err)
+	} else if n == 0 {
+		seedApplications(ctx, appRepo)
+	}
+	if n, err := envRepo.EnvsCount(ctx); err != nil {
+		log.Printf("[seed] 统计环境失败: %v", err)
+	} else if n == 0 {
+		seedEnvironments(ctx, envRepo)
+	}
+	if n, err := appcfgRepo.ConfigsCount(ctx); err != nil {
+		log.Printf("[seed] 统计应用配置失败: %v", err)
+	} else if n == 0 {
+		seedAppConfigs(ctx, appcfgRepo)
+	}
+	if n, err := dsRepo.DataServicesCount(ctx); err != nil {
+		log.Printf("[seed] 统计数据服务失败: %v", err)
+	} else if n == 0 {
+		seedDataServices(ctx, dsRepo)
+	}
+	if n, err := wlRepo.WorkloadsCount(ctx); err != nil {
+		log.Printf("[seed] 统计工作负载失败: %v", err)
+	} else if n == 0 {
+		seedWorkloads(ctx, wlRepo)
+	}
+	if n, err := govRepo.ServicesCount(ctx); err != nil {
+		log.Printf("[seed] 统计治理服务失败: %v", err)
+	} else if n == 0 {
+		seedGovernance(ctx, govRepo)
+	}
+	// 复杂模块：直接调 PG store 内部 SeedIfEmpty（绕过 Create 编排/状态机）。
+	if err := devopsRepo.SeedIfEmpty(ctx); err != nil {
+		log.Printf("[seed] DevOps 失败: %v", err)
+	}
+	if err := ccRepo.SeedIfEmpty(ctx); err != nil {
+		log.Printf("[seed] 配置中心失败: %v", err)
+	}
+	if err := billingRepo.SeedIfEmpty(ctx); err != nil {
+		log.Printf("[seed] 计费失败: %v", err)
+	}
+	if err := secRepo.SeedIfEmpty(ctx); err != nil {
+		log.Printf("[seed] 安全失败: %v", err)
+	}
+}
+
+// seedApplications 把内存版同一批预置应用灌入目标仓储（PG 路径用）。
+// 以每个应用自身的 TenantID 建 ctx（PG Create 以 ctx 租户为准），保证归属正确。
+func seedApplications(ctx context.Context, appRepo application.Repository) {
+	for _, a := range appmemory.SeedApps() {
+		a.Recount()
+		appCtx := tenant.WithTenant(ctx, a.TenantID)
+		if err := appRepo.Create(appCtx, a); err != nil {
+			log.Printf("[seed] 应用 %s: %v", a.ID, err)
+		}
+	}
+}
+
+// seedEnvironments 灌入环境预置数据（每条按 TenantID 建 ctx，PG Create 以 ctx 为准）。
+func seedEnvironments(ctx context.Context, repo environment.Repository) {
+	for _, e := range envmemory.SeedEnvs() {
+		if err := repo.Create(tenant.WithTenant(ctx, e.TenantID), e); err != nil {
+			log.Printf("[seed] 环境 %s: %v", e.ID, err)
+		}
+	}
+}
+
+// seedAppConfigs 灌入应用配置预置数据（Upsert 同 (tenant,app,env,key) 视为同一项）。
+func seedAppConfigs(ctx context.Context, repo appconfig.Repository) {
+	for _, c := range appcfgmemory.SeedConfigs() {
+		if _, err := repo.Upsert(tenant.WithTenant(ctx, c.TenantID), c); err != nil {
+			log.Printf("[seed] 应用配置 %s: %v", c.ID, err)
+		}
+	}
+}
+
+// seedDataServices 灌入数据服务预置数据。
+func seedDataServices(ctx context.Context, repo dataservice.Repository) {
+	for _, d := range dsmemory.SeedDataServices() {
+		if _, err := repo.Create(tenant.WithTenant(ctx, d.TenantID), d); err != nil {
+			log.Printf("[seed] 数据服务 %s: %v", d.ID, err)
+		}
+	}
+}
+
+// seedWorkloads 灌入工作负载预置数据。
+func seedWorkloads(ctx context.Context, repo workload.Repository) {
+	for _, w := range wlmemory.SeedWorkloads() {
+		if err := repo.Create(tenant.WithTenant(ctx, w.TenantID), w); err != nil {
+			log.Printf("[seed] 工作负载 %s: %v", w.ID, err)
+		}
+	}
+}
+
+// seedGovernance 灌入服务治理预置数据。灌入顺序：service → instance → route → breaker
+// （instance.service_id 引用 service.id；PG 无外键约束，但按依赖顺序灌更直观）。
+func seedGovernance(ctx context.Context, repo governance.Repository) {
+	for _, svc := range govmemory.SeedServices() {
+		appCtx := tenant.WithTenant(ctx, svc.TenantID)
+		if _, err := repo.CreateService(appCtx, svc); err != nil {
+			log.Printf("[seed] 治理服务 %s: %v", svc.ID, err)
+		}
+	}
+	for _, in := range govmemory.SeedInstances() {
+		appCtx := tenant.WithTenant(ctx, in.TenantID)
+		if _, err := repo.RegisterInstance(appCtx, in); err != nil {
+			log.Printf("[seed] 治理实例 %s: %v", in.ID, err)
+		}
+	}
+	for _, r := range govmemory.SeedRoutes() {
+		appCtx := tenant.WithTenant(ctx, r.TenantID)
+		if _, err := repo.CreateRoute(appCtx, r); err != nil {
+			log.Printf("[seed] 治理路由 %s: %v", r.ID, err)
+		}
+	}
+	for _, b := range govmemory.SeedBreakers() {
+		appCtx := tenant.WithTenant(ctx, b.TenantID)
+		if _, err := repo.CreateBreaker(appCtx, b); err != nil {
+			log.Printf("[seed] 熔断器 %s: %v", b.ID, err)
+		}
+	}
+}

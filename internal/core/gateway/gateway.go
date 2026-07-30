@@ -51,6 +51,23 @@ func (g *Gateway) Resolve(model string) (*provider.Channel, error) {
 	return chs[0], nil
 }
 
+// ResolveChannels 返回某模型的全部候选通道（非 offline，按优先级升序），供请求级 failover。
+// 与 Resolve 同策略，但返回全部候选而非仅首个，使首通道失败时可自动切下一通道。
+func (g *Gateway) ResolveChannels(model string) ([]*provider.Channel, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	m, ok := g.models[model]
+	if !ok {
+		return nil, fmt.Errorf("model %q not found", model)
+	}
+	chs := m.HealthyChannels()
+	if len(chs) == 0 {
+		return nil, fmt.Errorf("model %q 无可用通道", model)
+	}
+	sort.SliceStable(chs, func(i, j int) bool { return chs[i].Priority < chs[j].Priority })
+	return chs, nil
+}
+
 // Models 返回全部已注册模型（富信息），按 ID 稳定排序。
 func (g *Gateway) Models() []*provider.Model {
 	g.mu.RLock()

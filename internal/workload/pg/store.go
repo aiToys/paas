@@ -1,0 +1,191 @@
+// Package pg 提供 workload.Repository 的 PostgreSQL 实现。
+// 显式 WHERE tenant_id=$1 多租户过滤（与内存 1:1）；
+// Create 以 ctx 租户为准、忽略请求体 TenantID（防越权写）；
+// 跨租户访问统一返回 not found（不泄漏存在性）。
+package pg
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/aitoys/paas/internal/storage/pg"
+	"github.com/aitoys/paas/internal/workload"
+)
+
+// Store 是 workload.Repository 的 PostgreSQL 实现。
+type Store struct {
+	db *pg.DB
+}
+
+// NewStore 创建 workload PG 仓储。db 必须已完成迁移。
+func NewStore(db *pg.DB) *Store { return &Store{db: db} }
+
+// wlCols 与 model.Workload 字段顺序对齐（scan 列顺序必须一致）。
+const wlCols = `id, tenant_id, app_id, env_id, lane_id, type, name, image, image_ref, replicas, ready, status, schedule, command, created_at`
+
+// scanWL 通过 pg.RowScanner 抽象 QueryRow 与 Row 两种 Scan 来源。
+func scanWL(r pg.RowScanner, w *workload.Workload) error {
+	return r.Scan(
+		&w.ID, &w.TenantID, &w.AppID, &w.EnvID, &w.LaneID, &w.Type,
+		&w.Name, &w.Image, &w.ImageRef, &w.Replicas, &w.Ready,
+		&w.Status, &w.Schedule, &w.Command, &w.CreatedAt,
+	)
+}
+
+// List 按租户 + 可选 envID/appID/wtype 过滤；空串表示该维度不过滤（与内存语义一致）。
+// 动态拼 WHERE：固定 tenant_id=$1，envID/appID/wtype 非空各追加 AND col=$N。
+func (s *Store) List(ctx context.Context, envID, appID, wtype string) ([]workload.Workload, error) {
+	tid, err := pg.TenantOrErr(ctx)
+	if err != nil {
+		return nil, err
+	}
+	q := `SELECT ` + wlCols + ` FROM workloads WHERE tenant_id=$1`
+	args := []any{tid}
+	if envID != "" {
+		args = append(args, envID)
+		q += fmt.Sprintf(` AND env_id=$%d`, len(args))
+	}
+	if appID != "" {
+		args = append(args, appID)
+		q += fmt.Sprintf(` AND app_id=$%d`, len(args))
+	}
+	if wtype != "" {
+		args = append(args, wtype)
+		q += fmt.Sprintf(` AND type=$%d`, len(args))
+	}
+	q += ` ORDER BY id`
+	rows, err := s.db.Pool().Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]workload.Workload, 0)
+	for rows.Next() {
+		var w workload.Workload
+		if err = scanWL(rows, &w); err != nil {
+			return nil, err
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
+// Get 取单个工作负载。跨租户访问返回 not found（不泄漏）。
+func (s *Store) Get(ctx context.Context, id string) (workload.Workload, error) {
+	tid, err := pg.TenantOrErr(ctx)
+	if err != nil {
+		return workload.Workload{}, err
+	}
+	row := s.db.Pool().QueryRow(ctx,
+		`SELECT `+wlCols+` FROM workloads WHERE id=$1 AND tenant_id=$2`, id, tid)
+	var w workload.Workload
+	if err = scanWL(row, &w); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return workload.Workload{}, fmt.Errorf("工作负载不存在: %s", id)
+		}
+		return workload.Workload{}, err
+	}
+	return w, nil
+}
+
+// Create 写入工作负载。以 ctx 租户为准、忽略请求体 TenantID；空 LaneID 补 default 基线。
+// 主键冲突返回「工作负载已存在」（与内存实现消息一致，不使用 FormatExists 哨兵）。
+func (s *Store) Create(ctx context.Context, w workload.Workload) error {
+	tid, err := pg.TenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	if err := w.Validate(); err != nil {
+		return err
+	}
+	if w.ID == "" {
+		return fmt.Errorf("工作负载 ID 不能为空")
+	}
+	w.TenantID = tid // 以 ctx 为准
+	if w.LaneID == "" {
+		w.LaneID = workload.LaneDefault
+	}
+	_, err = s.db.Pool().Exec(ctx,
+		`INSERT INTO workloads (`+wlCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+		w.ID, w.TenantID, w.AppID, w.EnvID, w.LaneID, w.Type,
+		w.Name, w.Image, w.ImageRef, w.Replicas, w.Ready,
+		w.Status, w.Schedule, w.Command, w.CreatedAt)
+	if pg.IsUniqueViolation(err) {
+		return fmt.Errorf("工作负载已存在: %s", w.ID)
+	}
+	return err
+}
+
+// Update 调整期望副本与状态；status 空串表示不改状态。
+// mock 语义：status 切到 running 时 ready 跟随 replicas（与内存实现一致）。
+// 返回更新后的工作负载；跨租户访问返回 not found（不泄漏）。
+func (s *Store) Update(ctx context.Context, id string, replicas int, status string) (workload.Workload, error) {
+	tid, err := pg.TenantOrErr(ctx)
+	if err != nil {
+		return workload.Workload{}, err
+	}
+	// status 空串不改状态；status=running 时 ready 跟随 replicas（mock 语义）。
+	q := `UPDATE workloads SET replicas=$3,` +
+		`status=CASE WHEN $4<>'' THEN $4 ELSE status END,` +
+		`ready=CASE WHEN $4='running' THEN $3 ELSE ready END ` +
+		`WHERE id=$1 AND tenant_id=$2 RETURNING ` + wlCols
+	row := s.db.Pool().QueryRow(ctx, q, id, tid, replicas, status)
+	var w workload.Workload
+	if err = scanWL(row, &w); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return workload.Workload{}, fmt.Errorf("工作负载不存在: %s", id)
+		}
+		return workload.Workload{}, err
+	}
+	return w, nil
+}
+
+// UpdateImage 更新工作负载镜像（display + digest）；imageRef 空串不覆盖已有 digest
+// （与内存实现一致，兼容仅刷新 display 的场景）。返回更新后的工作负载。
+// 跨租户访问返回 not found（不泄漏）。
+func (s *Store) UpdateImage(ctx context.Context, id, image, imageRef string) (workload.Workload, error) {
+	tid, err := pg.TenantOrErr(ctx)
+	if err != nil {
+		return workload.Workload{}, err
+	}
+	q := `UPDATE workloads SET image=$3,` +
+		`image_ref=CASE WHEN $4<>'' THEN $4 ELSE image_ref END ` +
+		`WHERE id=$1 AND tenant_id=$2 RETURNING ` + wlCols
+	row := s.db.Pool().QueryRow(ctx, q, id, tid, image, imageRef)
+	var w workload.Workload
+	if err = scanWL(row, &w); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return workload.Workload{}, fmt.Errorf("工作负载不存在: %s", id)
+		}
+		return workload.Workload{}, err
+	}
+	return w, nil
+}
+
+// Delete 删除指定工作负载。跨租户访问返回 not found（不泄漏）。
+func (s *Store) Delete(ctx context.Context, id string) error {
+	tid, err := pg.TenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	tag, err := s.db.Pool().Exec(ctx,
+		`DELETE FROM workloads WHERE id=$1 AND tenant_id=$2`, id, tid)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("工作负载不存在: %s", id)
+	}
+	return nil
+}
+
+// WorkloadsCount 返回全表工作负载数，供 PG seed 判空（表空才灌，幂等）。
+// 注意：不经租户过滤，仅用于启动期 seed 判空，不暴露给业务层（不入 Repository 接口）。
+func (s *Store) WorkloadsCount(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.Pool().QueryRow(ctx, `SELECT COUNT(*) FROM workloads`).Scan(&n)
+	return n, err
+}

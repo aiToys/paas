@@ -31,3 +31,6 @@ dist/
 **/dist/
 .DS_Store
 *.local
+
+# 本地工具产物（Playwright MCP 抓取的快照/日志，勿提交）
+.playwright-mcp/

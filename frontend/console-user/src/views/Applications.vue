@@ -1,15 +1,18 @@
 <script setup lang="ts">
+// 应用列表（主线）。应用是逻辑跨环境实体，列表不按 scope 过滤；
+// 每个应用卡片显示「在当前 scope 环境的部署徽标」（前端聚合应用 + 工作负载）。
+// scope 全部时显示「部署在 N 个环境」。环境切换统一走顶栏，本页无环境控件。
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import { fetchAuth } from '@/api'
+import { useEnvStore } from '@/stores/env'
 
 interface App {
   id: string
   name: string
   initial: string
-  env: '生产' | '预发' | '开发'
   status: 'healthy' | 'degraded' | 'idle'
   gradient: string
   resources: { models: number; mq: number; dal: number }
@@ -17,17 +20,40 @@ interface App {
   rps: string
   desc: string
 }
+interface Workload {
+  id: string
+  appId: string
+  envId: string
+  type: string
+  replicas: number
+  ready: number
+  status: string
+}
 
 const apps = ref<App[]>([])
+const workloads = ref<Workload[]>([])
 const loading = ref(true)
+const envStore = useEnvStore()
+const router = useRouter()
+const route = useRoute()
+
+// 应用名/ID 过滤（顶栏搜索框 ?q=）
+const filteredApps = computed(() => {
+  const q = (route.query.q ?? '').toString().toLowerCase().trim()
+  if (!q) return apps.value
+  return apps.value.filter((a) => a.name.toLowerCase().includes(q) || a.id.toLowerCase().includes(q))
+})
 
 async function load() {
   loading.value = true
   try {
-    const resp = await fetchAuth('/api/applications')
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    const json = await resp.json()
-    apps.value = json.data ?? []
+    // 并行加载应用（逻辑态全量）+ 工作负载（运行态，部署徽标用）
+    const [aResp, wResp] = await Promise.all([
+      fetchAuth('/api/applications'),
+      fetchAuth('/api/workloads?type=service'),
+    ])
+    if (aResp.ok) apps.value = (await aResp.json()).data ?? []
+    if (wResp.ok) workloads.value = (await wResp.json()).data ?? []
   } catch (e) {
     ElMessage.error('加载应用失败：' + (e as Error).message)
   } finally {
@@ -35,19 +61,32 @@ async function load() {
   }
 }
 
-// 切换 API Key（租户视角）后重载列表
-function onKeyChanged() {
-  load()
-}
-onMounted(() => {
-  load()
-  window.addEventListener('paas:key-changed', onKeyChanged)
+// 按 appID 聚合工作负载（部署徽标用）
+const wlByApp = computed(() => {
+  const m = new Map<string, Workload[]>()
+  for (const w of workloads.value) {
+    const arr = m.get(w.appId) ?? []
+    arr.push(w)
+    m.set(w.appId, arr)
+  }
+  return m
 })
-onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
 
-const envs = ['全部', '生产', '预发', '开发'] as const
-const activeEnv = ref<string>('全部')
-const filtered = computed(() => (activeEnv.value === '全部' ? apps.value : apps.value.filter((a) => a.env === activeEnv.value)))
+// 部署徽标：scope 具体环境 -> 该环境部署状态；scope 全部 -> 部署环境数。
+// 读 envStore.currentEnv（响应式），切换 scope 自动重算，无需重载列表。
+function deployBadge(appId: string): { text: string; cls: string } {
+  const wls = wlByApp.value.get(appId) ?? []
+  if (envStore.currentEnv) {
+    const inEnv = wls.filter((w) => w.envId === envStore.currentEnv!.id)
+    if (!inEnv.length) return { text: '未部署', cls: 'none' }
+    const reps = inEnv.reduce((s, w) => s + w.replicas, 0)
+    const ready = inEnv.reduce((s, w) => s + w.ready, 0)
+    return { text: `${envStore.currentEnv.name} ${ready}/${reps}`, cls: envStore.isProd ? 'prod' : 'test' }
+  }
+  const envSet = new Set(wls.map((w) => w.envId))
+  if (!envSet.size) return { text: '未部署', cls: 'none' }
+  return { text: `${envSet.size} 个环境`, cls: 'multi' }
+}
 
 const statusMeta: Record<App['status'], { label: string; cls: string }> = {
   healthy: { label: '健康', cls: 'ok' },
@@ -55,22 +94,26 @@ const statusMeta: Record<App['status'], { label: string; cls: string }> = {
   idle: { label: '空闲', cls: 'idle' },
 }
 
-const router = useRouter()
 function open(a: App) {
   router.push(`/applications/${a.id}`)
 }
+
+function onKeyChanged() {
+  load()
+}
+onMounted(() => {
+  load()
+  envStore.loadEnvs()
+  window.addEventListener('paas:key-changed', onKeyChanged)
+})
+onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
 </script>
 
 <template>
   <div class="page">
     <div class="toolbar">
-      <div class="envs">
-        <button v-for="e in envs" :key="e" class="env" :class="{ on: activeEnv === e }" @click="activeEnv = e">
-          {{ e }}
-        </button>
-      </div>
       <div class="right">
-        <span class="count mono">{{ filtered.length }} 个应用</span>
+        <span class="count mono">{{ apps.length }} 个应用</span>
         <button class="new-btn">+ 新建应用</button>
       </div>
     </div>
@@ -79,13 +122,13 @@ function open(a: App) {
       <div v-for="i in 6" :key="i" class="skel" />
     </div>
     <div v-else class="grid">
-      <article v-for="a in filtered" :key="a.id" class="app-card" @click="open(a)">
+      <article v-for="a in filteredApps" :key="a.id" class="app-card" @click="open(a)">
         <div class="card-top">
           <div class="a-icon" :style="{ background: a.gradient }">{{ a.initial }}</div>
           <div class="a-titles">
             <div class="a-name-row">
               <h3 class="a-name">{{ a.name }}</h3>
-              <span class="env-badge" :class="a.env">{{ a.env }}</span>
+              <span class="env-badge" :class="deployBadge(a.id).cls">{{ deployBadge(a.id).text }}</span>
             </div>
             <div class="a-id mono">{{ a.id }}</div>
           </div>
@@ -132,33 +175,8 @@ function open(a: App) {
 .toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   margin-bottom: 20px;
-}
-.envs {
-  display: flex;
-  gap: 4px;
-  padding: 4px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-.env {
-  padding: 6px 14px;
-  border: none;
-  background: transparent;
-  color: var(--text-dim);
-  font-family: inherit;
-  font-size: 13px;
-  font-weight: 500;
-  border-radius: 7px;
-  cursor: pointer;
-  transition: all 0.12s;
-}
-.env.on {
-  background: var(--brand);
-  color: #fff;
-  box-shadow: 0 2px 8px var(--brand-glow);
 }
 .right {
   display: flex;
@@ -249,18 +267,23 @@ function open(a: App) {
   border-radius: 4px;
   font-size: 10.5px;
   font-weight: 500;
+  white-space: nowrap;
 }
-.env-badge.生产 {
+.env-badge.test {
+  background: var(--brand-soft);
+  color: var(--brand);
+}
+.env-badge.prod {
+  background: var(--warning-soft, rgba(245, 158, 11, 0.12));
+  color: var(--warning, #f59e0b);
+}
+.env-badge.multi {
   background: var(--success-soft);
   color: var(--success);
 }
-.env-badge.预发 {
-  background: var(--warning-soft);
-  color: var(--warning);
-}
-.env-badge.开发 {
+.env-badge.none {
   background: var(--surface-2);
-  color: var(--text-dim);
+  color: var(--text-faint);
 }
 .a-id {
   font-size: 11.5px;

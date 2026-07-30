@@ -110,9 +110,14 @@ func (s *Store) EnvType(ctx context.Context, id string) (string, error) {
 	return e.Type, nil
 }
 
-// seed 生成跨两租户的环境。
+// SeedEnvs 返回预置环境数据（PG seed 复用，DRY：内存/PG 同一真源）。
 // acme: env-acme-prod-bj / env-acme-prod-sh / env-acme-test
 // globex: env-globex-prod / env-globex-test
+func SeedEnvs() []environment.Environment {
+	return seed()
+}
+
+// seed 生成跨两租户的环境。
 func seed() []environment.Environment {
 	t := time.Now()
 	return []environment.Environment{

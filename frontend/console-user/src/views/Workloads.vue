@@ -35,9 +35,8 @@ const tabs = [
 ] as const
 
 const activeType = ref<string>(props.type || 'service')
-// 环境来自全局 store（顶栏环境选择器），页面不再各自管理
+// 环境来自全局 store（顶栏环境选择器，唯一环境切换入口）；页面不再有环境切换控件
 const activeEnv = computed(() => envStore.currentEnvId)
-const envs = computed(() => envStore.envs)
 const items = ref<Workload[]>([])
 const loading = ref(true)
 const scaling = ref<string>('') // 正在扩缩容的 id
@@ -50,7 +49,7 @@ const statusMeta: Record<Workload['status'], { label: string; cls: string }> = {
   pending: { label: '等待', cls: 'idle' },
 }
 
-const envName = computed(() => (id: string) => envs.value.find((e) => e.id === id)?.name ?? id)
+const envName = computed(() => (id: string) => envStore.envs.find((e) => e.id === id)?.name ?? id)
 
 async function load() {
   loading.value = true
@@ -93,7 +92,7 @@ async function scale(w: Workload) {
     scaling.value = w.id
     const resp = await fetchAuth(`/api/workloads/${w.id}`, {
       method: 'PUT',
-      body: JSON.stringify({ replicas, status: 'running' }),
+      body: JSON.stringify({ replicas }),
     })
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     ElMessage.success(`已调整为 ${replicas} 副本`)
@@ -126,11 +125,6 @@ function switchType(key: string) {
   load()
 }
 
-async function switchEnv(id: string) {
-  const env = id ? envStore.envs.find((e) => e.id === id) ?? null : null
-  if (await envStore.switchEnv(env)) load()
-}
-
 function onKeyChanged() {
   envStore.loadEnvs()
   load()
@@ -157,21 +151,6 @@ onUnmounted(() => {
 
 <template>
   <div class="page">
-    <div class="env-bar">
-      <span class="env-label">环境</span>
-      <button class="env-pill" :class="{ on: !activeEnv }" @click="switchEnv('')">全部</button>
-      <button
-        v-for="e in envs"
-        :key="e.id"
-        class="env-pill"
-        :class="{ on: activeEnv === e.id, prod: e.type === 'prod' }"
-        @click="switchEnv(e.id)"
-      >
-        {{ e.name }}
-        <span v-if="e.cluster" class="env-cluster">{{ e.cluster }}</span>
-      </button>
-    </div>
-
     <div class="tabs">
       <button
         v-for="t in tabs"

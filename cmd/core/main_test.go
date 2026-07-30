@@ -35,6 +35,9 @@ type testCoreDeps struct{}
 
 func (testCoreDeps) Logger() interface{}                { return nil }
 func (testCoreDeps) Gateway() provider.GatewayRegistrar { return nil }
+func (testCoreDeps) SecretResolver() provider.CredentialResolver {
+	return nil
+}
 
 func TestBootstrapInitializesAndRunsPlugins(t *testing.T) {
 	p := &capturePlugin{name: "maas"}

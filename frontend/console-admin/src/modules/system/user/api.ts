@@ -47,33 +47,126 @@ export interface UserCreateRequest {
   password?: string
 }
 
-// 获取用户列表
-export const fetchUserList = (params: UserSearchRequest) =>
-  api.get<UserSearchResponse>('/api/user', { params })
+// core /api/users 返回项（小驼峰；passwordHash 已 json:"-" 不回传）。
+interface CoreUser {
+  id: string
+  tenantId: string
+  name: string
+  email?: string
+  isAdmin: boolean
+  roles: string[]
+  status?: string
+  createdAt?: string
+}
 
-// 获取用户详情
-export const fetchUserDetail = (id: string) =>
-  api.get<UserInfo>(`/api/user/${id}`)
+// core status('active'|'disabled') → admin status('active'|'inactive')。
+const toAdminStatus = (s?: string): 'active' | 'inactive' =>
+  s === 'disabled' ? 'inactive' : 'active'
 
-// 创建用户
-export const createUser = (data: UserCreateRequest) =>
-  api.post<UserInfo>('/api/user', data)
+const mapUser = (u: CoreUser): UserInfo => ({
+  id: u.id,
+  username: u.name,
+  realName: u.name,
+  email: u.email ?? '',
+  phone: '',
+  roles: u.roles ?? [],
+  status: toAdminStatus(u.status),
+  avatar: '',
+  createTime: u.createdAt ?? '',
+  lastLoginTime: '',
+  loginCount: 0
+})
 
-// 更新用户
-export const updateUser = (id: string, data: Partial<UserCreateRequest>) =>
-  api.put<UserInfo>(`/api/user/${id}`, data)
+// 创建用户 body（对接 core POST /api/users）。
+interface CoreUserCreate {
+  id: string
+  tenantId: string
+  name: string
+  email?: string
+  password?: string
+  roles: string[]
+  isAdmin: boolean
+  status: string
+}
 
-// 删除用户
-export const deleteUser = (id: string) =>
-  api.del<boolean>(`/api/user/${id}`)
+// 获取用户列表（对接 core GET /api/users；假分页 + keyword 过滤）。
+export const fetchUserList = async (params: UserSearchRequest): Promise<UserSearchResponse> => {
+  const list = await api.get<CoreUser[]>('/api/users')
+  let mapped = (list ?? []).map(mapUser)
+  if (params.keyword) {
+    const kw = params.keyword.toLowerCase()
+    mapped = mapped.filter(
+      (u) => u.username.toLowerCase().includes(kw) || u.email.toLowerCase().includes(kw)
+    )
+  }
+  if (params.role) {
+    mapped = mapped.filter((u) => u.roles.includes(params.role!))
+  }
+  if (params.status) {
+    mapped = mapped.filter((u) => u.status === params.status)
+  }
+  return { records: mapped, total: mapped.length, current: params.page, size: params.size }
+}
 
-// 批量删除用户
-export const batchDeleteUsers = (ids: string[]) =>
-  api.del<boolean>('/api/user', { data: { ids } })
+// 获取用户详情（从列表派生，core 无单用户 GET）。
+export const fetchUserDetail = async (id: string): Promise<UserInfo> => {
+  const list = await api.get<CoreUser[]>('/api/users')
+  const u = (list ?? []).find((x) => x.id === id)
+  if (!u) throw new Error('用户不存在')
+  return mapUser(u)
+}
 
-// 导出用户列表（CSV 文本，对齐其他 exportXxx 契约）
-export const exportUsers = (params: UserSearchRequest) =>
-  api.get<string>('/api/user/export', { params })
+// 创建用户（对接 core POST /api/users；id 由 username 派生，默认租户 t-acme）。
+export const createUser = async (data: UserCreateRequest): Promise<UserInfo> => {
+  const body: CoreUserCreate = {
+    id: `u-${data.username}`,
+    tenantId: 't-acme',
+    name: data.username,
+    email: data.email,
+    password: data.password,
+    roles: data.roles,
+    isAdmin: data.roles.includes('tenant-admin'),
+    status: data.status === 'inactive' ? 'disabled' : 'active'
+  }
+  await api.post('/api/users', body)
+  return mapUser({ ...body, name: data.username })
+}
+
+// 更新用户（对接 core PUT /api/users/{id}）。
+export const updateUser = async (id: string, data: Partial<UserCreateRequest>): Promise<UserInfo> => {
+  const body: Partial<CoreUserCreate> = {
+    name: data.username,
+    email: data.email,
+    roles: data.roles,
+    isAdmin: data.roles?.includes('tenant-admin'),
+    status: data.status === 'inactive' ? 'disabled' : 'active',
+    password: data.password
+  }
+  await api.put(`/api/users/${id}`, body)
+  return { ...mapUser({ id, tenantId: '', name: data.username ?? '', isAdmin: false, roles: [] }), ...data } as UserInfo
+}
+
+// 删除用户（对接 core DELETE /api/users/{id}）。
+export const deleteUser = async (id: string): Promise<boolean> => {
+  await api.del(`/api/users/${id}`)
+  return true
+}
+
+// 批量删除用户（逐个调 core）。
+export const batchDeleteUsers = async (ids: string[]): Promise<boolean> => {
+  await Promise.all(ids.map((id) => api.del(`/api/users/${id}`)))
+  return true
+}
+
+// 导出用户列表（CSV 本地生成）。
+export const exportUsers = async (params: UserSearchRequest): Promise<string> => {
+  const res = await fetchUserList(params)
+  const header = 'id,username,email,roles,status'
+  const lines = res.records.map((u) =>
+    [u.id, u.username, u.email, `"${u.roles.join(',')}"`, u.status].join(',')
+  )
+  return [header, ...lines].join('\n')
+}
 
 // 合并自 src/apis/user/info.ts：菜单接口
 export interface MenusRequest {

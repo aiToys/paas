@@ -38,38 +38,72 @@ export interface RoleSearchResponse {
   size: number
 }
 
-// 获取角色列表
-export const fetchRoleList = (params: RoleSearchRequest) =>
-  api.get<RoleSearchResponse>('/api/role', { params })
+// 内置角色中文名映射（core BuiltinRoles 固定三角色）。
+const ROLE_LABELS: Record<string, string> = {
+  'tenant-admin': '租户管理员',
+  developer: '开发者',
+  viewer: '观察者'
+}
 
-// 获取角色详情
-export const fetchRoleDetail = (id: string) =>
-  api.get<RoleInfo>(`/api/role/${id}`)
+// core /api/roles 返回项。
+interface CoreRole {
+  name: string
+  permissions: string[]
+}
 
-// 创建角色
-export const createRole = (data: RoleCreateRequest) =>
-  api.post<RoleInfo>('/api/role', data)
+const mapRole = (r: CoreRole): RoleInfo => ({
+  id: r.name,
+  name: ROLE_LABELS[r.name] ?? r.name,
+  code: r.name,
+  description: r.permissions.join(', '),
+  status: 'active',
+  createTime: '',
+  updateTime: ''
+})
 
-// 更新角色
-export const updateRole = (id: string, data: Partial<RoleCreateRequest>) =>
-  api.put<RoleInfo>(`/api/role/${id}`, data)
+// 获取角色列表（对接 core GET /api/roles；内置角色只读，假分页适配 admin 期望）。
+export const fetchRoleList = async (params: RoleSearchRequest): Promise<RoleSearchResponse> => {
+  const list = await api.get<CoreRole[]>('/api/roles')
+  let mapped = (list ?? []).map(mapRole)
+  if (params.keyword) {
+    const kw = params.keyword.toLowerCase()
+    mapped = mapped.filter(
+      (r) => r.name.toLowerCase().includes(kw) || r.code.toLowerCase().includes(kw)
+    )
+  }
+  return { records: mapped, total: mapped.length, current: params.page, size: params.size }
+}
 
-// 删除角色
-export const deleteRole = (id: string) =>
-  api.del<boolean>(`/api/role/${id}`)
+// 获取角色详情（本地从列表派生，core 无单角色端点）。
+export const fetchRoleDetail = async (id: string): Promise<RoleInfo> => {
+  const list = await api.get<CoreRole[]>('/api/roles')
+  const r = (list ?? []).find((x) => x.name === id)
+  if (!r) throw new Error('角色不存在')
+  return mapRole(r)
+}
 
-// 批量删除角色
-export const batchDeleteRoles = (ids: string[]) =>
-  api.del<boolean>('/api/role', { data: { ids } })
+// 内置角色不可创建/修改/删除（core BuiltinRoles 固定）。保留函数签名以兼容 useCrud，抛明确错误。
+const unsupported = (op: string) => Promise.reject(new Error(`内置角色不支持${op}`))
 
-// 导出角色列表
-export const exportRoles = () =>
-  api.get<string>('/api/role/export')
+export const createRole = (_data: RoleCreateRequest) => unsupported('创建')
+export const updateRole = (_id: string, _data: Partial<RoleCreateRequest>) => unsupported('修改')
+export const deleteRole = (_id: string) => unsupported('删除')
+export const batchDeleteRoles = (_ids: string[]) => unsupported('批量删除')
 
-// 获取角色权限
-export const fetchRolePermissions = (roleId: string) =>
-  api.get<string[]>(`/api/role/${roleId}/permissions`)
+// 导出角色列表（CSV 本地生成）。
+export const exportRoles = async (): Promise<string> => {
+  const list = await api.get<CoreRole[]>('/api/roles')
+  const rows = (list ?? []).map((r) => mapRole(r))
+  const header = 'id,name,code,description,status'
+  const lines = rows.map((r) => [r.id, r.name, r.code, `"${r.description}"`, r.status].join(','))
+  return [header, ...lines].join('\n')
+}
 
-// 设置角色权限
-export const setRolePermissions = (roleId: string, permissions: string[]) =>
-  api.put<boolean>(`/api/role/${roleId}/permissions`, { permissions })
+// 获取角色权限（从列表派生）。
+export const fetchRolePermissions = async (roleId: string): Promise<string[]> => {
+  const list = await api.get<CoreRole[]>('/api/roles')
+  return (list ?? []).find((x) => x.name === roleId)?.permissions ?? []
+}
+
+// 设置角色权限（内置角色只读）。
+export const setRolePermissions = (_roleId: string, _permissions: string[]) => unsupported('权限修改')

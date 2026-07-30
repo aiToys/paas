@@ -44,6 +44,9 @@ type CoreDeps interface {
 	// Gateway 返回推理路由注册点；插件在 Init 阶段把 Provider 注册进去。
 	// 非 MaaS 类插件可返回 nil。
 	Gateway() provider.GatewayRegistrar
+	// SecretResolver 返回平台级 Secret 明文解析器；非 MaaS 类插件可返回 nil。
+	// 用于第三方供应商通道经 CredentialRef 解析出 API Key（仅内存，不日志/不持久化）。
+	SecretResolver() provider.CredentialResolver
 }
 
 // Plugin 是子系统接入 Core 必须实现的契约。

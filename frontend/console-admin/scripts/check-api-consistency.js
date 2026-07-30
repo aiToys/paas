@@ -108,11 +108,25 @@ console.log(`📊 Mock API 文件: ${mockFiles.length} 个`)
 console.log(`📊 Mock API 端点: ${mockApis.length} 个\n`)
 
 // 3. 检查不匹配的 API
+// 对接 PaaS core 后端的端点（不走 MSW mock）—— 这些由真实后端提供，跳过 mock 一致性检查。
+const CORE_BACKEND_PREFIXES = [
+  '/api/auth/',
+  '/api/system/menus',
+  '/api/dashboard/',
+  '/api/tenants',
+  '/api/users',
+  '/api/api-keys',
+  '/api/roles'
+]
+const isCoreBackend = (p) => CORE_BACKEND_PREFIXES.some((prefix) => p.startsWith(prefix))
+
 const missingApis = []
 
 frontendApis.forEach(frontend => {
+  if (isCoreBackend(frontend.path)) return // 对接 core，无需 mock
+
   const normalizedFrontend = normalizePath(frontend.path)
-  
+
   const found = mockApis.some(mock => {
     const normalizedMock = normalizePath(mock.path)
     

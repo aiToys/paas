@@ -1,0 +1,41 @@
+package devops
+
+import "context"
+
+// 四仓储接口方法名带实体前缀，避免单 Store 实现全部接口时方法名冲突
+// （List/Get/Create 在多实体上重名）。实现必须从 ctx 取租户并强制过滤
+// （缺失即拒，跨租户 not found 不泄漏存在性）。
+
+// CodeRepoRepository 是代码仓库持久化抽象。
+type CodeRepoRepository interface {
+	ListRepos(ctx context.Context, appID string) ([]CodeRepo, error)
+	GetRepo(ctx context.Context, id string) (CodeRepo, error)
+	CreateRepo(ctx context.Context, r CodeRepo) error
+	DeleteRepo(ctx context.Context, id string) error
+}
+
+// BuildRunRepository 是构建运行持久化抽象。
+// CreateBuildRun 触发一次构建；mock CI runner 异步流转状态并产出 Image。
+type BuildRunRepository interface {
+	ListBuildRuns(ctx context.Context, appID string) ([]BuildRun, error)
+	GetBuildRun(ctx context.Context, id string) (BuildRun, error)
+	CreateBuildRun(ctx context.Context, b BuildRun) error
+}
+
+// ImageRepository 是构建产物持久化抽象。
+type ImageRepository interface {
+	ListImages(ctx context.Context, appID string) ([]Image, error)
+	GetImage(ctx context.Context, id string) (Image, error)
+}
+
+// ReleaseRepository 是发布持久化 + 编排抽象。
+// CreateRelease/RollbackRelease 内部完成 Workload 编排（依赖倒置：编排需要 Workload
+// 仓储，由实现注入，接口本身不暴露 Workload 依赖）。
+type ReleaseRepository interface {
+	ListReleases(ctx context.Context, appID string) ([]Release, error)
+	GetRelease(ctx context.Context, id string) (Release, error)
+	// CreateRelease 编排发布：取镜像、找/建目标环境基线 Workload、更新镜像、记录回滚指针。
+	CreateRelease(ctx context.Context, input ReleaseInput) (Release, error)
+	// RollbackRelease 回滚到上一镜像，返回新建的回滚 Release。
+	RollbackRelease(ctx context.Context, releaseID string) (Release, error)
+}

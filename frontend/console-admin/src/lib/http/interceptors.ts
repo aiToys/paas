@@ -33,30 +33,30 @@ export function installInterceptors(instance: AxiosInstance): void {
   // 响应拦截：解包 ApiResult + 解析 ProblemDetail
   instance.interceptors.response.use(
     (response) => {
-      // HTTP 200 + ApiResult 包装
-      const payload = response.data as ApiResult<unknown> | unknown
-      if (
-        payload &&
-        typeof payload === 'object' &&
-        'code' in payload &&
-        'data' in payload
-      ) {
-        const result = payload as ApiResult<unknown>
-        if (result.code !== 0) {
-          // 过渡路径：HTTP 200 + ApiResult.code !== 0
-          // status 选取：若 result.code 落在 4xx/5xx 区间则用之；否则默认 500（应用层错误）
-          const status =
-            result.code >= 400 && result.code < 600 ? result.code : 500
-          const problem = parseProblem(status, {
-            type: 'about:blank',
-            title: result.msg || 'Unknown error',
-            status,
-            detail: result.msg || ''
-          })
-          notifyProblem(problem, { silent: response.config._silent })
-          throw new HttpError(problem, response as unknown as Response)
+      // 兼容两种成功响应包裹：
+      //   - ApiResult：{ code, data, msg }（code===0 解包 data；!==0 当应用层错误）
+      //   - PaaS core：{ data: T }（无 code，直接解包 data）
+      const payload = response.data
+      if (payload && typeof payload === 'object' && 'data' in payload) {
+        const obj = payload as Record<string, unknown>
+        if ('code' in obj) {
+          // ApiResult 路径
+          const code = obj.code as number
+          if (code !== 0) {
+            const status = code >= 400 && code < 600 ? code : 500
+            const msg = (obj.msg as string) || 'Unknown error'
+            const problem = parseProblem(status, {
+              type: 'about:blank',
+              title: msg,
+              status,
+              detail: msg
+            })
+            notifyProblem(problem, { silent: response.config._silent })
+            throw new HttpError(problem, response as unknown as Response)
+          }
         }
-        response.data = result.data
+        // code===0 或 core {data:T}：统一解包 data
+        response.data = obj.data
       }
       return response
     },

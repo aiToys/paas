@@ -16,11 +16,13 @@ export function parseProblem(status: number, body: unknown): ProblemDetail {
 
   if (body && typeof body === 'object') {
     const b = body as Record<string, unknown>
+    // PaaS core 错误契约 { error: "msg" }（无 RFC7807 字段）→ 映射到 title/detail。
+    const errStr = typeof b.error === 'string' ? b.error : undefined
     return {
       type: typeof b.type === 'string' ? b.type : 'about:blank',
-      title: typeof b.title === 'string' ? b.title : fallbackTitle,
+      title: typeof b.title === 'string' ? b.title : (errStr ?? fallbackTitle),
       status: typeof b.status === 'number' ? b.status : status,
-      detail: typeof b.detail === 'string' ? b.detail : '',
+      detail: typeof b.detail === 'string' ? b.detail : (errStr ?? ''),
       instance: typeof b.instance === 'string' ? b.instance : undefined,
       code: typeof b.code === 'string' ? b.code : undefined,
       errors:

@@ -1,6 +1,6 @@
 // 全局环境上下文 store。
 // 环境从「页面过滤」升为「全局上下文」：当前环境贯穿所有页面，类似 K8s current context。
-// 生产环境 gated 进入（确认 + 15 分钟超时回退测试），防误操作生产。
+// 生产环境 gated 进入（确认 + 15 分钟超时切回全部环境），防误操作生产。
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
@@ -37,7 +37,7 @@ export const useEnvStore = defineStore('env', () => {
     if (env?.type === 'prod') {
       try {
         await ElMessageBox.confirm(
-          '你将进入生产环境，所有操作请谨慎。生产会话 15 分钟后自动回退测试。',
+          '你将进入生产环境，所有操作请谨慎。生产会话 15 分钟后自动退出生产（切回全部环境）。',
           '进入生产环境',
           { type: 'warning', confirmButtonText: '确认进入', cancelButtonText: '取消' },
         )
