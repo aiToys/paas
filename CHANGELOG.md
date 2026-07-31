@@ -60,6 +60,8 @@
 - 修复 gateway 流式 nil panic、ctx 不感知导致断连后仍计费。
 
 ### Fixed
+- CRD 真实集群 list/watch 失败（`v1.ListOptions is not suitable for converting to "core.aitoys.github.com/v1alpha1"`）：根因是 `groupversion_info.go` 用裸 `runtime.NewSchemeBuilder`，未把 metav1 参数类型（ListOptions 等）注册到 GroupVersion，client list/watch 的 parameter codec 无法识别本 GV。改用 controller-runtime 的 `scheme.Builder`（AddToScheme 时自动注册 metav1 参数类型）。fake client 不走 parameter codec，故单元测试无法暴露——经真实 K8s 集群端到端验证发现并修复。
 - CRD group/version 为空导致无法 apply：根因是 `make manifests` 用 `paths=./api/...` 通配符使 controller-gen 无法从包路径推断 group/version。改为具体包路径 `paths=./api/core/v1alpha1` + package 级 `+groupName=core.aitoys.github.com` 注解，CRD 现正确生成 `core.aitoys.github.com` group（`core.aitoys.github.com_workloads.yaml` / `_dataservices.yaml`）。
+- controller-runtime manager metrics server 默认占 :8080 与 core HTTP 服务冲突致 manager 退出。改为 `PAAS_METRICS_ADDR`（默认 :8081，设 0 禁用）；并注入 zap logger（否则 reconcile 错误被吞无法排查）。
 
 [Unreleased]: https://github.com/aitoys/paas/commits/main
