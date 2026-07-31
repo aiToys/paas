@@ -21,12 +21,12 @@ import (
 	"github.com/aitoys/paas/internal/billing"
 	"github.com/aitoys/paas/internal/configcenter"
 	"github.com/aitoys/paas/internal/core/application"
-	"github.com/aitoys/paas/internal/dashboard"
 	authPkg "github.com/aitoys/paas/internal/core/auth"
 	"github.com/aitoys/paas/internal/core/gateway"
 	"github.com/aitoys/paas/internal/core/health"
 	"github.com/aitoys/paas/internal/core/identity"
 	coreplugin "github.com/aitoys/paas/internal/core/plugin"
+	"github.com/aitoys/paas/internal/dashboard"
 	"github.com/aitoys/paas/internal/dataservice"
 	"github.com/aitoys/paas/internal/devops"
 	"github.com/aitoys/paas/internal/environment"
@@ -36,6 +36,7 @@ import (
 	"github.com/aitoys/paas/internal/observability"
 	"github.com/aitoys/paas/internal/observability/tracing"
 	"github.com/aitoys/paas/internal/security"
+	"github.com/aitoys/paas/internal/web"
 	"github.com/aitoys/paas/internal/workload"
 	"github.com/aitoys/paas/pkg/plugin"
 	"github.com/aitoys/paas/pkg/provider"
@@ -421,6 +422,14 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores) {
 	// /docs：Scalar 交互文档（拉 /openapi.json 渲染），公开无鉴权。
 	mux.Handle("/docs", apiroute.ServeDocs("/openapi.json", "PaaS API"))
 
+	// 嵌入式前端 SPA（core 单镜像同域 serve，无 CORS）。API 路由已在上文注册，
+	// ServeMux 最长前缀匹配使 /api/* /v1/* /openapi.json /docs /livez 优先命中；
+	// 以下三者为剩余路径的前端入口，/ 兜底 landing。
+	//   /console/* → console-user   /admin/* → console-admin   /* → landing
+	mux.Handle("/console/", web.ServeStatic("/console/", "console-user"))
+	mux.Handle("/admin/", web.ServeStatic("/admin/", "console-admin"))
+	mux.Handle("/", web.ServeStatic("/", "landing"))
+
 	// —— 其余模块 OpenAPI 元数据（Operation：spec-only，mux 注册见上方 mux.Handle）——
 	// 工作负载（应用子资源 + 跨应用列表）
 	reg.Operation("GET", "/api/applications/{id}/workloads", apiroute.Tags("工作负载"), apiroute.Summary("应用下工作负载"), apiroute.Perm("workload:read"), apiroute.WithResp([]workload.Workload{}))
@@ -576,7 +585,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores) {
 		Addr: ":8080",
 		// otelhttp 包装 mux：自动为每个请求建 span（含 http.method/status_code/server.address）。
 		// 过滤探针/契约/文档端点（高频无业务语义，避免噪音 span 淹没真实链路）。
-		Handler:           otelhttp.NewHandler(mux, "http.server",
+		Handler: otelhttp.NewHandler(mux, "http.server",
 			otelhttp.WithFilter(skipTelemetryPaths)),
 		ReadHeaderTimeout: 10 * time.Second, // 防 Slowloris 慢速头部攻击
 	}

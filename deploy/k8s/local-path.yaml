@@ -1,0 +1,143 @@
+# Rancher local-path-provisioner（集群级依赖，一次性 apply）。
+# 无 SC 的集群装此 provisioner 后，PVC 自动在节点创建 hostPath PV（dev/demo 持久化）。
+#
+# 内网部署：镜像已推到 hub.wang.dd:5000/rancher/local-path-provisioner:v0.0.24
+# （源 docker.m.daocloud.io/rancher/local-path-provisioner）。
+#
+# 用法：kubectl apply -f deploy/k8s/local-path.yaml
+# 然后 paas chart 设 postgres.storageClassName=local-path + db.enabled=true。
+#
+# 数据绑节点（Pod 漂移失效）；生产多副本应换外置 PG 或网络存储（NFS/Ceph）。
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: local-path-storage
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: local-path-provisioner-service-account
+  namespace: local-path-storage
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: local-path-provisioner-role
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "persistentvolumeclaims", "pods", "configmaps"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete"]          # 创建/清理 helper pod（PV 目录建立/删除）
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: local-path-provisioner-bind
+subjects:
+  - kind: ServiceAccount
+    name: local-path-provisioner-service-account
+    namespace: local-path-storage
+roleRef:
+  kind: ClusterRole
+  name: local-path-provisioner-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: local-path-config
+  namespace: local-path-storage
+data:
+  config.json: |-
+    {
+      "nodePathMap": [
+        {
+          "node": "DEFAULT_PATH_FOR_NON_LISTED_NODES",
+          "paths": ["/opt/local-path-provisioner"]
+        }
+      ]
+    }
+  helperPod.yaml: |-
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: helper-pod
+    spec:
+      priorityClassName: system-node-critical
+      tolerations:
+        - key: node.kubernetes.io/disk-pressure
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: helper-pod
+          image: hub.wang.dd:5000/library/busybox:latest
+          imagePullPolicy: IfNotPresent
+  # setup/teardown：provisioner 创建 helper pod 时自动注入 script volume（挂载这两脚本）
+  # + ACTION/VOL_DIR env + command，在目标节点执行 mkdir/rmdir。无需在 helperPod.yaml 手动挂载。
+  setup: |-
+    #!/bin/sh
+    set -eu
+    mkdir -m 0777 -p "$VOL_DIR"
+  teardown: |-
+    #!/bin/sh
+    set -eu
+    rm -rf "$VOL_DIR"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: local-path-provisioner
+  namespace: local-path-storage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: local-path-provisioner
+  template:
+    metadata:
+      labels:
+        app: local-path-provisioner
+    spec:
+      serviceAccountName: local-path-provisioner-service-account
+      containers:
+        - name: local-path-provisioner
+          image: hub.wang.dd:5000/rancher/local-path-provisioner:v0.0.24
+          imagePullPolicy: Always
+          command:
+            - local-path-provisioner
+            - --debug
+            - start
+            - --config=/etc/config/config.json
+            - --provisioner-name=rancher.io/local-path
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/config/
+      volumes:
+        - name: config-volume
+          configMap:
+            name: local-path-config
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-path
+provisioner: rancher.io/local-path
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer

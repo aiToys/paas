@@ -21,7 +21,8 @@ spec:
     spec:
       containers:
         - name: postgres
-          image: postgres:16-alpine
+          image: {{ .Values.postgres.image | default "postgres:16-alpine" }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
             - { name: POSTGRES_DB, value: paas }
             - { name: POSTGRES_USER, value: paas }
@@ -39,9 +40,12 @@ spec:
   volumeClaimTemplates:
     - metadata: { name: data }
       spec:
+        {{- with .Values.postgres.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
         accessModes: ["ReadWriteOnce"]
         resources:
-          requests: { storage: 10Gi }
+          requests: { storage: {{ .Values.postgres.storageSize | default "10Gi" }} }
 ---
 apiVersion: v1
 kind: Service

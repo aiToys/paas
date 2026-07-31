@@ -176,7 +176,8 @@ const routes: RouteRecordRaw[] = [
 ]
 
 const router = createRouter({
-  history: createWebHistory(),
+  // base 跟随 vite base（'/console/'），SPA 前端路由正确解析子路径。
+  history: createWebHistory(import.meta.env.BASE_URL),
   routes,
 })
 

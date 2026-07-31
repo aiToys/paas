@@ -63,6 +63,22 @@ CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md LICENSE
 
 `make airsync` 编译；`make manifests` 生成 CRD（controller-gen）。
 
+### 集群部署（Helm + 前端嵌入单镜像）
+
+一套 Helm chart（`deploy/charts/paas`）一把梭部署到 K8s：core 单镜像同源 serve 前端 + API（无 CORS），参考 aiem 模式（`hub.wang.dd:5000` 私有 registry + `hermes` ingress）。
+
+- **前端嵌入 core**：三套 SPA（console-user/console-admin/landing）构建产物 `//go:embed` 进 core 二进制（`internal/web/`），core 同域 serve。同域路由（ServeMux 最长前缀匹配）：`/api/*` `/v1/*` `/openapi.json` `/docs` `/livez` → API（精确匹配优先）；`/console/*` → console-user；`/admin/*` → console-admin；`/*` → landing（兜底）。前端 base path 子路径化：console-user `base:'/console/'`、console-admin `VITE_BASE='/admin/'`、landing 默认 `/`。
+- **Dockerfile 多阶段**：node:22-alpine 构建三套前端（console-admin 需 Node ≥ 22.13）→ golang:1.26-alpine Go 交叉编译（`ARG GOARCH=amd64`，builder 跑本地架构交叉编译到 amd64 避 QEMU）→ distroless runtime。国内源默认（`ARG NPM_REGISTRY=https://registry.npmmirror.com`、`ARG GOPROXY=https://goproxy.cn,direct`），海外 `--build-arg` 覆盖。无 `# syntax=` 指令（避免 buildkit 拉远程 frontend）。
+- **Helm chart 组件**：`templates/crds.yaml`（Workload+DataService CRD，`crds.install` 门控）+ `templates/rbac.yaml`（ServiceAccount + ClusterRole[core.aitoys CRD + apps/batch workload + pods/services/events] + ClusterRoleBinding）+ core-deployment（`serviceAccountName` + `PAAS_K8S_NAMESPACE` + `PAAS_METRICS_ADDR=0`）+ ingress（`hermes` class，host 配）+ 内置 postgres（`db.enabled` 开关）。
+- **in-cluster 数据面**：core 容器内 `startManager` 用 `ctrl.GetConfig()` 自动检测（PAAS_KUBECONFIG 显式 或 in-cluster SA token + KUBERNETES_SERVICE_HOST），集群内部署无需 PAAS_KUBECONFIG 文件，SA token 自动挂载 + RBAC 授权。**关键修复**：原以 `PAAS_KUBECONFIG` 非空作启 manager 的唯一门控，导致集群内部署（SA token 可用但 env 空）数据面不生效——改用 `ctrl.GetConfig()` 容错（无 config 才降级）。此 bug 单元测试测不出（无 in-cluster 环境），真实集群部署才暴露。
+- **部署脚本**：`scripts/deploy-k8s.sh`（docker build → push → helm upgrade）。docker push 在某些环境（如 colima VM 到 registry 路由不通）超时时，自动 fallback `crane push --insecure`（不经 dockerd，直 HTTP 推）。集群覆盖文件 `deploy/charts/paas/values-paas-k8s.yaml`（registry=hub.wang.dd:5000/paas、ingress=hermes/paas.k8s.dd、本集群无 StorageClass 时 `db.enabled=false` 内存模式）。
+
+```bash
+./scripts/deploy-k8s.sh                          # 构建前端 embed 镜像 + push + helm install（paas.k8s.dd）
+# 部署后访问：http://paas.k8s.dd/（landing）/console/（用户控制台）/admin/（后台）+ /v1/models（API）
+# 验证数据面：curl POST /api/applications/app-cs/workloads → kubectl get deploy 自动出现
+```
+
 ## 常用命令
 
 **后端（根目录）：**
@@ -263,7 +279,11 @@ internal/environment/  领域(type prod|test + cluster) + Repository(租户隔�
 - **横切继承（已验证）**：发布/回滚到 prod 受 `prod:write`（EnvTypeResolver），前端回滚走 `useDangerConfirm`（生产输入名称），生产视觉强隔离自动生效--DevOps 切片只关注业务逻辑，隔离由平台层兜底。
 - console-user 应用详情四 tab：代码仓库 / 构建（状态轮询+日志展开）/ 镜像 / 发布（选镜像+环境+策略+回滚）。
 - **跨应用 DevOps 中心**（`/devops`）：3 tab 总览（构建 / 镜像 / 发布），复用 `/api/buildruns`、`/api/images`、`/api/releases` 跨应用列表端点（appID="" = 租户内全部，store 已支持）；构建状态 5s 轮询；发布 tab 含回滚（走 useDangerConfirm）。消除侧栏 DevOps「即将」。
-- 切片**真实构建已接（env 开关）**：`PAAS_DEVOPS_REAL=true` 接真实 git/docker/registry（`internal/devops/builder`），空则 Mock（现状不变）。Release 部署经 workload K8s 数据面落地（Deployment）。策略接口开放（rolling/blue-green/canary），实现 YAGNI（只 rolling），蓝绿/金丝雀归后续（灰度耦合泳道归服务治理）。
+- 切片**真实构建三模式（env 开关）**：`PAAS_DEVOPS_BUILDER` 显式三选一构建执行体——`k8s`（默认集群模式）/ `process` / `mock`（未设=mock，现状不变）；`PAAS_DEVOPS_REAL=true` 向后兼容别名 → `process`。
+  - **`k8s` 模式（DooD）**：core 创建 `batch/v1 Job` Pod（`docker:git` 镜像 + 挂节点 `hostPath: /var/run/docker.sock`，**非 privileged** 复用节点 daemon），Pod 内跑 git clone→docker build→push，core 轮询 Job 完成取 Pod 日志解析 `PAAS_DIGEST=` 回写 `BuildRun`。`builder.K8sJob` 实现 `Pipeline`（`Clientset kubernetes.Interface` + `Namespace` + 凭证，状态机仍在 Store）。`startManager` 用 `kubernetes.NewForConfig` 构造 clientset 注入；无 K8s clientset 时降级 Mock。RBAC 补 `pods/log` get（`rbac.yaml`）。Job `TTLSecondsAfterFinished=86400`（1 天后自动清）+ `BackoffLimit=0`（失败不重试）。digest 解析正则 `^PAAS_DIGEST=(sha256:[0-9a-f]+)$`，无匹配 → BuildRun failed + 全量 Pod 日志作 Log。脚本纯 env 变量替换（业务逻辑在 Go 侧算好透传，防注入），`docker login --password-stdin` 密码不进 argv。内网 builder 镜像 `hub.wang.dd:5000/library/docker:git`（amd64 预推）。**安全取舍**：构建共享节点 daemon（理论隔离弱），dev 集群 + 平台级凭证可接受；生产多租户硬化（Kaniko/专用构建节点）归后续。**集群 e2e 已端到端验证**（构建 docker-library/hello-world → 真实 registry digest 落 Image，对失败路径亦优雅回写 failed+日志）。**真实集群踩坑修复**：① 脚本 `DOCKER_BUILDKIT=0` 强制 classic builder——DooD 下 buildkit 经 sock 的 context transfer 有 bug（dockerfile 收 2B 损坏 → "failed to read dockerfile"）；② docker build 参数用 `BUILD_ARGS` 变量无引号拼接（非 `${var:+-f "$var"}`），busybox ash 对 `${:+}` 嵌套引号展开会丢 `-f`；③ `dockerfile`/`buildContext` 相对 cwd `/workspace`（如 `amd64/Dockerfile` + `buildContext=amd64`）；④ helm upgrade 不改 deployment spec 时不触发 rollout（image.tag 不变需 `kubectl rollout restart` 强制拉新镜像，pullPolicy: Always 仅在 Pod 重建时生效）。
+  - **`process` 模式**：core 进程内 `os/exec` git/docker（`builder.Real`，本地 dev；distroless/K8s 部署不可用——故集群必须用 `k8s`）。
+  - **`mock` 模式**：`sha256(commit+app+build)` 派生 digest，零依赖。
+  - Release 部署经 workload K8s 数据面落地（Deployment）。策略接口开放（rolling/blue-green/canary），实现 YAGNI（只 rolling），蓝绿/金丝雀归后续（灰度耦合泳道归服务治理）。
 
 ### 应用配置（工作负载级 env/Secret）
 

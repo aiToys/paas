@@ -11,6 +11,7 @@ spec:
     metadata:
       labels: {{- include "paas.coreSelector" . | nindent 8 }}
     spec:
+      serviceAccountName: {{ include "paas.fullname" . }}
       containers:
         - name: core
           image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -29,6 +30,26 @@ spec:
             - name: PAAS_API_KEY
               value: {{ .Values.env.PAAS_API_KEY | quote }}
             {{- end }}
+            # K8s 数据面（in-cluster）：ctrl.GetConfigOrDie() 自动用 ServiceAccount token，
+            # 无需 PAAS_KUBECONFIG。落地 namespace = release namespace；metrics server 禁用避端口冲突。
+            - name: PAAS_K8S_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: PAAS_METRICS_ADDR
+              value: "0"
+            # DevOps 构建流水线（PAAS_DEVOPS_BUILDER：k8s=Job Pod 构建；process=in-process docker；空=Mock）。
+            # k8s 模式：core 创建 batch/Job（docker:git + 挂节点 docker.sock）→ 轮询完成取日志解析 digest。
+            - name: PAAS_DEVOPS_BUILDER
+              value: {{ .Values.devops.builder | default "" | quote }}
+            - name: PAAS_BUILDER_IMAGE
+              value: {{ .Values.devops.builderImage | default "docker:git" | quote }}
+            - name: PAAS_REGISTRY
+              value: {{ .Values.devops.registry | default "" | quote }}
+            - name: PAAS_GIT_TOKEN
+              value: {{ .Values.devops.gitToken | default "" | quote }}
+            - name: PAAS_REGISTRY_USER
+              value: {{ .Values.devops.registryUser | default "" | quote }}
+            - name: PAAS_REGISTRY_PASS
+              value: {{ .Values.devops.registryPass | default "" | quote }}
           resources: {{- toYaml .Values.resources | nindent 12 }}
           readinessProbe:
             httpGet: { path: /livez, port: http }

@@ -19,18 +19,18 @@ import (
 
 // Params 是构建流水线输入。
 type Params struct {
-	TenantID      string
-	AppID         string
-	BuildID       string
-	Commit        string // 已知则直接用；空则 real 路径 clone 后取 HEAD
-	Branch        string
-	GitURL        string // real 路径 clone 源
-	Dockerfile    string // 空则 Dockerfile（仓库根）
-	BuildContext  string // 空则 .
-	Registry      string // 镜像仓库地址（real 推送目标，空则 registry.paas.local）
-	GitToken      string // 可选：私有仓库 HTTPS token（注入 git URL）
-	RegistryUser  string // 可选：docker login 用户名
-	RegistryPass  string // 可选：docker login 密码
+	TenantID     string
+	AppID        string
+	BuildID      string
+	Commit       string // 已知则直接用；空则 real 路径 clone 后取 HEAD
+	Branch       string
+	GitURL       string // real 路径 clone 源
+	Dockerfile   string // 空则 Dockerfile（仓库根）
+	BuildContext string // 空则 .
+	Registry     string // 镜像仓库地址（real 推送目标，空则 registry.paas.local）
+	GitToken     string // 可选：私有仓库 HTTPS token（注入 git URL）
+	RegistryUser string // 可选：docker login 用户名
+	RegistryPass string // 可选：docker login 密码
 }
 
 // Result 是构建产物。Digest 是不可变真源（生产部署锁这个）。
@@ -51,7 +51,7 @@ type Mock struct{}
 // Build 按 commit+app+build 派生 sha256 digest，模拟步进耗时。
 func (Mock) Build(_ context.Context, p Params) (Result, error) {
 	time.Sleep(800 * time.Millisecond) // 模拟 clone+build+push 耗时
-	digest := "sha256:" + sha256hex(p.Commit + p.AppID + p.BuildID)
+	digest := "sha256:" + sha256hex(p.Commit+p.AppID+p.BuildID)
 	tag := p.Branch + "-" + safeShort(p.Commit, 8)
 	return Result{Digest: digest, Tag: tag, Log: mockBuildLog(tag)}, nil
 }

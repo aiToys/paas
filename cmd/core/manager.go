@@ -7,6 +7,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -19,18 +20,29 @@ import (
 )
 
 // k8sAppliers 聚合 K8s 数据面 applier（workload + dataservice），供各 repo 装饰。
+// clientset + namespace 额外供 builder.K8sJob 创建构建 Job + 取 Pod 日志。
 type k8sAppliers struct {
 	workload    workload.Applier
 	dataservice dataservice.Applier
+	clientset   kubernetes.Interface // 供 builder.K8sJob（create Job + pods/log）；nil=K8s 不可用
+	namespace   string               // Job 落地 namespace（PAAS_K8S_NAMESPACE）
 }
 
-// startManager 按 PAAS_KUBECONFIG 启 controller-runtime manager（K8s 数据面）。
-// 非空则启 Workload + DataService Reconciler 并返回 applier 供 repo 装饰；
-// 为空或启动失败则返回 nil（走纯 PG/memory，现状不变，降级不阻塞）。
+// startManager 启 controller-runtime manager（K8s 数据面），自动检测配置来源：
+//   - PAAS_KUBECONFIG 显式指定（本地开发：~/.kube/config）
+//   - 否则 ctrl.GetConfig 自动检测 in-cluster（SA token + KUBERNETES_SERVICE_HOST，
+//     集群内 Deployment 部署）或默认 KUBECONFIG
+//
+// 启 Workload + DataService Reconciler 并返回 applier 供 repo 装饰；
+// 无可用 config 或启动失败则返回 nil（走纯 PG/memory，降级不阻塞）。
 func startManager() (k8sAppliers, context.CancelFunc) {
-	kubeconfig := os.Getenv("PAAS_KUBECONFIG")
-	if kubeconfig == "" {
-		log.Printf("K8s 数据面: 未配 PAAS_KUBECONFIG，workload/dataservice 走 PG/memory（dev 路径）")
+	// PAAS_KUBECONFIG 作为 KUBECONFIG 覆盖（ctrl.GetConfig 读 KUBECONFIG，不读 PAAS_KUBECONFIG）。
+	if kc := os.Getenv("PAAS_KUBECONFIG"); kc != "" {
+		_ = os.Setenv("KUBECONFIG", kc)
+	}
+	cfg, err := ctrl.GetConfig() // KUBECONFIG env 或 in-cluster 自动；都无则 error
+	if err != nil {
+		log.Printf("K8s 数据面: 无可用 config（%v），workload/dataservice 走 PG/memory", err)
 		return k8sAppliers{}, nil
 	}
 	scheme := runtime.NewScheme()
@@ -38,7 +50,6 @@ func startManager() (k8sAppliers, context.CancelFunc) {
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 	// 设 controller-runtime logger（否则 reconcile 错误被吞，无法排查）。
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
-	cfg := ctrl.GetConfigOrDie() // 读 KUBECONFIG（PAAS_KUBECONFIG 优先于默认）
 	// controller-runtime 默认 metrics server 占 :8080，与 core HTTP 服务冲突；
 	// 改到 PAAS_METRICS_ADDR（默认 :8081），空则禁用。
 	metricsAddr := os.Getenv("PAAS_METRICS_ADDR")
@@ -69,8 +80,18 @@ func startManager() (k8sAppliers, context.CancelFunc) {
 		}
 	}()
 	ns := os.Getenv("PAAS_K8S_NAMESPACE")
+	// clientset 供 builder.K8sJob 创建构建 Job + 取 Pod 日志（controller-runtime typed client
+	// 不支持 pods/log 子资源）。构造失败不阻塞 workload/dataservice（applier 用 mgr.GetClient）。
+	var clientset kubernetes.Interface
+	if cs, err := kubernetes.NewForConfig(cfg); err != nil {
+		log.Printf("K8s 数据面: 构造 clientset 失败（builder K8s 模式将降级）: %v", err)
+	} else {
+		clientset = cs
+	}
 	return k8sAppliers{
 		workload:    controller.NewK8sApplier(mgr.GetClient(), ns),
 		dataservice: controller.NewDataServiceK8sApplier(mgr.GetClient(), ns),
+		clientset:   clientset,
+		namespace:   ns,
 	}, cancel
 }

@@ -14,6 +14,7 @@ import (
 //	两租户：Acme(t-acme) / Globex(t-globex)
 //	三 Key：sk-acme-admin / sk-globex-admin / sk-acme-dev（developer，验证权限差异）
 //	一密码登录用户：admin/123456（t-acme 管理员，供 console-admin 登录）
+//
 // extraKey（来自 PAAS_API_KEY）若非内置 Key，追加为 t-acme 的 admin Key，兼容自定义部署。
 func seedIdentity(idb identity.Repository, extraKey string) {
 	ctx := context.Background()

@@ -1,0 +1,37 @@
+# 本地 K8s 集群部署覆盖（参考 aiem 模式）。
+# 用法：helm upgrade --install paas deploy/charts/paas -n paas --create-namespace -f deploy/charts/paas/values-paas-k8s.yaml
+#
+# 集群特征：hermes ingress class + hub.wang.dd:5000 私有 registry + 域名 paas.k8s.dd。
+# core 单镜像同域 serve 前端 + API；前端写死同源 /api /v1，无 CORS。
+
+image:
+  registry: hub.wang.dd:5000/paas   # 内网私有 registry（同 aiem），需先 docker push 镜像
+  repository: paas-core
+  tag: "0.1.0"
+  pullPolicy: Always                 # Always：便于 retag 后滚动更新拉新镜像
+
+# 数据库：local-path-provisioner（deploy/k8s/local-path.yaml，先 apply）提供 SC，
+# 内置 postgres PVC 自动绑定到节点本地路径。镜像用内网 registry（节点拉不到 docker.io）。
+db:
+  enabled: true
+postgres:
+  image: hub.wang.dd:5000/library/postgres:16-alpine
+  storageClassName: local-path
+  storageSize: "5Gi"
+
+ingress:
+  enabled: true
+  className: hermes                  # 集群 ingress controller（kubectl get ingressclass 确认）
+  host: paas.k8s.dd                  # 访问域名（需 DNS/hosts 解析到集群入口）
+
+# DevOps 真实构建：K8s Job 模式（DooD，挂节点 docker.sock）。
+# builder 镜像需先推到内网 registry（amd64）：
+#   docker pull docker:git && docker tag docker:git hub.wang.dd:5000/library/docker:git
+#   crane push --insecure ...（或 docker push）
+devops:
+  builder: k8s
+  builderImage: hub.wang.dd:5000/library/docker:git
+  registry: hub.wang.dd:5000         # 构建产物推送目标（同 image.registry 前缀）
+  registryUser: ""                   # hub.wang.dd:5000 无认证则留空
+  registryPass: ""
+  gitToken: ""                       # 构建公开仓库留空；私有仓库填 HTTPS token

@@ -1,0 +1,57 @@
+{{/*
+K8s 数据面：core 以 ServiceAccount 身份在集群内纳管 Workload/DataService CRD，
+并落地为 Deployment/StatefulSet/Job/CronJob + Service。Cluster 范围 RBAC（落地 namespace
+由 PAAS_K8S_NAMESPACE 限定，但 watch/reconcile 需集群级 list 权限）。
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "paas.fullname" . }}
+  labels: {{- include "paas.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "paas.fullname" . }}
+  labels: {{- include "paas.labels" . | nindent 4 }}
+rules:
+  # 自定义 CRD（core.aitoys.github.com）：reconcile Workload/DataService。
+  - apiGroups: ["core.aitoys.github.com"]
+    resources: ["workloads", "dataservices"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # CRD status 子资源（Reconciler 回写 status.ready/phase）：update/patch 需单独授权。
+  - apiGroups: ["core.aitoys.github.com"]
+    resources: ["workloads/status", "dataservices/status"]
+    verbs: ["update", "patch"]
+  # 工作负载落地（WorkloadReconciler → Deployment/Job/CronJob；DataServiceReconciler → StatefulSet）。
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Service（StatefulSet headless service）+ Pods/Events 只读（状态观测）。
+  - apiGroups: [""]
+    resources: ["services", "pods"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+  # DevOps 构建Job：core 取 Job Pod 日志解析 digest（builder.K8sJob，PAAS_DEVOPS_BUILDER=k8s）。
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "paas.fullname" . }}
+  labels: {{- include "paas.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "paas.fullname" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: ClusterRole
+  name: {{ include "paas.fullname" . }}
+  apiGroup: rbac.authorization.k8s.io

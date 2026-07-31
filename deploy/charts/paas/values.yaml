@@ -12,6 +12,17 @@ db:
   enabled: true
   url: ""                         # 外置 PG（db.enabled=false 时必填），如 postgres://user:pwd@host:5432/db?sslmode=disable
 
+# 内置 postgres 细节（db.enabled=true 时生效）。
+postgres:
+  image: postgres:16-alpine       # 内网集群改 registry 全名（如 hub.wang.dd:5000/library/postgres:16-alpine）
+  storageClassName: ""            # 指定 StorageClass（如 local-path）；空用集群默认 SC
+  storageSize: "10Gi"             # 数据卷大小
+
+# CRD：install=true 时 chart 一并 apply Workload/Dataservice CRD（K8s 数据面纳管所需）。
+# 重复 upgrade 幂等；uninstall 会删 CRD（连带 CR 实例，生产慎用 helm uninstall）。
+crds:
+  install: true
+
 # Ingress：enabled=true 暴露 HTTP（需集群 Ingress Controller）
 ingress:
   enabled: false
@@ -21,6 +32,17 @@ ingress:
 # 环境变量（core 启动配置）
 env:
   PAAS_API_KEY: ""                # 自定义 API Key（空则用默认演示 Key）
+
+# DevOps 构建流水线（代码→镜像）。
+# builder: k8s=创建 Job Pod 真实构建（DooD，需 K8s + 节点 docker.sock）；process=in-process
+#   docker（本地 dev，K8s/distroless 部署不可用）；空=Mock（零依赖派生 digest）。
+devops:
+  builder: ""
+  builderImage: "docker:git"      # k8s 模式 Job 容器镜像（内网改 hub.wang.dd:5000/library/docker:git）
+  registry: ""                    # 镜像推送目标 registry（如 hub.wang.dd:5000）
+  gitToken: ""                    # 私有 git 仓库 HTTPS token（公开仓库留空）
+  registryUser: ""                # registry docker login 用户名（无认证留空）
+  registryPass: ""                # registry docker login 密码
 
 # core 容器资源
 resources:

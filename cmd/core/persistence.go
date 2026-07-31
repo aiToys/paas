@@ -16,6 +16,8 @@ import (
 	"github.com/aitoys/paas/internal/appconfig"
 	appcfgmemory "github.com/aitoys/paas/internal/appconfig/memory"
 	appcfgpg "github.com/aitoys/paas/internal/appconfig/pg"
+	"github.com/aitoys/paas/internal/backup"
+	bkmemory "github.com/aitoys/paas/internal/backup/memory"
 	"github.com/aitoys/paas/internal/billing"
 	billingmemory "github.com/aitoys/paas/internal/billing/memory"
 	billingpg "github.com/aitoys/paas/internal/billing/pg"
@@ -43,8 +45,6 @@ import (
 	govpg "github.com/aitoys/paas/internal/governance/pg"
 	"github.com/aitoys/paas/internal/messaging"
 	msgmemory "github.com/aitoys/paas/internal/messaging/memory"
-	bkmemory "github.com/aitoys/paas/internal/backup/memory"
-	"github.com/aitoys/paas/internal/backup"
 	"github.com/aitoys/paas/internal/security"
 	secmemory "github.com/aitoys/paas/internal/security/memory"
 	secpg "github.com/aitoys/paas/internal/security/pg"
@@ -83,7 +83,7 @@ type Stores struct {
 // 横切依赖：devops store 依赖 workload.Repository（Release 编排找/建/更新 Workload），
 // 两路径下注入的 workload store 与 wlHandler 共享同一实例（用量/编排真源唯一）。
 func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(), error) {
-	devopsPipeline := newDevOpsPipeline() // PAAS_DEVOPS_REAL=true 用真实 git/docker，否则 nil=Mock
+	devopsPipeline := newDevOpsPipeline(appliers) // PAAS_DEVOPS_BUILDER 选 k8s/process/mock
 	if dsn := os.Getenv("PAAS_DB_URL"); dsn != "" {
 		db, err := storagepg.Open(ctx, dsn)
 		if err != nil {
@@ -116,7 +116,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		billingRepo := billingpg.NewStore(db)
 		secRepo := secpg.NewStore(db)
 		msgRepo := messaging.Repository(msgmemory.NewStore())
-	bkRepo := backup.Repository(bkmemory.NewStore())
+		bkRepo := backup.Repository(bkmemory.NewStore())
 
 		seedPGAllIfEmpty(ctx, idb, appRepo, envRepo, appcfgRepo, rawDs, rawWl,
 			devopsRepo, govRepo, ccRepo, billingRepo, secRepo)
@@ -138,7 +138,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 			Billing:        billingRepo,
 			Security:       secRepo,
 			Messaging:      msgRepo,
-		Backup:         bkRepo,
+			Backup:         bkRepo,
 		}
 		return stores, db.Close, nil
 	}
@@ -188,23 +188,57 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 	return stores, nil, nil
 }
 
-// newDevOpsPipeline 按 PAAS_DEVOPS_REAL 选择构建流水线。
-// 非空（true/1/yes）→ Real（git clone + docker build + push，凭证从 env 读）；
-// 空 → nil（Store 默认用 Mock，与历史行为一致）。
+// newDevOpsPipeline 按 PAAS_DEVOPS_BUILDER 选择构建流水线执行体：
+//   - k8s：创建 K8s Job Pod（DooD，挂节点 docker.sock）跑 git clone→docker build→push，
+//     core 轮询完成取日志解析 digest。需 K8s clientset 可用（集群内部署）。
+//   - process：core 进程内 os/exec git/docker（本地 dev，distroless/K8s 部署不可用）。
+//   - mock / 未设：nil（Store 默认 Mock，零依赖派生 digest，与历史一致）。
 //
-// Real 凭证 env：PAAS_REGISTRY（镜像仓库）、PAAS_GIT_TOKEN（私有仓库 HTTPS token）、
-// PAAS_REGISTRY_USER / PAAS_REGISTRY_PASS（docker login）。
-func newDevOpsPipeline() builder.Pipeline {
-	if !envEnabled("PAAS_DEVOPS_REAL") {
+// 向后兼容：未设 PAAS_DEVOPS_BUILDER 但 PAAS_DEVOPS_REAL=true → process。
+//
+// 凭证 env（k8s/process 共用）：PAAS_REGISTRY、PAAS_GIT_TOKEN、
+// PAAS_REGISTRY_USER / PAAS_REGISTRY_PASS。k8s 模式额外：PAAS_BUILDER_IMAGE（Job 容器镜像）。
+func newDevOpsPipeline(appliers k8sAppliers) builder.Pipeline {
+	mode := strings.ToLower(strings.TrimSpace(os.Getenv("PAAS_DEVOPS_BUILDER")))
+	if mode == "" && envEnabled("PAAS_DEVOPS_REAL") { // 向后兼容
+		mode = "process"
+	}
+	switch mode {
+	case "k8s":
+		if appliers.clientset == nil {
+			log.Printf("DevOps: PAAS_DEVOPS_BUILDER=k8s 但 K8s clientset 不可用，降级为 Mock")
+			return nil
+		}
+		log.Printf("DevOps: K8s Job 构建流水线已启用（namespace=%s, builderImage=%s）",
+			appliers.namespace, builderImageEnv())
+		return &builder.K8sJob{
+			Clientset:    appliers.clientset,
+			Namespace:    appliers.namespace,
+			BuilderImage: builderImageEnv(),
+			Registry:     os.Getenv("PAAS_REGISTRY"),
+			GitToken:     os.Getenv("PAAS_GIT_TOKEN"),
+			RegistryUser: os.Getenv("PAAS_REGISTRY_USER"),
+			RegistryPass: os.Getenv("PAAS_REGISTRY_PASS"),
+		}
+	case "process":
+		log.Printf("DevOps: in-process 构建流水线已启用（git clone + docker build + push，registry=%s）", os.Getenv("PAAS_REGISTRY")) //nolint:gosec // G706 误报：registry env 非用户输入
+		return &builder.Real{
+			Registry:     os.Getenv("PAAS_REGISTRY"),
+			GitToken:     os.Getenv("PAAS_GIT_TOKEN"),
+			RegistryUser: os.Getenv("PAAS_REGISTRY_USER"),
+			RegistryPass: os.Getenv("PAAS_REGISTRY_PASS"),
+		}
+	default: // "" / "mock" / 未知值
 		return nil
 	}
-	log.Printf("DevOps: 真实构建流水线已启用（git clone + docker build + push，registry=%s）", os.Getenv("PAAS_REGISTRY"))
-	return &builder.Real{
-		Registry:     os.Getenv("PAAS_REGISTRY"),
-		GitToken:     os.Getenv("PAAS_GIT_TOKEN"),
-		RegistryUser: os.Getenv("PAAS_REGISTRY_USER"),
-		RegistryPass: os.Getenv("PAAS_REGISTRY_PASS"),
+}
+
+// builderImageEnv 返回 Job 容器镜像（PAAS_BUILDER_IMAGE 或默认 docker:git）。
+func builderImageEnv() string {
+	if v := os.Getenv("PAAS_BUILDER_IMAGE"); v != "" {
+		return v
 	}
+	return "docker:git"
 }
 
 // envEnabled 判定布尔 env（true/1/yes/on，大小写不敏感）。
