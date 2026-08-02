@@ -2,17 +2,54 @@
 // 应用列表（主线）。应用是逻辑跨环境实体，列表不按 scope 过滤；
 // 每个应用卡片显示「在当前 scope 环境的部署徽标」（前端聚合应用 + 工作负载）。
 // scope 全部时显示「部署在 N 个环境」。环境切换统一走顶栏，本页无环境控件。
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
 
-// 新建应用：当前后端尚无 POST /api/applications 端点（应用为主线，本期未开放自助创建）。
-// 按钮保留引导性占位，点击给明确反馈而非静默无响应（避免用户误以为按钮坏了）。
-function notImplemented() {
-  ElMessage.info('应用创建接口尚未开放，敬请期待')
+// 新建应用弹窗：POST /api/applications（name+env+desc，ID 后端生成 + ApplyDefaults 补展示）。
+const createVisible = ref(false)
+const creating = ref(false)
+const createForm = reactive({ name: '', env: '开发', desc: '' })
+
+function openCreate() {
+  createForm.name = ''
+  createForm.env = '开发'
+  createForm.desc = ''
+  createVisible.value = true
+}
+
+async function createApp() {
+  if (!createForm.name.trim()) {
+    ElMessage.warning('请输入应用名称')
+    return
+  }
+  creating.value = true
+  try {
+    const resp = await fetchAuth('/api/applications', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: createForm.name.trim(),
+        env: createForm.env,
+        desc: createForm.desc.trim(),
+      }),
+    })
+    if (!resp.ok) {
+      const e = await resp.json().catch(() => ({}))
+      ElMessage.error('创建失败：' + (e.error || resp.statusText))
+      return
+    }
+    ElMessage.success('应用创建成功')
+    createVisible.value = false
+    load()
+  } catch (e) {
+    ElMessage.error('创建失败：' + (e as Error).message)
+  } finally {
+    creating.value = false
+  }
 }
 
 interface App {
@@ -126,12 +163,18 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
     <div class="toolbar">
       <div class="right">
         <span class="count mono">{{ apps.length }} 个应用</span>
-        <button class="new-btn" @click="notImplemented">+ 新建应用</button>
+        <button class="new-btn" @click="openCreate">+ 新建应用</button>
       </div>
     </div>
 
     <div v-if="loading" class="grid">
       <div v-for="i in 6" :key="i" class="skel" />
+    </div>
+    <div v-else-if="filteredApps.length === 0" class="empty-state">
+      <div class="empty-icon">🚀</div>
+      <h3>暂无应用</h3>
+      <p>创建你的第一个应用，开始管理模型路由、数据服务与部署。</p>
+      <button class="new-btn" @click="openCreate">+ 新建应用</button>
     </div>
     <div v-else class="grid">
       <article v-for="a in filteredApps" :key="a.id" class="app-card" @click="open(a)">
@@ -170,12 +213,35 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
         </div>
       </article>
 
-      <button class="add-card" @click="notImplemented">
+      <button class="add-card" @click="openCreate">
         <div class="add-icon">+</div>
         <div class="add-text">新建应用</div>
         <div class="add-hint">申请资源、部署服务</div>
       </button>
     </div>
+
+    <!-- 新建应用弹窗 -->
+    <el-dialog v-model="createVisible" title="新建应用" width="460px">
+      <el-form label-position="top">
+        <el-form-item label="应用名称" required>
+          <el-input v-model="createForm.name" placeholder="如 智能客服" maxlength="32" show-word-limit />
+        </el-form-item>
+        <el-form-item label="环境">
+          <el-select v-model="createForm.env" style="width: 100%">
+            <el-option label="开发" value="开发" />
+            <el-option label="预发" value="预发" />
+            <el-option label="生产" value="生产" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="描述">
+          <el-input v-model="createForm.desc" type="textarea" :rows="3" placeholder="应用用途简述" maxlength="200" show-word-limit />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="createVisible = false">取消</el-button>
+        <el-button type="primary" :loading="creating" @click="createApp">创建</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -183,6 +249,29 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
 .page {
   max-width: 1200px;
   margin: 0 auto;
+}
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 80px 20px;
+  text-align: center;
+  color: var(--text-faint);
+}
+.empty-state .empty-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+}
+.empty-state h3 {
+  margin: 0 0 8px;
+  color: var(--text);
+  font-size: 18px;
+}
+.empty-state p {
+  margin: 0 0 24px;
+  font-size: 14px;
+  max-width: 360px;
 }
 .toolbar {
   display: flex;

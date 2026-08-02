@@ -213,6 +213,20 @@ cmd/core serveHTTP
 - **写操作请求体全覆盖**：所有接收 JSON body 的 POST/PUT 均登记 `WithReqBody`（含 devops/configcenter 漏登记的 4 个 POST Operation）；无 body 的写操作（rollback/pay/heartbeat/publish/generate）按 REST 语义不强加 requestBody。
 - **后续**：vendored 本地 Scalar JS（离线）、自动 mock。
 
+### P1.1 应用去假 + 租户开通（生产可用起步）
+
+承接 P0 登录会话，解决「看起来假」的核心：应用 seed 演示数据 + 租户无法开通 + 模型硬编码（模型管理归 P1.2）。P1.1 聚焦应用去假 + 租户开通。设计见 `docs/superpowers/specs/2026-08-02-p1-real-platform.md`。
+
+- **应用 seed demo 门控**（零假数据）：`PAAS_DISABLE_DEMO_SEED=true`（chart `seed.demo=false`）时内存 `application/memory.NewStore()` + PG `seedApplications()` 两路径均跳过 `SeedApps()` 灌入，生产应用列表为空由用户自建；dev 默认灌示例应用。与演示凭证门控同源（`seedIdentity`），避免两套门控。`SeedApps()` 函数保留作 dev seed 真源。
+- **租户开通**（admin 后台）：identity 后端 CRUD 已齐（`/api/tenants|users|api-keys`，`adminGuard` super_admin），补前端：
+  - **菜单**：`auth/menus.go` `staticMenus()` system 下加「租户管理」（`/system/tenant`），前端 `lib/router/dynamic.ts` `import.meta.glob('@/modules/**/*.vue')` 自动识别组件。
+  - **system/tenant 模块**（console-admin）：`api.ts`（对接 `/api/tenants`，假分页适配 useCrud + `fetchAllTenants` 供用户表单选租户）+ `List.vue`（SearchTable + 删除走 `ElMessageBox.prompt` 输入租户 ID 确认）+ `TenantFormDrawer.vue`（id+name，core 无租户更新端点仅新建）。
+  - **system/user 选租户**：`api.ts` 去硬编码 `tenantId:'t-acme'`，`UserCreateRequest` 加 `tenantId`，`UserFormDrawer.vue` 加「所属租户」下拉（edit/view 禁用，租户不可改）；普通 tenant-admin 后端强制本租户兜底（`CreateUser` 非 super_admin 强制 `in.TenantID = callerTenant`）。
+- **DeleteTenant 非空保护**（防孤儿 + 防误删）：`identity.ErrTenantNotEmpty` sentinel；memory/pg `DeleteTenant` 前置检查有用户返 409（引导先清用户），handler 映射 `409 租户下仍有用户`。memory 保留级联清 API Key（防御孤儿），移除静默级联清用户（前置检查保证无用户）。跨 store 业务数据（应用/工作负载/数据服务）级联清留后（删租户低频高危）。
+- **console-user 应用创建**（去假后必需）：`Applications.vue` 「新建应用」从 `notImplemented` 占位改接真实 `POST /api/applications`（name+env+desc，ID 后端兜底生成 + `ApplyDefaults` 补展示）；el-dialog 创建弹窗 + 空状态引导（`filteredApps` 空时 🚀 + 「新建应用」CTA，非空白页）。
+- **开通流程**：admin 登录 console-admin -> 租户管理建租户 -> 用户管理建该租户管理员（选租户）-> 用户登录 console-user 自建应用/生成 API Key。
+- **留后续（P1.2）**：模型管理（Model/Channel/Credential CRUD + catalog 改 DB 驱动 + admin 页面）；跨 store 级联删租户业务数据；租户禁用/冻结（软删）；租户自助公开注册。
+
 ### 工作负载（应用运行形态）
 
 工作负载归属应用，分三类（Service/Job/CronJob），本期进程内 mock，真实 K8s 编排为下一切片：

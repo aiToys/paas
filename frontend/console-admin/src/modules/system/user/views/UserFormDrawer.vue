@@ -25,7 +25,7 @@
 </template>
 
 <script lang="ts" setup>
-import { ref, watch, reactive, computed } from 'vue'
+import { ref, watch, reactive, computed, onMounted } from 'vue'
 import { FormDrawer, RoleSelector } from '@/app/components'
 import type { FormField, FormDrawerMode } from '@/app/components/FormDrawer/types'
 import { ElMessage } from 'element-plus'
@@ -37,6 +37,7 @@ import {
   type UserCreateRequest,
 } from '../api'
 import { getCommonStatusOptions } from '@/app/constants/enums'
+import { fetchAllTenants, type TenantInfo } from '@/modules/system/tenant/api'
 
 const props = defineProps<{
   modelValue: boolean
@@ -61,6 +62,7 @@ watch(visible, (v) => emit('update:modelValue', v))
 
 const formData = reactive<UserCreateRequest & { confirmPassword: string }>({
   username: '',
+  tenantId: '',
   realName: '',
   email: '',
   phone: '',
@@ -70,6 +72,16 @@ const formData = reactive<UserCreateRequest & { confirmPassword: string }>({
   confirmPassword: '',
 })
 
+// 租户列表：创建用户时选所属租户（super_admin 跨租户；普通 admin 后端强制本租户）。
+const tenantOptions = ref<TenantInfo[]>([])
+const loadTenants = async () => {
+  try {
+    tenantOptions.value = await fetchAllTenants()
+  } catch {
+    // 加载失败静默：下拉为空，用户可手填或后端兜底
+  }
+}
+
 const drawerTitle = computed(() => {
   if (props.mode === 'add') return t('user.addTitle')
   if (props.mode === 'edit') return t('user.editTitle')
@@ -77,6 +89,15 @@ const drawerTitle = computed(() => {
 })
 
 const fields = computed<FormField[]>(() => [
+  {
+    prop: 'tenantId',
+    label: '所属租户',
+    type: 'select',
+    span: 12,
+    options: tenantOptions.value.map((tnt) => ({ label: `${tnt.name} (${tnt.id})`, value: tnt.id })),
+    disabled: props.mode !== 'add',
+    placeholder: '请选择租户',
+  },
   { prop: 'username', label: t('user.field.username'), type: 'input', span: 12 },
   { prop: 'realName', label: t('user.field.realName'), type: 'input', span: 12 },
   { prop: 'email', label: t('user.field.email'), type: 'input', span: 12 },
@@ -144,6 +165,7 @@ watch(() => formData.password, () => {
 })
 
 const rules = computed(() => ({
+  tenantId: [{ required: true, message: '请选择所属租户', trigger: 'change' }],
   username: [
     { required: true, message: t('user.validation.usernameRequired'), trigger: 'blur' },
     { min: 3, max: 20, message: t('user.validation.usernameLength'), trigger: 'blur' },
@@ -179,6 +201,7 @@ const rules = computed(() => ({
 const initForm = () => {
   const empty = {
     username: '',
+    tenantId: '',
     realName: '',
     email: '',
     phone: '',
@@ -191,6 +214,7 @@ const initForm = () => {
     const u = props.data
     Object.assign(formData, {
       username: u.username,
+      tenantId: u.tenantId ?? '',
       realName: u.realName,
       email: u.email,
       phone: u.phone,
@@ -228,4 +252,8 @@ const handleSubmit = async (data: Record<string, unknown>) => {
     submitting.value = false
   }
 }
+
+onMounted(() => {
+  loadTenants()
+})
 </script>

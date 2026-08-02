@@ -6,6 +6,7 @@ import { api } from '@/lib/http/client'
 // 用户信息接口
 export interface UserInfo {
   id: string
+  tenantId: string
   username: string
   realName: string
   email: string
@@ -39,6 +40,7 @@ export interface UserSearchResponse {
 // 用户创建/更新请求接口
 export interface UserCreateRequest {
   username: string
+  tenantId: string
   realName: string
   email: string
   phone: string
@@ -65,6 +67,7 @@ const toAdminStatus = (s?: string): 'active' | 'inactive' =>
 
 const mapUser = (u: CoreUser): UserInfo => ({
   id: u.id,
+  tenantId: u.tenantId,
   username: u.name,
   realName: u.name,
   email: u.email ?? '',
@@ -120,7 +123,7 @@ export const fetchUserDetail = async (id: string): Promise<UserInfo> => {
 export const createUser = async (data: UserCreateRequest): Promise<UserInfo> => {
   const body: CoreUserCreate = {
     id: `u-${data.username}`,
-    tenantId: 't-acme',
+    tenantId: data.tenantId,
     name: data.username,
     email: data.email,
     password: data.password,
