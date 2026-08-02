@@ -5,9 +5,10 @@ import (
 	"net/http"
 )
 
+// cookie 名导出供 gateway.BearerAuth 三通道复用（DRY，避免字符串漂移）。
 const (
-	accessCookieName  = "paas_access"
-	refreshCookieName = "paas_refresh"
+	AccessCookieName  = "paas_access"
+	RefreshCookieName = "paas_refresh"
 )
 
 // setSessionCookies 签发 access + refresh 两个 httpOnly cookie。
@@ -18,12 +19,12 @@ const (
 // SameSite=Lax 防 CSRF（同源 SPA 足够）。
 func setSessionCookies(w http.ResponseWriter, access, refresh string, secure bool) {
 	http.SetCookie(w, &http.Cookie{
-		Name: accessCookieName, Value: access, Path: "/",
+		Name: AccessCookieName, Value: access, Path: "/",
 		HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode,
 		MaxAge: int(AccessTTL.Seconds()),
 	})
 	http.SetCookie(w, &http.Cookie{
-		Name: refreshCookieName, Value: refresh, Path: "/api/auth",
+		Name: RefreshCookieName, Value: refresh, Path: "/api/auth",
 		HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode,
 		MaxAge: int(RefreshTTL.Seconds()),
 	})
@@ -32,18 +33,18 @@ func setSessionCookies(w http.ResponseWriter, access, refresh string, secure boo
 // clearSessionCookies 设过期清除两个 cookie（登出用）。
 func clearSessionCookies(w http.ResponseWriter, secure bool) {
 	http.SetCookie(w, &http.Cookie{
-		Name: accessCookieName, Path: "/", MaxAge: -1,
+		Name: AccessCookieName, Path: "/", MaxAge: -1,
 		HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode,
 	})
 	http.SetCookie(w, &http.Cookie{
-		Name: refreshCookieName, Path: "/api/auth", MaxAge: -1,
+		Name: RefreshCookieName, Path: "/api/auth", MaxAge: -1,
 		HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode,
 	})
 }
 
 // refreshFromCookie 从请求读 refresh cookie；无则返错误。
 func refreshFromCookie(r *http.Request) (string, error) {
-	c, err := r.Cookie(refreshCookieName)
+	c, err := r.Cookie(RefreshCookieName)
 	if err != nil || c.Value == "" {
 		return "", errors.New("missing refresh cookie")
 	}

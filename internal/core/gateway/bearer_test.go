@@ -104,3 +104,54 @@ func TestBearerAuthInvalidAPIKey(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
+
+func TestBearerAuthCookieChannel(t *testing.T) {
+	idb := idmemory.NewStore()
+	tok, _ := auth.Sign(auth.Claims{
+		Sub: "u2", Tenant: "t-globex", Roles: []string{"tenant-admin"},
+		Typ: auth.TokenAccess, Exp: time.Now().Add(time.Minute).Unix(),
+	}, testBearerSecret)
+
+	var got capture
+	h := BearerAuth(idb, testBearerSecret)(handlerProbe(t, &got))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: auth.AccessCookieName, Value: tok})
+	h.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "t-globex", got.tenant)
+	assert.Equal(t, "u2", got.userID)
+}
+
+// cookie + header 同时存在时，cookie 通道优先（浏览器会话场景）。
+func TestBearerAuthCookiePrecedence(t *testing.T) {
+	idb := idmemory.NewStore()
+	tok, _ := auth.Sign(auth.Claims{
+		Sub: "u-cookie", Tenant: "t-cookie", Roles: []string{"tenant-admin"},
+		Typ: auth.TokenAccess, Exp: time.Now().Add(time.Minute).Unix(),
+	}, testBearerSecret)
+
+	var got capture
+	h := BearerAuth(idb, testBearerSecret)(handlerProbe(t, &got))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: auth.AccessCookieName, Value: tok})
+	req.Header.Set("Authorization", "Bearer sk-unknown") // 即使 header 无效，cookie 优先
+	h.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "t-cookie", got.tenant, "cookie 通道应优先于 header")
+}
+
+// cookie 有但无效 -> 401，不降级到 header（防混淆）。
+func TestBearerAuthInvalidCookieRejects(t *testing.T) {
+	h := BearerAuth(idmemory.NewStore(), testBearerSecret)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Fatal("无效 cookie 不应进入下游")
+	}))
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.AddCookie(&http.Cookie{Name: auth.AccessCookieName, Value: "invalid.jwt.value"})
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}

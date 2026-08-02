@@ -19,6 +19,21 @@ import (
 func BearerAuth(idb identity.Repository, jwtSecret string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// 通道 1：access cookie（浏览器会话，优先于 header）。
+			// cookie 命中即走 JWT 解析；有 cookie 但无效 -> 401（不降级到 header，防混淆）。
+			if c, err := r.Cookie(auth.AccessCookieName); err == nil && c.Value != "" {
+				claims, perr := auth.ParseType(c.Value, jwtSecret, auth.TokenAccess)
+				if perr == nil {
+					ctx := tenant.WithTenant(r.Context(), claims.Tenant)
+					ctx = WithRoles(ctx, claims.Roles)
+					ctx = WithUserID(ctx, claims.Sub)
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+				httputil.WriteError(w, http.StatusUnauthorized, "invalid token")
+				return
+			}
+			// 通道 2/3：Authorization header（JWT 或 API Key）
 			tok, err := auth.BearerToken(r)
 			if err != nil {
 				httputil.WriteError(w, http.StatusUnauthorized, "missing bearer token")
