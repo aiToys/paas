@@ -55,3 +55,30 @@ func TestResolveAPIKeyDefaultsAndOverride(t *testing.T) {
 	t.Setenv("PAAS_API_KEY", "sk-custom")
 	assert.Equal(t, "sk-custom", resolveAPIKey())
 }
+
+func TestResolveJWTSecret_ProductionRejectsEmpty(t *testing.T) {
+	t.Setenv("PAAS_JWT_SECRET", "")
+	t.Setenv("PAAS_PROD", "true")
+
+	_, err := resolveJWTSecretOrErr()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "PAAS_JWT_SECRET")
+}
+
+func TestResolveJWTSecret_DevAllowsRandom(t *testing.T) {
+	t.Setenv("PAAS_JWT_SECRET", "")
+	t.Setenv("PAAS_PROD", "")
+
+	s, err := resolveJWTSecretOrErr()
+	require.NoError(t, err)
+	assert.NotEmpty(t, s)
+}
+
+func TestResolveJWTSecret_UsesEnvIfSet(t *testing.T) {
+	t.Setenv("PAAS_JWT_SECRET", "my-explicit-secret")
+	t.Setenv("PAAS_PROD", "true") // 生产模式但有显式 secret，应通过
+
+	s, err := resolveJWTSecretOrErr()
+	require.NoError(t, err)
+	assert.Equal(t, "my-explicit-secret", s)
+}

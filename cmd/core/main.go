@@ -186,18 +186,34 @@ func resolveAPIKey() string {
 	return "sk-acme-admin"
 }
 
-// resolveJWTSecret 解析 JWT 签名密钥。
-// PAAS_JWT_SECRET 非空则用之；空则随机生成 32 字节（重启后旧 token 失效，生产请配置）。
-func resolveJWTSecret() string {
+// resolveJWTSecretOrErr 返回 JWT secret 与可能的配置错误（可测，不调 os.Exit）。
+//   - PAAS_JWT_SECRET 非空 -> 用之
+//   - 空 + 生产模式（PAAS_PROD=true）-> 报错拒启
+//   - 空 + dev 模式（PAAS_PROD 未设）-> 随机生成 32 字节（保持本地零配置启动，重启后旧 token 失效）
+//
+// 偏离 plan 的 PAAS_DEV：改用正向 PAAS_PROD 标识生产，本地 ./bin/core 不设 env 仍可随机启动（不破坏现状）。
+func resolveJWTSecretOrErr() (string, error) {
 	if s := os.Getenv("PAAS_JWT_SECRET"); s != "" {
-		return s
+		return s, nil
+	}
+	if os.Getenv("PAAS_PROD") == "true" {
+		return "", fmt.Errorf("PAAS_JWT_SECRET 未配置：生产环境（PAAS_PROD=true）必须显式设置（≥32 字节随机串）")
 	}
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
-		log.Fatalf("生成 JWT 随机密钥失败: %v", err)
+		return "", fmt.Errorf("生成 JWT secret 失败: %w", err)
 	}
-	log.Printf("[auth] PAAS_JWT_SECRET 未配置，已随机生成（重启后旧 token 失效，生产环境请配置）")
-	return base64.StdEncoding.EncodeToString(b)
+	log.Printf("[auth] PAAS_JWT_SECRET 未配置，dev 模式随机生成（生产 PAAS_PROD=true 请配置）")
+	return base64.StdEncoding.EncodeToString(b), nil
+}
+
+// resolveJWTSecret 启动路径用：Fatal 包装 resolveJWTSecretOrErr。
+func resolveJWTSecret() string {
+	s, err := resolveJWTSecretOrErr()
+	if err != nil {
+		log.Fatalf("[auth] %v", err)
+	}
+	return s
 }
 
 // serveHTTP 挂载 OpenAI 兼容端点（鉴权 + RBAC）与存活探针。
