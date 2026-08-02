@@ -49,7 +49,7 @@ export interface UserCreateRequest {
   password?: string
 }
 
-// core /api/users 返回项（小驼峰；passwordHash 已 json:"-" 不回传）。
+// core /api/admin/users 返回项（小驼峰；passwordHash 已 json:"-" 不回传）。
 interface CoreUser {
   id: string
   tenantId: string
@@ -80,7 +80,7 @@ const mapUser = (u: CoreUser): UserInfo => ({
   loginCount: 0
 })
 
-// 创建用户 body（对接 core POST /api/users）。
+// 创建用户 body（对接 core POST /api/admin/users）。
 interface CoreUserCreate {
   id: string
   tenantId: string
@@ -92,9 +92,9 @@ interface CoreUserCreate {
   status: string
 }
 
-// 获取用户列表（对接 core GET /api/users；假分页 + keyword 过滤）。
+// 获取用户列表（对接 core GET /api/admin/users；假分页 + keyword 过滤）。
 export const fetchUserList = async (params: UserSearchRequest): Promise<UserSearchResponse> => {
-  const list = await api.get<CoreUser[]>('/api/users')
+  const list = await api.get<CoreUser[]>('/api/admin/users')
   let mapped = (list ?? []).map(mapUser)
   if (params.keyword) {
     const kw = params.keyword.toLowerCase()
@@ -113,13 +113,13 @@ export const fetchUserList = async (params: UserSearchRequest): Promise<UserSear
 
 // 获取用户详情（从列表派生，core 无单用户 GET）。
 export const fetchUserDetail = async (id: string): Promise<UserInfo> => {
-  const list = await api.get<CoreUser[]>('/api/users')
+  const list = await api.get<CoreUser[]>('/api/admin/users')
   const u = (list ?? []).find((x) => x.id === id)
   if (!u) throw new Error('用户不存在')
   return mapUser(u)
 }
 
-// 创建用户（对接 core POST /api/users；id 由 username 派生，默认租户 t-acme）。
+// 创建用户（对接 core POST /api/admin/users；id 由 username 派生，默认租户 t-acme）。
 export const createUser = async (data: UserCreateRequest): Promise<UserInfo> => {
   const body: CoreUserCreate = {
     id: `u-${data.username}`,
@@ -131,11 +131,11 @@ export const createUser = async (data: UserCreateRequest): Promise<UserInfo> => 
     isAdmin: data.roles.includes('tenant-admin'),
     status: data.status === 'inactive' ? 'disabled' : 'active'
   }
-  await api.post('/api/users', body)
+  await api.post('/api/admin/users', body)
   return mapUser({ ...body, name: data.username })
 }
 
-// 更新用户（对接 core PUT /api/users/{id}）。
+// 更新用户（对接 core PUT /api/admin/users/{id}）。
 export const updateUser = async (id: string, data: Partial<UserCreateRequest>): Promise<UserInfo> => {
   const body: Partial<CoreUserCreate> = {
     name: data.username,
@@ -145,19 +145,19 @@ export const updateUser = async (id: string, data: Partial<UserCreateRequest>): 
     status: data.status === 'inactive' ? 'disabled' : 'active',
     password: data.password
   }
-  await api.put(`/api/users/${id}`, body)
+  await api.put(`/api/admin/users/${id}`, body)
   return { ...mapUser({ id, tenantId: '', name: data.username ?? '', isAdmin: false, roles: [] }), ...data } as UserInfo
 }
 
-// 删除用户（对接 core DELETE /api/users/{id}）。
+// 删除用户（对接 core DELETE /api/admin/users/{id}）。
 export const deleteUser = async (id: string): Promise<boolean> => {
-  await api.del(`/api/users/${id}`)
+  await api.del(`/api/admin/users/${id}`)
   return true
 }
 
 // 批量删除用户（逐个调 core）。
 export const batchDeleteUsers = async (ids: string[]): Promise<boolean> => {
-  await Promise.all(ids.map((id) => api.del(`/api/users/${id}`)))
+  await Promise.all(ids.map((id) => api.del(`/api/admin/users/${id}`)))
   return true
 }
 

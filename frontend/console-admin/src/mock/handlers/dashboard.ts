@@ -19,7 +19,7 @@ function genTrend(days: number): { date: string; value: number }[] {
 
 export const dashboardHandlers = [
   // 仪表盘统计指标
-  http.get('/api/dashboard/stats', ({ request }) => {
+  http.get('/api/admin/dashboard/stats', ({ request }) => {
     const auth = request.headers.get('authorization') || ''
     const isAdmin = auth.includes('_admin_')
 
@@ -42,7 +42,7 @@ export const dashboardHandlers = [
   }),
 
   // 仪表盘图表数据
-  http.get('/api/dashboard/charts', ({ request }) => {
+  http.get('/api/admin/dashboard/charts', ({ request }) => {
     const searchParams = new URL(request.url).searchParams
     const range = searchParams.get('range') || '7d'
     const days = range === '7d' ? 7 : range === '30d' ? 30 : 90
@@ -58,7 +58,7 @@ export const dashboardHandlers = [
   }),
 
   // 仪表盘活动列表
-  http.get('/api/dashboard/activities', () => {
+  http.get('/api/admin/dashboard/activities', () => {
     return ok([
       {
         id: 'act-system-update',

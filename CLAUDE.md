@@ -218,9 +218,9 @@ cmd/core serveHTTP
 承接 P0 登录会话，解决「看起来假」的核心：应用 seed 演示数据 + 租户无法开通 + 模型硬编码（模型管理归 P1.2）。P1.1 聚焦应用去假 + 租户开通。设计见 `docs/superpowers/specs/2026-08-02-p1-real-platform.md`。
 
 - **应用 seed demo 门控**（零假数据）：`PAAS_DISABLE_DEMO_SEED=true`（chart `seed.demo=false`）时内存 `application/memory.NewStore()` + PG `seedApplications()` 两路径均跳过 `SeedApps()` 灌入，生产应用列表为空由用户自建；dev 默认灌示例应用。与演示凭证门控同源（`seedIdentity`），避免两套门控。`SeedApps()` 函数保留作 dev seed 真源。
-- **租户开通**（admin 后台）：identity 后端 CRUD 已齐（`/api/tenants|users|api-keys`，`adminGuard` super_admin），补前端：
+- **租户开通**（admin 后台）：identity 后端 CRUD 已齐（`/api/admin/tenants|users|api-keys`，`adminGuard` super_admin），补前端：
   - **菜单**：`auth/menus.go` `staticMenus()` system 下加「租户管理」（`/system/tenant`），前端 `lib/router/dynamic.ts` `import.meta.glob('@/modules/**/*.vue')` 自动识别组件。
-  - **system/tenant 模块**（console-admin）：`api.ts`（对接 `/api/tenants`，假分页适配 useCrud + `fetchAllTenants` 供用户表单选租户）+ `List.vue`（SearchTable + 删除走 `ElMessageBox.prompt` 输入租户 ID 确认）+ `TenantFormDrawer.vue`（id+name，core 无租户更新端点仅新建）。
+  - **system/tenant 模块**（console-admin）：`api.ts`（对接 `/api/admin/tenants`，假分页适配 useCrud + `fetchAllTenants` 供用户表单选租户）+ `List.vue`（SearchTable + 删除走 `ElMessageBox.prompt` 输入租户 ID 确认）+ `TenantFormDrawer.vue`（id+name，core 无租户更新端点仅新建）。
   - **system/user 选租户**：`api.ts` 去硬编码 `tenantId:'t-acme'`，`UserCreateRequest` 加 `tenantId`，`UserFormDrawer.vue` 加「所属租户」下拉（edit/view 禁用，租户不可改）；普通 tenant-admin 后端强制本租户兜底（`CreateUser` 非 super_admin 强制 `in.TenantID = callerTenant`）。
 - **DeleteTenant 非空保护**（防孤儿 + 防误删）：`identity.ErrTenantNotEmpty` sentinel；memory/pg `DeleteTenant` 前置检查有用户返 409（引导先清用户），handler 映射 `409 租户下仍有用户`。memory 保留级联清 API Key（防御孤儿），移除静默级联清用户（前置检查保证无用户）。跨 store 业务数据（应用/工作负载/数据服务）级联清留后（删租户低频高危）。
 - **console-user 应用创建**（去假后必需）：`Applications.vue` 「新建应用」从 `notImplemented` 占位改接真实 `POST /api/applications`（name+env+desc，ID 后端兜底生成 + `ApplyDefaults` 补展示）；el-dialog 创建弹窗 + 空状态引导（`filteredApps` 空时 🚀 + 「新建应用」CTA，非空白页）。
@@ -311,7 +311,7 @@ console-user 弃用 localStorage 明文 API Key 裸奔模式，改走密码登�
 多轮深度代码检测修复，平台级横切，后续切片自动继承：
 
 - **演示凭证门控**（防生产后门）：`PAAS_DISABLE_DEMO_SEED=true`（chart `seed.demo=false`）关闭 `admin/123456` + `sk-acme-admin/sk-globex-admin/sk-acme-dev` 演示凭证 seed；生产部署必须设 false。租户结构 + `PAAS_API_KEY`（运维配置）不受影响。两路径（内存 `seedIdentity` + PG `seedPGAllIfEmpty`）同源门控。
-- **平台级管理越权防护**：`adminGuard`（保护 `/api/tenants|users|api-keys|dashboard/*`）从 `tenant:admin` 收紧为 `super_admin`（`gateway.IsPlatformAdmin`），防 tenant-admin 越权枚举全部租户与用户。console-admin 的 IsAdmin 用户 token 携带 super_admin 标记（auth.issueTokens）通行。
+- **平台级管理越权防护**：`adminGuard`（保护 `/api/admin/tenants|users|api-keys|dashboard/*`）从 `tenant:admin` 收紧为 `super_admin`（`gateway.IsPlatformAdmin`），防 tenant-admin 越权枚举全部租户与用户。console-admin 的 IsAdmin 用户 token 携带 super_admin 标记（auth.issueTokens）通行。
 - **HTTP panic recover**：`recoveryMiddleware` 包 mux 最内层（otelhttp 外层），捕获 handler panic 防单请求挂掉进程（in-flight/SSE 流被强断），panic 栈入服务端日志，客户端只收 500 internal error。
 - **错误响应脱敏**：`httputil.WriteInternalError(w, err)` 统一 500 返 "internal error"（不泄漏 SQL 语句/表名/连接串），原始错误入日志；替换散落 40+ 处 `WriteError(w, 500, err.Error())`。`/v1/chat/completions` 503 按 sentinel 分类返脱敏 cause（credential issue/rate limited/upstream unavailable），不泄漏上游 URL/IP。
 - **构建日志 Git token 脱敏**：`builder.MaskToken/MaskErr` 对 `https://<token>@host` -> `https://***@` 脱敏，store `runBuild` 拿 res 后统一应用，防 git clone 失败 stderr 经 `BuildRun.Log` -> `GET /api/buildruns/{id}` 泄漏给 build:read。

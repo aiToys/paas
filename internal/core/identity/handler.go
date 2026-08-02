@@ -21,7 +21,7 @@ type HashPasswordFn func(plain string) (string, error)
 // 返 error 表示不达标。nil 时跳过校验（向后兼容）。
 type PasswordValidatorFn func(plain string) error
 
-// Handler 是 identity 管理 API 的 HTTP 处理器（/api/tenants、/api/users、/api/api-keys、/api/roles）。
+// Handler 是 identity 管理 API 的 HTTP 处理器（/api/admin/tenants、/api/admin/users、/api/admin/api-keys、/api/admin/roles）。
 // 各方法以 http.HandlerFunc 暴露，由 main.go 经 reg.Register 注册（同时登记 OpenAPI）。
 type Handler struct {
 	repo              Repository
@@ -111,7 +111,7 @@ func (h *Handler) DeleteTenant(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, http.StatusForbidden, "需要平台管理员权限")
 		return
 	}
-	id := pathID(r, "/api/tenants/")
+	id := pathID(r, "/api/admin/tenants/")
 	if id == "" {
 		httputil.WriteError(w, http.StatusBadRequest, "缺少 id")
 		return
@@ -203,7 +203,7 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
-	id := pathID(r, "/api/users/")
+	id := pathID(r, "/api/admin/users/")
 	if id == "" {
 		httputil.WriteError(w, http.StatusBadRequest, "缺少 id")
 		return
@@ -248,7 +248,7 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
-	id := pathID(r, "/api/users/")
+	id := pathID(r, "/api/admin/users/")
 	if id == "" {
 		httputil.WriteError(w, http.StatusBadRequest, "缺少 id")
 		return
@@ -335,7 +335,7 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
-	id := pathID(r, "/api/api-keys/")
+	id := pathID(r, "/api/admin/api-keys/")
 	if id == "" {
 		httputil.WriteError(w, http.StatusBadRequest, "缺少 id")
 		return
@@ -386,7 +386,7 @@ func (h *Handler) ListRoles(w http.ResponseWriter, r *http.Request) {
 
 // —— 辅助 ——
 
-// pathID 从请求路径取末段 id（如 /api/users/u-1 → u-1）。
+// pathID 从请求路径取末段 id（如 /api/admin/users/u-1 → u-1）。
 func pathID(r *http.Request, prefix string) string {
 	p := strings.TrimPrefix(r.URL.Path, prefix)
 	// 去掉可能的子路径

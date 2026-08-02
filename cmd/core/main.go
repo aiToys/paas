@@ -241,7 +241,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	authHandler := authPkg.NewHandler(stores.Identity, jwtSecret, os.Getenv("PAAS_COOKIE_SECURE") == "true")
 	// 注入审计记录器：登录/登出/失败记 security.AuditLog（adapter 桥接 + 注入 ctx tenant）。
 	authHandler = authHandler.WithAudit(&authAuditAdapter{store: stores.Security})
-	// identity 管理 API（/api/tenants、/api/users、/api/api-keys、/api/roles）：平台级，需 tenant:admin。
+	// identity 管理 API（/api/admin/tenants、/api/admin/users、/api/admin/api-keys、/api/admin/roles）：平台运维域，需 super_admin。
 	idmHandler := identity.NewHandler(stores.Identity).
 		HashPassword(authPkg.HashPassword).
 		PasswordValidator(authPkg.ValidatePassword)
@@ -617,12 +617,12 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		apiroute.Tags("认证"), apiroute.Summary("菜单下发（动态路由装载）"),
 		apiroute.WithResp([]authPkg.Menu{}))
 
-	// dashboard 聚合统计（admin 首页；需 tenant:admin）。
-	reg.Register("GET", "/api/dashboard/stats", adminGuard(http.HandlerFunc(dashHandler.Stats)),
+	// dashboard 聚合统计（admin 后台首页；/api/admin/* 平台运维域，super_admin 通行）。
+	reg.Register("GET", "/api/admin/dashboard/stats", adminGuard(http.HandlerFunc(dashHandler.Stats)),
 		apiroute.Tags("平台总览"), apiroute.Summary("首页统计聚合"), apiroute.WithResp(dashboard.Stats{}))
-	reg.Register("GET", "/api/dashboard/charts", adminGuard(http.HandlerFunc(dashHandler.Charts)),
+	reg.Register("GET", "/api/admin/dashboard/charts", adminGuard(http.HandlerFunc(dashHandler.Charts)),
 		apiroute.Tags("平台总览"), apiroute.Summary("趋势与分布"), apiroute.WithResp(dashboard.Charts{}))
-	reg.Register("GET", "/api/dashboard/activities", adminGuard(http.HandlerFunc(dashHandler.Activities)),
+	reg.Register("GET", "/api/admin/dashboard/activities", adminGuard(http.HandlerFunc(dashHandler.Activities)),
 		apiroute.Tags("平台总览"), apiroute.Summary("动态"), apiroute.WithResp([]dashboard.Activity{}))
 
 	// messaging（MQ topic/消费组 CRUD，租户隔离，方法级 dataservice 权限）。
@@ -651,28 +651,28 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("DELETE", "/dp/register", apiroute.Tags("数据面"), apiroute.Summary("反注册服务（?id=）"), apiroute.Perm("dp:write"))
 	reg.Operation("PUT", "/dp/heartbeat", apiroute.Tags("数据面"), apiroute.Summary("心跳（兼容保留，K8s readiness 是真源）"), apiroute.Perm("dp:write"))
 
-	// identity 管理 API（平台级 CRUD，需 tenant:admin；super_admin 通行）。
-	reg.Register("GET", "/api/tenants", adminGuard(http.HandlerFunc(idmHandler.ListTenants)),
+	// identity 管理 API（平台运维域 /api/admin/*，super_admin 通行）。
+	reg.Register("GET", "/api/admin/tenants", adminGuard(http.HandlerFunc(idmHandler.ListTenants)),
 		apiroute.Tags("身份管理"), apiroute.Summary("租户列表"), apiroute.WithResp([]identity.Tenant{}))
-	reg.Register("POST", "/api/tenants", adminGuard(http.HandlerFunc(idmHandler.CreateTenant)),
+	reg.Register("POST", "/api/admin/tenants", adminGuard(http.HandlerFunc(idmHandler.CreateTenant)),
 		apiroute.Tags("身份管理"), apiroute.Summary("创建租户"), apiroute.WithReqBody(identity.Tenant{}), apiroute.WithResp(identity.Tenant{}))
-	reg.Register("DELETE", "/api/tenants/{id}", adminGuard(http.HandlerFunc(idmHandler.DeleteTenant)),
+	reg.Register("DELETE", "/api/admin/tenants/{id}", adminGuard(http.HandlerFunc(idmHandler.DeleteTenant)),
 		apiroute.Tags("身份管理"), apiroute.Summary("删除租户（级联）"))
-	reg.Register("GET", "/api/users", adminGuard(http.HandlerFunc(idmHandler.ListUsers)),
+	reg.Register("GET", "/api/admin/users", adminGuard(http.HandlerFunc(idmHandler.ListUsers)),
 		apiroute.Tags("身份管理"), apiroute.Summary("用户列表（?tenantId= 过滤）"), apiroute.WithResp([]identity.User{}))
-	reg.Register("POST", "/api/users", adminGuard(http.HandlerFunc(idmHandler.CreateUser)),
+	reg.Register("POST", "/api/admin/users", adminGuard(http.HandlerFunc(idmHandler.CreateUser)),
 		apiroute.Tags("身份管理"), apiroute.Summary("创建用户（含密码）"), apiroute.WithResp(identity.User{}))
-	reg.Register("PUT", "/api/users/{id}", adminGuard(http.HandlerFunc(idmHandler.UpdateUser)),
+	reg.Register("PUT", "/api/admin/users/{id}", adminGuard(http.HandlerFunc(idmHandler.UpdateUser)),
 		apiroute.Tags("身份管理"), apiroute.Summary("更新用户（roles/status/密码可选）"), apiroute.WithResp(identity.User{}))
-	reg.Register("DELETE", "/api/users/{id}", adminGuard(http.HandlerFunc(idmHandler.DeleteUser)),
+	reg.Register("DELETE", "/api/admin/users/{id}", adminGuard(http.HandlerFunc(idmHandler.DeleteUser)),
 		apiroute.Tags("身份管理"), apiroute.Summary("删除用户"))
-	reg.Register("GET", "/api/api-keys", adminGuard(http.HandlerFunc(idmHandler.ListAPIKeys)),
+	reg.Register("GET", "/api/admin/api-keys", adminGuard(http.HandlerFunc(idmHandler.ListAPIKeys)),
 		apiroute.Tags("身份管理"), apiroute.Summary("API Key 列表（掩码，?tenantId= 过滤）"), apiroute.WithResp([]identity.APIKey{}))
-	reg.Register("POST", "/api/api-keys", adminGuard(http.HandlerFunc(idmHandler.CreateAPIKey)),
+	reg.Register("POST", "/api/admin/api-keys", adminGuard(http.HandlerFunc(idmHandler.CreateAPIKey)),
 		apiroute.Tags("身份管理"), apiroute.Summary("创建 API Key（返明文一次）"), apiroute.WithResp(identity.APIKey{}))
-	reg.Register("DELETE", "/api/api-keys/{id}", adminGuard(http.HandlerFunc(idmHandler.DeleteAPIKey)),
+	reg.Register("DELETE", "/api/admin/api-keys/{id}", adminGuard(http.HandlerFunc(idmHandler.DeleteAPIKey)),
 		apiroute.Tags("身份管理"), apiroute.Summary("删除 API Key"))
-	reg.Register("GET", "/api/roles", adminGuard(http.HandlerFunc(idmHandler.ListRoles)),
+	reg.Register("GET", "/api/admin/roles", adminGuard(http.HandlerFunc(idmHandler.ListRoles)),
 		apiroute.Tags("身份管理"), apiroute.Summary("内置角色列表（只读）"))
 
 	srv := &http.Server{

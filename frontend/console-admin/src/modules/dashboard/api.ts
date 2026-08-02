@@ -39,10 +39,10 @@ export interface Activity {
 export type ChartRange = '7d' | '30d' | '90d'
 
 export const fetchDashboardStats = () =>
-  api.get<DashboardStats>('/api/dashboard/stats')
+  api.get<DashboardStats>('/api/admin/dashboard/stats')
 
 export const fetchDashboardCharts = (range: ChartRange) =>
-  api.get<DashboardCharts>('/api/dashboard/charts', { params: { range } })
+  api.get<DashboardCharts>('/api/admin/dashboard/charts', { params: { range } })
 
 export const fetchDashboardActivities = () =>
-  api.get<Activity[]>('/api/dashboard/activities')
+  api.get<Activity[]>('/api/admin/dashboard/activities')

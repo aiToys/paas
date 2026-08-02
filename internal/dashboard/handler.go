@@ -60,7 +60,7 @@ type Handler struct {
 // NewHandler 创建 dashboard handler。
 func NewHandler(idb identity.Repository) *Handler { return &Handler{idb: idb} }
 
-// Stats: GET /api/dashboard/stats —— 平台级聚合统计。
+// Stats: GET /api/admin/dashboard/stats —— 平台级聚合统计。
 func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	users, _ := h.idb.ListUsers(ctx, "")
@@ -76,7 +76,7 @@ func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// Charts: GET /api/dashboard/charts —— 近 7 天趋势 + 租户用户分布。
+// Charts: GET /api/admin/dashboard/charts —— 近 7 天趋势 + 租户用户分布。
 func (h *Handler) Charts(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	users, _ := h.idb.ListUsers(ctx, "")
@@ -107,7 +107,7 @@ func (h *Handler) Charts(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteData(w, Charts{Trend: trend, Distribution: dist})
 }
 
-// Activities: GET /api/dashboard/activities —— 静态系统提示（无审计跨租户聚合，留后续）。
+// Activities: GET /api/admin/dashboard/activities —— 静态系统提示（无审计跨租户聚合，留后续）。
 func (h *Handler) Activities(w http.ResponseWriter, _ *http.Request) {
 	now := time.Now().Format(time.RFC3339)
 	httputil.WriteData(w, []Activity{

@@ -112,11 +112,7 @@ console.log(`📊 Mock API 端点: ${mockApis.length} 个\n`)
 const CORE_BACKEND_PREFIXES = [
   '/api/auth/',
   '/api/system/menus',
-  '/api/dashboard/',
-  '/api/tenants',
-  '/api/users',
-  '/api/api-keys',
-  '/api/roles'
+  '/api/admin/'
 ]
 const isCoreBackend = (p) => CORE_BACKEND_PREFIXES.some((prefix) => p.startsWith(prefix))
 

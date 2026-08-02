@@ -201,10 +201,10 @@ func dataSlice(t *testing.T, body []byte) []map[string]any {
 
 func TestTenantsCRUD(t *testing.T) {
 	h := newAdminHandler()
-	rec := doReq(t, h.CreateTenant, http.MethodPost, "/api/tenants", `{"id":"t-new","name":"NewCo"}`)
+	rec := doReq(t, h.CreateTenant, http.MethodPost, "/api/admin/tenants", `{"id":"t-new","name":"NewCo"}`)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	rec = doReq(t, h.ListTenants, http.MethodGet, "/api/tenants", "")
+	rec = doReq(t, h.ListTenants, http.MethodGet, "/api/admin/tenants", "")
 	require.Equal(t, http.StatusOK, rec.Code)
 	names := []string{}
 	for _, tnt := range dataSlice(t, rec.Body.Bytes()) {
@@ -212,49 +212,49 @@ func TestTenantsCRUD(t *testing.T) {
 	}
 	assert.Contains(t, names, "NewCo")
 
-	rec = doReq(t, h.DeleteTenant, http.MethodDelete, "/api/tenants/t-new", "")
+	rec = doReq(t, h.DeleteTenant, http.MethodDelete, "/api/admin/tenants/t-new", "")
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
 func TestDeleteTenantNonEmptyRejected(t *testing.T) {
 	h := newAdminHandler()
 	// 建租户 + 用户
-	require.Equal(t, http.StatusOK, doReq(t, h.CreateTenant, http.MethodPost, "/api/tenants", `{"id":"t-ne","name":"NonEmpty"}`).Code)
-	require.Equal(t, http.StatusOK, doReq(t, h.CreateUser, http.MethodPost, "/api/users",
+	require.Equal(t, http.StatusOK, doReq(t, h.CreateTenant, http.MethodPost, "/api/admin/tenants", `{"id":"t-ne","name":"NonEmpty"}`).Code)
+	require.Equal(t, http.StatusOK, doReq(t, h.CreateUser, http.MethodPost, "/api/admin/users",
 		`{"id":"u-ne","tenantId":"t-ne","name":"ne-user","password":"secret","roles":["developer"]}`).Code)
 	// 删有用户的租户 -> 409
-	rec := doReq(t, h.DeleteTenant, http.MethodDelete, "/api/tenants/t-ne", "")
+	rec := doReq(t, h.DeleteTenant, http.MethodDelete, "/api/admin/tenants/t-ne", "")
 	require.Equal(t, http.StatusConflict, rec.Code)
 	assert.Contains(t, rec.Body.String(), "仍有用户")
 	// 清用户后删 -> 204
-	require.Equal(t, http.StatusNoContent, doReq(t, h.DeleteUser, http.MethodDelete, "/api/users/u-ne", "").Code)
-	assert.Equal(t, http.StatusNoContent, doReq(t, h.DeleteTenant, http.MethodDelete, "/api/tenants/t-ne", "").Code)
+	require.Equal(t, http.StatusNoContent, doReq(t, h.DeleteUser, http.MethodDelete, "/api/admin/users/u-ne", "").Code)
+	assert.Equal(t, http.StatusNoContent, doReq(t, h.DeleteTenant, http.MethodDelete, "/api/admin/tenants/t-ne", "").Code)
 }
 
 func TestUsersCRUDNoPasswordLeak(t *testing.T) {
 	h := newAdminHandler()
-	rec := doReq(t, h.CreateUser, http.MethodPost, "/api/users",
+	rec := doReq(t, h.CreateUser, http.MethodPost, "/api/admin/users",
 		`{"id":"u1","tenantId":"t1","name":"alice","password":"secret","roles":["developer"]}`)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	rec = doReq(t, h.ListUsers, http.MethodGet, "/api/users", "")
+	rec = doReq(t, h.ListUsers, http.MethodGet, "/api/admin/users", "")
 	require.Equal(t, http.StatusOK, rec.Code)
 	us := dataSlice(t, rec.Body.Bytes())
 	require.Len(t, us, 1)
 	_, hasHash := us[0]["passwordHash"]
 	assert.False(t, hasHash, "列表不应回传 passwordHash")
 
-	rec = doReq(t, h.UpdateUser, http.MethodPut, "/api/users/u1",
+	rec = doReq(t, h.UpdateUser, http.MethodPut, "/api/admin/users/u1",
 		`{"name":"alice2","password":"newpw","roles":["viewer"],"isAdmin":false,"status":"active"}`)
 	require.Equal(t, http.StatusOK, rec.Code)
 
-	rec = doReq(t, h.DeleteUser, http.MethodDelete, "/api/users/u1", "")
+	rec = doReq(t, h.DeleteUser, http.MethodDelete, "/api/admin/users/u1", "")
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
 func TestAPIKeyCreatePlaintextListMasks(t *testing.T) {
 	h := newAdminHandler()
-	rec := doReq(t, h.CreateAPIKey, http.MethodPost, "/api/api-keys",
+	rec := doReq(t, h.CreateAPIKey, http.MethodPost, "/api/admin/api-keys",
 		`{"tenantId":"t1","userId":"u1","roles":["developer"]}`)
 	require.Equal(t, http.StatusOK, rec.Code)
 	var wrap struct {
@@ -264,7 +264,7 @@ func TestAPIKeyCreatePlaintextListMasks(t *testing.T) {
 	key := wrap.Data["key"].(string)
 	assert.True(t, strings.HasPrefix(key, "sk-"))
 
-	rec = doReq(t, h.ListAPIKeys, http.MethodGet, "/api/api-keys", "")
+	rec = doReq(t, h.ListAPIKeys, http.MethodGet, "/api/admin/api-keys", "")
 	require.Equal(t, http.StatusOK, rec.Code)
 	ks := dataSlice(t, rec.Body.Bytes())
 	require.Len(t, ks, 1)
@@ -275,7 +275,7 @@ func TestAPIKeyCreatePlaintextListMasks(t *testing.T) {
 
 func TestListRoles(t *testing.T) {
 	h := newAdminHandler()
-	rec := doReq(t, h.ListRoles, http.MethodGet, "/api/roles", "")
+	rec := doReq(t, h.ListRoles, http.MethodGet, "/api/admin/roles", "")
 	require.Equal(t, http.StatusOK, rec.Code)
 	names := []string{}
 	for _, r := range dataSlice(t, rec.Body.Bytes()) {
@@ -302,13 +302,13 @@ func TestTenantAdminCannotCrossTenant(t *testing.T) {
 	h.IsPlatformAdmin = func(*http.Request) bool { return false } // 普通 tenant-admin
 
 	// t-acme 的 tenant-admin 尝试删 t-globex 的用户 → 应 404（userInCallerTenant 拒绝）。
-	r := withTenantReq(httptest.NewRequest(http.MethodDelete, "/api/users/u-globex", nil), "t-acme")
+	r := withTenantReq(httptest.NewRequest(http.MethodDelete, "/api/admin/users/u-globex", nil), "t-acme")
 	rec := httptest.NewRecorder()
 	h.DeleteUser(rec, r)
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 
 	// 列表：tenant-admin 只看到本租户用户（1 条），看不到 t-globex。
-	r = withTenantReq(httptest.NewRequest(http.MethodGet, "/api/users", nil), "t-acme")
+	r = withTenantReq(httptest.NewRequest(http.MethodGet, "/api/admin/users", nil), "t-acme")
 	rec = httptest.NewRecorder()
 	h.ListUsers(rec, r)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -317,13 +317,13 @@ func TestTenantAdminCannotCrossTenant(t *testing.T) {
 	assert.Equal(t, "u-acme", users[0]["id"])
 
 	// 租户枚举对 tenant-admin 禁止（仅平台超管）。
-	r = withTenantReq(httptest.NewRequest(http.MethodGet, "/api/tenants", nil), "t-acme")
+	r = withTenantReq(httptest.NewRequest(http.MethodGet, "/api/admin/tenants", nil), "t-acme")
 	rec = httptest.NewRecorder()
 	h.ListTenants(rec, r)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 
 	// tenant-admin 创建用户时不可授予超管（防提权）。
-	r = withTenantReq(httptest.NewRequest(http.MethodPost, "/api/users",
+	r = withTenantReq(httptest.NewRequest(http.MethodPost, "/api/admin/users",
 		strings.NewReader(`{"id":"u2","tenantId":"t-globex","name":"x","isAdmin":true}`)), "t-acme")
 	r.Header.Set("Content-Type", "application/json")
 	rec = httptest.NewRecorder()
@@ -341,7 +341,7 @@ func TestPlatformAdminCrossTenant(t *testing.T) {
 	h := NewHandler(repo)
 	h.IsPlatformAdmin = func(*http.Request) bool { return true }
 
-	r := withTenantReq(httptest.NewRequest(http.MethodDelete, "/api/users/u-globex", nil), "t-acme")
+	r := withTenantReq(httptest.NewRequest(http.MethodDelete, "/api/admin/users/u-globex", nil), "t-acme")
 	rec := httptest.NewRecorder()
 	h.DeleteUser(rec, r)
 	assert.Equal(t, http.StatusNoContent, rec.Code, "平台超管可跨租户删除")
