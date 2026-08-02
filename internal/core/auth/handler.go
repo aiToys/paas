@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -42,12 +43,13 @@ type Handler struct {
 	idb          identity.Repository
 	secret       string
 	cookieSecure bool
+	limiter      *loginLimiter
 }
 
 // NewHandler 创建 auth handler。secret 为 JWT 签名密钥；cookieSecure 控制 session cookie 的
-// Secure 位（HTTP 部署 false，配 TLS 后 true）。
+// Secure 位（HTTP 部署 false，配 TLS 后 true）。内部初始化登录限流器（per-IP+per-username）。
 func NewHandler(idb identity.Repository, secret string, cookieSecure bool) *Handler {
-	return &Handler{idb: idb, secret: secret, cookieSecure: cookieSecure}
+	return &Handler{idb: idb, secret: secret, cookieSecure: cookieSecure, limiter: newLoginLimiter()}
 }
 
 // Login: POST /api/auth/sessions —— 用户名密码换 token 对。
@@ -61,14 +63,22 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		writeAuthErr(w, http.StatusBadRequest, "用户名与密码必填")
 		return
 	}
+	ip := clientIP(r)
+	if ok, retry := h.limiter.allow(ip, req.Username); !ok {
+		writeAuthErr(w, http.StatusTooManyRequests,
+			fmt.Sprintf("登录尝试过多，请 %d 秒后再试", int(retry.Seconds())+1))
+		return
+	}
 	u, err := h.idb.GetUserByName(r.Context(), req.Username)
 	if err != nil {
+		h.limiter.recordFailure(ip, req.Username)
 		writeAuthErr(w, http.StatusUnauthorized, "用户名或密码错误")
 		return
 	}
 	// 先验密码（不存在/密码错统一 401，不泄漏账号存在性），再检查状态：
 	// 密码已验证后提示禁用不增加枚举风险（攻击者需已知密码才能发现账号禁用）。
 	if u.PasswordHash == "" || !CheckPassword(u.PasswordHash, req.Password) {
+		h.limiter.recordFailure(ip, req.Username)
 		writeAuthErr(w, http.StatusUnauthorized, "用户名或密码错误")
 		return
 	}
@@ -76,6 +86,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		writeAuthErr(w, http.StatusForbidden, "账号已禁用")
 		return
 	}
+	h.limiter.recordSuccess(ip, req.Username)
 	res, err := h.issueTokens(u)
 	if err != nil {
 		writeAuthErr(w, http.StatusInternalServerError, "签发 token 失败")

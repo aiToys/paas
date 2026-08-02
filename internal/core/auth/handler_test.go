@@ -226,3 +226,15 @@ func TestLogoutClearsCookies(t *testing.T) {
 		assert.Less(t, c.MaxAge, 0, "cookie %s 应过期清除", c.Name)
 	}
 }
+
+func TestLoginRateLimitedAfter5Fails(t *testing.T) {
+	h := newAuthHandler(t)
+	body := `{"username":"admin","password":"wrong"}`
+	for i := 0; i < 5; i++ {
+		rec := doJSON(t, h.Login, http.MethodPost, "/api/auth/sessions", body)
+		require.Equal(t, http.StatusUnauthorized, rec.Code, "前 5 次应 401")
+	}
+	// 第 6 次应 429（per-IP+per-username 锁定）
+	rec := doJSON(t, h.Login, http.MethodPost, "/api/auth/sessions", body)
+	require.Equal(t, http.StatusTooManyRequests, rec.Code, "5 次失败后应 429")
+}
