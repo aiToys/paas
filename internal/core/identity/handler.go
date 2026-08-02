@@ -38,7 +38,10 @@ func NewHandler(repo Repository) *Handler { return &Handler{repo: repo} }
 func (h *Handler) HashPassword(fn HashPasswordFn) *Handler { h.hashPassword = fn; return h }
 
 // PasswordValidator 设置密码强度校验器（main.go 注入 auth.ValidatePassword）。
-func (h *Handler) PasswordValidator(fn PasswordValidatorFn) *Handler { h.passwordValidator = fn; return h }
+func (h *Handler) PasswordValidator(fn PasswordValidatorFn) *Handler {
+	h.passwordValidator = fn
+	return h
+}
 
 // platformAdmin 判定调用者是否平台超管；未注入 IsPlatformAdmin 时保守按 false（最小权限）。
 func (h *Handler) platformAdmin(r *http.Request) bool {

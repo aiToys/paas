@@ -18,12 +18,12 @@ const (
 // secure 由 PAAS_COOKIE_SECURE 控制：HTTP 部署需 false（否则浏览器拒收），配 TLS 后 true。
 // SameSite=Lax 防 CSRF（同源 SPA 足够）。
 func setSessionCookies(w http.ResponseWriter, access, refresh string, secure bool) {
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124 Secure 由 PAAS_COOKIE_SECURE 配置驱动（HTTP 部署需 false）
 		Name: AccessCookieName, Value: access, Path: "/",
 		HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode,
 		MaxAge: int(AccessTTL.Seconds()),
 	})
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124 Secure 由 PAAS_COOKIE_SECURE 配置驱动（HTTP 部署需 false）
 		Name: RefreshCookieName, Value: refresh, Path: "/api/auth",
 		HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode,
 		MaxAge: int(RefreshTTL.Seconds()),
@@ -32,11 +32,11 @@ func setSessionCookies(w http.ResponseWriter, access, refresh string, secure boo
 
 // clearSessionCookies 设过期清除两个 cookie（登出用）。
 func clearSessionCookies(w http.ResponseWriter, secure bool) {
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124 Secure 由 PAAS_COOKIE_SECURE 配置驱动（HTTP 部署需 false）
 		Name: AccessCookieName, Path: "/", MaxAge: -1,
 		HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode,
 	})
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124 Secure 由 PAAS_COOKIE_SECURE 配置驱动（HTTP 部署需 false）
 		Name: RefreshCookieName, Path: "/api/auth", MaxAge: -1,
 		HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode,
 	})

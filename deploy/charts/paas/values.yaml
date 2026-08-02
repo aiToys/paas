@@ -68,6 +68,15 @@ dataplane:
 seed:
   demo: true
 
+# 身份会话：JWT 签名 secret + cookie Secure + 生产标识。
+#   - jwtSecret：生产必填（≥32 字节随机串，openssl rand -hex 32）；空 + prod=true 拒启；dev 空则随机生成。
+#   - cookieSecure：HTTP 部署 false（否则浏览器拒收 cookie），配 ingress TLS 后 true。
+#   - prod：true 表生产（强制 jwtSecret 非空，且应配合 seed.demo=false 关演示凭证）。
+auth:
+  jwtSecret: ""
+  cookieSecure: false
+  prod: false
+
 # core 容器资源
 resources:
   requests: { cpu: 100m, memory: 128Mi }

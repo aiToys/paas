@@ -33,6 +33,13 @@ spec:
             # 演示凭证 seed：seed.demo=false 时设 true，关闭 admin/123456 + sk-* 演示 Key（生产防护）。
             - name: PAAS_DISABLE_DEMO_SEED
               value: {{ if not .Values.seed.demo }}"true"{{ else }}""{{ end }}
+            # 身份会话：JWT secret（生产必填，空+prod=true 拒启）；cookie Secure（HTTP false / TLS true）；生产标识。
+            - name: PAAS_JWT_SECRET
+              value: {{ .Values.auth.jwtSecret | quote }}
+            - name: PAAS_COOKIE_SECURE
+              value: {{ .Values.auth.cookieSecure | quote }}
+            - name: PAAS_PROD
+              value: {{ .Values.auth.prod | quote }}
             # K8s 数据面（in-cluster）：ctrl.GetConfigOrDie() 自动用 ServiceAccount token，
             # 无需 PAAS_KUBECONFIG。落地 namespace = release namespace；metrics server 禁用避端口冲突。
             - name: PAAS_K8S_NAMESPACE

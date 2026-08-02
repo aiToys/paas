@@ -192,7 +192,7 @@ func TestRefreshReadsCookie(t *testing.T) {
 	rt, _ := Sign(Claims{Sub: "u-admin", Tenant: "t-acme", Roles: []string{"tenant-admin"},
 		Typ: TokenRefresh, Exp: 9999999999}, hSecret)
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/tokens/refresh", nil)
-	req.AddCookie(&http.Cookie{Name: RefreshCookieName, Value: rt})
+	req.AddCookie(&http.Cookie{Name: RefreshCookieName, Value: rt}) //nolint:gosec // G124 测试 cookie 无需安全属性
 	rec := httptest.NewRecorder()
 	h.Refresh(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)

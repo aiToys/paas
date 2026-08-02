@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	loginMaxFails = 5               // 窗口内失败次数上限
-	loginWindow   = 5 * time.Minute // 失败计数窗口
+	loginMaxFails = 5                // 窗口内失败次数上限
+	loginWindow   = 5 * time.Minute  // 失败计数窗口
 	loginLockout  = 15 * time.Minute // 超限锁定时长
 )
 

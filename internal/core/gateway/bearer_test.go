@@ -116,7 +116,7 @@ func TestBearerAuthCookieChannel(t *testing.T) {
 	h := BearerAuth(idb, testBearerSecret)(handlerProbe(t, &got))
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.AddCookie(&http.Cookie{Name: auth.AccessCookieName, Value: tok})
+	req.AddCookie(&http.Cookie{Name: auth.AccessCookieName, Value: tok}) //nolint:gosec // G124 测试 cookie 无需安全属性
 	h.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -136,8 +136,8 @@ func TestBearerAuthCookiePrecedence(t *testing.T) {
 	h := BearerAuth(idb, testBearerSecret)(handlerProbe(t, &got))
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.AddCookie(&http.Cookie{Name: auth.AccessCookieName, Value: tok})
-	req.Header.Set("Authorization", "Bearer sk-unknown") // 即使 header 无效，cookie 优先
+	req.AddCookie(&http.Cookie{Name: auth.AccessCookieName, Value: tok}) //nolint:gosec // G124 测试 cookie 无需安全属性
+	req.Header.Set("Authorization", "Bearer sk-unknown")                 // 即使 header 无效，cookie 优先
 	h.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -151,7 +151,7 @@ func TestBearerAuthInvalidCookieRejects(t *testing.T) {
 	}))
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.AddCookie(&http.Cookie{Name: auth.AccessCookieName, Value: "invalid.jwt.value"})
+	req.AddCookie(&http.Cookie{Name: auth.AccessCookieName, Value: "invalid.jwt.value"}) //nolint:gosec // G124 测试 cookie 无需安全属性
 	h.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }

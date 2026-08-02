@@ -70,7 +70,7 @@ func TestRefreshFromCookie(t *testing.T) {
 	if _, err := refreshFromCookie(req); err == nil {
 		t.Error("无 cookie 应返错")
 	}
-	req.AddCookie(&http.Cookie{Name: "paas_refresh", Value: "rt"})
+	req.AddCookie(&http.Cookie{Name: "paas_refresh", Value: "rt"}) //nolint:gosec // G124 测试 cookie 无需安全属性
 	v, err := refreshFromCookie(req)
 	if err != nil || v != "rt" {
 		t.Errorf("有 cookie 应返值，got v=%q err=%v", v, err)
