@@ -1,3 +1,0 @@
-DROP TABLE IF EXISTS billing_records CASCADE;
-DROP TABLE IF EXISTS billing_usages CASCADE;
-DROP TABLE IF EXISTS billing_quotas CASCADE;
