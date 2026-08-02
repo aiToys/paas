@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessageBox } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
-import { auth, setApiKey, currentPreset, PRESET_KEYS } from '@/api'
 import { useEnvStore } from '@/stores/env'
+import { useSessionStore } from '@/stores/session'
 import { useTheme } from '@/composables/useTheme'
 
 const route = useRoute()
@@ -31,13 +31,10 @@ onMounted(async () => {
 })
 onUnmounted(() => { if (prodTimer) window.clearInterval(prodTimer) })
 
-// 当前身份视角（来自 API Key）：租户标签 + 头像首字母；自定义 Key 退化为通用展示。
-const identityLabel = computed(() => currentPreset()?.label ?? '自定义 Key')
-const identityInitial = computed(() => {
-  const p = currentPreset()
-  if (p) return p.tenant.replace('t-', '').charAt(0).toUpperCase()
-  return 'U'
-})
+const session = useSessionStore()
+// 当前身份视角（来自会话 profile）：用户名 + 首字母。
+const identityLabel = computed(() => session.profile?.username ?? '未登录')
+const identityInitial = computed(() => (session.profile?.username ?? 'U').charAt(0).toUpperCase())
 
 // 环境选择器
 const envLabel = computed(() => envStore.currentEnv?.name ?? '全部环境')
@@ -59,22 +56,22 @@ async function onPickEnv(cmd: string | number | object) {
   if (env) await envStore.switchEnv(env)
 }
 
-async function onPickKey(cmd: string | number | object) {
-  const key = String(cmd)
-  if (key === '__custom') {
-    try {
-      const { value } = await ElMessageBox.prompt('输入 API Key（绑定租户与角色）', '切换 API Key', {
-        confirmButtonText: '切换',
-        cancelButtonText: '取消',
-        inputPlaceholder: 'sk-...',
-      })
-      if (value.trim()) setApiKey(value.trim())
-    } catch {
-      // 用户取消
-    }
+// 演示账号快切（dev/demo）：预设账号一键登录；__logout 退出。
+async function onPickAccount(cmd: string | number | object) {
+  const c = String(cmd)
+  if (c === '__logout') {
+    await session.logout()
+    router.push('/login')
     return
   }
-  setApiKey(key)
+  const d = session.DEMO_ACCOUNTS.find((a) => a.username === c)
+  if (!d) return
+  try {
+    await session.login(d.username, d.password)
+    ElMessage.success(`已切换到 ${d.label}`)
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '切换失败')
+  }
 }
 
 interface NavItem {
@@ -249,7 +246,7 @@ function isActive(to: string) {
               <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
             </svg>
           </button>
-          <el-dropdown trigger="click" @command="onPickKey">
+          <el-dropdown trigger="click" @command="onPickAccount">
             <div class="tenant-chip">
               <div class="t-avatar">{{ identityInitial }}</div>
               <span v-if="!collapsed">{{ identityLabel }}</span>
@@ -257,17 +254,17 @@ function isActive(to: string) {
             <template #dropdown>
               <el-dropdown-menu>
                 <el-dropdown-item
-                  v-for="p in PRESET_KEYS"
-                  :key="p.key"
-                  :command="p.key"
-                  :disabled="p.key === auth.key"
+                  v-for="d in session.DEMO_ACCOUNTS"
+                  :key="d.username"
+                  :command="d.username"
+                  :disabled="d.username === session.profile?.username"
                 >
                   <div class="key-row">
-                    <span>{{ p.label }}</span>
-                    <span class="key-role">{{ p.role }}</span>
+                    <span>{{ d.label }}</span>
+                    <span class="key-role">{{ d.role }}</span>
                   </div>
                 </el-dropdown-item>
-                <el-dropdown-item command="__custom" divided>自定义 Key…</el-dropdown-item>
+                <el-dropdown-item command="__logout" divided>退出登录</el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
