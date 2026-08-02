@@ -252,6 +252,20 @@ internal/environment/  领域(type prod|test + cluster) + Repository(租户隔�
 - console-user：`Environments.vue`（环境列表）+ `Workloads.vue` 环境过滤 pill + 应用详情部署 tab 按环境分组。
 - **LaneID 预留不实现路由**：泳道（染色+降级）归后续服务治理切片；Release/EnvTemplate 归 DevOps/GitOps。起步只建环境基座。
 
+### console-user 生产级登录会话（httpOnly cookie）
+
+console-user 弃用 localStorage 明文 API Key 裸奔模式，改走密码登录 + httpOnly cookie 会话（L1+L2 生产级）。API Key 体系保留供程序化调用（`/dp/`、SDK、curl），浏览器登录态走 cookie。
+
+- **httpOnly cookie 三通道**：`gateway.BearerAuth` 升级为 ① cookie access ② `Authorization: Bearer <JWT>` ③ `Authorization: Bearer <APIKey>` 三通道（cookie 优先）。login/refresh 成功 `Set-Cookie: paas_access`（Path=/，15min）+ `paas_refresh`（Path=/api/auth，7d，收窄暴露面），HttpOnly+SameSite=Lax，Secure 由 `PAAS_COOKIE_SECURE` 控制（HTTP false / TLS true）。core 同域 serve 前端，cookie 同源无 CORS。
+- **JWT secret 生产强制**：`PAAS_JWT_SECRET` 空 + `PAAS_PROD=true` 拒启；dev 未设随机生成（本地零配置）。`PAAS_PROD` 正向标识生产。
+- **登录限流**：`internal/core/auth/loginLimiter` per-IP + per-username 内存令牌桶，失败 5 次/5min 锁 15min；`clientIP` 取 X-Forwarded-For 首段。单实例够用，多副本上 Redis 延后。
+- **登录审计**：`auth.AuditRecorder` 接口（依赖倒置，基本类型参数避免 auth->security 循环）+ `cmd/core.authAuditAdapter` 桥接 `security.AuditStore`。login/login_failed/logout 记审计；adapter 注入 ctx tenant（login_failed 租户未知归 "platform"，因 audit_logs.tenant_id NOT NULL）。
+- **强密码策略**：`auth.ValidatePassword`（≥8 + 字母 + 数字）+ `identity.PasswordValidatorFn` 依赖倒置注入；admin CreateUser/UpdateUser 强制，seed demo 账号豁免（demo 门控）。
+- **安全 headers 中间件**：CSP / HSTS（仅 HTTPS）/ X-Frame-Options:DENY / X-Content-Type-Options:nosniff / Referrer-Policy，挂 mux 最外层。
+- **前端**：`api.ts` `credentials:'include'` 不碰 token，401 自动 refresh+重试一次，refresh 失败触发 `paas:session-expired`；`stores/session.ts` 缓存 profile；`Login.vue` + `router.beforeEach` 守卫（ping `/api/auth/users/me` 判登录态）+ 顶栏演示账号快切（预设账号一键登录，生产关 demo 后失效）。
+- **配置**（helm `auth` 段）：`jwtSecret`（生产必填，`openssl rand -hex 32`）/ `cookieSecure`（HTTP false）/ `prod`（生产 true）。生产部署 `auth.prod=true` + `auth.jwtSecret=<随机>` + `seed.demo=false`。
+- **留后续（L3）**：refresh token rotation、MFA、OIDC/SSO、主动 session 撤销黑名单、密码重置、多副本 Redis 限流共享、ingress TLS（本期用户确认先 HTTP，cookieSecure=false，配证书后切 true + HSTS 即闭环）。
+
 ### 生产安全防护（横切机制）
 
 生产/测试隔离是**平台级横切关注点**，统一在此解决，后续切片（DevOps/应用配置）自动继承：
