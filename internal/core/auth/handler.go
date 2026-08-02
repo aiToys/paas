@@ -39,13 +39,15 @@ type UserProfile struct {
 // Handler 是 /api/auth/* 与 /api/system/menus 的 HTTP 处理器。
 // 各端点以方法形式暴露，由 main.go 挂到对应路由（login/refresh 公开，me/menus/logout 需 BearerAuth）。
 type Handler struct {
-	idb    identity.Repository
-	secret string
+	idb          identity.Repository
+	secret       string
+	cookieSecure bool
 }
 
-// NewHandler 创建 auth handler。secret 为 JWT 签名密钥。
-func NewHandler(idb identity.Repository, secret string) *Handler {
-	return &Handler{idb: idb, secret: secret}
+// NewHandler 创建 auth handler。secret 为 JWT 签名密钥；cookieSecure 控制 session cookie 的
+// Secure 位（HTTP 部署 false，配 TLS 后 true）。
+func NewHandler(idb identity.Repository, secret string, cookieSecure bool) *Handler {
+	return &Handler{idb: idb, secret: secret, cookieSecure: cookieSecure}
 }
 
 // Login: POST /api/auth/sessions —— 用户名密码换 token 对。

@@ -238,7 +238,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	mux := http.NewServeMux()
 	// BearerAuth 双通道：JWT（admin 浏览器登录）/ API Key（程序化调用）共存，下游零改动。
 	auth := gateway.BearerAuth(stores.Identity, jwtSecret)
-	authHandler := authPkg.NewHandler(stores.Identity, jwtSecret)
+	authHandler := authPkg.NewHandler(stores.Identity, jwtSecret, os.Getenv("PAAS_COOKIE_SECURE") == "true")
 	// identity 管理 API（/api/tenants、/api/users、/api/api-keys、/api/roles）：平台级，需 tenant:admin。
 	idmHandler := identity.NewHandler(stores.Identity).
 		HashPassword(authPkg.HashPassword)

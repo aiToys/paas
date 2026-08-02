@@ -26,7 +26,7 @@ func newAuthHandler(t *testing.T) *Handler {
 		ID: "u-admin", TenantID: "t-acme", Name: "admin",
 		PasswordHash: hash, IsAdmin: true, Roles: []string{"tenant-admin"}, Status: identity.StatusActive,
 	}))
-	return NewHandler(idb, hSecret)
+	return NewHandler(idb, hSecret, false)
 }
 
 func doJSON(t *testing.T, h http.HandlerFunc, method, target, body string) *httptest.ResponseRecorder {
@@ -82,7 +82,7 @@ func TestLoginDisabled(t *testing.T) {
 		ID: "u1", TenantID: "t", Name: "disabled", PasswordHash: hash,
 		Roles: []string{"developer"}, Status: identity.StatusDisabled,
 	}))
-	h := NewHandler(idb, hSecret)
+	h := NewHandler(idb, hSecret, false)
 	rec := doJSON(t, h.Login, http.MethodPost, "/api/auth/sessions",
 		`{"username":"disabled","password":"123456"}`)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
@@ -114,7 +114,7 @@ func TestMeDeveloperScoped(t *testing.T) {
 		ID: "u-dev", TenantID: "t", Name: "dev", IsAdmin: false,
 		Roles: []string{"developer"}, Status: identity.StatusActive,
 	}))
-	h := NewHandler(idb, hSecret)
+	h := NewHandler(idb, hSecret, false)
 	tok, _ := Sign(Claims{Sub: "u-dev", Tenant: "t", Roles: []string{"developer"},
 		Typ: TokenAccess, Exp: 9999999999}, hSecret)
 
