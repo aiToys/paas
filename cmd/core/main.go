@@ -664,8 +664,8 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		Addr: ":8080",
 		// recovery 中间件包 mux 最内层（捕获 handler panic，防单请求挂掉进程，SSE 流式也保护）；
 		// otelhttp 再包外层（自动建 span，过滤探针/契约/文档端点避免噪音）。
-		Handler: otelhttp.NewHandler(recoveryMiddleware(mux), "http.server",
-			otelhttp.WithFilter(skipTelemetryPaths)),
+		Handler: securityHeadersMiddleware(otelhttp.NewHandler(recoveryMiddleware(mux), "http.server",
+			otelhttp.WithFilter(skipTelemetryPaths))),
 		ReadHeaderTimeout: 10 * time.Second, // 防 Slowloris 慢速头部攻击
 	}
 	// 仅打印 Key 前缀，避免生产 API Key 明文进容器日志/日志聚合系统（运维确认用长度 + 前 6 字符）。
