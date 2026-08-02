@@ -167,3 +167,62 @@ func TestMenusNonEmpty(t *testing.T) {
 	assert.NotEmpty(t, menus)
 	assert.Equal(t, "home", menus[0].Name)
 }
+
+func TestLoginSetsCookies(t *testing.T) {
+	h := newAuthHandler(t)
+	rec := doJSON(t, h.Login, http.MethodPost, "/api/auth/sessions",
+		`{"username":"admin","password":"123456"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var hasAccess, hasRefresh bool
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == AccessCookieName {
+			hasAccess = true
+		}
+		if c.Name == RefreshCookieName {
+			hasRefresh = true
+		}
+	}
+	assert.True(t, hasAccess, "登录成功应下发 access cookie")
+	assert.True(t, hasRefresh, "登录成功应下发 refresh cookie")
+}
+
+func TestRefreshReadsCookie(t *testing.T) {
+	h := newAuthHandler(t)
+	rt, _ := Sign(Claims{Sub: "u-admin", Tenant: "t-acme", Roles: []string{"tenant-admin"},
+		Typ: TokenRefresh, Exp: 9999999999}, hSecret)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/tokens/refresh", nil)
+	req.AddCookie(&http.Cookie{Name: RefreshCookieName, Value: rt})
+	rec := httptest.NewRecorder()
+	h.Refresh(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var hasAccess bool
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == AccessCookieName {
+			hasAccess = true
+		}
+	}
+	assert.True(t, hasAccess, "refresh 应重发 access cookie")
+}
+
+func TestRefreshBodyFallback(t *testing.T) {
+	h := newAuthHandler(t)
+	rt, _ := Sign(Claims{Sub: "u-admin", Tenant: "t-acme", Roles: []string{"tenant-admin"},
+		Typ: TokenRefresh, Exp: 9999999999}, hSecret)
+	// 不带 cookie，走 body 兼容（SDK 调用场景）
+	rec := doJSON(t, h.Refresh, http.MethodPost, "/api/auth/tokens/refresh",
+		`{"refreshToken":"`+rt+`"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestLogoutClearsCookies(t *testing.T) {
+	h := newAuthHandler(t)
+	req := httptest.NewRequest(http.MethodDelete, "/api/auth/sessions", nil)
+	rec := httptest.NewRecorder()
+	h.Logout(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	cs := rec.Result().Cookies()
+	require.NotEmpty(t, cs, "应下发清 cookie 指令")
+	for _, c := range cs {
+		assert.Less(t, c.MaxAge, 0, "cookie %s 应过期清除", c.Name)
+	}
+}

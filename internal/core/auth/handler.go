@@ -81,17 +81,25 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		writeAuthErr(w, http.StatusInternalServerError, "签发 token 失败")
 		return
 	}
+	setSessionCookies(w, res.AccessToken, res.RefreshToken, h.cookieSecure)
 	writeAuthData(w, res)
 }
 
 // Refresh: POST /api/auth/tokens/refresh —— 凭 refresh token 换新 token 对。
 func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
-	var req RefreshRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeAuthErr(w, http.StatusBadRequest, "请求体格式错误")
+	// 优先读 refresh cookie（浏览器会话）；退化读 body（兼容 SDK 显式调用）。
+	refreshToken, _ := refreshFromCookie(r)
+	if refreshToken == "" {
+		var req RefreshRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+			refreshToken = req.RefreshToken
+		}
+	}
+	if refreshToken == "" {
+		writeAuthErr(w, http.StatusUnauthorized, "missing refresh token")
 		return
 	}
-	c, err := ParseType(req.RefreshToken, h.secret, TokenRefresh)
+	c, err := ParseType(refreshToken, h.secret, TokenRefresh)
 	if err != nil {
 		writeAuthErr(w, http.StatusUnauthorized, "refresh token 无效")
 		return
@@ -113,11 +121,13 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 		writeAuthErr(w, http.StatusInternalServerError, "签发 token 失败")
 		return
 	}
+	setSessionCookies(w, res.AccessToken, res.RefreshToken, h.cookieSecure)
 	writeAuthData(w, res)
 }
 
 // Logout: DELETE /api/auth/sessions —— 无状态 JWT，仅返回成功（前端清 token）。
 func (h *Handler) Logout(w http.ResponseWriter, _ *http.Request) {
+	clearSessionCookies(w, h.cookieSecure)
 	writeAuthData(w, map[string]any{})
 }
 
