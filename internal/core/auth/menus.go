@@ -58,5 +58,18 @@ func staticMenus() []Menu {
 			Component: "profile/views/Profile",
 			Meta:      MenuMeta{Title: "个人中心", Icon: "User", ShowMenu: true},
 		},
+		{
+			Path:      "/model",
+			Name:      "model",
+			Component: "model/views/List",
+			Meta:      MenuMeta{Title: "模型管理", Icon: "Cpu", ShowMenu: true},
+		},
+		{
+			// 模型详情（通道管理）：动态段路由，侧栏隐藏（ShowMenu:false），由列表「通道」按钮跳入。
+			Path:      "/model/:id",
+			Name:      "modelDetail",
+			Component: "model/views/Detail",
+			Meta:      MenuMeta{Title: "模型详情", Icon: "Cpu", ShowMenu: false},
+		},
 	}
 }

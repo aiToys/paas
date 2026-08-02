@@ -22,6 +22,7 @@ type Channel struct {
 	Priority int    `json:"priority"`           // 数字越小优先级越高
 	Status   string `json:"status"`             // healthy/degraded/offline
 	Endpoint string `json:"endpoint,omitempty"` // 供应商 BaseURL（如 https://api.deepseek.com）
+	Vendor   string `json:"vendor,omitempty"`   // 供应商展示名（openai/deepseek/qwen，观测用）
 	// 第三方供应商通道配置（mock/echo 通道为零值）。
 	UpstreamModel string   `json:"upstreamModel,omitempty"` // 供应商侧模型名（deepseek-chat / qwen-plus / gpt-4o）
 	CredentialRef string   `json:"credentialRef,omitempty"` // 凭证引用（security 平台级 Secret ID）

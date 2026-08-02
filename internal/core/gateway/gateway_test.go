@@ -81,3 +81,21 @@ func TestRegisterModelValidation(t *testing.T) {
 	require.Error(t, g.RegisterModel(nil))
 	require.Error(t, g.RegisterModel(&provider.Model{ID: ""}))
 }
+
+func TestUnregisterModel(t *testing.T) {
+	g := New()
+	require.NoError(t, g.RegisterModel(twoChannelModel()))
+	require.Len(t, g.Models(), 1)
+
+	_, err := g.Resolve("m1")
+	require.NoError(t, err, "注册后应可路由")
+
+	g.UnregisterModel("m1")
+	require.Empty(t, g.Models(), "注销后模型应移除")
+	_, err = g.Resolve("m1")
+	require.Error(t, err, "注销后路由应失败")
+
+	// 幂等：再次注销未知 ID 不 panic
+	g.UnregisterModel("m1")
+	g.UnregisterModel("never-existed")
+}

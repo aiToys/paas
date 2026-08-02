@@ -359,6 +359,33 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_tenant_time ON audit_logs(tenant_id, at DESC);
 
+-- ===== maas：模型目录（平台级，全租户共享；无 tenant_id，不走 RLS） =====
+-- Model/Channel 三层抽象持久化。channel.model_id FK CASCADE 随模型级联清。
+-- capabilities 用 JSONB 存 []string；通道 impl 不入库（运行时 BuildProvider 按 type 构造）。
+CREATE TABLE IF NOT EXISTS maas_models (
+    id             TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    vendor         TEXT NOT NULL DEFAULT '',
+    context_window INTEGER NOT NULL DEFAULT 0,
+    capabilities   JSONB NOT NULL DEFAULT '[]'::jsonb,    -- []string
+    input_price    DOUBLE PRECISION NOT NULL DEFAULT 0,
+    output_price   DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "desc"         TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS maas_channels (
+    id             TEXT PRIMARY KEY,
+    model_id       TEXT NOT NULL REFERENCES maas_models(id) ON DELETE CASCADE,
+    type           TEXT NOT NULL,                          -- echo | mock | openai-compatible
+    priority       INTEGER NOT NULL DEFAULT 0,
+    status         TEXT NOT NULL DEFAULT 'healthy',
+    endpoint       TEXT NOT NULL DEFAULT '',
+    vendor         TEXT NOT NULL DEFAULT '',
+    upstream_model TEXT NOT NULL DEFAULT '',
+    credential_ref TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_maas_ch_model ON maas_channels(model_id);
+
 -- ===== 行级安全（RLS）：第二道防线（查询层仍强制 tenant 过滤） =====
 -- POLICY 语义：tenant_id = current_setting('app.tenant_id', true)
 --   未设 app.tenant_id → current_setting 返 NULL → 放行（不破坏查询层过滤路径）

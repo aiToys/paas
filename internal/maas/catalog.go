@@ -97,7 +97,7 @@ func realCh(id string, prio int, vendor, baseURL, upstream, credRef string, reso
 	p := NewOpenAICompatibleProvider(vendor, baseURL, upstream, credRef, resolver, nil)
 	c := &provider.Channel{
 		ID: id, Type: p.Name(), Priority: prio, Status: provider.StatusHealthy,
-		Endpoint: baseURL, UpstreamModel: upstream, CredentialRef: credRef,
+		Endpoint: baseURL, Vendor: vendor, UpstreamModel: upstream, CredentialRef: credRef,
 	}
 	c.SetImpl(p)
 	return c

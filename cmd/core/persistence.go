@@ -43,6 +43,8 @@ import (
 	"github.com/aitoys/paas/internal/governance"
 	govmemory "github.com/aitoys/paas/internal/governance/memory"
 	govpg "github.com/aitoys/paas/internal/governance/pg"
+	"github.com/aitoys/paas/internal/maas"
+	mapg "github.com/aitoys/paas/internal/maas/pg"
 	"github.com/aitoys/paas/internal/messaging"
 	msgmemory "github.com/aitoys/paas/internal/messaging/memory"
 	"github.com/aitoys/paas/internal/security"
@@ -81,6 +83,7 @@ type Stores struct {
 	Security       security.Repository
 	Messaging      messaging.Repository
 	Backup         backup.Repository
+	MaaS           maas.Repository
 }
 
 // buildAllStores 选择持久化后端、构造全模块 store 并完成 seed。
@@ -122,11 +125,13 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		ccRepo := ccpg.NewStore(db)
 		billingRepo := billingpg.NewStore(db)
 		secRepo := secpg.NewStore(db)
+		maasRepo := mapg.NewStore(db)
 		msgRepo := messaging.Repository(msgmemory.NewStore())
 		bkRepo := backup.Repository(bkmemory.NewStore())
 
 		seedPGAllIfEmpty(ctx, idb, appRepo, envRepo, appcfgRepo, rawDs, rawWl,
 			devopsRepo, govRepo, ccRepo, billingRepo, secRepo)
+		seedMaasCatalog(ctx, maasRepo, secRepo)
 		// workload seed 用 ApplyRepo（wlRepo 已装饰：写 PG + 投影 CRD），让 seed 工作负载真实落地
 		// K8s（Deployment + nginx Pod）。seedPGAllIfEmpty 用 rawWl 不投影，故单独 seed；表空才灌（幂等）。
 		if n, err := rawWl.WorkloadsCount(ctx); err != nil {
@@ -153,6 +158,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 			Security:       secRepo,
 			Messaging:      msgRepo,
 			Backup:         bkRepo,
+			MaaS:           maasRepo,
 		}
 		return stores, db.Close, nil
 	}
@@ -178,6 +184,8 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 	ccRepo := ccmemory.NewStore()
 	billingRepo := billingmemory.NewStore()
 	secRepo := secmemory.NewStore()
+	maasRepo := maas.NewMemoryStore()
+	seedMaasCatalog(ctx, maasRepo, secRepo)
 	msgRepo := messaging.Repository(msgmemory.NewStore())
 	bkRepo := backup.Repository(bkmemory.NewStore())
 	log.Println("持久化后端: 内存（dev/echo 路径，零依赖）")
@@ -199,6 +207,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		Security:       secRepo,
 		Messaging:      msgRepo,
 		Backup:         bkRepo,
+		MaaS:           maasRepo,
 	}
 	return stores, nil, nil
 }
@@ -378,4 +387,29 @@ func seedWorkloads(ctx context.Context, repo workload.Repository) {
 func seedGovernance(ctx context.Context, repo governance.Repository) {
 	// 去假数据：不灌 mock 服务/实例/路由/熔断。用户配置产生。
 	// 实例真源为 K8s Endpoints（/dp/ 数据面发现已提供），governance /api/instances 切 Endpoints 留后续。
+}
+
+// seedMaasCatalog 灌入模型目录（demo 模式 PAAS_DISABLE_DEMO_SEED != true）。
+// PG store 支持 ModelsCount，表空才灌（幂等优化）；内存路径 SeedCatalog 自身幂等（exists 跳过）直接灌。
+// resolver 用于 catalog() 构造真实通道（impl 不入库，MaaSPlugin.Init 加载时 BuildProvider 重建）。
+func seedMaasCatalog(ctx context.Context, repo maas.Repository, secStore security.SecretStore) {
+	if os.Getenv("PAAS_DISABLE_DEMO_SEED") == "true" {
+		return
+	}
+	// PG store 暴露 ModelsCount，表非空跳过（避免重启重复尝试 insert 全部模型）。
+	if counter, ok := repo.(interface {
+		ModelsCount(context.Context) (int, error)
+	}); ok {
+		n, err := counter.ModelsCount(ctx)
+		if err != nil {
+			log.Printf("[seed] 统计模型失败: %v", err)
+			return
+		}
+		if n > 0 {
+			return
+		}
+	}
+	if err := maas.SeedCatalog(ctx, repo, secretResolver{store: secStore}); err != nil {
+		log.Printf("[seed] MaaS catalog: %v", err)
+	}
 }

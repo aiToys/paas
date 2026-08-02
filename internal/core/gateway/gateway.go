@@ -33,6 +33,14 @@ func (g *Gateway) RegisterModel(m *provider.Model) error {
 	return nil
 }
 
+// UnregisterModel 注销一个逻辑模型（含其通道）。未知 ID 忽略（幂等，与注册语义对称）。
+// 供模型管理删除模型后从路由表移除，避免已删模型仍可被 Resolve 命中。
+func (g *Gateway) UnregisterModel(modelID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.models, modelID)
+}
+
 // Resolve 按通道优先级取首个非 offline 通道。
 // 返回选中通道（含 Provider 与 ID），供 handler 调用失败时按 channel.ID 降级。
 // 全部通道 offline 时返回错误。

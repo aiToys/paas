@@ -1,4 +1,6 @@
 -- 反向依赖顺序 DROP（FK 子表先）。RLS POLICY 随表删除自动清理。
+DROP TABLE IF EXISTS maas_channels;
+DROP TABLE IF EXISTS maas_models;
 DROP TABLE IF EXISTS audit_logs;
 DROP TABLE IF EXISTS secrets;
 DROP TABLE IF EXISTS billing_records;

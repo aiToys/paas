@@ -55,16 +55,14 @@ func main() {
 
 	gw := gateway.New()
 	meter := &gateway.Meter{}
-	// 本切片注册 MaaS 插件（真实第三方供应商通道 + mock 演示）
-	plugins := []plugin.Plugin{&maas.MaaSPlugin{}}
 
-	if err := run(ctx, plugins, gw, meter); err != nil {
+	if err := run(ctx, gw, meter); err != nil {
 		log.Fatalf("core 启动失败: %v", err)
 	}
 }
 
 // run 启动 HTTP 服务并引导插件；返回非 nil 则进程以 1 退出。
-func run(ctx context.Context, plugins []plugin.Plugin, gw *gateway.Gateway, meter *gateway.Meter) error {
+func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter) error {
 	// OTel tracer 初始化（PAAS_OTEL_ENDPOINT 非空接 OTLP/HTTP 后端，空=noop 行为不变）。
 	tracerShutdown, err := tracing.Init(ctx, os.Getenv("PAAS_OTEL_ENDPOINT"))
 	if err != nil {
@@ -93,6 +91,8 @@ func run(ctx context.Context, plugins []plugin.Plugin, gw *gateway.Gateway, mete
 	// CredentialResolver 桥接 security store：注入 MaaS 插件解析平台级凭证。
 	// security.SecretStore 接口含 Resolve（PG/memory 透明）。
 	deps := realCoreDeps{gw: gw, resolver: secretResolver{store: stores.Security.(security.SecretStore)}}
+	// MaaS 插件注入已 seed 的模型仓储（Init 从 store 加载模型 + BuildProvider 重建通道，注册 gateway）。
+	plugins := []plugin.Plugin{maas.NewMaaSPlugin(stores.MaaS)}
 	// 注入进程级 ctx 给 devops store：构建 goroutine 感知 shutdown（runBuild 派生 baseCtx，
 	// K8sJob 子 ctx随之 cancel），避免 SIGTERM 后 in-flight 构建永久卡 running。
 	if ds, ok := stores.DevOpsBuilds.(interface{ SetBaseCtx(context.Context) }); ok {
@@ -442,6 +442,21 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// 数据服务（资源中心 CRUD + meta）
 	mux.Handle("/api/dataservices", auth(dsHandler))
 	mux.Handle("/api/dataservices/", auth(dsHandler))
+
+	// 模型管理（平台级，super_admin 由 adminGuard 兜底）：模型/通道 CRUD + 写后增量刷新 gateway 路由表。
+	maasHandler := maas.NewHandler(stores.MaaS, gw, secretResolver{store: stores.Security.(security.SecretStore)})
+	mux.Handle("/api/admin/models", adminGuard(maasHandler))
+	mux.Handle("/api/admin/models/", adminGuard(maasHandler))
+	// 模型管理 spec（composite 内部按 method+path 分发，mux 已 subtree 注册，此处仅记 OpenAPI）
+	reg.Operation("GET", "/api/admin/models", apiroute.Tags("模型管理"), apiroute.Summary("模型列表"), apiroute.Perm("super_admin"), apiroute.WithResp([]provider.Model{}))
+	reg.Operation("POST", "/api/admin/models", apiroute.Tags("模型管理"), apiroute.Summary("创建模型"), apiroute.Perm("super_admin"), apiroute.WithReqBody(provider.Model{}), apiroute.WithResp(provider.Model{}))
+	reg.Operation("GET", "/api/admin/models/{id}", apiroute.Tags("模型管理"), apiroute.Summary("模型详情"), apiroute.Perm("super_admin"), apiroute.WithResp(provider.Model{}))
+	reg.Operation("PUT", "/api/admin/models/{id}", apiroute.Tags("模型管理"), apiroute.Summary("更新模型标量"), apiroute.Perm("super_admin"), apiroute.WithReqBody(provider.Model{}), apiroute.WithResp(provider.Model{}))
+	reg.Operation("DELETE", "/api/admin/models/{id}", apiroute.Tags("模型管理"), apiroute.Summary("删除模型（级联清通道）"), apiroute.Perm("super_admin"))
+	reg.Operation("GET", "/api/admin/models/{id}/channels", apiroute.Tags("模型管理"), apiroute.Summary("通道列表"), apiroute.Perm("super_admin"), apiroute.WithResp([]provider.Channel{}))
+	reg.Operation("POST", "/api/admin/models/{id}/channels", apiroute.Tags("模型管理"), apiroute.Summary("创建通道"), apiroute.Perm("super_admin"), apiroute.WithReqBody(provider.Channel{}), apiroute.WithResp(provider.Channel{}))
+	reg.Operation("PUT", "/api/admin/models/{id}/channels/{cid}", apiroute.Tags("模型管理"), apiroute.Summary("更新通道"), apiroute.Perm("super_admin"), apiroute.WithReqBody(provider.Channel{}), apiroute.WithResp(provider.Channel{}))
+	reg.Operation("DELETE", "/api/admin/models/{id}/channels/{cid}", apiroute.Tags("模型管理"), apiroute.Summary("删除通道"), apiroute.Perm("super_admin"))
 
 	mux.Handle("/livez", health.NewHandler())
 

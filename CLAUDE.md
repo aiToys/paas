@@ -225,7 +225,20 @@ cmd/core serveHTTP
 - **DeleteTenant 非空保护**（防孤儿 + 防误删）：`identity.ErrTenantNotEmpty` sentinel；memory/pg `DeleteTenant` 前置检查有用户返 409（引导先清用户），handler 映射 `409 租户下仍有用户`。memory 保留级联清 API Key（防御孤儿），移除静默级联清用户（前置检查保证无用户）。跨 store 业务数据（应用/工作负载/数据服务）级联清留后（删租户低频高危）。
 - **console-user 应用创建**（去假后必需）：`Applications.vue` 「新建应用」从 `notImplemented` 占位改接真实 `POST /api/applications`（name+env+desc，ID 后端兜底生成 + `ApplyDefaults` 补展示）；el-dialog 创建弹窗 + 空状态引导（`filteredApps` 空时 🚀 + 「新建应用」CTA，非空白页）。
 - **开通流程**：admin 登录 console-admin -> 租户管理建租户 -> 用户管理建该租户管理员（选租户）-> 用户登录 console-user 自建应用/生成 API Key。
-- **留后续（P1.2）**：模型管理（Model/Channel/Credential CRUD + catalog 改 DB 驱动 + admin 页面）；跨 store 级联删租户业务数据；租户禁用/冻结（软删）；租户自助公开注册。
+- **留后续**：跨 store 级联删租户业务数据；租户禁用/冻结（软删）；租户自助公开注册。（模型管理见 P1.2）
+
+### P1.2 模型管理（Model/Channel/Credential CRUD + DB 驱动 catalog）
+
+承接 P1.1，解决模型硬编码（`catalog()` 纯函数返固定列表，无法运行时增改）。模型目录改 DB 驱动：admin 后台 CRUD 模型/通道，写后增量刷新 gateway 路由表。设计见 `docs/superpowers/specs/2026-08-02-p1-real-platform.md`（P1.2 概要），计划 `docs/superpowers/plans/2026-08-02-p1.2-model-management.md`。
+
+- **Model/Channel Repository**（平台级，无 tenant）：`internal/maas/store.go` Repository 接口（Model CRUD + Channel 子资源 CRUD，带 ctx 传播请求取消）+ memory 实现（读返深拷贝隔离）+ `BuildProvider(ch, resolver)` 工厂（type→Provider：echo/mock 进程内、openai-compatible 用 Endpoint/UpstreamModel/CredentialRef+resolver）。`Channel` 加 `Vendor` 字段（展示用）。sentinel 错误（`ErrModelNotFound/Exists`、`ErrChannelNotFound/Exists`）映射 HTTP 状态。
+- **PG 持久化**：migration 追加 `maas_models`（capabilities JSONB）+ `maas_channels`（model_id FK CASCADE）到 `0001_init.up.sql`（项目未上线，合并 schema）；`internal/maas/pg/store.go` 实现 Repository（`ListModels` 两次查询 models+channels 内存聚合避免 N+1；channel 写操作前置 `modelExists` 返友好 `ErrModelNotFound`；`ModelsCount` 供 seed 判空）。integration 测试 `//go:build integration`。
+- **gateway 增量刷新**：`Gateway.UnregisterModel(id)`（接口 `GatewayRegistrar` 加该方法）；handler CRUD 后 `reloadModel`（GetModel→BuildProvider+SetImpl 重建通道→RegisterModel 同 ID 覆盖）/ `UnregisterModel`，不全量重载。
+- **catalog seed 门控**：`SeedCatalog(ctx, repo, resolver)` 幂等灌入（exists 跳过）；`PAAS_DISABLE_DEMO_SEED != true`（dev）时 cmd/core 两路径（内存/PG）灌 catalog 作 demo，生产空目录由 admin 手动配。`MaaSPlugin.Init` 从 Repository 加载模型 + BuildProvider 重建 impl + RegisterModel（repo nil 时 fallback catalog 兼容旧用法/测试）。`MaaSPlugin` 改 `NewMaaSPlugin(repo)` 构造注入，cmd/core 装配时 store 已 seed。
+- **REST API**（`internal/maas/handler.go`，composite 按路径分发）：`/api/admin/models`（GET 列表/POST 创建）+ `/{id}`（GET/PUT/DELETE，删除级联清通道+UnregisterModel）+ `/{id}/channels`（GET/POST）+ `/{id}/channels/{cid}`（PUT/DELETE）。每写操作后 reloadModel 刷新 gateway。`adminGuard` super_admin 兜底（平台级，handler 内不判权限）。OpenAPI Operation 登记 9 操作（Perm `super_admin`）。
+- **console-admin 模型管理**（super_admin）：菜单「模型管理」（`/model`，Cpu 图标）+ 隐藏详情路由 `/model/:id`（`ShowMenu:false`，列表「通道」按钮跳入，dynamic.ts import.meta.glob 自动识别）。`modules/model/`：`api.ts`（Model/Channel 类型 + CRUD + CHANNEL_TYPES/STATUS 常量 + `fetchPlatformSecrets` 凭证下拉）+ `List.vue`（SearchTable+useCrud 假分页，模型列表/创建/删除输入 ID 确认/跳通道）+ `ModelFormDrawer.vue`（id/name/vendor/contextWindow/capabilities 逗号分隔/input-outputPrice）+ `Detail.vue`（通道表格+状态 tag+CRUD）+ `ChannelFormDrawer.vue`（type select；openai-compatible 时显 endpoint/vendor/upstreamModel/credentialRef 选平台级 Secret/priority/status，用 FormDrawer `dependencies` 声明式显隐）。
+- **响应解包契约**：console-admin http interceptor 按是否有 `data` 字段解包——list 端点 `{data:[...]}`→数组，item 端点对象直接返回（model/channel 无顶层 data 字段）。maas handler 与之匹配。
+- **留后续**：模型启用/禁用（软删）、通道健康检查（真实探活替代手动 status）、凭证测试（建通道时 ping 上游）、模型分组/标签、用量按模型维度计量。
 
 ### 工作负载（应用运行形态）
 

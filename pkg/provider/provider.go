@@ -58,4 +58,6 @@ type GatewayRegistrar interface {
 	// RegisterModel 注册一个逻辑模型（含其全部通道）。
 	// 同 ID 视为覆盖更新。
 	RegisterModel(m *Model) error
+	// UnregisterModel 注销一个逻辑模型（含通道）。未知 ID 忽略（幂等）。
+	UnregisterModel(modelID string)
 }
