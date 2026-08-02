@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -237,4 +238,56 @@ func TestLoginRateLimitedAfter5Fails(t *testing.T) {
 	// 第 6 次应 429（per-IP+per-username 锁定）
 	rec := doJSON(t, h.Login, http.MethodPost, "/api/auth/sessions", body)
 	require.Equal(t, http.StatusTooManyRequests, rec.Code, "5 次失败后应 429")
+}
+
+type mockAuditEntry struct{ tenant, actor, action, detail string }
+
+type mockAudit struct {
+	mu      sync.Mutex
+	records []mockAuditEntry
+}
+
+func (m *mockAudit) Record(_ context.Context, tenantID, actor, action, detail string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.records = append(m.records, mockAuditEntry{tenantID, actor, action, detail})
+	return nil
+}
+
+func (m *mockAudit) hasAction(action string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.records {
+		if r.action == action {
+			return true
+		}
+	}
+	return false
+}
+
+func TestLoginRecordsAudit(t *testing.T) {
+	h := newAuthHandler(t)
+	auditor := &mockAudit{}
+	h.WithAudit(auditor)
+	// 成功登录
+	doJSON(t, h.Login, http.MethodPost, "/api/auth/sessions", `{"username":"admin","password":"123456"}`)
+	assert.True(t, auditor.hasAction("login"), "成功登录应记 login 审计")
+	// 失败登录
+	doJSON(t, h.Login, http.MethodPost, "/api/auth/sessions", `{"username":"admin","password":"wrong"}`)
+	assert.True(t, auditor.hasAction("login_failed"), "失败登录应记 login_failed 审计")
+}
+
+func TestLogoutRecordsAudit(t *testing.T) {
+	h := newAuthHandler(t)
+	auditor := &mockAudit{}
+	h.WithAudit(auditor)
+	// 先登录拿 cookie，再 logout
+	rec := doJSON(t, h.Login, http.MethodPost, "/api/auth/sessions", `{"username":"admin","password":"123456"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	req := httptest.NewRequest(http.MethodDelete, "/api/auth/sessions", nil)
+	for _, c := range rec.Result().Cookies() {
+		req.AddCookie(c)
+	}
+	h.Logout(httptest.NewRecorder(), req)
+	assert.True(t, auditor.hasAction("logout"), "登出应记 logout 审计")
 }

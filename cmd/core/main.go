@@ -239,6 +239,8 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// BearerAuth 双通道：JWT（admin 浏览器登录）/ API Key（程序化调用）共存，下游零改动。
 	auth := gateway.BearerAuth(stores.Identity, jwtSecret)
 	authHandler := authPkg.NewHandler(stores.Identity, jwtSecret, os.Getenv("PAAS_COOKIE_SECURE") == "true")
+	// 注入审计记录器：登录/登出/失败记 security.AuditLog（adapter 桥接 + 注入 ctx tenant）。
+	authHandler = authHandler.WithAudit(&authAuditAdapter{store: stores.Security})
 	// identity 管理 API（/api/tenants、/api/users、/api/api-keys、/api/roles）：平台级，需 tenant:admin。
 	idmHandler := identity.NewHandler(stores.Identity).
 		HashPassword(authPkg.HashPassword)

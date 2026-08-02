@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -44,6 +45,19 @@ type Handler struct {
 	secret       string
 	cookieSecure bool
 	limiter      *loginLimiter
+	audit        AuditRecorder
+}
+
+// AuditRecorder 审计记录器（依赖倒置，避免 auth->security 反向依赖）。
+// cmd/core 桥接 security.AuditStore 实现注入；未注入则不记审计。
+type AuditRecorder interface {
+	Record(ctx context.Context, tenantID, actor, action, detail string) error
+}
+
+// WithAudit 注入审计记录器（链式，可选）。
+func (h *Handler) WithAudit(a AuditRecorder) *Handler {
+	h.audit = a
+	return h
 }
 
 // NewHandler 创建 auth handler。secret 为 JWT 签名密钥；cookieSecure 控制 session cookie 的
@@ -71,15 +85,13 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 	u, err := h.idb.GetUserByName(r.Context(), req.Username)
 	if err != nil {
-		h.limiter.recordFailure(ip, req.Username)
-		writeAuthErr(w, http.StatusUnauthorized, "用户名或密码错误")
+		h.loginFailed(w, r, ip, req.Username)
 		return
 	}
 	// 先验密码（不存在/密码错统一 401，不泄漏账号存在性），再检查状态：
 	// 密码已验证后提示禁用不增加枚举风险（攻击者需已知密码才能发现账号禁用）。
 	if u.PasswordHash == "" || !CheckPassword(u.PasswordHash, req.Password) {
-		h.limiter.recordFailure(ip, req.Username)
-		writeAuthErr(w, http.StatusUnauthorized, "用户名或密码错误")
+		h.loginFailed(w, r, ip, req.Username)
 		return
 	}
 	if u.Status != identity.StatusActive {
@@ -87,6 +99,9 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.limiter.recordSuccess(ip, req.Username)
+	if h.audit != nil {
+		_ = h.audit.Record(r.Context(), u.TenantID, u.ID, "login", fmt.Sprintf("ip=%s ua=%s", ip, r.UserAgent()))
+	}
 	res, err := h.issueTokens(u)
 	if err != nil {
 		writeAuthErr(w, http.StatusInternalServerError, "签发 token 失败")
@@ -137,8 +152,26 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 }
 
 // Logout: DELETE /api/auth/sessions —— 无状态 JWT，仅返回成功（前端清 token）。
-func (h *Handler) Logout(w http.ResponseWriter, _ *http.Request) {
+// loginFailed 统一处理登录失败：限流计数 + 审计 + 401（不泄漏账号存在性）。
+func (h *Handler) loginFailed(w http.ResponseWriter, r *http.Request, ip, username string) {
+	h.limiter.recordFailure(ip, username)
+	if h.audit != nil {
+		_ = h.audit.Record(r.Context(), "", username, "login_failed", "ip="+ip)
+	}
+	writeAuthErr(w, http.StatusUnauthorized, "用户名或密码错误")
+}
+
+func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	clearSessionCookies(w, h.cookieSecure)
+	if h.audit != nil {
+		actor, tenant := "", ""
+		if c, err := r.Cookie(AccessCookieName); err == nil {
+			if claims, err := ParseType(c.Value, h.secret, TokenAccess); err == nil {
+				actor, tenant = claims.Sub, claims.Tenant
+			}
+		}
+		_ = h.audit.Record(r.Context(), tenant, actor, "logout", "ip="+clientIP(r))
+	}
 	writeAuthData(w, map[string]any{})
 }
 
