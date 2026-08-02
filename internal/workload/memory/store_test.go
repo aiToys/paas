@@ -16,7 +16,7 @@ func globexCtx() context.Context { return tenant.WithTenant(context.Background()
 
 func TestListByType(t *testing.T) {
 	s := NewStore()
-	// acme: cs-api(service), rec-svc(service)；globex: etl-nightly(cronjob), etl-backfill(job), agent-gw(service)
+	// acme: cs-api/rec-svc(service) + batch-recall(job) + daily-report(cronjob)；globex: etl-nightly(cronjob)/etl-backfill(job)/agent-gw(service)
 	svcs, err := s.List(acmeCtx(), "", "", workload.TypeService)
 	require.NoError(t, err)
 	require.Len(t, svcs, 2)
@@ -52,10 +52,10 @@ func TestListByApp(t *testing.T) {
 
 func TestListByEnv(t *testing.T) {
 	s := NewStore()
-	// env-acme-test 下应只有 acme 的 cs-api/rec-svc
+	// env-acme-test 下应只有 acme 的 4 条（cs-api/rec-svc/batch-recall/daily-report）
 	got, err := s.List(acmeCtx(), "env-acme-test", "", "")
 	require.NoError(t, err)
-	require.Len(t, got, 2)
+	require.Len(t, got, 4)
 	for _, w := range got {
 		assert.Equal(t, "env-acme-test", w.EnvID)
 		assert.Equal(t, workload.LaneDefault, w.LaneID)

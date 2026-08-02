@@ -27,40 +27,19 @@ func NewDataServiceK8sApplier(cl client.Client, namespace string) *DataServiceK8
 	return &DataServiceK8sApplier{Client: cl, namespace: namespace}
 }
 
-// engineOrDefault 取 spec.engine，缺省按 Kind 给默认（与 KindMeta.Default 对齐）。
-func engineOrDefault(d dataservice.DataService) string {
-	if e, ok := d.Spec["engine"]; ok && e != "" {
-		return e
-	}
-	switch d.Kind {
-	case dataservice.KindDB:
-		return "postgres"
-	case dataservice.KindCache:
-		return "redis"
-	case dataservice.KindMQ:
-		return "kafka"
-	case dataservice.KindStorage:
-		return "minio"
-	case dataservice.KindVector:
-		return "milvus"
-	case dataservice.KindSearch:
-		return "elasticsearch"
-	}
-	return ""
-}
-
 // Apply CreateOrUpdate DataService CRD（期望状态）。
 func (a *DataServiceK8sApplier) Apply(ctx context.Context, d dataservice.DataService) error {
 	crd := &v1alpha1.DataService{ObjectMeta: metav1.ObjectMeta{Name: d.ID, Namespace: a.namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, a.Client, crd, func() error {
 		crd.Spec = v1alpha1.DataServiceSpec{
-			TenantID: d.TenantID,
-			AppID:    d.AppID,
-			EnvID:    d.EnvID,
-			Kind:     d.Kind,
-			Name:     d.Name,
-			Engine:   engineOrDefault(d),
-			Spec:     d.Spec,
+			TenantID:   d.TenantID,
+			AppID:      d.AppID,
+			EnvID:      d.EnvID,
+			Kind:       d.Kind,
+			Name:       d.Name,
+			Engine:     dataservice.EngineOf(d), // 复用领域真源（DRY，与 FillConnection 一致）
+			Spec:       d.Spec,
+			Connection: d.Connection, // 含 host/port/credentials/uri；reconciler 据此建 Secret+Svc+STS
 		}
 		return nil
 	})

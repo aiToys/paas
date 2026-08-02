@@ -1,10 +1,11 @@
 <script setup lang="ts">
 // 工作负载视图：跨应用列表，按类型分 Tab（服务/Job/CronJob）。
 // 数据来自 /api/workloads?type=；扩缩容 PUT、删除 DELETE。换 Key（租户）自动重载。
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
+import EmptyState from '@/components/EmptyState.vue'
 import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
@@ -35,18 +36,36 @@ const tabs = [
 ] as const
 
 const activeType = ref<string>(props.type || 'service')
+// 三个路由（/workloads/services|jobs|cronjobs）共用本组件 + props.type 区分。
+// 组件复用时 setup 不重新执行，必须 watch prop 才能在侧栏菜单切换时同步 tab + 数据。
+watch(
+  () => props.type,
+  (t) => {
+    const next = t || 'service'
+    if (next !== activeType.value) {
+      activeType.value = next
+      load()
+    }
+  },
+)
 // 环境来自全局 store（顶栏环境选择器，唯一环境切换入口）；页面不再有环境切换控件
 const activeEnv = computed(() => envStore.currentEnvId)
 const items = ref<Workload[]>([])
 const loading = ref(true)
 const scaling = ref<string>('') // 正在扩缩容的 id
 
-const statusMeta: Record<Workload['status'], { label: string; cls: string }> = {
+// statusMeta 仅覆盖已知枚举值；后端返回空串/未知状态时必须兜底，否则
+// statusMeta[status] 为 undefined，模板访问 .cls 崩溃整个工作负载列表（与 Applications 同款）。
+const STATUS_META: Record<string, { label: string; cls: string }> = {
   running: { label: '运行中', cls: 'ok' },
   deploying: { label: '部署中', cls: 'warn' },
   failed: { label: '异常', cls: 'err' },
   succeeded: { label: '已完成', cls: 'done' },
   pending: { label: '等待', cls: 'idle' },
+}
+const STATUS_UNKNOWN = { label: '未知', cls: 'idle' }
+function statusOf(s: string): { label: string; cls: string } {
+  return STATUS_META[s] ?? STATUS_UNKNOWN
 }
 
 const envName = computed(() => (id: string) => envStore.envs.find((e) => e.id === id)?.name ?? id)
@@ -68,15 +87,12 @@ async function load() {
 }
 
 async function scale(w: Workload) {
-  // 生产环境扩缩容前置确认（防误操作生产）
-  if (envStore.isProd) {
-    const ok = await confirmDangerous({ action: '扩缩容', target: w.name })
-    if (!ok) return
-  }
+  // prompt 本身就是确认（输入新副本数）；不再叠加前置 confirm，避免连续弹两个模态。
+  // 生产环境通过标题前缀 + isProd 上下文体现警示，操作仍受后端 prod:write 兜底。
   try {
     const { value } = await ElMessageBox.prompt(
       `${envStore.isProd ? '⚠️ [生产环境] ' : ''}调整「${w.name}」的副本数`,
-      '扩缩容',
+      `${envStore.isProd ? '⚠️ [生产环境] ' : ''}扩缩容`,
       {
         confirmButtonText: '应用',
         cancelButtonText: '取消',
@@ -107,8 +123,13 @@ async function scale(w: Workload) {
 }
 
 async function remove(w: Workload) {
-  // 删除属高危：生产环境要求输入名称确认（防误操作生产）
-  const ok = await confirmDangerous({ action: '删除', target: w.name, requireNameConfirm: true })
+  // 删除属高危：生产环境要求输入名称确认（防误操作生产）；工作负载按顶栏 scope 过滤，isProd 用 scope
+  const ok = await confirmDangerous({
+    action: '删除',
+    target: w.name,
+    requireNameConfirm: envStore.isProd,
+    isProd: envStore.isProd,
+  })
   if (!ok) return
   try {
     const resp = await fetchAuth(`/api/workloads/${w.id}`, { method: 'DELETE' })
@@ -132,14 +153,18 @@ function onKeyChanged() {
 function onEnvChanged() {
   load()
 }
-onMounted(() => {
+onMounted(async () => {
+  // 确保 env 列表已加载：深链直接打开 /workloads?env=xxx 时 envStore.envs 可能仍空
+  // （App.vue 的 loadEnvs 与本组件 onMounted 并发，谁先完成不确定）。
+  if (!envStore.envs.length) {
+    await envStore.loadEnvs()
+  }
   // 环境视图跳转携带 ?env= 预选环境
   const q = route.query.env as string
   if (q) {
-    envStore.switchEnv(envStore.envs.find((e) => e.id === q) ?? null).then(() => load())
-  } else {
-    load()
+    await envStore.switchEnv(envStore.envs.find((e) => e.id === q) ?? null)
   }
+  load()
   window.addEventListener('paas:key-changed', onKeyChanged)
   window.addEventListener('paas:env-changed', onEnvChanged)
 })
@@ -169,10 +194,11 @@ onUnmounted(() => {
       <div v-for="i in 4" :key="i" class="skel-row" />
     </div>
 
-    <div v-else-if="items.length === 0" class="empty">
-      <Icon name="server" :size="32" />
-      <p>当前租户下暂无{{ tabs.find((t) => t.key === activeType)?.label }}工作负载</p>
-    </div>
+    <EmptyState
+      v-else-if="items.length === 0"
+      icon="server"
+      :text="`当前租户下暂无${tabs.find((t) => t.key === activeType)?.label}工作负载`"
+    />
 
     <div v-else class="table-wrap">
       <table class="tbl">
@@ -206,9 +232,9 @@ onUnmounted(() => {
               </span>
             </td>
             <td>
-              <span class="status" :class="statusMeta[w.status].cls">
+              <span class="status" :class="statusOf(w.status).cls">
                 <span v-if="w.status === 'running'" class="pulse-dot" />
-                {{ statusMeta[w.status].label }}
+                {{ statusOf(w.status).label }}
               </span>
             </td>
             <td class="col-act">

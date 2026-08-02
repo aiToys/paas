@@ -44,6 +44,14 @@ spec:
             properties:
               appId:
                 type: string
+              connection:
+                additionalProperties:
+                  type: string
+                description: |-
+                  Connection 平台生成的连接信息（host/port/credentials/uri），控制面下发，reconciler 读：
+                    - 敏感 key（password/token/secretKey/database/accessKey）→ 建 Secret，Pod env 引用；
+                    - host/port/uri → 可观测/调试（不进 Secret）。
+                type: object
               engine:
                 type: string
               envId:

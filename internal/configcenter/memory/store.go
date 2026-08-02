@@ -23,14 +23,14 @@ type Store struct {
 	pubSeq     int
 }
 
+// NewStore 创建仓储（空，不 seed mock 配置）。
+// 去假数据：用户经控制台配置真实命名空间/配置/发布（原 seed 为 mock 演示配置）。
 func NewStore() *Store {
-	s := &Store{
+	return &Store{
 		namespaces: map[string]configcenter.Namespace{},
 		items:      map[string]configcenter.ConfigItem{},
 		publishes:  map[string]configcenter.Publish{},
 	}
-	s.seed()
-	return s
 }
 
 func tenantOrErr(ctx context.Context) (string, error) {
@@ -164,6 +164,10 @@ func (s *Store) UpsertItem(ctx context.Context, item configcenter.ConfigItem) (c
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 锁内复校验 namespace 存在且属本租户（防 GetNamespace 与 Lock 间 DeleteNamespace 级联清产生孤儿 item）
+	if n, ok := s.namespaces[item.NamespaceID]; !ok || n.TenantID != tid {
+		return configcenter.ConfigItem{}, fmt.Errorf("命名空间不存在: %s", item.NamespaceID)
+	}
 	for id, ex := range s.items {
 		if ex.TenantID == tid && ex.NamespaceID == item.NamespaceID && ex.Key == item.Key {
 			ex.Value = item.Value
@@ -198,6 +202,19 @@ func (s *Store) DeleteItem(ctx context.Context, id string) error {
 
 // —— Publish ——
 
+// clonePublish 深拷贝发布（Snapshot map 新建独立），防止返回值与 store 内部状态共享 map
+// 引发并发读写 panic（与 billing cloneBill 同款防御）。
+func clonePublish(p configcenter.Publish) configcenter.Publish {
+	if p.Snapshot != nil {
+		cp := make(map[string]string, len(p.Snapshot))
+		for k, v := range p.Snapshot {
+			cp[k] = v
+		}
+		p.Snapshot = cp
+	}
+	return p
+}
+
 func (s *Store) ListPublishes(ctx context.Context, namespaceID string) ([]configcenter.Publish, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {
@@ -213,7 +230,7 @@ func (s *Store) ListPublishes(ctx context.Context, namespaceID string) ([]config
 		if namespaceID != "" && p.NamespaceID != namespaceID {
 			continue
 		}
-		out = append(out, p)
+		out = append(out, clonePublish(p))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Version > out[j].Version })
 	return out, nil
@@ -230,6 +247,10 @@ func (s *Store) CreatePublish(ctx context.Context, namespaceID string) (configce
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 锁内复校验 namespace 存在且属本租户（防 GetNamespace 与 Lock 间 DeleteNamespace 级联清产生孤儿 publish）
+	if n, ok := s.namespaces[namespaceID]; !ok || n.TenantID != tid {
+		return configcenter.Publish{}, fmt.Errorf("命名空间不存在: %s", namespaceID)
+	}
 	// 计算下一个版本号（namespace 内最大 version + 1）
 	maxVersion := 0
 	snapshot := map[string]string{}
@@ -261,7 +282,7 @@ func (s *Store) CreatePublish(ctx context.Context, namespaceID string) (configce
 		CreatedAt:   time.Now(),
 	}
 	s.publishes[pub.ID] = pub
-	return pub, nil
+	return clonePublish(pub), nil
 }
 
 // RollbackPublish 激活历史 rolled-back 发布为 active。
@@ -288,7 +309,7 @@ func (s *Store) RollbackPublish(ctx context.Context, publishID string) (configce
 	}
 	target.Status = configcenter.StatusActive
 	s.publishes[publishID] = target
-	return target, nil
+	return clonePublish(target), nil
 }
 
 func (s *Store) ActivePublish(ctx context.Context, namespaceID string) (configcenter.Publish, bool, error) {
@@ -312,7 +333,7 @@ func (s *Store) ActivePublish(ctx context.Context, namespaceID string) (configce
 	if found == nil {
 		return configcenter.Publish{}, false, nil
 	}
-	return *found, true, nil
+	return clonePublish(*found), true, nil
 }
 
 // PublishNamespaceID 返回发布所属 namespace（回滚路由校验用）。
@@ -359,18 +380,5 @@ func SeedPublishes() []configcenter.Publish {
 			Snapshot: map[string]string{"feature.newui": "off", "rate.limit": "50"},
 			Status:   configcenter.StatusActive, CreatedAt: t,
 		},
-	}
-}
-
-// seed 灌入内存版预置数据（PG 路径直接调对应的 Seed* 函数共用同一真源）。
-func (s *Store) seed() {
-	for _, n := range SeedNamespaces() {
-		s.namespaces[n.ID] = n
-	}
-	for _, it := range SeedItems() {
-		s.items[it.ID] = it
-	}
-	for _, p := range SeedPublishes() {
-		s.publishes[p.ID] = p
 	}
 }

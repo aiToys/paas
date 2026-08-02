@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/aitoys/paas/internal/httputil"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -44,7 +46,7 @@ func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) boo
 	if h.Authorize == nil || h.Authorize(r, perm) {
 		return true
 	}
-	writeErr(w, http.StatusForbidden, "forbidden: missing "+perm)
+	httputil.WriteError(w, http.StatusForbidden, "forbidden: missing "+perm)
 	return false
 }
 
@@ -64,7 +66,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/api/billing/records/") && strings.HasSuffix(path, "/pay"):
 		h.servePay(w, r)
 	default:
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
 }
 
@@ -76,7 +78,7 @@ func (h *Handler) serveQuota(w http.ResponseWriter, r *http.Request) {
 		}
 		q, err := h.repo.GetQuota(r.Context())
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			httputil.WriteInternalError(w, err)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(q)
@@ -86,23 +88,23 @@ func (h *Handler) serveQuota(w http.ResponseWriter, r *http.Request) {
 		}
 		var q ResourceQuota
 		if err := json.NewDecoder(r.Body).Decode(&q); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
 		saved, err := h.repo.SetQuota(r.Context(), q)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			httputil.WriteInternalError(w, err)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(saved)
 	default:
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
 func (h *Handler) serveUsage(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !h.allow(w, r, PermBillingRead) {
@@ -110,12 +112,12 @@ func (h *Handler) serveUsage(w http.ResponseWriter, r *http.Request) {
 	}
 	q, err := h.repo.GetQuota(r.Context())
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		httputil.WriteInternalError(w, err)
 		return
 	}
 	u, err := h.repo.GetUsage(r.Context())
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		httputil.WriteInternalError(w, err)
 		return
 	}
 	_ = json.NewEncoder(w).Encode(BuildUsageView(q, u))
@@ -123,7 +125,7 @@ func (h *Handler) serveUsage(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) serveRecords(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !h.allow(w, r, PermBillingRead) {
@@ -131,7 +133,7 @@ func (h *Handler) serveRecords(w http.ResponseWriter, r *http.Request) {
 	}
 	list, err := h.repo.ListBills(r.Context())
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		httputil.WriteInternalError(w, err)
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
@@ -139,7 +141,7 @@ func (h *Handler) serveRecords(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) serveGenerate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !h.allow(w, r, PermBillingWrite) {
@@ -151,7 +153,7 @@ func (h *Handler) serveGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	rec, err := h.repo.GenerateBill(r.Context(), period)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		httputil.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusCreated)
@@ -160,7 +162,7 @@ func (h *Handler) serveGenerate(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) servePay(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !h.allow(w, r, PermBillingWrite) {
@@ -170,12 +172,12 @@ func (h *Handler) servePay(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/billing/records/")
 	id := strings.TrimSuffix(rest, "/pay")
 	if id == "" || strings.Contains(id, "/") {
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
 	rec, err := h.repo.PayBill(r.Context(), id)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		httputil.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	_ = json.NewEncoder(w).Encode(rec)
@@ -186,9 +188,4 @@ func (h *Handler) servePay(w http.ResponseWriter, r *http.Request) {
 func currentPeriod() string {
 	t := time.Now()
 	return t.Format("2006-01")
-}
-
-func writeErr(w http.ResponseWriter, code int, msg string) {
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }

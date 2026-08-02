@@ -27,7 +27,7 @@ func (c InstallConfig) Run() error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(work)
+	defer func() { _ = os.RemoveAll(work) }()
 
 	if err := UnTarGz(c.Bundle, work); err != nil {
 		return fmt.Errorf("解包: %w", err)
@@ -82,12 +82,12 @@ func UnTarGz(bundlePath, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	gz, err := gzip.NewReader(f)
 	if err != nil {
 		return err
 	}
-	defer gz.Close()
+	defer func() { _ = gz.Close() }()
 	tr := tar.NewReader(gz)
 	for {
 		hdr, err := tr.Next()

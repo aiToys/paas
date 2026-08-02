@@ -18,12 +18,10 @@ type Store struct {
 	idSeq int
 }
 
+// NewStore 创建仓储（空，不 seed mock 配置）。
+// 去假数据：用户经控制台配置真实 env/Secret（原 seed 含假 secret sk-real-secret-value）。
 func NewStore() *Store {
-	s := &Store{items: map[string]appconfig.ConfigItem{}}
-	for _, c := range seed() {
-		s.items[c.ID] = c
-	}
-	return s
+	return &Store{items: map[string]appconfig.ConfigItem{}}
 }
 
 func tenantOrErr(ctx context.Context) (string, error) {
@@ -116,5 +114,3 @@ func SeedConfigs() []appconfig.ConfigItem {
 		{ID: "cfg-globex-1", TenantID: "t-globex", AppID: "app-agent", EnvID: "env-globex-prod", Key: "MODEL_TIMEOUT", Value: "30", Type: appconfig.TypeEnv, UpdatedAt: t},
 	}
 }
-
-func seed() []appconfig.ConfigItem { return SeedConfigs() }

@@ -26,7 +26,8 @@ func NewStore() *Store {
 		quotas: map[string]billing.ResourceQuota{},
 		usage:  map[string]billing.ResourceUsage{},
 	}
-	s.seed()
+	// 不 seed mock 配额/用量/账单（去假数据）：用量从 CheckAndInc 真实派生（应用/工作负载创建时递增），
+	// 配额用 GetQuota 默认值（未设返默认非错误），账单由 GenerateBill 真实产生。
 	return s
 }
 
@@ -122,7 +123,11 @@ func (s *Store) IncUsage(ctx context.Context, resource string, delta int) (billi
 	if !ok {
 		u = billing.ResourceUsage{TenantID: tid, Counts: map[string]int{}}
 	}
-	u.Counts[resource] += delta
+	newCnt := u.Counts[resource] + delta
+	if newCnt < 0 {
+		newCnt = 0 // 回滚（delta<0）不夹紧会写负值，污染配额上限校验、高估剩余空间
+	}
+	u.Counts[resource] = newCnt
 	u.UpdatedAt = time.Now()
 	s.usage[tid] = u
 	u.Counts = cloneIntMap(u.Counts) // 返回前深拷贝
@@ -154,7 +159,11 @@ func (s *Store) CheckAndInc(ctx context.Context, resource string, delta int) (bi
 		return billing.ResourceUsage{}, fmt.Errorf("%w: %s（上限 %d，当前 %d，请求 %+d）",
 			billing.ErrQuotaExceeded, resource, limit, u.Counts[resource], delta)
 	}
-	u.Counts[resource] += delta
+	newCnt := u.Counts[resource] + delta
+	if newCnt < 0 {
+		newCnt = 0 // 回滚（delta<0）不夹紧会写负值，污染配额上限校验、高估剩余空间
+	}
+	u.Counts[resource] = newCnt
 	u.UpdatedAt = time.Now()
 	s.usage[tid] = u
 	u.Counts = cloneIntMap(u.Counts)
@@ -173,7 +182,7 @@ func (s *Store) ListBills(ctx context.Context) ([]billing.BillingRecord, error) 
 	out := make([]billing.BillingRecord, 0)
 	for _, b := range s.bills {
 		if b.TenantID == tid {
-			out = append(out, b)
+			out = append(out, cloneBill(b))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
@@ -189,10 +198,17 @@ func (s *Store) GetBill(ctx context.Context, id string) (billing.BillingRecord, 
 	defer s.mu.RUnlock()
 	for _, b := range s.bills {
 		if b.ID == id && b.TenantID == tid {
-			return b, nil
+			return cloneBill(b), nil
 		}
 	}
 	return billing.BillingRecord{}, fmt.Errorf("账单不存在: %s", id)
+}
+
+// cloneBill 深拷贝账单（Items 切片底层数组独立），防止返回值与 store 内部状态共享底层数组
+// 引发并发读写 race（与 cloneIntMap 同款防御）。
+func cloneBill(b billing.BillingRecord) billing.BillingRecord {
+	b.Items = append([]billing.BillItem(nil), b.Items...)
+	return b
 }
 
 // GenerateBill 按当前用量 × 单价生成 period 账单；同 period 已有 unpaid 则覆盖更新。
@@ -233,7 +249,7 @@ func (s *Store) GenerateBill(ctx context.Context, period string) (billing.Billin
 			b.Total = total
 			b.CreatedAt = now
 			s.bills[i] = b
-			return b, nil
+			return cloneBill(b), nil // 深拷贝返回，隔离调用方与 store 内部 items 切片
 		}
 	}
 
@@ -248,7 +264,7 @@ func (s *Store) GenerateBill(ctx context.Context, period string) (billing.Billin
 		CreatedAt: now,
 	}
 	s.bills = append(s.bills, rec)
-	return rec, nil
+	return cloneBill(rec), nil // 深拷贝返回，隔离调用方与 store 内部 items 切片
 }
 
 func (s *Store) PayBill(ctx context.Context, id string) (billing.BillingRecord, error) {
@@ -272,19 +288,6 @@ func (s *Store) PayBill(ctx context.Context, id string) (billing.BillingRecord, 
 		return b, nil
 	}
 	return billing.BillingRecord{}, fmt.Errorf("账单不存在: %s", id)
-}
-
-func (s *Store) seed() {
-	t := time.Now()
-	for _, q := range SeedQuotas(t) {
-		s.quotas[q.TenantID] = q
-	}
-	for _, u := range SeedUsages(t) {
-		s.usage[u.TenantID] = u
-	}
-	s.bills = append(s.bills, SeedBills(t)...)
-	// seed 占用了序号 1（bill-t-acme-1），后续 GenerateBill 从 2 起，避免 ID 冲突。
-	s.seq = 1
 }
 
 // SeedQuotas 返回平台预置示例配额，供内存仓储自灌与 PG 仓储迁移后 seed 复用同一真源。

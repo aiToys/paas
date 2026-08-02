@@ -11,6 +11,9 @@ export interface DangerOptions {
   target: string
   /** 高危：要求输入目标名称确认（删除类操作） */
   requireNameConfirm?: boolean
+  /** 显式 isProd：由调用方按资源所在环境判定传入，覆盖顶栏 scope。
+   *  防顶栏 scope 与资源环境不一致时（如测试 scope 下操作生产资源）防护被削弱。 */
+  isProd?: boolean
 }
 
 /**
@@ -22,7 +25,7 @@ export interface DangerOptions {
  */
 export async function confirmDangerous(opt: DangerOptions): Promise<boolean> {
   const envStore = useEnvStore()
-  const isProd = envStore.isProd
+  const isProd = opt.isProd ?? envStore.isProd
   const prefix = isProd ? `⚠️ [生产环境] ` : ''
 
   // 仅生产环境的高危操作要求输入名称确认；测试环境走普通确认

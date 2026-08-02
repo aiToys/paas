@@ -1,0 +1,34 @@
+# Grafana values（统一面板，预配 Prometheus/Loki/Tempo 三数据源）。
+---
+adminPassword: "paas-admin"
+
+persistence:
+  enabled: true
+  storageClassName: local-path
+  size: 5Gi
+
+resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits: { cpu: 500m, memory: 512Mi }
+
+# 数据源 Provisioning（开箱即用，三支柱全配好）
+datasources:
+  datasources.yaml:
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        url: http://prom-prometheus-server.observability.svc.cluster.local:80
+        isDefault: true
+        access: proxy
+      - name: Loki
+        type: loki
+        url: http://loki.observability.svc.cluster.local:3100
+        access: proxy
+      - name: Tempo
+        type: tempo
+        url: http://tempo.observability.svc.cluster.local:3100
+        access: proxy
+
+service:
+  type: ClusterIP

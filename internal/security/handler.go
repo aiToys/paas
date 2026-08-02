@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+
+	"github.com/aitoys/paas/internal/httputil"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -57,7 +59,7 @@ func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) boo
 	if h.Authorize == nil || h.Authorize(r, perm) {
 		return true
 	}
-	writeErr(w, http.StatusForbidden, "forbidden: missing "+perm)
+	httputil.WriteError(w, http.StatusForbidden, "forbidden: missing "+perm)
 	return false
 }
 
@@ -66,7 +68,7 @@ func (h *Handler) adminOnly(w http.ResponseWriter, r *http.Request) bool {
 	if h.IsAdmin != nil && h.IsAdmin(r) {
 		return true
 	}
-	writeErr(w, http.StatusForbidden, "forbidden: platform admin only")
+	httputil.WriteError(w, http.StatusForbidden, "forbidden: platform admin only")
 	return false
 }
 
@@ -90,7 +92,6 @@ func (h *Handler) record(ctx context.Context, action, resourceID, detail string)
 
 // ServeHTTP 按路径分发。
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
 	path := strings.TrimRight(r.URL.Path, "/")
 	switch {
 	case path == "/api/security/secrets":
@@ -100,7 +101,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "/api/security/audit-logs":
 		h.serveAudit(w, r)
 	default:
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
 }
 
@@ -111,10 +112,10 @@ func (h *Handler) serveSecretCollection(w http.ResponseWriter, r *http.Request) 
 		}
 		list, err := h.repo.ListSecrets(r.Context())
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			httputil.WriteInternalError(w, err)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
+		httputil.WriteData(w, list)
 		return
 	}
 	if r.Method == http.MethodPost {
@@ -123,7 +124,7 @@ func (h *Handler) serveSecretCollection(w http.ResponseWriter, r *http.Request) 
 		}
 		var sec Secret
 		if err := json.NewDecoder(r.Body).Decode(&sec); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
 		// 平台级 Secret（如供应商凭证）仅平台管理员可创建。
@@ -132,21 +133,20 @@ func (h *Handler) serveSecretCollection(w http.ResponseWriter, r *http.Request) 
 		}
 		saved, err := h.repo.CreateSecret(r.Context(), sec)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			httputil.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		// 记审计（创建成功）
 		h.record(r.Context(), ActionCreate, saved.ID, "创建密钥 "+sec.Name)
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(saved)
+		httputil.WriteJSON(w, http.StatusCreated, saved)
 		return
 	}
-	writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
 func (h *Handler) serveSecretItem(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !h.allow(w, r, PermSecurityWrite) {
@@ -155,13 +155,13 @@ func (h *Handler) serveSecretItem(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/security/secrets/")
 	id = strings.TrimRight(id, "/")
 	if id == "" {
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
 	// 先取（确认存在 + 拿 name 记审计）；跨租户/不存在走 not found 不泄漏
 	sec, err := h.repo.GetSecret(r.Context(), id)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	// 平台级 Secret 仅平台管理员可删。
@@ -169,16 +169,16 @@ func (h *Handler) serveSecretItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.repo.DeleteSecret(r.Context(), id); err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	h.record(r.Context(), ActionDelete, id, "删除密钥 "+sec.Name)
-	_ = json.NewEncoder(w).Encode(map[string]string{"deleted": id})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"deleted": id})
 }
 
 func (h *Handler) serveAudit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !h.allow(w, r, PermSecurityRead) {
@@ -187,13 +187,8 @@ func (h *Handler) serveAudit(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	list, err := h.repo.ListAuditLogs(r.Context(), q.Get("resourceType"), q.Get("action"))
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		httputil.WriteInternalError(w, err)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
-}
-
-func writeErr(w http.ResponseWriter, code int, msg string) {
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	httputil.WriteData(w, list) // 统一 Content-Type: application/json; charset=utf-8（原 json.Encode 缺 charset）
 }

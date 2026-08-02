@@ -17,8 +17,15 @@ import (
 
 // newHandler 构造集成 handler：真实 governance/env 内存仓储 + stub 鉴权。
 // prodWrite=true 模拟 admin，false 模拟 developer（生产只读）。
-func newHandler(prodWrite bool) *governance.Handler {
-	h := governance.NewHandler(govmemory.NewStore(), governance.WithEnvResolver(envmemory.NewStore()))
+// 可选传入共享 governance store（如需跨 handler 复用预置数据）；未传则各自独立 NewStore。
+func newHandler(prodWrite bool, stores ...*govmemory.Store) *governance.Handler {
+	var store *govmemory.Store
+	if len(stores) > 0 && stores[0] != nil {
+		store = stores[0]
+	} else {
+		store = govmemory.NewStore()
+	}
+	h := governance.NewHandler(store, governance.WithEnvResolver(envmemory.NewStore()))
 	h.Authorize = func(r *http.Request, perm string) bool {
 		if perm == governance.PermProdWrite {
 			return prodWrite
@@ -64,12 +71,29 @@ func TestHandlerList(t *testing.T) {
 
 // TestHandlerProdGuard 验证生产注册/注销权限守卫。
 func TestHandlerProdGuard(t *testing.T) {
-	hDev := newHandler(false)
-	// dev 注册生产服务 -> 403
+	// 共享 store：admin 先建生产服务，dev/admin 注销同一服务（验证权限差异）
+	store := govmemory.NewStore()
+	hAdmin := newHandler(true, store)
+	// admin 先建一个生产服务，供后续注销测试
 	r := req(acmeCtx(), "POST", "/api/services", governance.Service{
-		Name: "prod-new", EnvID: "env-acme-prod-bj", Protocol: governance.ProtocolHTTP, Port: 8080,
+		Name: "prod-svc", EnvID: "env-acme-prod-bj", Protocol: governance.ProtocolHTTP, Port: 8080,
 	})
 	w := httptest.NewRecorder()
+	hAdmin.ServeHTTP(w, r)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("admin 建生产服务应 201，got %d: %s", w.Code, w.Body.String())
+	}
+	var prodSvc governance.Service
+	if err := json.Unmarshal(w.Body.Bytes(), &prodSvc); err != nil {
+		t.Fatalf("解析生产服务失败: %v", err)
+	}
+
+	hDev := newHandler(false, store)
+	// dev 注册生产服务 -> 403
+	r = req(acmeCtx(), "POST", "/api/services", governance.Service{
+		Name: "prod-new", EnvID: "env-acme-prod-bj", Protocol: governance.ProtocolHTTP, Port: 8080,
+	})
+	w = httptest.NewRecorder()
 	hDev.ServeHTTP(w, r)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("dev 注册生产服务应 403，got %d", w.Code)
@@ -83,15 +107,14 @@ func TestHandlerProdGuard(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("dev 注册测试服务应 201，got %d", w.Code)
 	}
-	// admin 注销生产服务（svc-acme-rec 属 env-acme-prod-bj）-> dev 403 / admin 200
-	r = req(acmeCtx(), "DELETE", "/api/services/svc-acme-rec", nil)
+	// dev 注销生产服务 -> 403 / admin 注销 -> 200
+	r = req(acmeCtx(), "DELETE", "/api/services/"+prodSvc.ID, nil)
 	w = httptest.NewRecorder()
 	hDev.ServeHTTP(w, r)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("dev 注销生产服务应 403，got %d", w.Code)
 	}
-	hAdmin := newHandler(true)
-	r = req(acmeCtx(), "DELETE", "/api/services/svc-acme-rec", nil)
+	r = req(acmeCtx(), "DELETE", "/api/services/"+prodSvc.ID, nil)
 	w = httptest.NewRecorder()
 	hAdmin.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
@@ -102,28 +125,41 @@ func TestHandlerProdGuard(t *testing.T) {
 // TestHandlerInstanceOps 验证实例注册/发现/心跳。
 func TestHandlerInstanceOps(t *testing.T) {
 	h := newHandler(true)
-	// 注册实例（svc-acme-cs 属测试环境，dev 也能写）
-	r := req(acmeCtx(), "POST", "/api/services/svc-acme-cs/instances", governance.Instance{
-		Addr: "10.0.1.200:8080",
+	// 先建测试服务（属 env-acme-test），拿到 svcID 后注册实例
+	r := req(acmeCtx(), "POST", "/api/services", governance.Service{
+		Name: "test-svc", EnvID: "env-acme-test", Protocol: governance.ProtocolHTTP, Port: 8080,
 	})
 	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("建测试服务应 201，got %d: %s", w.Code, w.Body.String())
+	}
+	var svc governance.Service
+	if err := json.Unmarshal(w.Body.Bytes(), &svc); err != nil {
+		t.Fatalf("解析服务失败: %v", err)
+	}
+	// 注册实例
+	r = req(acmeCtx(), "POST", "/api/services/"+svc.ID+"/instances", governance.Instance{
+		Addr: "10.0.1.200:8080",
+	})
+	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("注册实例应 201，got %d: %s", w.Code, w.Body.String())
 	}
 	var created governance.Instance
 	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
-		t.Fatalf("解析失败: %v", err)
+		t.Fatalf("解析实例失败: %v", err)
 	}
 	// 服务详情应包含新实例
-	r = req(acmeCtx(), "GET", "/api/services/svc-acme-cs", nil)
+	r = req(acmeCtx(), "GET", "/api/services/"+svc.ID, nil)
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	var detail struct {
 		Instances []governance.Instance `json:"instances"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
-		t.Fatalf("解析失败: %v", err)
+		t.Fatalf("解析详情失败: %v", err)
 	}
 	found := false
 	for _, x := range detail.Instances {

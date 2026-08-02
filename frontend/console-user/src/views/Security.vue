@@ -5,7 +5,10 @@
 import { onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
+import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
+
+const envStore = useEnvStore()
 
 interface Secret {
   id: string; name: string; type: string; scope: string; value: string; desc?: string; updatedAt: string
@@ -86,7 +89,12 @@ async function create() {
 }
 
 async function remove(row: Secret) {
-  const ok = await confirmDangerous({ action: '删除密钥', target: row.name, requireNameConfirm: true })
+  const ok = await confirmDangerous({
+    action: '删除密钥',
+    target: row.name,
+    requireNameConfirm: envStore.isProd,
+    isProd: envStore.isProd,
+  })
   if (!ok) return
   const resp = await fetchAuth(`/api/security/secrets/${row.id}`, { method: 'DELETE' })
   if (resp.ok) {

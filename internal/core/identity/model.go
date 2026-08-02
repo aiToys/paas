@@ -14,13 +14,13 @@ type Tenant struct {
 // User 表示租户内的用户。
 type User struct {
 	ID           string    `json:"id"`
-	TenantID     string    `json:"tenantId"`           // 所属租户；多租户隔离键
-	Name         string    `json:"name"`               // 登录用户名（本期全局唯一）
-	Email        string    `json:"email,omitempty"`    // 可选
-	PasswordHash string    `json:"-"`                  // 永不序列化（handler 显式清空 + json:"-" 双保险）
+	TenantID     string    `json:"tenantId"`        // 所属租户；多租户隔离键
+	Name         string    `json:"name"`            // 登录用户名（本期全局唯一）
+	Email        string    `json:"email,omitempty"` // 可选
+	PasswordHash string    `json:"-"`               // 永不序列化（handler 显式清空 + json:"-" 双保险）
 	IsAdmin      bool      `json:"isAdmin"`
-	Roles        []string  `json:"roles"`              // 角色名，关联 BuiltinRoles()
-	Status       string    `json:"status,omitempty"`   // active|disabled；仅 active 可密码登录
+	Roles        []string  `json:"roles"`            // 角色名，关联 BuiltinRoles()
+	Status       string    `json:"status,omitempty"` // active|disabled；仅 active 可密码登录
 	CreatedAt    time.Time `json:"createdAt,omitempty"`
 }
 

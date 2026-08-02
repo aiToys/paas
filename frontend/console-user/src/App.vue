@@ -5,11 +5,13 @@ import { ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import { auth, setApiKey, currentPreset, PRESET_KEYS } from '@/api'
 import { useEnvStore } from '@/stores/env'
+import { useTheme } from '@/composables/useTheme'
 
 const route = useRoute()
 const router = useRouter()
 const collapsed = ref(false)
 const envStore = useEnvStore()
+const { theme, toggle } = useTheme()
 const searchQuery = ref('')
 
 function onSearch() {
@@ -232,6 +234,21 @@ function isActive(to: string) {
             />
             <kbd>⏎</kbd>
           </div>
+          <button
+            class="theme-toggle"
+            :title="theme === 'dark' ? '切换到亮色' : '切换到暗色'"
+            :aria-label="theme === 'dark' ? '切换到亮色' : '切换到暗色'"
+            @click="toggle"
+          >
+            <!-- 暗色下显示太阳（点击切亮）；亮色下显示月亮（点击切暗） -->
+            <svg v-if="theme === 'dark'" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="4" />
+              <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41" />
+            </svg>
+            <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+            </svg>
+          </button>
           <el-dropdown trigger="click" @command="onPickKey">
             <div class="tenant-chip">
               <div class="t-avatar">{{ identityInitial }}</div>
@@ -285,7 +302,7 @@ function isActive(to: string) {
 .sidebar {
   width: 248px;
   flex-shrink: 0;
-  background: linear-gradient(180deg, #0d111c 0%, #0a0d14 100%);
+  background: var(--sidebar-bg);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -462,7 +479,7 @@ function isActive(to: string) {
   justify-content: space-between;
   padding: 18px 32px;
   border-bottom: 1px solid var(--border);
-  background: rgba(10, 13, 20, 0.6);
+  background: var(--topbar-bg);
   backdrop-filter: blur(8px);
 }
 .page-title {
@@ -513,6 +530,24 @@ function isActive(to: string) {
   font-family: var(--font-mono);
   font-size: 11px;
 }
+.theme-toggle {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.theme-toggle:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
 .tenant-chip {
   display: flex;
   align-items: center;

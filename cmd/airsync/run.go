@@ -20,7 +20,7 @@ func airsyncVerify(bundle string) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(dir)
+	defer func() { _ = os.RemoveAll(dir) }()
 	if err := airsync.UnTarGz(bundle, dir); err != nil {
 		return err
 	}

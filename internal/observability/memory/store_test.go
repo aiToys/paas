@@ -13,32 +13,8 @@ import (
 func acmeCtx() context.Context   { return tenant.WithTenant(context.Background(), "t-acme") }
 func globexCtx() context.Context { return tenant.WithTenant(context.Background(), "t-globex") }
 
-// TestMetricsLazilyAdvance 验证惰性补点：查询后点数增长。
-func TestMetricsLazilyAdvance(t *testing.T) {
-	s := NewStore()
-	key := observability.TargetApp + "|app-old|" + observability.MetricCPU
-	s.series[key] = observability.MetricSeries{
-		ID: "ms-old", TenantID: "t-acme", TargetType: observability.TargetApp,
-		TargetID: "app-old", Name: observability.MetricCPU, Unit: "%", Current: 40,
-		Points: []observability.MetricPoint{{TS: time.Now().Add(-2 * time.Minute), Value: 40}},
-	}
-	before := len(s.series[key].Points)
-	list, err := s.ListMetrics(acmeCtx(), observability.TargetApp, "app-old", observability.MetricCPU)
-	if err != nil {
-		t.Fatalf("查询失败: %v", err)
-	}
-	if len(list) != 1 {
-		t.Fatalf("应返回 1 条，got %d", len(list))
-	}
-	if len(list[0].Points) <= before {
-		t.Fatalf("惰性补点后点数应增长，before=%d after=%d", before, len(list[0].Points))
-	}
-	if len(list[0].Points) > observability.MaxPoints {
-		t.Fatalf("点数不应超过上限 %d，got %d", observability.MaxPoints, len(list[0].Points))
-	}
-}
-
 // TestTenantIsolation 验证指标/规则按租户隔离。
+// 降级模式 series 空（ListMetrics 返空不泄漏）；rules 保留 seed，按租户过滤。
 func TestTenantIsolation(t *testing.T) {
 	s := NewStore()
 	acme, _ := s.ListMetrics(acmeCtx(), "", "", "")
@@ -53,22 +29,32 @@ func TestTenantIsolation(t *testing.T) {
 			t.Fatalf("泄漏其他租户指标: %s", m.ID)
 		}
 	}
+	// 规则按租户隔离：seed rule-acme-cpu 属 t-acme，globex 看不到。
+	acmeRules, _ := s.ListAlertRules(acmeCtx())
+	if len(acmeRules) == 0 {
+		t.Fatal("acme 应有 seed 规则")
+	}
+	for _, r := range acmeRules {
+		if r.TenantID != "t-acme" {
+			t.Fatalf("泄漏其他租户规则: %s", r.ID)
+		}
+	}
+	globexRules, _ := s.ListAlertRules(globexCtx())
+	if len(globexRules) != 0 {
+		t.Fatalf("globex 不应见 acme 规则，got %d", len(globexRules))
+	}
 }
 
-// TestAlertEvaluation 验证告警即时评估（cpu>50 命中 acme app）。
+// TestAlertEvaluation 降级模式 series 空 -> ListAlerts 无 firing 告警。
+// 接真实后端时 series 由 real store 提供，告警评估在 real 模式测。
 func TestAlertEvaluation(t *testing.T) {
 	s := NewStore()
 	alerts, err := s.ListAlerts(acmeCtx())
 	if err != nil {
 		t.Fatalf("评估失败: %v", err)
 	}
-	if len(alerts) == 0 {
-		t.Fatal("应至少有 1 条 firing 告警（cpu>50）")
-	}
-	for _, a := range alerts {
-		if a.RuleID != "rule-acme-cpu" {
-			t.Fatalf("告警来源规则错误，got %s", a.RuleID)
-		}
+	if len(alerts) != 0 {
+		t.Fatalf("降级模式 series 空应无 firing 告警，got %d", len(alerts))
 	}
 	// globex 无规则 -> 空告警
 	gAlerts, _ := s.ListAlerts(globexCtx())
@@ -77,7 +63,7 @@ func TestAlertEvaluation(t *testing.T) {
 	}
 }
 
-// TestCreateAndDeleteRule 验证规则 CRUD + 评估生效。
+// TestCreateAndDeleteRule 验证规则 CRUD（不依赖告警 firing，降级模式 series 空）。
 func TestCreateAndDeleteRule(t *testing.T) {
 	s := NewStore()
 	r, err := s.CreateAlertRule(acmeCtx(), observability.AlertRule{
@@ -91,22 +77,29 @@ func TestCreateAndDeleteRule(t *testing.T) {
 	if r.ID == "" {
 		t.Fatal("应分配 ID")
 	}
-	// 该规则应触发（latency 120 > 50）
-	alerts, _ := s.ListAlerts(acmeCtx())
+	// 创建后列表应含新规则
+	list, _ := s.ListAlertRules(acmeCtx())
 	found := false
-	for _, a := range alerts {
-		if a.RuleID == r.ID {
+	for _, x := range list {
+		if x.ID == r.ID {
 			found = true
-			if a.Severity != observability.SeverityCritical {
-				t.Fatalf("严重级别应透传，got %s", a.Severity)
+			if x.Severity != observability.SeverityCritical {
+				t.Fatalf("严重级别应透传，got %s", x.Severity)
 			}
 		}
 	}
 	if !found {
-		t.Fatal("新规则应触发告警")
+		t.Fatal("创建后列表应含新规则")
 	}
 	if err := s.DeleteAlertRule(acmeCtx(), r.ID); err != nil {
 		t.Fatalf("删除失败: %v", err)
+	}
+	// 删除后列表不含
+	list2, _ := s.ListAlertRules(acmeCtx())
+	for _, x := range list2 {
+		if x.ID == r.ID {
+			t.Fatal("删除后列表不应含该规则")
+		}
 	}
 }
 
@@ -130,35 +123,31 @@ func TestCrossTenantRuleHidden(t *testing.T) {
 	}
 }
 
-// TestLogsLazilyAppended 验证日志惰性补点：首次查询返回日志。
-func TestLogsLazilyAppended(t *testing.T) {
-	s := NewStore()
-	logs, err := s.ListLogs(acmeCtx(), "", "", "", 50)
-	if err != nil {
-		t.Fatalf("ListLogs 失败: %v", err)
-	}
-	if len(logs) == 0 {
-		t.Fatal("首次查询应有惰性补点的日志")
-	}
-	// 倒序：最新在前
-	if !logs[0].Timestamp.After(logs[len(logs)-1].Timestamp) {
-		t.Fatal("日志应按时间倒序")
-	}
-}
-
-// TestLogsFilterByLevel 验证级别过滤。
+// TestLogsFilterByLevel 验证级别过滤（注入日志后按 level 过滤 + 倒序）。
 func TestLogsFilterByLevel(t *testing.T) {
 	s := NewStore()
+	now := time.Now()
+	s.logs["t-acme"] = []observability.LogEntry{
+		{ID: "l1", TenantID: "t-acme", AppID: "app-cs", Level: observability.LevelInfo, Message: "启动", Timestamp: now},
+		{ID: "l2", TenantID: "t-acme", AppID: "app-cs", Level: observability.LevelError, Message: "失败", Timestamp: now.Add(time.Second)},
+		{ID: "l3", TenantID: "t-acme", AppID: "app-cs", Level: observability.LevelError, Message: "再次失败", Timestamp: now.Add(2 * time.Second)},
+	}
 	all, _ := s.ListLogs(acmeCtx(), "", "", "", 100)
+	if len(all) != 3 {
+		t.Fatalf("全部应 3 条，got %d", len(all))
+	}
 	errs, _ := s.ListLogs(acmeCtx(), "", observability.LevelError, "", 100)
+	if len(errs) != 2 {
+		t.Fatalf("error 应 2 条，got %d", len(errs))
+	}
 	for _, l := range errs {
 		if l.Level != observability.LevelError {
 			t.Fatalf("级别过滤应只返回 error，got %s", l.Level)
 		}
 	}
-	// error 数应 <= 全部
-	if len(errs) > len(all) {
-		t.Fatalf("过滤后数 %d 应 <= 全部 %d", len(errs), len(all))
+	// 倒序：最新在前
+	if !errs[0].Timestamp.After(errs[len(errs)-1].Timestamp) {
+		t.Fatal("日志应按时间倒序")
 	}
 }
 
@@ -170,33 +159,18 @@ func TestLogsInvalidLevel(t *testing.T) {
 	}
 }
 
-// TestLogsTenantIsolation 验证日志按租户隔离。
-func TestLogsTenantIsolation(t *testing.T) {
-	s := NewStore()
-	acme, _ := s.ListLogs(acmeCtx(), "", "", "", 50)
-	for _, l := range acme {
-		if l.TenantID != "t-acme" {
-			t.Fatalf("acme 日志不应含其它租户: %+v", l)
-		}
-	}
-	// globex 也有日志（logApps 配置了）
-	globex, _ := s.ListLogs(globexCtx(), "", "", "", 50)
-	if len(globex) == 0 {
-		t.Fatal("globex 应有日志")
-	}
-	for _, l := range globex {
-		if l.TenantID != "t-globex" {
-			t.Fatalf("globex 日志不应含 acme: %+v", l)
-		}
-	}
-}
-
-// TestLogsKeywordSearch 验证关键字搜索。
+// TestLogsKeywordSearch 验证关键字搜索（注入日志后按关键字过滤）。
 func TestLogsKeywordSearch(t *testing.T) {
 	s := NewStore()
-	_, _ = s.ListLogs(acmeCtx(), "", "", "", 100) // 触发补点
-	// 搜索固定关键字（模板里 "路由"）
+	now := time.Now()
+	s.logs["t-acme"] = []observability.LogEntry{
+		{ID: "l1", TenantID: "t-acme", AppID: "app-cs", Level: observability.LevelInfo, Message: "路由表更新", Timestamp: now},
+		{ID: "l2", TenantID: "t-acme", AppID: "app-cs", Level: observability.LevelInfo, Message: "健康检查", Timestamp: now.Add(time.Second)},
+	}
 	hits, _ := s.ListLogs(acmeCtx(), "", "", "路由", 100)
+	if len(hits) != 1 {
+		t.Fatalf("关键字 '路由' 应命中 1 条，got %d", len(hits))
+	}
 	for _, l := range hits {
 		if !strings.Contains(l.Message, "路由") {
 			t.Fatalf("关键字过滤应只返回含关键字的: %s", l.Message)
@@ -204,45 +178,67 @@ func TestLogsKeywordSearch(t *testing.T) {
 	}
 }
 
-// TestTracesLazilyAppended 验证 trace 惰性补点 + span 结构。
-func TestTracesLazilyAppended(t *testing.T) {
+// TestLogsAppFilter 验证按 appId 过滤。
+func TestLogsAppFilter(t *testing.T) {
 	s := NewStore()
-	traces, err := s.ListTraces(acmeCtx(), "", "", 20)
-	if err != nil {
-		t.Fatalf("ListTraces 失败: %v", err)
+	now := time.Now()
+	s.logs["t-acme"] = []observability.LogEntry{
+		{ID: "l1", TenantID: "t-acme", AppID: "app-cs", Level: observability.LevelInfo, Message: "a", Timestamp: now},
+		{ID: "l2", TenantID: "t-acme", AppID: "app-etl", Level: observability.LevelInfo, Message: "b", Timestamp: now.Add(time.Second)},
 	}
-	if len(traces) == 0 {
-		t.Fatal("首次查询应有惰性补点的 trace")
+	cs, _ := s.ListLogs(acmeCtx(), "app-cs", "", "", 100)
+	if len(cs) != 1 {
+		t.Fatalf("app-cs 应 1 条，got %d", len(cs))
 	}
-	for _, tr := range traces {
-		if len(tr.Spans) == 0 {
-			t.Fatalf("trace %s 应含 span", tr.ID)
-		}
-		if tr.DurationMs <= 0 {
-			t.Fatalf("trace %s 总时长应 >0", tr.ID)
-		}
-		if !observability.ValidTraceStatus(tr.Status) {
-			t.Fatalf("trace %s 非法状态 %s", tr.ID, tr.Status)
-		}
-	}
-	// 倒序
-	if !traces[0].StartedAt.After(traces[len(traces)-1].StartedAt) {
-		t.Fatal("trace 应按开始时间倒序")
+	if cs[0].AppID != "app-cs" {
+		t.Fatalf("appId 过滤错误，got %s", cs[0].AppID)
 	}
 }
 
-// TestTracesFilterByStatus 验证状态过滤。
+// TestLogsCrossTenantHidden 验证日志按租户隔离（注入 acme 日志，globex 看不到）。
+func TestLogsCrossTenantHidden(t *testing.T) {
+	s := NewStore()
+	now := time.Now()
+	s.logs["t-acme"] = []observability.LogEntry{
+		{ID: "l1", TenantID: "t-acme", AppID: "app-cs", Level: observability.LevelInfo, Message: "a", Timestamp: now},
+	}
+	acme, _ := s.ListLogs(acmeCtx(), "", "", "", 50)
+	if len(acme) != 1 {
+		t.Fatalf("acme 应见 1 条，got %d", len(acme))
+	}
+	globex, _ := s.ListLogs(globexCtx(), "", "", "", 50)
+	if len(globex) != 0 {
+		t.Fatalf("globex 不应见 acme 日志，got %d", len(globex))
+	}
+}
+
+// TestTracesFilterByStatus 验证状态过滤（注入 trace 后按 status 过滤 + 倒序）。
 func TestTracesFilterByStatus(t *testing.T) {
 	s := NewStore()
-	_, _ = s.ListTraces(acmeCtx(), "", "", 50) // 触发补点
+	now := time.Now()
+	s.traces["t-acme"] = []observability.Trace{
+		{ID: "t1", TenantID: "t-acme", AppID: "app-cs", Operation: "GET /v1/models", Status: observability.TraceSuccess, DurationMs: 50, StartedAt: now, Spans: []observability.Span{{ID: "s1", Operation: "db", Service: "svc"}}},
+		{ID: "t2", TenantID: "t-acme", AppID: "app-cs", Operation: "POST /v1/chat", Status: observability.TraceError, DurationMs: 120, StartedAt: now.Add(time.Second), Spans: []observability.Span{{ID: "s2", Operation: "upstream", Service: "svc"}}},
+	}
+	all, _ := s.ListTraces(acmeCtx(), "", "", 50)
+	if len(all) != 2 {
+		t.Fatalf("全部应 2 条，got %d", len(all))
+	}
 	errs, err := s.ListTraces(acmeCtx(), "", observability.TraceError, 50)
 	if err != nil {
 		t.Fatalf("ListTraces 失败: %v", err)
+	}
+	if len(errs) != 1 {
+		t.Fatalf("error 应 1 条，got %d", len(errs))
 	}
 	for _, tr := range errs {
 		if tr.Status != observability.TraceError {
 			t.Fatalf("状态过滤应只返回 error，got %s", tr.Status)
 		}
+	}
+	// 倒序：最新在前
+	if !all[0].StartedAt.After(all[len(all)-1].StartedAt) {
+		t.Fatal("trace 应按开始时间倒序")
 	}
 }
 
@@ -254,17 +250,19 @@ func TestTracesInvalidStatus(t *testing.T) {
 	}
 }
 
-// TestTracesTenantIsolation 验证 trace 按租户隔离。
-func TestTracesTenantIsolation(t *testing.T) {
+// TestTracesCrossTenantHidden 验证 trace 按租户隔离（注入 acme trace，globex 看不到）。
+func TestTracesCrossTenantHidden(t *testing.T) {
 	s := NewStore()
+	now := time.Now()
+	s.traces["t-acme"] = []observability.Trace{
+		{ID: "t1", TenantID: "t-acme", AppID: "app-cs", Operation: "GET /v1/models", Status: observability.TraceSuccess, DurationMs: 50, StartedAt: now, Spans: []observability.Span{{ID: "s1", Operation: "db", Service: "svc"}}},
+	}
 	acme, _ := s.ListTraces(acmeCtx(), "", "", 20)
-	for _, tr := range acme {
-		if tr.TenantID != "t-acme" {
-			t.Fatalf("acme trace 不应含其它租户: %+v", tr)
-		}
+	if len(acme) != 1 {
+		t.Fatalf("acme 应见 1 条，got %d", len(acme))
 	}
 	globex, _ := s.ListTraces(globexCtx(), "", "", 20)
-	if len(globex) == 0 {
-		t.Fatal("globex 应有 trace")
+	if len(globex) != 0 {
+		t.Fatalf("globex 不应见 acme trace，got %d", len(globex))
 	}
 }

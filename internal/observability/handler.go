@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/aitoys/paas/internal/httputil"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -38,7 +40,7 @@ func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) boo
 	if h.Authorize == nil || h.Authorize(r, perm) {
 		return true
 	}
-	writeErr(w, http.StatusForbidden, "forbidden: missing "+perm)
+	httputil.WriteError(w, http.StatusForbidden, "forbidden: missing "+perm)
 	return false
 }
 
@@ -60,14 +62,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "/api/observability/traces":
 		h.serveTraces(w, r)
 	default:
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
 }
 
 // serveTraces 处理 GET /api/observability/traces?appId=&status=&limit=（惰性补点）。
 func (h *Handler) serveTraces(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !h.allow(w, r, PermObservabilityRead) {
@@ -82,7 +84,7 @@ func (h *Handler) serveTraces(w http.ResponseWriter, r *http.Request) {
 	}
 	traces, err := h.repo.ListTraces(r.Context(), q.Get("appId"), q.Get("status"), limit)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		httputil.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": traces})
@@ -91,7 +93,7 @@ func (h *Handler) serveTraces(w http.ResponseWriter, r *http.Request) {
 // serveLogs 处理 GET /api/observability/logs?appId=&level=&q=&limit=（惰性补点）。
 func (h *Handler) serveLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !h.allow(w, r, PermObservabilityRead) {
@@ -106,7 +108,7 @@ func (h *Handler) serveLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	logs, err := h.repo.ListLogs(r.Context(), q.Get("appId"), q.Get("level"), q.Get("q"), limit)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		httputil.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": logs})
@@ -114,7 +116,7 @@ func (h *Handler) serveLogs(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) serveMetrics(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !h.allow(w, r, PermObservabilityRead) {
@@ -123,7 +125,7 @@ func (h *Handler) serveMetrics(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	list, err := h.repo.ListMetrics(r.Context(), q.Get("targetType"), q.Get("targetId"), q.Get("name"))
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		httputil.WriteInternalError(w, err)
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
@@ -136,8 +138,18 @@ func (h *Handler) serveRuleCollection(w http.ResponseWriter, r *http.Request) {
 		}
 		list, err := h.repo.ListAlertRules(r.Context())
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			httputil.WriteInternalError(w, err)
 			return
+		}
+		// targetType 过滤（前端按 dataservice 等维度查规则）；空则返全部。
+		if tt := r.URL.Query().Get("targetType"); tt != "" {
+			filtered := make([]AlertRule, 0, len(list))
+			for _, rule := range list {
+				if rule.TargetType == tt {
+					filtered = append(filtered, rule)
+				}
+			}
+			list = filtered
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
 		return
@@ -148,24 +160,24 @@ func (h *Handler) serveRuleCollection(w http.ResponseWriter, r *http.Request) {
 		}
 		var rule AlertRule
 		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
 		saved, err := h.repo.CreateAlertRule(r.Context(), rule)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			httputil.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(saved)
 		return
 	}
-	writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
 func (h *Handler) serveRuleItem(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodDelete {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !h.allow(w, r, PermObservabilityWrite) {
@@ -174,11 +186,11 @@ func (h *Handler) serveRuleItem(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/observability/alert-rules/")
 	id = strings.TrimRight(id, "/")
 	if id == "" {
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
 	if err := h.repo.DeleteAlertRule(r.Context(), id); err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]string{"deleted": id})
@@ -186,7 +198,7 @@ func (h *Handler) serveRuleItem(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) serveAlerts(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !h.allow(w, r, PermObservabilityRead) {
@@ -194,13 +206,8 @@ func (h *Handler) serveAlerts(w http.ResponseWriter, r *http.Request) {
 	}
 	alerts, err := h.repo.ListAlerts(r.Context())
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		httputil.WriteInternalError(w, err)
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": alerts})
-}
-
-func writeErr(w http.ResponseWriter, code int, msg string) {
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }

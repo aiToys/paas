@@ -35,3 +35,21 @@ devops:
   registryUser: ""                   # hub.wang.dd:5000 无认证则留空
   registryPass: ""
   gitToken: ""                       # 构建公开仓库留空；私有仓库填 HTTPS token
+
+# MaaS 真实推理（airouter 网关）；key 不入库，部署时 --set maas.airouterApiKey=<key> 注入
+maas:
+  airouterApiKey: ""
+
+# 可观测三支柱（observability namespace 真实后端，见 deploy/observability/*.yaml）。
+# core 经这些 env 接真实 Prometheus/Loki/Tempo；控制面自身 OTel 链路推 Tempo。
+observability:
+  prometheusURL: "http://prom-prometheus-server.observability.svc.cluster.local:80"
+  lokiURL: "http://loki.observability.svc.cluster.local:3100"
+  tempoURL: "http://tempo.observability.svc.cluster.local:3200"
+  otelEndpoint: "tempo.observability.svc.cluster.local:4318"
+
+# 数据面 SDK 接入：演示用 sk-acme-admin 作 dp token（TODO per-workload/per-tenant token）。
+dataplane:
+  token: "sk-acme-admin"
+  endpoint: ""   # 空用默认 http://paas-core.paas.svc.cluster.local/dp
+

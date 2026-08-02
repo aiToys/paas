@@ -50,8 +50,8 @@ func TestTenantIsolation(t *testing.T) {
 	if acmeTenant != 2 || globexTenant != 1 {
 		t.Fatalf("租户级应隔离：acme 2、globex 1，got %d/%d", acmeTenant, globexTenant)
 	}
-	if platform != 3 {
-		t.Fatalf("平台级凭证应 3 个（供应商 Key），got %d", platform)
+	if platform != 4 {
+		t.Fatalf("平台级凭证应 4 个（OpenAI/DeepSeek/通义/airouter），got %d", platform)
 	}
 	// 跨租户 Get 租户级不泄漏
 	if _, err := s.GetSecret(acmeCtx(), "sec-globex-token"); err == nil {

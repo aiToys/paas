@@ -123,12 +123,13 @@ async function loadTraces() {
   if (resp.ok) traces.value = (await resp.json()).data ?? []
 }
 
-async function loadAll() {
-  loading.value = true
+async function loadAll(silent = false) {
+  // 首次加载设 loading（骨架）；10s 轮询 silent=true 不设 loading，避免 v-loading 闪烁。
+  if (!silent) loading.value = true
   try {
     await Promise.all([loadMetrics(), loadRules(), loadAlerts(), loadLogs(), loadTraces()])
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 
@@ -198,11 +199,18 @@ async function saveRule() {
 }
 
 async function deleteRule(r: AlertRule) {
-  const resp = await fetchAuth(`/api/observability/alert-rules/${r.id}`, { method: 'DELETE' })
-  if (resp.ok) {
-    ElMessage.success('已删除')
-    loadRules()
-    loadAlerts()
+  try {
+    const resp = await fetchAuth(`/api/observability/alert-rules/${r.id}`, { method: 'DELETE' })
+    if (resp.ok) {
+      ElMessage.success('已删除')
+      loadRules()
+      loadAlerts()
+    } else {
+      const err = await resp.json().catch(() => ({}))
+      ElMessage.error(err.error || '删除失败')
+    }
+  } catch (e) {
+    ElMessage.error('删除失败：' + (e as Error).message)
   }
 }
 
@@ -210,7 +218,7 @@ let timer: number | undefined
 onMounted(async () => {
   await loadApps()
   await loadAll()
-  timer = window.setInterval(loadAll, 10000) // 10s 轮询刷新指标/告警
+  timer = window.setInterval(() => loadAll(true), 10000) // 10s 轮询刷新指标/告警（silent 不闪烁）
 })
 onUnmounted(() => {
   if (timer) window.clearInterval(timer)
@@ -225,7 +233,7 @@ onUnmounted(() => {
         <p class="sub">指标监控 + 告警规则 · 惰性时序模拟采集（10s 自动刷新）</p>
       </div>
       <div class="head-actions">
-        <el-select v-model="targetApp" placeholder="选择应用" style="width: 200px" @change="loadMetrics(); loadAlerts(); loadLogs(); loadTraces()">
+        <el-select v-model="targetApp" placeholder="选择应用" style="width: 200px" @change="() => loadAll()">
           <el-option v-for="a in apps" :key="a.id" :label="a.name" :value="a.id" />
         </el-select>
         <el-button type="primary" @click="openRule">+ 告警规则</el-button>

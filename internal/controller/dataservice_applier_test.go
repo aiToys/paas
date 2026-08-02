@@ -48,15 +48,15 @@ func TestDataServiceK8sApplierApplyAndDelete(t *testing.T) {
 	}
 }
 
-func TestEngineOrDefaultFallback(t *testing.T) {
+func TestEngineOfFallback(t *testing.T) {
 	// 无 engine 字段时按 Kind 给默认（与 KindMeta.Default 对齐）。
 	d := dataservice.DataService{Kind: dataservice.KindMQ, Spec: map[string]string{}}
-	if got := engineOrDefault(d); got != "kafka" {
-		t.Fatalf("mq 默认 engine 应为 kafka，实得 %s", got)
+	if got := dataservice.EngineOf(d); got != "nats" {
+		t.Fatalf("mq 默认 engine 应为 nats，实得 %s", got)
 	}
 	// 显式 engine 优先。
 	d2 := dataservice.DataService{Kind: dataservice.KindMQ, Spec: map[string]string{"engine": "rabbitmq"}}
-	if got := engineOrDefault(d2); got != "rabbitmq" {
+	if got := dataservice.EngineOf(d2); got != "rabbitmq" {
 		t.Fatalf("显式 engine 应优先，实得 %s", got)
 	}
 }

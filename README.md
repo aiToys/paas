@@ -1,6 +1,6 @@
 # paas
 
-[![Go](https://img.shields.io/badge/Go-1.23+-00ADD8?logo=go)](https://go.dev/)
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](https://go.dev/)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
 [![CI](https://github.com/aitoys/paas/actions/workflows/ci.yml/badge.svg)](https://github.com/aitoys/paas/actions/workflows/ci.yml)
 
@@ -8,7 +8,7 @@
 
 ## 状态
 
-🚧 开源就绪起步期（完成度约 90%）。Platform Core 底座 + MaaS 推理平台 + 应用主线 + 全套平台能力横切已落地，进程内 mock 可端到端演示；真实基础设施（vLLM 纳管 / K8s 编排 / PG 持久化）为后续切片。
+🚧 开源就绪起步期（完成度约 96%）。Platform Core 底座 + MaaS 推理平台 + 应用主线 + 全套平台能力横切已落地；**K8s 数据面（Workload/Dataservice CRD + Reconciler，真实集群端到端已验证）+ PostgreSQL 持久化（全 10 模块已迁）** 已上线，DevOps 构建流水线下沉到 K8s Job（DooD）。轻资产路线：不自建推理集群，聚合第三方供应商（OpenAI/DeepSeek/通义千问）。
 
 ### 已落地能力
 
@@ -48,24 +48,34 @@
 
 | 领域 | 选型 |
 |------|------|
-| 控制面 | Go + controller-runtime + kubebuilder |
-| 元数据存储 | PostgreSQL |
+| 控制面 | Go 1.26 + controller-runtime + kubebuilder |
+| 元数据存储 | PostgreSQL（全 10 模块已迁，可降级内存模式） |
 | 事件总线 | NATS（嵌入式） |
-| 推理引擎 | vLLM（纳管，不自研） |
+| 推理引擎 | 第三方供应商聚合（OpenAI / DeepSeek / 通义千问，OpenAI 兼容协议；不自建 vLLM） |
 | 可观测 | OpenTelemetry + Prometheus + Loki + Tempo |
 | 交付 | Helm + OCI + `airsync` 离线工具 |
-| 前端 | Vue 3 + Element Plus + Vite + TypeScript |
+| 前端 | Vue 3 + Element Plus + Vite + TypeScript（console-user / console-admin / landing 三套） |
 | 协议 | Apache 2.0 |
 
 ## 快速开始
 
-环境要求：Go >= 1.23、Node >= 22、pnpm、GNU make（本地开发）；或仅需 Docker（容器体验）。
+环境要求：Go >= 1.26、Node >= 22.13、pnpm、GNU make（本地开发）；或仅需 Docker（容器体验）；或 K8s 集群 + helm（生产部署）。
+
+> **本地 dev 提示**：本机存在 `~/.kube/config` 时 core 会自动连集群数据面（写操作投影 CRD）。纯内存调试请设 `PAAS_K8S_ENABLED=false`。
 
 **Docker 一键启动**（最快体验）：
 
 ```bash
 docker compose up --build         # 构建并启动 Platform Core（:8080）
 curl -H "Authorization: Bearer sk-acme-admin" http://localhost:8080/livez
+```
+
+**K8s 部署**（单镜像同域 serve 前端 + API，含数据面 CRD + Reconciler）：
+
+```bash
+./scripts/deploy-k8s.sh            # docker build（前端 embed）→ push registry → helm upgrade
+# 默认推 hub.wang.dd:5000/paas-core，覆盖配置见 deploy/charts/paas/values-paas-k8s.yaml
+# 持久化：PAAS_DB_URL 指向集群内 postgres；数据面：in-cluster SA token + RBAC 自动授权
 ```
 
 **本地开发**（后端 Platform Core，暴露 :8080）：

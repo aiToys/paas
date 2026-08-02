@@ -13,10 +13,60 @@ import (
 func acmeCtx() context.Context   { return tenant.WithTenant(context.Background(), "t-acme") }
 func globexCtx() context.Context { return tenant.WithTenant(context.Background(), "t-globex") }
 
+// seedImage 白盒注入镜像 fixture（ImageRepository 无 Create 方法，测试直接造静态构建产物）。
+// 去假数据后 NewStore 不再 seed，依赖镜像的测试需显式调用本 helper 自建数据。
+func seedImage(s *Store, id, tid, appID string) devops.Image {
+	img := devops.Image{
+		ID:         id,
+		TenantID:   tid,
+		AppID:      appID,
+		Registry:   "registry.paas.local/" + appID,
+		Tag:        "main-" + id,
+		Digest:     "sha256:" + sha256hex(id),
+		Source:     "a1b2c3d4e5f67890a1b2c3d4e5f67890a1b2c3d4",
+		Branch:     "main",
+		BuildRunID: "build-" + id,
+		BuiltAt:    time.Now(),
+		Status:     devops.ImageReady,
+	}
+	s.mu.Lock()
+	s.images[id] = img
+	s.mu.Unlock()
+	return img
+}
+
+// seedRelease 白盒注入发布单 fixture（CreateRelease 是编排方法，不适合直接造静态历史发布）。
+// 供跨租户隔离等需要预置历史发布单的测试显式调用。
+func seedRelease(s *Store, id, tid, appID, envID, imageID, imageDigest, workloadID string) devops.Release {
+	rel := devops.Release{
+		ID:          id,
+		TenantID:    tid,
+		AppID:       appID,
+		EnvID:       envID,
+		ImageID:     imageID,
+		ImageDigest: imageDigest,
+		Strategy:    devops.StrategyRolling,
+		Status:      devops.ReleaseSucceeded,
+		WorkloadID:  workloadID,
+		CreatedAt:   time.Now(),
+		CreatedBy:   "u-test",
+	}
+	s.mu.Lock()
+	s.releases[id] = rel
+	s.mu.Unlock()
+	return rel
+}
+
 // TestBuildRunMockCI 验证 mock CI runner 异步流转 pending->running->success 并产出 Image。
 func TestBuildRunMockCI(t *testing.T) {
 	s := NewStore(wlmemory.NewStore())
 	ctx := acmeCtx()
+	// 自建仓库（构建需校验仓库归属应用）
+	if err := s.CreateRepo(ctx, devops.CodeRepo{
+		ID: "repo-acme-cs", AppID: "app-cs", GitURL: "https://github.com/acme/cs-svc.git", Branch: "main",
+	}); err != nil {
+		t.Fatalf("建仓库失败: %v", err)
+	}
 
 	if err := s.CreateBuildRun(ctx, devops.BuildRun{
 		AppID: "app-cs", RepoID: "repo-acme-cs", Trigger: devops.TriggerManual,
@@ -64,8 +114,10 @@ func TestReleaseOrchestration(t *testing.T) {
 	wl := wlmemory.NewStore()
 	s := NewStore(wl)
 	ctx := acmeCtx()
+	// 自建镜像 fixture（构建产物）
+	seedImage(s, "img-acme-001", "t-acme", "app-cs")
 
-	// seed 的 img-acme-001 发布到 env-acme-test（wl-cs-api 已存在 service 基线）
+	// img-acme-001 发布到 env-acme-test（wl-cs-api 由 wlmemory seed 提供 service 基线）
 	rel, err := s.CreateRelease(ctx, devops.ReleaseInput{
 		AppID: "app-cs", EnvID: "env-acme-test", ImageID: "img-acme-001",
 	})
@@ -95,6 +147,13 @@ func TestReleasePreviousAndRollback(t *testing.T) {
 	wl := wlmemory.NewStore()
 	s := NewStore(wl)
 	ctx := acmeCtx()
+	// 自建镜像 img-acme-001 + 仓库（构建 img2 需要）
+	seedImage(s, "img-acme-001", "t-acme", "app-cs")
+	if err := s.CreateRepo(ctx, devops.CodeRepo{
+		ID: "repo-acme-cs", AppID: "app-cs", GitURL: "https://github.com/acme/cs-svc.git", Branch: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	// 第一次发布 img-acme-001
 	if _, err := s.CreateRelease(ctx, devops.ReleaseInput{
@@ -149,11 +208,16 @@ func TestRollbackNoPrevious(t *testing.T) {
 	wl := wlmemory.NewStore()
 	s := NewStore(wl)
 	ctx := acmeCtx()
+	// 自建镜像 fixture
+	seedImage(s, "img-acme-001", "t-acme", "app-cs")
 
 	// 首次发布（无 previous）
-	rel, _ := s.CreateRelease(ctx, devops.ReleaseInput{
+	rel, err := s.CreateRelease(ctx, devops.ReleaseInput{
 		AppID: "app-cs", EnvID: "env-acme-test", ImageID: "img-acme-001",
 	})
+	if err != nil {
+		t.Fatalf("发布失败: %v", err)
+	}
 
 	if _, err := s.RollbackRelease(ctx, rel.ID); err == nil {
 		t.Fatal("无上一镜像应无法回滚，应报错")
@@ -165,8 +229,10 @@ func TestReleaseCreateWorkload(t *testing.T) {
 	wl := wlmemory.NewStore()
 	s := NewStore(wl)
 	ctx := acmeCtx()
+	// 自建镜像 fixture
+	seedImage(s, "img-acme-001", "t-acme", "app-cs")
 
-	// app-cs 在 env-acme-prod-bj 无 service 基线 -> 发布应创建新 Workload
+	// app-cs 在 env-acme-prod-bj 无 service 基线（wlmemory seed 仅 env-acme-test 有 service）-> 发布应创建新 Workload
 	rel, err := s.CreateRelease(ctx, devops.ReleaseInput{
 		AppID: "app-cs", EnvID: "env-acme-prod-bj", ImageID: "img-acme-001",
 	})
@@ -193,6 +259,15 @@ func TestReleaseCreateWorkload(t *testing.T) {
 // TestTenantIsolation 验证跨租户访问 not found 不泄漏。
 func TestTenantIsolation(t *testing.T) {
 	s := NewStore(wlmemory.NewStore())
+	// 自建跨租户数据：acme 仓库+镜像+发布，globex 镜像
+	if err := s.CreateRepo(acmeCtx(), devops.CodeRepo{
+		ID: "repo-acme-cs", AppID: "app-cs", GitURL: "https://github.com/acme/cs.git", Branch: "main",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	acmeImg := seedImage(s, "img-acme-001", "t-acme", "app-cs")
+	seedImage(s, "img-globex-001", "t-globex", "app-agent")
+	seedRelease(s, "rel-acme-001", "t-acme", "app-cs", "env-acme-test", "img-acme-001", acmeImg.Digest, "wl-cs-api")
 
 	// acme 访问 globex 镜像 -> not found
 	if _, err := s.GetImage(acmeCtx(), "img-globex-001"); err == nil {

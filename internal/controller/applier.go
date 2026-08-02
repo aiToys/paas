@@ -46,17 +46,19 @@ func (a *K8sApplier) Apply(ctx context.Context, w workload.Workload) error {
 	crd := &v1alpha1.Workload{ObjectMeta: metav1.ObjectMeta{Name: w.ID, Namespace: a.namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, a.Client, crd, func() error {
 		crd.Spec = v1alpha1.WorkloadSpec{
-			TenantID: w.TenantID,
-			AppID:    w.AppID,
-			EnvID:    w.EnvID,
-			LaneID:   w.LaneID,
-			Type:     w.Type,
-			Name:     w.Name,
-			Image:    w.Image,
-			ImageRef: w.ImageRef,
-			Replicas: clampReplicas(w.Replicas),
-			Schedule: w.Schedule,
-			Command:  w.Command,
+			TenantID:      w.TenantID,
+			AppID:         w.AppID,
+			EnvID:         w.EnvID,
+			LaneID:        w.LaneID,
+			Type:          w.Type,
+			Name:          w.Name,
+			Image:         w.Image,
+			ImageRef:      w.ImageRef,
+			Replicas:      clampReplicas(w.Replicas),
+			Port:          clampReplicas(w.Port),          // 端口投影，驱动 reconciler 建 Service + readiness probe
+			ContainerPort: clampReplicas(w.ContainerPort), // 0 时不建 Service（向后兼容）
+			Schedule:      w.Schedule,
+			Command:       w.Command,
 		}
 		return nil
 	})

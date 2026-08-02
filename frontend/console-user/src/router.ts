@@ -86,6 +86,14 @@ const routes: RouteRecordRaw[] = [
     props: { kind: 'search' },
     meta: { title: '搜索引擎' },
   },
+  {
+    // 数据服务详情：kind + id 双段路径，与 /resources/:kind 列表路由不冲突（最长匹配）
+    path: '/resources/:kind/:id',
+    name: 'data-service-detail',
+    component: () => import('@/views/DataServiceDetail.vue'),
+    props: true,
+    meta: { title: '数据服务详情' },
+  },
 
   // —— 工作负载：应用运行形态 ——
   {
@@ -172,6 +180,13 @@ const routes: RouteRecordRaw[] = [
     name: 'billing',
     component: () => import('@/views/Billing.vue'),
     meta: { title: '配额与账单' },
+  },
+  // 404 兜底：未注册路径渲染 NotFound，避免只剩顶栏+侧栏的空白页。
+  {
+    path: '/:catchAll(.*)*',
+    name: 'not-found',
+    component: () => import('@/views/NotFound.vue'),
+    meta: { title: '页面不存在' },
   },
 ]
 

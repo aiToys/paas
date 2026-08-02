@@ -73,9 +73,13 @@ async function rollback(row: Release) {
     requireNameConfirm: envStore.isProd && row.envId === envStore.currentEnv?.id,
   })
   if (!ok) return
-  const resp = await fetchAuth(`/api/releases/${row.id}/rollback`, { method: 'POST' })
-  if (resp.ok) { ElMessage.success('已回滚'); loadReleases() }
-  else { const err = await resp.json().catch(() => ({})); ElMessage.error(err.error || '回滚失败') }
+  try {
+    const resp = await fetchAuth(`/api/releases/${row.id}/rollback`, { method: 'POST' })
+    if (resp.ok) { ElMessage.success('已回滚'); loadReleases() }
+    else { const err = await resp.json().catch(() => ({})); ElMessage.error(err.error || '回滚失败') }
+  } catch (e) {
+    ElMessage.error('回滚失败：' + (e as Error).message)
+  }
 }
 
 function shortDigest(d: string) {

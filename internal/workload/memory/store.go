@@ -15,14 +15,28 @@ import (
 
 // Store 是 workload.Repository 的内存实现。
 type Store struct {
-	mu        sync.RWMutex
-	workloads map[string]workload.Workload
+	mu            sync.RWMutex
+	workloads     map[string]workload.Workload
+	imageRegistry string // seed 镜像 registry 前缀（内网部署拼 <registry>/library/...）
 }
 
-// NewStore 创建仓储并 seed 示例工作负载。
-func NewStore() *Store {
+// StoreOpt 配置 Store。
+type StoreOpt func(*Store)
+
+// WithImageRegistry 设置 seed 镜像的 registry 前缀。
+// 集群部署（PAAS_IMAGE_REGISTRY=hub.wang.dd:5000）时 seed 镜像拼内网地址让节点可拉；
+// 空（本地 dev）用公开名 nginx:stable（内存模式不投影 K8s，镜像真假无影响）。
+func WithImageRegistry(registry string) StoreOpt {
+	return func(s *Store) { s.imageRegistry = registry }
+}
+
+// NewStore 创建仓储并 seed 示例工作负载（真实 nginx 业务服务镜像）。
+func NewStore(opts ...StoreOpt) *Store {
 	s := &Store{workloads: map[string]workload.Workload{}}
-	for _, w := range seed() {
+	for _, o := range opts {
+		o(s)
+	}
+	for _, w := range seed(s.imageRegistry) {
 		s.workloads[w.ID] = w
 	}
 	return s
@@ -160,25 +174,51 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-// SeedWorkloads 返回平台预置示例工作负载，供内存仓储自灌与 PG 仓储迁移后 seed 复用同一真源。
-func SeedWorkloads() []workload.Workload { return seed() }
+// SeedWorkloads 返回平台预置示例工作负载（真实 nginx 业务服务镜像），供内存仓储自灌与
+// PG 仓储迁移后 seed 复用同一真源。registry 非空拼内网地址（集群可拉），空用公开名（dev）。
+func SeedWorkloads(registry string) []workload.Workload { return seed(registry) }
 
-// seed 生成跨两租户的示例工作负载，挂到环境（LaneID 均为 default 基线）。
-// acme: cs-api/rec-svc -> env-acme-test；globex: etl/agent -> env-globex-prod。
-func seed() []workload.Workload {
+// nginxImage 按 registry 拼接 nginx 镜像地址（去 repo 前缀走 library/，与 engineImage 同款）。
+func nginxImage(registry string) string {
+	if registry == "" {
+		return "nginx:stable"
+	}
+	return registry + "/library/nginx:stable"
+}
+
+// seed 生成跨两租户的示例工作负载（真实 nginx 镜像，初始占位态由 K8s 回填真实）。
+// acme: cs-api/rec-svc(service) + batch-recall(job) + daily-report(cronjob)，三类齐全；
+// globex: etl-nightly(cronjob)/etl-backfill(job)/agent-gw(service)，多租户隔离对照。
+//
+// Ready/Status 为初始占位：集群模式 StatusReader 从 K8s 回填真实值（覆盖 store 静态值），
+// 内存模式（无 K8s）保持初始态（dev 演示，不撒谎说 running）。service 镜像 nginx listen 80，
+// Port/ContainerPort=80 驱动 reconciler 建 Service + TCP readiness probe -> Endpoints ready。
+// job/cronjob 用 `nginx -v`（打印版本退出，演示一次性/定时任务成功语义）。
+func seed(registry string) []workload.Workload {
 	t := time.Now()
 	d := workload.LaneDefault
+	nginx := nginxImage(registry)
 	return []workload.Workload{
 		{ID: "wl-cs-api", TenantID: "t-acme", AppID: "app-cs", EnvID: "env-acme-test", LaneID: d, Type: workload.TypeService,
-			Name: "cs-api", Image: "paas/qwen-cs:7b", Replicas: 2, Ready: 2, Status: workload.StatusRunning, CreatedAt: t},
+			Name: "cs-api", Image: nginx, Replicas: 2, Ready: 0, Status: workload.StatusDeploying,
+			Port: 80, ContainerPort: 80, CreatedAt: t},
 		{ID: "wl-rec-svc", TenantID: "t-acme", AppID: "app-rec", EnvID: "env-acme-test", LaneID: d, Type: workload.TypeService,
-			Name: "rec-svc", Image: "paas/rec:latest", Replicas: 4, Ready: 3, Status: workload.StatusDeploying, CreatedAt: t},
+			Name: "rec-svc", Image: nginx, Replicas: 3, Ready: 0, Status: workload.StatusDeploying,
+			Port: 80, ContainerPort: 80, CreatedAt: t},
+		{ID: "wl-acme-recall", TenantID: "t-acme", AppID: "app-rec", EnvID: "env-acme-test", LaneID: d, Type: workload.TypeJob,
+			Name: "batch-recall", Image: nginx, Replicas: 1, Ready: 0, Status: workload.StatusPending,
+			Command: "nginx -v", CreatedAt: t},
+		{ID: "wl-acme-report", TenantID: "t-acme", AppID: "app-cs", EnvID: "env-acme-test", LaneID: d, Type: workload.TypeCronJob,
+			Name: "daily-report", Image: nginx, Replicas: 0, Ready: 0, Status: workload.StatusRunning,
+			Schedule: "0 8 * * *", Command: "nginx -v", CreatedAt: t},
 		{ID: "wl-etl-nightly", TenantID: "t-globex", AppID: "app-etl", EnvID: "env-globex-prod", LaneID: d, Type: workload.TypeCronJob,
-			Name: "etl-nightly", Image: "paas/etl:1.2", Replicas: 0, Ready: 0, Status: workload.StatusSucceeded,
-			Schedule: "0 2 * * *", CreatedAt: t},
+			Name: "etl-nightly", Image: nginx, Replicas: 0, Ready: 0, Status: workload.StatusRunning,
+			Schedule: "0 2 * * *", Command: "nginx -v", CreatedAt: t},
 		{ID: "wl-etl-backfill", TenantID: "t-globex", AppID: "app-etl", EnvID: "env-globex-prod", LaneID: d, Type: workload.TypeJob,
-			Name: "etl-backfill", Image: "paas/etl:1.2", Replicas: 2, Ready: 1, Status: workload.StatusRunning, CreatedAt: t},
+			Name: "etl-backfill", Image: nginx, Replicas: 1, Ready: 0, Status: workload.StatusPending,
+			Command: "nginx -v", CreatedAt: t},
 		{ID: "wl-agent-gw", TenantID: "t-globex", AppID: "app-agent", EnvID: "env-globex-prod", LaneID: d, Type: workload.TypeService,
-			Name: "agent-gw", Image: "paas/agent:0.9", Replicas: 2, Ready: 2, Status: workload.StatusRunning, CreatedAt: t},
+			Name: "agent-gw", Image: nginx, Replicas: 2, Ready: 0, Status: workload.StatusDeploying,
+			Port: 80, ContainerPort: 80, CreatedAt: t},
 	}
 }

@@ -55,17 +55,21 @@ function startEditQuota() {
 }
 
 async function saveQuota() {
-  const resp = await fetchAuth('/api/billing/quota', {
-    method: 'PUT',
-    body: JSON.stringify({ limits: quotaDraft.value }),
-  })
-  if (resp.ok) {
-    ElMessage.success('配额已更新')
-    quotaEditable.value = false
-    load()
-  } else {
-    const err = await resp.json().catch(() => ({}))
-    ElMessage.error(err.error || '更新失败')
+  try {
+    const resp = await fetchAuth('/api/billing/quota', {
+      method: 'PUT',
+      body: JSON.stringify({ limits: quotaDraft.value }),
+    })
+    if (resp.ok) {
+      ElMessage.success('配额已更新')
+      quotaEditable.value = false
+      load()
+    } else {
+      const err = await resp.json().catch(() => ({}))
+      ElMessage.error(err.error || '更新失败')
+    }
+  } catch (e) {
+    ElMessage.error('更新失败：' + (e as Error).message)
   }
 }
 
@@ -116,13 +120,17 @@ async function pay(bill: Bill) {
   } catch {
     return
   }
-  const resp = await fetchAuth(`/api/billing/records/${bill.id}/pay`, { method: 'POST' })
-  if (resp.ok) {
-    ElMessage.success('已支付')
-    loadBills()
-  } else {
-    const err = await resp.json().catch(() => ({}))
-    ElMessage.error(err.error || '支付失败')
+  try {
+    const resp = await fetchAuth(`/api/billing/records/${bill.id}/pay`, { method: 'POST' })
+    if (resp.ok) {
+      ElMessage.success('已支付')
+      loadBills()
+    } else {
+      const err = await resp.json().catch(() => ({}))
+      ElMessage.error(err.error || '支付失败')
+    }
+  } catch (e) {
+    ElMessage.error('支付失败：' + (e as Error).message)
   }
 }
 

@@ -28,6 +28,13 @@ type WorkloadSpec struct {
 	Schedule string     `json:"schedule,omitempty"` // cronjob 专属
 	Command  string     `json:"command,omitempty"`
 	GPU      GPURequest `json:"gpu,omitempty"`
+	// Port 是 Service 对外暴露端口（service 类型且 >0 时 reconciler 才建 K8s Service）。
+	// +kubebuilder:validation:Minimum=1
+	Port int32 `json:"port,omitempty"`
+	// ContainerPort 是 Pod 监听端口；为 0 时 reconciler 取 Port。建 Service 时映射 Port→ContainerPort，
+	// 并据此给容器声明 containerPort + readiness probe（TCP，零侵入）。
+	// +kubebuilder:validation:Minimum=1
+	ContainerPort int32 `json:"containerPort,omitempty"`
 }
 
 // WorkloadStatus 是 reconcile 后的实际状态（reconciler 回写）。

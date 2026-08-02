@@ -14,7 +14,14 @@ func acmeCtx() context.Context { return tenant.WithTenant(context.Background(), 
 // TestListSecretMasked 验证 List 时 Secret 值掩码（不泄漏明文）。
 func TestListSecretMasked(t *testing.T) {
 	s := memory.NewStore()
-	list, _ := s.List(acmeCtx(), "app-cs", "env-acme-test")
+	ctx := acmeCtx()
+	// 自建 secret 配置（去假数据后 store 初始空，测试自建验证掩码）
+	if _, err := s.Upsert(ctx, appconfig.ConfigItem{
+		AppID: "app-cs", EnvID: "env-acme-test", Key: "API_KEY", Value: "sk-real-secret-value", Type: appconfig.TypeSecret,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	list, _ := s.List(ctx, "app-cs", "env-acme-test")
 	var apiKey appconfig.ConfigItem
 	for _, c := range list {
 		if c.Key == "API_KEY" {

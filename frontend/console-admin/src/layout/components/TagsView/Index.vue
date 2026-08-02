@@ -33,7 +33,7 @@
 <script lang="ts" setup>
 import ContextMenu from './ContextMenu.vue'
 import { useTagsViewClose } from './useTagsViewClose'
-import { ref, reactive, watch } from 'vue'
+import { ref, reactive, watch, onUnmounted } from 'vue'
 import { RouteLocationNormalizedLoaded, useRoute } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useTagsViewStore, type TagsViewItem } from '@/app/stores/tagsView'
@@ -90,6 +90,12 @@ watch(
   },
   { immediate: true }
 )
+
+// 兜底：菜单打开（visible=true）时组件被卸载（如切换 showTagsView 开关），
+// watch 不触发 false 分支 → body click 监听器永驻 + 闭包泄漏。显式清理。
+onUnmounted(() => {
+  if (visible.value) document.body.removeEventListener('click', closeMenu)
+})
 
 const getTitle = (route: RouteLocationNormalizedLoaded) => {
   if (!route.meta) {

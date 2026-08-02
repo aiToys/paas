@@ -52,10 +52,25 @@ export async function fetchAuth(path: string, opts: RequestInit = {}): Promise<R
   return resp
 }
 
-// fetchJSON 是 fetchAuth 的类型化封装：自动解 JSON 并按生成的契约类型 T 标注响应。
-// T 取自 src/api/types.gen.ts（pnpm gen:api 从后端 /openapi.json 生成）。
-// 401/403/429 的全局提示同 fetchAuth；非 2xx 抛错由调用方 catch。
+// fetchJSON 是 fetchAuth 的类型化封装：自动解 JSON，**自动解包 {data:T} 契约**，
+// 非 2xx 抛错（含后端 error 文案）。T 取自 src/api/types.gen.ts（pnpm gen:api 生成）。
+//
+// 架构防护：后端统一 {data:T} 契约（httputil.WriteData），但部分历史接口裸返回对象
+// 或 {service,instances} 形态。fetchJSON 智能解包——仅当响应形如 {data:...} 时取 data，
+// 否则原样返回，兼容两种契约。新代码一律用 fetchJSON，杜绝 ApplicationDetail 那类
+// "裸取 (await resp.json()) 当对象用 → bindings undefined → 白屏" 的契约遗漏 bug。
+//
+// 401/403/429 的全局提示同 fetchAuth；非 2xx 抛 Error 由调用方 catch。
 export async function fetchJSON<T>(path: string, opts?: RequestInit): Promise<T> {
   const resp = await fetchAuth(path, opts)
-  return (await resp.json()) as T
+  const json = await resp.json().catch(() => ({}))
+  if (!resp.ok) {
+    const msg = (json && typeof json === 'object' && 'error' in json ? json.error : null) || `HTTP ${resp.status}`
+    throw new Error(msg as string)
+  }
+  // {data:T} 契约解包；其余形态（裸对象 / {service,instances}）原样返回。
+  if (json && typeof json === 'object' && 'data' in json) {
+    return (json as { data: T }).data
+  }
+  return json as T
 }

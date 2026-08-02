@@ -55,6 +55,12 @@ import (
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
+// envNamespaceResolver 实现 dataservice.NamespaceResolver，读 PAAS_K8S_NAMESPACE 供数据服务 FQDN 生成。
+// cluster 部署时 = paas（Service 落地 namespace）；dev 本地空 → store 兜底 DefaultNamespace。
+type envNamespaceResolver struct{ ns string }
+
+func (r envNamespaceResolver) Namespace() string { return r.ns }
+
 // Stores 聚合全 11 模块 store，由 buildAllStores 构造（PG 或内存两路径统一形态）。
 // 字段类型为各模块 Repository 接口；handler 注入点对后端透明。
 // devops 是四子接口合集，无单一 Repository 接口，故拆 4 字段（同一 store 实例同时实现全部）。
@@ -83,7 +89,8 @@ type Stores struct {
 // 横切依赖：devops store 依赖 workload.Repository（Release 编排找/建/更新 Workload），
 // 两路径下注入的 workload store 与 wlHandler 共享同一实例（用量/编排真源唯一）。
 func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(), error) {
-	devopsPipeline := newDevOpsPipeline(appliers) // PAAS_DEVOPS_BUILDER 选 k8s/process/mock
+	devopsPipeline := newDevOpsPipeline(appliers)                           // PAAS_DEVOPS_BUILDER 选 k8s/process/mock
+	nsResolver := envNamespaceResolver{ns: os.Getenv("PAAS_K8S_NAMESPACE")} // 数据服务连接 FQDN 用
 	if dsn := os.Getenv("PAAS_DB_URL"); dsn != "" {
 		db, err := storagepg.Open(ctx, dsn)
 		if err != nil {
@@ -99,7 +106,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		appRepo := applicationpg.NewStore(db)
 		envRepo := envpg.NewStore(db)
 		appcfgRepo := appcfgpg.NewStore(db)
-		rawDs := dspg.NewStore(db)
+		rawDs := dspg.NewStore(db, dspg.WithNamespaceResolver(nsResolver))
 		var dsRepo dataservice.Repository = rawDs
 		if appliers.dataservice != nil {
 			dsRepo = dataservice.NewApplyRepo(dsRepo, appliers.dataservice) // K8s 启用：dataservice 写投影 CRD
@@ -120,6 +127,13 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 
 		seedPGAllIfEmpty(ctx, idb, appRepo, envRepo, appcfgRepo, rawDs, rawWl,
 			devopsRepo, govRepo, ccRepo, billingRepo, secRepo)
+		// workload seed 用 ApplyRepo（wlRepo 已装饰：写 PG + 投影 CRD），让 seed 工作负载真实落地
+		// K8s（Deployment + nginx Pod）。seedPGAllIfEmpty 用 rawWl 不投影，故单独 seed；表空才灌（幂等）。
+		if n, err := rawWl.WorkloadsCount(ctx); err != nil {
+			log.Printf("[seed] 统计工作负载失败: %v", err)
+		} else if n == 0 {
+			seedWorkloads(ctx, wlRepo)
+		}
 		log.Println("持久化后端: PostgreSQL（全 11 模块已迁移）")
 
 		stores := &Stores{
@@ -149,11 +163,12 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 	appRepo := appmemory.NewStore()
 	envRepo := envmemory.NewStore()
 	appcfgRepo := appcfgmemory.NewStore()
-	var dsRepo dataservice.Repository = dsmemory.NewStore()
+	var dsRepo dataservice.Repository = dsmemory.NewStore(dsmemory.WithNamespaceResolver(nsResolver))
 	if appliers.dataservice != nil {
 		dsRepo = dataservice.NewApplyRepo(dsRepo, appliers.dataservice) // K8s 启用：dataservice 写投影 CRD
 	}
-	var wlRepo workload.Repository = wlmemory.NewStore() // 与 devops 共享：Release 编排更新 Workload.ImageRef
+	// 内存路径 NewStore 传 imageRegistry opt，seed 镜像拼内网地址（集群可拉）。
+	var wlRepo workload.Repository = wlmemory.NewStore(wlmemory.WithImageRegistry(os.Getenv("PAAS_IMAGE_REGISTRY"))) // 与 devops 共享：Release 编排更新 Workload.ImageRef
 	if appliers.workload != nil {
 		wlRepo = workload.NewApplyRepo(wlRepo, appliers.workload) // K8s 启用：workload 写操作投影 CRD 期望状态
 	}
@@ -293,11 +308,7 @@ func seedPGAllIfEmpty(
 	} else if n == 0 {
 		seedDataServices(ctx, dsRepo)
 	}
-	if n, err := wlRepo.WorkloadsCount(ctx); err != nil {
-		log.Printf("[seed] 统计工作负载失败: %v", err)
-	} else if n == 0 {
-		seedWorkloads(ctx, wlRepo)
-	}
+	// workload seed 移到 buildAllStores 用 ApplyRepo（投影 CRD，rawWl 不投影）。
 	if n, err := govRepo.ServicesCount(ctx); err != nil {
 		log.Printf("[seed] 统计治理服务失败: %v", err)
 	} else if n == 0 {
@@ -339,27 +350,18 @@ func seedEnvironments(ctx context.Context, repo environment.Repository) {
 	}
 }
 
-// seedAppConfigs 灌入应用配置预置数据（Upsert 同 (tenant,app,env,key) 视为同一项）。
-func seedAppConfigs(ctx context.Context, repo appconfig.Repository) {
-	for _, c := range appcfgmemory.SeedConfigs() {
-		if _, err := repo.Upsert(tenant.WithTenant(ctx, c.TenantID), c); err != nil {
-			log.Printf("[seed] 应用配置 %s: %v", c.ID, err)
-		}
-	}
-}
+// seedAppConfigs no-op（去假数据）：不灌 mock 应用配置（原 seed 含假 secret）。用户配置真实 env/Secret。
+func seedAppConfigs(ctx context.Context, repo appconfig.Repository) {}
 
-// seedDataServices 灌入数据服务预置数据。
-func seedDataServices(ctx context.Context, repo dataservice.Repository) {
-	for _, d := range dsmemory.SeedDataServices() {
-		if _, err := repo.Create(tenant.WithTenant(ctx, d.TenantID), d); err != nil {
-			log.Printf("[seed] 数据服务 %s: %v", d.ID, err)
-		}
-	}
-}
+// seedDataServices no-op（去假数据）：不灌 mock 数据服务实例。
+// 用户经控制台创建真实数据服务（已有真实引擎 mysql/redis/nats/minio）。
+func seedDataServices(ctx context.Context, repo dataservice.Repository) {}
 
 // seedWorkloads 灌入工作负载预置数据。
 func seedWorkloads(ctx context.Context, repo workload.Repository) {
-	for _, w := range wlmemory.SeedWorkloads() {
+	// 内网部署 seed 镜像拼 PAAS_IMAGE_REGISTRY 前缀（集群节点可拉）；空用公开名（dev 内存模式）。
+	registry := os.Getenv("PAAS_IMAGE_REGISTRY")
+	for _, w := range wlmemory.SeedWorkloads(registry) {
 		if err := repo.Create(tenant.WithTenant(ctx, w.TenantID), w); err != nil {
 			log.Printf("[seed] 工作负载 %s: %v", w.ID, err)
 		}
@@ -369,28 +371,6 @@ func seedWorkloads(ctx context.Context, repo workload.Repository) {
 // seedGovernance 灌入服务治理预置数据。灌入顺序：service → instance → route → breaker
 // （instance.service_id 引用 service.id；PG 无外键约束，但按依赖顺序灌更直观）。
 func seedGovernance(ctx context.Context, repo governance.Repository) {
-	for _, svc := range govmemory.SeedServices() {
-		appCtx := tenant.WithTenant(ctx, svc.TenantID)
-		if _, err := repo.CreateService(appCtx, svc); err != nil {
-			log.Printf("[seed] 治理服务 %s: %v", svc.ID, err)
-		}
-	}
-	for _, in := range govmemory.SeedInstances() {
-		appCtx := tenant.WithTenant(ctx, in.TenantID)
-		if _, err := repo.RegisterInstance(appCtx, in); err != nil {
-			log.Printf("[seed] 治理实例 %s: %v", in.ID, err)
-		}
-	}
-	for _, r := range govmemory.SeedRoutes() {
-		appCtx := tenant.WithTenant(ctx, r.TenantID)
-		if _, err := repo.CreateRoute(appCtx, r); err != nil {
-			log.Printf("[seed] 治理路由 %s: %v", r.ID, err)
-		}
-	}
-	for _, b := range govmemory.SeedBreakers() {
-		appCtx := tenant.WithTenant(ctx, b.TenantID)
-		if _, err := repo.CreateBreaker(appCtx, b); err != nil {
-			log.Printf("[seed] 熔断器 %s: %v", b.ID, err)
-		}
-	}
+	// 去假数据：不灌 mock 服务/实例/路由/熔断。用户配置产生。
+	// 实例真源为 K8s Endpoints（/dp/ 数据面发现已提供），governance /api/instances 切 Endpoints 留后续。
 }

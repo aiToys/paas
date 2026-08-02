@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+
+	"github.com/aitoys/paas/internal/httputil"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -55,7 +57,7 @@ func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) boo
 	if h.Authorize == nil || h.Authorize(r, perm) {
 		return true
 	}
-	writeErr(w, http.StatusForbidden, "forbidden: missing "+perm)
+	httputil.WriteError(w, http.StatusForbidden, "forbidden: missing "+perm)
 	return false
 }
 
@@ -74,11 +76,10 @@ func (h *Handler) allowProd(w http.ResponseWriter, r *http.Request, envID string
 
 // ServeHTTP 处理 /api/applications/{id}/configs[/{cfgId}]。
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
 	rest := strings.TrimPrefix(r.URL.Path, "/api/applications/")
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) < 2 || parts[1] != "configs" {
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
 	appID := parts[0]
@@ -88,7 +89,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case 3:
 		h.serveItem(w, r, appID, parts[2])
 	default:
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
 }
 
@@ -100,10 +101,10 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request, appID 
 		envID := r.URL.Query().Get("envId")
 		list, err := h.repo.List(r.Context(), appID, envID)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			httputil.WriteInternalError(w, err)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
+		httputil.WriteData(w, list)
 		return
 	}
 	if r.Method == http.MethodPost {
@@ -112,12 +113,12 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request, appID 
 		}
 		var item ConfigItem
 		if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
 		item.AppID = appID
 		if item.EnvID == "" {
-			writeErr(w, http.StatusBadRequest, "envId 必填")
+			httputil.WriteError(w, http.StatusBadRequest, "envId 必填")
 			return
 		}
 		// 生产环境改配置需 prod:write（developer 被拦，生产只读）
@@ -126,19 +127,18 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request, appID 
 		}
 		saved, err := h.repo.Upsert(r.Context(), item)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			httputil.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(saved)
+		httputil.WriteJSON(w, http.StatusCreated, saved)
 		return
 	}
-	writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
 func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request, appID, cfgID string) {
 	if r.Method != http.MethodDelete {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !h.allow(w, r, PermConfigWrite) {
@@ -148,7 +148,7 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request, appID, cfgID
 	// 必须确认 cfgID 属于 appID，否则会跨应用越权删除同租户其它应用配置。
 	list, err := h.repo.List(r.Context(), appID, "")
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		httputil.WriteInternalError(w, err)
 		return
 	}
 	belongs := false
@@ -162,17 +162,12 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request, appID, cfgID
 		}
 	}
 	if !belongs {
-		writeErr(w, http.StatusNotFound, "配置不存在: "+cfgID)
+		httputil.WriteError(w, http.StatusNotFound, "配置不存在: "+cfgID)
 		return
 	}
 	if err := h.repo.Delete(r.Context(), cfgID); err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]string{"deleted": cfgID})
-}
-
-func writeErr(w http.ResponseWriter, code int, msg string) {
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"deleted": cfgID})
 }

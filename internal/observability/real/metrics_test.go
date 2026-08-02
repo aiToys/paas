@@ -14,8 +14,10 @@ func TestMetricsStoreSuccess(t *testing.T) {
 			t.Fatalf("路径应为 /api/v1/query_range，实际 %s", r.URL.Path)
 		}
 		q := r.URL.Query().Get("query")
-		if q != `paas_cpu_usage{target_type="app",target_id="app-cs"}` {
-			t.Fatalf("PromQL 不符: %s", q)
+		// 应用级：按 paas_aitoys_app label 聚合 cAdvisor CPU
+		want := `sum(rate(container_cpu_usage_seconds_total{paas_aitoys_app="app-cs",container!="POD",container!=""}[5m]))`
+		if q != want {
+			t.Fatalf("PromQL 不符:\n got: %s\nwant: %s", q, want)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"status": "success",
@@ -23,8 +25,8 @@ func TestMetricsStoreSuccess(t *testing.T) {
 				"resultType": "matrix",
 				"result": []map[string]any{
 					{
-						"metric": map[string]any{"__name__": "paas_cpu_usage", "target_type": "app", "target_id": "app-cs"},
-						"values": [][]any{{1719500000, "62"}, {1719500060, "64"}},
+						"metric": map[string]any{"__name__": "container_cpu_usage_seconds_total"},
+						"values": [][]any{{1719500000, "0.62"}, {1719500060, "0.64"}},
 					},
 				},
 			},
@@ -36,8 +38,11 @@ func TestMetricsStoreSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("意外错误: %v", err)
 	}
-	if len(out) != 1 || out[0].Name != "cpu" || out[0].Current != 64 {
+	if len(out) != 1 || out[0].Name != "cpu" || out[0].Current != 0.64 {
 		t.Fatalf("解析错误: %+v", out)
+	}
+	if out[0].TargetType != "app" || out[0].TargetID != "app-cs" || out[0].Unit != "cores" {
+		t.Fatalf("series 元数据错误: %+v", out[0])
 	}
 	if len(out[0].Points) != 2 {
 		t.Fatalf("应解析 2 个点，实际 %d", len(out[0].Points))
@@ -53,5 +58,65 @@ func TestMetricsStoreBackendDown(t *testing.T) {
 	}
 	if len(out) != 0 {
 		t.Fatalf("后端不可达应返空切片，实际 %d 条", len(out))
+	}
+}
+
+// TestMetricsStoreDataservicePodQuery 验证 dataservice 走 cAdvisor pod 标签查询（pod="<id>-0"）。
+func TestMetricsStoreDataservicePodQuery(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.Query().Get("query")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"data": map[string]any{
+				"resultType": "matrix",
+				"result": []map[string]any{
+					{
+						"metric": map[string]any{"pod": "ds-mysql-0"},
+						"values": [][]any{{1719500000, "0.5"}, {1719500060, "0.6"}},
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+	s := NewMetricsStore(srv.URL)
+	out, err := s.ListMetrics(context.Background(), "dataservice", "ds-mysql", "cpu")
+	if err != nil {
+		t.Fatalf("意外错误: %v", err)
+	}
+	if len(out) != 1 || out[0].TargetType != "dataservice" || out[0].TargetID != "ds-mysql" {
+		t.Fatalf("series 错误: %+v", out)
+	}
+	if out[0].Unit != "cores" || out[0].Current != 0.6 {
+		t.Fatalf("cpu 单位/值错误: unit=%s current=%v", out[0].Unit, out[0].Current)
+	}
+	want := `sum(rate(container_cpu_usage_seconds_total{pod="ds-mysql-0",container="main"}[5m]))`
+	if gotQuery != want {
+		t.Fatalf("dataservice PromQL 应按 pod 标签查 cAdvisor:\n got: %s\nwant: %s", gotQuery, want)
+	}
+}
+
+// TestMetricsStoreDataserviceMemoryScale 验证内存 bytes->MiB 缩放。
+func TestMetricsStoreDataserviceMemoryScale(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status": "success",
+			"data": map[string]any{
+				"resultType": "matrix",
+				"result": []map[string]any{
+					{"metric": map[string]any{"pod": "ds-r-0"}, "values": [][]any{{1719500000, "1048576"}}}, // 1 MiB
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+	s := NewMetricsStore(srv.URL)
+	out, _ := s.ListMetrics(context.Background(), "dataservice", "ds-r", "mem")
+	if len(out) != 1 {
+		t.Fatalf("应 1 条 series，got %d", len(out))
+	}
+	if out[0].Unit != "MiB" || out[0].Current != 1 {
+		t.Fatalf("内存应缩放为 MiB: unit=%s current=%v", out[0].Unit, out[0].Current)
 	}
 }

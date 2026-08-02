@@ -9,6 +9,11 @@
 #   /api/* /v1/* /openapi.json /docs /livez → API
 #   /console/* → console-user   /admin/* → console-admin   /* → landing
 
+# runtime 基础镜像（全局 ARG，供第 3 阶段 FROM；legacy builder 需 ARG 在首个 FROM 前）。
+# 国内默认 alpine:3.20（gcr distroless 不在 daocloud 白名单拉不到）；海外可
+# --build-arg RUNTIME_IMAGE=gcr.io/distroless/static-debian12:nonroot 回 distroless（需同步去 apk add/USER 行）。
+ARG RUNTIME_IMAGE=alpine:3.20
+
 # ---------- 1. 前端构建阶段 ----------
 # node:22-alpine：console-admin preinstall 要求 Node >= 22.13.0。
 FROM node:22-alpine AS frontend
@@ -51,11 +56,19 @@ ARG GOARCH=amd64
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=${GOARCH} go build -trimpath -ldflags="-s -w" -o /out/core ./cmd/core
 
 # ---------- 3. 运行阶段 ----------
-# runtime 必须匹配 GOARCH（默认 amd64）。FROM --platform 强制拉对应架构 distroless。
-FROM --platform=linux/amd64 gcr.io/distroless/static-debian12:nonroot
+# alpine runtime（Go 静态二进制 CGO_ENABLED=0 不依赖 glibc/musl，alpine 可跑）。
+# 装 ca-certificates 供 HTTPS（airouter 网关 / OpenAI/DeepSeek 等供应商 API）。
+# 国内构建：base 镜像经 daocloud 中转 retag 到本地同名（docker.io/gcr 直拉超时），
+# 配合 DOCKER_BUILDKIT=0 走本地镜像不查 remote metadata（scripts/deploy-k8s.sh）。
+# 海外构建可 --build-arg RUNTIME_IMAGE=gcr.io/distroless/static-debian12:nonroot 回 distroless
+# （需同步去掉 apk add/USER 行，distroless 内置 nonroot）。
+ARG RUNTIME_IMAGE=alpine:3.20
+FROM ${RUNTIME_IMAGE}
+RUN apk add --no-cache ca-certificates && update-ca-certificates
 WORKDIR /
 COPY --from=builder /out/core /core
-# nonroot 用户（distroless 镜像内置 uid=65532）
-USER nonroot:nonroot
+# 非 root 运行（最小权限，与 distroless nonroot 同 uid=65532）
+RUN adduser -D -u 65532 nonroot
+USER nonroot
 EXPOSE 8080
 ENTRYPOINT ["/core"]

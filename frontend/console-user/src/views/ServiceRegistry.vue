@@ -47,10 +47,12 @@ const form = ref({ name: '', appId: '', envId: '', protocol: 'http', port: 8080,
 // 路由创建弹窗
 const showRoute = ref(false)
 const routeForm = ref({ name: '', path: '', serviceId: '', methods: ['ANY'] as string[], stripPath: true })
+const routeSubmitting = ref(false)
 const methodOpts = ['GET', 'POST', 'PUT', 'DELETE', 'ANY']
 
 // 熔断器创建弹窗
 const showBreaker = ref(false)
+const breakerSubmitting = ref(false)
 const breakerForm = ref({
   name: '', serviceId: '', strategy: 'error_rate',
   threshold: 50, minRequests: 20, windowSecs: 60,
@@ -118,29 +120,44 @@ async function createRoute() {
     ElMessage.warning('请填写名称、路径并选择目标服务')
     return
   }
-  const resp = await fetchAuth('/api/routes', {
-    method: 'POST',
-    body: JSON.stringify({ ...routeForm.value, enabled: true }),
-  })
-  if (resp.ok) { ElMessage.success('路由已创建'); showRoute.value = false; loadRoutes() }
-  else { const e = await resp.json().catch(() => ({})); ElMessage.error(e.error || '创建失败') }
+  routeSubmitting.value = true
+  try {
+    const resp = await fetchAuth('/api/routes', {
+      method: 'POST',
+      body: JSON.stringify({ ...routeForm.value, enabled: true }),
+    })
+    if (resp.ok) { ElMessage.success('路由已创建'); showRoute.value = false; loadRoutes() }
+    else { const e = await resp.json().catch(() => ({})); ElMessage.error(e.error || '创建失败') }
+  } catch (e) {
+    ElMessage.error('创建失败：' + (e as Error).message)
+  } finally {
+    routeSubmitting.value = false
+  }
 }
 
 async function toggleRoute(row: Route) {
-  const resp = await fetchAuth(`/api/routes/${row.id}`, {
-    method: 'PUT',
-    body: JSON.stringify({ enabled: !row.enabled }),
-  })
-  if (resp.ok) loadRoutes()
-  else { const e = await resp.json().catch(() => ({})); ElMessage.error(e.error || '操作失败') }
+  try {
+    const resp = await fetchAuth(`/api/routes/${row.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled: !row.enabled }),
+    })
+    if (resp.ok) loadRoutes()
+    else { const e = await resp.json().catch(() => ({})); ElMessage.error(e.error || '操作失败') }
+  } catch (e) {
+    ElMessage.error('操作失败：' + (e as Error).message)
+  }
 }
 
 async function deleteRoute(row: Route) {
   const ok = await confirmDangerous({ action: '删除路由', target: row.name })
   if (!ok) return
-  const resp = await fetchAuth(`/api/routes/${row.id}`, { method: 'DELETE' })
-  if (resp.ok) { ElMessage.success('已删除'); loadRoutes() }
-  else { const e = await resp.json().catch(() => ({})); ElMessage.error(e.error || '删除失败') }
+  try {
+    const resp = await fetchAuth(`/api/routes/${row.id}`, { method: 'DELETE' })
+    if (resp.ok) { ElMessage.success('已删除'); loadRoutes() }
+    else { const e = await resp.json().catch(() => ({})); ElMessage.error(e.error || '删除失败') }
+  } catch (e) {
+    ElMessage.error('删除失败：' + (e as Error).message)
+  }
 }
 
 function openBreaker() {
@@ -157,29 +174,44 @@ async function createBreaker() {
     ElMessage.warning('请填写名称并选择目标服务')
     return
   }
-  const resp = await fetchAuth('/api/breakers', {
-    method: 'POST',
-    body: JSON.stringify({ ...f, enabled: true }),
-  })
-  if (resp.ok) { ElMessage.success('熔断器已创建'); showBreaker.value = false; loadBreakers() }
-  else { const e = await resp.json().catch(() => ({})); ElMessage.error(e.error || '创建失败') }
+  breakerSubmitting.value = true
+  try {
+    const resp = await fetchAuth('/api/breakers', {
+      method: 'POST',
+      body: JSON.stringify({ ...f, enabled: true }),
+    })
+    if (resp.ok) { ElMessage.success('熔断器已创建'); showBreaker.value = false; loadBreakers() }
+    else { const e = await resp.json().catch(() => ({})); ElMessage.error(e.error || '创建失败') }
+  } catch (e) {
+    ElMessage.error('创建失败：' + (e as Error).message)
+  } finally {
+    breakerSubmitting.value = false
+  }
 }
 
 async function toggleBreaker(row: Breaker) {
-  const resp = await fetchAuth(`/api/breakers/${row.id}`, {
-    method: 'PUT',
-    body: JSON.stringify({ enabled: !row.enabled }),
-  })
-  if (resp.ok) loadBreakers()
-  else { const e = await resp.json().catch(() => ({})); ElMessage.error(e.error || '操作失败') }
+  try {
+    const resp = await fetchAuth(`/api/breakers/${row.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ enabled: !row.enabled }),
+    })
+    if (resp.ok) loadBreakers()
+    else { const e = await resp.json().catch(() => ({})); ElMessage.error(e.error || '操作失败') }
+  } catch (e) {
+    ElMessage.error('操作失败：' + (e as Error).message)
+  }
 }
 
 async function deleteBreaker(row: Breaker) {
   const ok = await confirmDangerous({ action: '删除熔断器', target: row.name })
   if (!ok) return
-  const resp = await fetchAuth(`/api/breakers/${row.id}`, { method: 'DELETE' })
-  if (resp.ok) { ElMessage.success('已删除'); loadBreakers() }
-  else { const e = await resp.json().catch(() => ({})); ElMessage.error(e.error || '删除失败') }
+  try {
+    const resp = await fetchAuth(`/api/breakers/${row.id}`, { method: 'DELETE' })
+    if (resp.ok) { ElMessage.success('已删除'); loadBreakers() }
+    else { const e = await resp.json().catch(() => ({})); ElMessage.error(e.error || '删除失败') }
+  } catch (e) {
+    ElMessage.error('删除失败：' + (e as Error).message)
+  }
 }
 
 function openCreate() {
@@ -432,7 +464,9 @@ watch(() => envStore.currentEnvId, load)
       </el-form>
       <template #footer>
         <el-button @click="showRoute = false">取消</el-button>
-        <el-button type="primary" @click="createRoute">创建</el-button>
+        <el-button type="primary" :disabled="routeSubmitting" @click="createRoute">
+          {{ routeSubmitting ? '创建中…' : '创建' }}
+        </el-button>
       </template>
     </el-dialog>
 
@@ -467,7 +501,9 @@ watch(() => envStore.currentEnvId, load)
       </el-form>
       <template #footer>
         <el-button @click="showBreaker = false">取消</el-button>
-        <el-button type="primary" @click="createBreaker">创建</el-button>
+        <el-button type="primary" :disabled="breakerSubmitting" @click="createBreaker">
+          {{ breakerSubmitting ? '创建中…' : '创建' }}
+        </el-button>
       </template>
     </el-dialog>
   </div>

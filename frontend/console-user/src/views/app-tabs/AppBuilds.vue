@@ -54,14 +54,18 @@ function schedulePoll() {
   const hasPending = builds.value.some((b) => b.status === 'pending' || b.status === 'running')
   if (hasPending && pollTimer === null) {
     pollTimer = window.setInterval(async () => {
-      const resp = await fetchAuth(`/api/applications/${props.appId}/buildruns`)
-      if (resp.ok) {
-        builds.value = (await resp.json()).data ?? []
-        const still = builds.value.some((b) => b.status === 'pending' || b.status === 'running')
-        if (!still && pollTimer !== null) {
-          clearInterval(pollTimer)
-          pollTimer = null
+      try {
+        const resp = await fetchAuth(`/api/applications/${props.appId}/buildruns`)
+        if (resp.ok) {
+          builds.value = (await resp.json()).data ?? []
+          const still = builds.value.some((b) => b.status === 'pending' || b.status === 'running')
+          if (!still && pollTimer !== null) {
+            clearInterval(pollTimer)
+            pollTimer = null
+          }
         }
+      } catch {
+        // 网络错误静默：轮询不阻塞用户，下次 tick 重试
       }
     }, 2000)
   }
@@ -72,17 +76,21 @@ async function trigger() {
     ElMessage.warning('请先选择仓库')
     return
   }
-  const resp = await fetchAuth(`/api/applications/${props.appId}/buildruns`, {
-    method: 'POST',
-    body: JSON.stringify({ repoId: selectedRepo.value }),
-  })
-  if (resp.ok) {
-    ElMessage.success('构建已触发')
-    showTrigger.value = false
-    load()
-  } else {
-    const err = await resp.json().catch(() => ({}))
-    ElMessage.error(err.error || '触发失败')
+  try {
+    const resp = await fetchAuth(`/api/applications/${props.appId}/buildruns`, {
+      method: 'POST',
+      body: JSON.stringify({ repoId: selectedRepo.value }),
+    })
+    if (resp.ok) {
+      ElMessage.success('构建已触发')
+      showTrigger.value = false
+      load()
+    } else {
+      const err = await resp.json().catch(() => ({}))
+      ElMessage.error(err.error || '触发失败')
+    }
+  } catch (e) {
+    ElMessage.error('触发失败：' + (e as Error).message)
   }
 }
 

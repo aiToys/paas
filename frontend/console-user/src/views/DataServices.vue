@@ -3,6 +3,7 @@
 // 6 种 kind 共用此组件，由路由 props.kind 区分。KindMeta 从后端 /api/dataservices/meta 拉取（权威）。
 // 租户私有；写操作生产环境需 prod:write（developer 生产只读），删除走 useDangerConfirm。
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
@@ -21,6 +22,7 @@ interface DataService {
 
 const props = defineProps<{ kind: string }>()
 
+const router = useRouter()
 const envStore = useEnvStore()
 const metas = ref<KindMeta[]>([])
 const items = ref<DataService[]>([])
@@ -42,6 +44,10 @@ function specEntries(spec: Record<string, string>, fields?: SpecField[]): { labe
   return fields.map((f) => ({ label: f.label, value: spec[f.key] ?? '-' }))
 }
 
+// 行所在环境是否生产（列表不按 scope 过滤，测试 scope 下也可能含生产资源行；
+// 删除/停库等高危操作须按资源所属环境类型判断，而非当前 scope）。
+const isRowProd = (row: DataService) => envStore.envs.find((e) => e.id === row.envId)?.type === 'prod'
+
 function openCreate() {
   const def: Record<string, string> = {}
   meta.value?.fields.forEach((f) => { def[f.key] = f.default })
@@ -51,6 +57,12 @@ function openCreate() {
 
 async function create() {
   if (!form.value.name.trim()) { ElMessage.warning('请填写名称'); return }
+  if (!form.value.envId) { ElMessage.warning('请选择环境'); return }
+  // text 必填字段（Default 为空 = 必填，如 storage.bucket），提前校验避免提交才返 400。
+  const missing = meta.value?.fields.find(
+    (f) => f.type === 'text' && !f.default && !form.value.spec[f.key]?.trim(),
+  )
+  if (missing) { ElMessage.warning(`请填写${missing.label}`); return }
   submitting.value = true
   try {
     const resp = await fetchAuth('/api/dataservices', {
@@ -65,6 +77,8 @@ async function create() {
       const err = await resp.json().catch(() => ({}))
       ElMessage.error(err.error || '创建失败')
     }
+  } catch (e) {
+    ElMessage.error('创建失败：' + (e as Error).message)
   } finally {
     submitting.value = false
   }
@@ -72,23 +86,41 @@ async function create() {
 
 async function toggle(row: DataService) {
   const next = row.status === 'running' ? 'stopped' : 'running'
-  const resp = await fetchAuth(`/api/dataservices/${row.id}`, {
-    method: 'PUT',
-    body: JSON.stringify({ status: next }),
-  })
-  if (resp.ok) { ElMessage.success(next === 'running' ? '已启动' : '已停止'); load() }
-  else { const err = await resp.json().catch(() => ({})); ElMessage.error(err.error || '操作失败') }
+  // 生产环境停止数据服务属高危（停库影响线上），走危险确认（输入名称）；启动不需。
+  if (next === 'stopped' && isRowProd(row)) {
+    const ok = await confirmDangerous({
+      action: '停止数据服务', target: row.name,
+      requireNameConfirm: true,
+      isProd: true, // 仅 isRowProd(row) 为 true 时进入此分支
+    })
+    if (!ok) return
+  }
+  try {
+    const resp = await fetchAuth(`/api/dataservices/${row.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ status: next }),
+    })
+    if (resp.ok) { ElMessage.success(next === 'running' ? '已启动' : '已停止'); load() }
+    else { const err = await resp.json().catch(() => ({})); ElMessage.error(err.error || '操作失败') }
+  } catch (e) {
+    ElMessage.error('操作失败：' + (e as Error).message)
+  }
 }
 
 async function remove(row: DataService) {
   const ok = await confirmDangerous({
     action: '删除数据服务', target: row.name,
-    requireNameConfirm: envStore.isProd && row.envId === envStore.currentEnv?.id,
+    requireNameConfirm: isRowProd(row),
+    isProd: isRowProd(row),
   })
   if (!ok) return
-  const resp = await fetchAuth(`/api/dataservices/${row.id}`, { method: 'DELETE' })
-  if (resp.ok) { ElMessage.success('已删除'); load() }
-  else { const err = await resp.json().catch(() => ({})); ElMessage.error(err.error || '删除失败') }
+  try {
+    const resp = await fetchAuth(`/api/dataservices/${row.id}`, { method: 'DELETE' })
+    if (resp.ok) { ElMessage.success('已删除'); load() }
+    else { const err = await resp.json().catch(() => ({})); ElMessage.error(err.error || '删除失败') }
+  } catch (e) {
+    ElMessage.error('删除失败：' + (e as Error).message)
+  }
 }
 
 async function loadMeta() {
@@ -110,7 +142,13 @@ async function load() {
   await Promise.all([metas.value.length ? Promise.resolve() : loadMeta(), loadItems()])
 }
 
-watch(() => props.kind, loadItems)
+// 行点击跳详情（操作列按钮 @click.stop 防误触）
+function goDetail(row: DataService) {
+  router.push(`/resources/${row.kind}/${row.id}`)
+}
+
+// kind 切换先清旧数据再加载，避免 loading 缝隙期短暂显示旧 kind 数据。
+watch(() => props.kind, () => { items.value = []; loadItems() })
 onMounted(load)
 </script>
 
@@ -125,7 +163,7 @@ onMounted(load)
     </div>
 
     <section class="block" v-loading="loading">
-      <el-table :data="items" size="small" empty-text="暂无实例，可点击右上角创建">
+      <el-table :data="items" size="small" empty-text="暂无实例，可点击右上角创建" row-class-name="clickable-row" @row-click="goDetail">
         <el-table-column label="名称" min-width="180">
           <template #default="{ row }"><span class="mono">{{ row.name }}</span></template>
         </el-table-column>
@@ -154,10 +192,10 @@ onMounted(load)
         </el-table-column>
         <el-table-column label="操作" width="140">
           <template #default="{ row }">
-            <el-button text :type="row.status === 'running' ? 'warning' : 'success'" size="small" @click="toggle(row)">
+            <el-button text :type="row.status === 'running' ? 'warning' : 'success'" size="small" @click.stop="toggle(row)">
               {{ row.status === 'running' ? '停止' : '启动' }}
             </el-button>
-            <el-button text type="danger" size="small" @click="remove(row)">删除</el-button>
+            <el-button text type="danger" size="small" @click.stop="remove(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -200,4 +238,5 @@ onMounted(load)
 .spec-grid { display: flex; flex-wrap: wrap; gap: 6px 18px; }
 .spec-item { font-size: 12px; }
 .spec-label { color: var(--text-faint); margin-right: 6px; }
+:deep(.clickable-row) { cursor: pointer; }
 </style>

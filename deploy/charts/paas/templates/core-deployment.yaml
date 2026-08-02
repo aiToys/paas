@@ -30,6 +30,9 @@ spec:
             - name: PAAS_API_KEY
               value: {{ .Values.env.PAAS_API_KEY | quote }}
             {{- end }}
+            # 演示凭证 seed：seed.demo=false 时设 true，关闭 admin/123456 + sk-* 演示 Key（生产防护）。
+            - name: PAAS_DISABLE_DEMO_SEED
+              value: {{ if not .Values.seed.demo }}"true"{{ else }}""{{ end }}
             # K8s 数据面（in-cluster）：ctrl.GetConfigOrDie() 自动用 ServiceAccount token，
             # 无需 PAAS_KUBECONFIG。落地 namespace = release namespace；metrics server 禁用避端口冲突。
             - name: PAAS_K8S_NAMESPACE
@@ -44,12 +47,36 @@ spec:
               value: {{ .Values.devops.builderImage | default "docker:git" | quote }}
             - name: PAAS_REGISTRY
               value: {{ .Values.devops.registry | default "" | quote }}
+            # 数据服务引擎镜像 registry（节点拉不到 docker.io 时，引擎镜像推 <registry>/library/）。
+            - name: PAAS_IMAGE_REGISTRY
+              value: {{ .Values.devops.registry | default "" | quote }}
+            # MaaS airouter 网关 API Key（统一真实推理入口；启动 seed 到 sec-platform-airouter）。
+            # 留空则 airouter 通道调用返 ErrCredentialMissing（不影响 catalog 注册与平台其他能力）。
+            - name: PAAS_AIROUTER_API_KEY
+              value: {{ .Values.maas.airouterApiKey | default "" | quote }}
             - name: PAAS_GIT_TOKEN
               value: {{ .Values.devops.gitToken | default "" | quote }}
             - name: PAAS_REGISTRY_USER
               value: {{ .Values.devops.registryUser | default "" | quote }}
             - name: PAAS_REGISTRY_PASS
               value: {{ .Values.devops.registryPass | default "" | quote }}
+            # 可观测三支柱 + 控制面自身 OTel 链路（指向 observability namespace 的真实后端）。
+            # 任一为空则该支柱降级为 memory 惰性 mock（三支柱独立可混用）。
+            # Tempo OTLP/HTTP endpoint 不含 scheme（otlptracehttp + WithInsecure）。
+            - name: PAAS_PROM_URL
+              value: {{ .Values.observability.prometheusURL | default "" | quote }}
+            - name: PAAS_LOKI_URL
+              value: {{ .Values.observability.lokiURL | default "" | quote }}
+            - name: PAAS_TEMPO_URL
+              value: {{ .Values.observability.tempoURL | default "" | quote }}
+            - name: PAAS_OTEL_ENDPOINT
+              value: {{ .Values.observability.otelEndpoint | default "" | quote }}
+            # 数据面 SDK 接入：注入 service 类型 Pod env（zeus 应用经 paas-registry 插件发现 PaaS）。
+            # token 是 API Key（绑 tenant）；空则不注入（K8s 部署但未配 token）。
+            - name: PAAS_DP_TOKEN
+              value: {{ .Values.dataplane.token | default "" | quote }}
+            - name: PAAS_DP_ENDPOINT_DEFAULT
+              value: {{ .Values.dataplane.endpoint | default "" | quote }}
           resources: {{- toYaml .Values.resources | nindent 12 }}
           readinessProbe:
             httpGet: { path: /livez, port: http }

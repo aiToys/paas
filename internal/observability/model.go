@@ -11,9 +11,10 @@ import "time"
 
 // 指标 target 类型。
 const (
-	TargetApp      = "app"
-	TargetWorkload = "workload"
-	TargetEnv      = "env"
+	TargetApp         = "app"
+	TargetWorkload    = "workload"
+	TargetEnv         = "env"
+	TargetDataservice = "dataservice" // 数据服务实例（targetId = 数据服务 K8s 资源名，即领域 ID）
 )
 
 // 指标名（常用）。
@@ -60,7 +61,7 @@ type MetricPoint struct {
 type MetricSeries struct {
 	ID         string        `json:"id"`
 	TenantID   string        `json:"tenantId,omitempty"`
-	TargetType string        `json:"targetType"` // app | workload | env
+	TargetType string        `json:"targetType"` // app | workload | env | dataservice
 	TargetID   string        `json:"targetId"`
 	Name       string        `json:"name"` // cpu | mem | rps | latency | errorRate
 	Unit       string        `json:"unit"` // % / ms / req/s
@@ -74,7 +75,7 @@ type AlertRule struct {
 	TenantID   string    `json:"tenantId,omitempty"` // ctx 写入，请求体忽略
 	Name       string    `json:"name"`
 	MetricName string    `json:"metricName"`         // cpu | rps | ...
-	TargetType string    `json:"targetType"`         // app | workload | env
+	TargetType string    `json:"targetType"`         // app | workload | env | dataservice
 	TargetID   string    `json:"targetId,omitempty"` // 空 = 该类型全部 target
 	Operator   string    `json:"operator"`           // > >= < <=
 	Threshold  float64   `json:"threshold"`

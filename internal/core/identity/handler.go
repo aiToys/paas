@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
@@ -47,17 +48,6 @@ func callerTenant(r *http.Request) string {
 
 // —— 响应辅助（core 契约 {data:T}/{error:msg}）——
 
-func writeData(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"data": v})
-}
-
-func writeErr(w http.ResponseWriter, code int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]any{"error": msg})
-}
-
 func decodeBody(r *http.Request, dst any) error {
 	return json.NewDecoder(r.Body).Decode(dst)
 }
@@ -67,15 +57,15 @@ func decodeBody(r *http.Request, dst any) error {
 func (h *Handler) ListTenants(w http.ResponseWriter, r *http.Request) {
 	// 租户枚举为平台级能力：仅平台超管可访问，普通 tenant-admin 仅能感知本租户。
 	if !h.platformAdmin(r) {
-		writeErr(w, http.StatusForbidden, "需要平台管理员权限")
+		httputil.WriteError(w, http.StatusForbidden, "需要平台管理员权限")
 		return
 	}
 	ts, err := h.repo.ListTenants(r.Context())
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		httputil.WriteInternalError(w, err)
 		return
 	}
-	writeData(w, ts)
+	httputil.WriteData(w, ts)
 }
 
 type tenantInput struct {
@@ -85,37 +75,37 @@ type tenantInput struct {
 
 func (h *Handler) CreateTenant(w http.ResponseWriter, r *http.Request) {
 	if !h.platformAdmin(r) {
-		writeErr(w, http.StatusForbidden, "需要平台管理员权限")
+		httputil.WriteError(w, http.StatusForbidden, "需要平台管理员权限")
 		return
 	}
 	var in tenantInput
 	if err := decodeBody(r, &in); err != nil {
-		writeErr(w, http.StatusBadRequest, "请求体格式错误")
+		httputil.WriteError(w, http.StatusBadRequest, "请求体格式错误")
 		return
 	}
 	if in.ID == "" || in.Name == "" {
-		writeErr(w, http.StatusBadRequest, "id 与 name 必填")
+		httputil.WriteError(w, http.StatusBadRequest, "id 与 name 必填")
 		return
 	}
 	if err := h.repo.CreateTenant(r.Context(), Tenant{ID: in.ID, Name: in.Name, CreatedAt: time.Now()}); err != nil {
-		writeErr(w, http.StatusConflict, err.Error())
+		httputil.WriteError(w, http.StatusConflict, err.Error())
 		return
 	}
-	writeData(w, Tenant{ID: in.ID, Name: in.Name})
+	httputil.WriteData(w, Tenant{ID: in.ID, Name: in.Name})
 }
 
 func (h *Handler) DeleteTenant(w http.ResponseWriter, r *http.Request) {
 	if !h.platformAdmin(r) {
-		writeErr(w, http.StatusForbidden, "需要平台管理员权限")
+		httputil.WriteError(w, http.StatusForbidden, "需要平台管理员权限")
 		return
 	}
 	id := pathID(r, "/api/tenants/")
 	if id == "" {
-		writeErr(w, http.StatusBadRequest, "缺少 id")
+		httputil.WriteError(w, http.StatusBadRequest, "缺少 id")
 		return
 	}
 	if err := h.repo.DeleteTenant(r.Context(), id); err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -131,14 +121,14 @@ func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	}
 	us, err := h.repo.ListUsers(r.Context(), tenantID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		httputil.WriteInternalError(w, err)
 		return
 	}
 	// 不回传 password_hash
 	for i := range us {
 		us[i].PasswordHash = ""
 	}
-	writeData(w, us)
+	httputil.WriteData(w, us)
 }
 
 type userInput struct {
@@ -155,11 +145,11 @@ type userInput struct {
 func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	var in userInput
 	if err := decodeBody(r, &in); err != nil {
-		writeErr(w, http.StatusBadRequest, "请求体格式错误")
+		httputil.WriteError(w, http.StatusBadRequest, "请求体格式错误")
 		return
 	}
 	if in.ID == "" || in.TenantID == "" || in.Name == "" {
-		writeErr(w, http.StatusBadRequest, "id/tenantId/name 必填")
+		httputil.WriteError(w, http.StatusBadRequest, "id/tenantId/name 必填")
 		return
 	}
 	// 普通 tenant-admin：强制归属本租户，且不可创建超管（防提权）。
@@ -177,23 +167,23 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	if in.Password != "" && h.hashPassword != nil {
 		hash, err := h.hashPassword(in.Password)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "密码哈希失败")
+			httputil.WriteError(w, http.StatusInternalServerError, "密码哈希失败")
 			return
 		}
 		u.PasswordHash = hash
 	}
 	if err := h.repo.CreateUser(r.Context(), u); err != nil {
-		writeErr(w, http.StatusConflict, err.Error())
+		httputil.WriteError(w, http.StatusConflict, err.Error())
 		return
 	}
 	u.PasswordHash = ""
-	writeData(w, u)
+	httputil.WriteData(w, u)
 }
 
 func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	id := pathID(r, "/api/users/")
 	if id == "" {
-		writeErr(w, http.StatusBadRequest, "缺少 id")
+		httputil.WriteError(w, http.StatusBadRequest, "缺少 id")
 		return
 	}
 	// 普通 tenant-admin：目标用户必须归属本租户，且不可授予超管（防提权）。
@@ -204,7 +194,7 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	var in userInput
 	if err := decodeBody(r, &in); err != nil {
-		writeErr(w, http.StatusBadRequest, "请求体格式错误")
+		httputil.WriteError(w, http.StatusBadRequest, "请求体格式错误")
 		return
 	}
 	if !h.platformAdmin(r) {
@@ -217,22 +207,22 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	if in.Password != "" && h.hashPassword != nil {
 		hash, err := h.hashPassword(in.Password)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "密码哈希失败")
+			httputil.WriteError(w, http.StatusInternalServerError, "密码哈希失败")
 			return
 		}
 		u.PasswordHash = hash
 	}
 	if err := h.repo.UpdateUser(r.Context(), u); err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	writeData(w, map[string]any{"id": id})
+	httputil.WriteData(w, map[string]any{"id": id})
 }
 
 func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 	id := pathID(r, "/api/users/")
 	if id == "" {
-		writeErr(w, http.StatusBadRequest, "缺少 id")
+		httputil.WriteError(w, http.StatusBadRequest, "缺少 id")
 		return
 	}
 	// 平台超管可跨租户删除（tenantID 空）；普通 tenant-admin 强制限定本租户。
@@ -244,7 +234,7 @@ func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		tenantID = callerTenant(r)
 	}
 	if err := h.repo.DeleteUser(r.Context(), tenantID, id); err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -254,7 +244,7 @@ func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 // 不归属或不存在写 404 返回 false（不泄漏存在性）。平台超管不应调用此方法。
 func (h *Handler) userInCallerTenant(w http.ResponseWriter, r *http.Request, id string) bool {
 	if _, err := h.repo.GetUser(r.Context(), callerTenant(r), id); err != nil {
-		writeErr(w, http.StatusNotFound, "用户不存在")
+		httputil.WriteError(w, http.StatusNotFound, "用户不存在")
 		return false
 	}
 	return true
@@ -270,14 +260,14 @@ func (h *Handler) ListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	}
 	ks, err := h.repo.ListAPIKeys(r.Context(), tenantID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		httputil.WriteInternalError(w, err)
 		return
 	}
 	// 列表掩码明文 key（不泄漏）
 	for i := range ks {
 		ks[i].Key = maskKey(ks[i].Key)
 	}
-	writeData(w, ks)
+	httputil.WriteData(w, ks)
 }
 
 type apiKeyInput struct {
@@ -290,11 +280,11 @@ type apiKeyInput struct {
 func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	var in apiKeyInput
 	if err := decodeBody(r, &in); err != nil {
-		writeErr(w, http.StatusBadRequest, "请求体格式错误")
+		httputil.WriteError(w, http.StatusBadRequest, "请求体格式错误")
 		return
 	}
 	if in.TenantID == "" || in.UserID == "" {
-		writeErr(w, http.StatusBadRequest, "tenantId/userId 必填")
+		httputil.WriteError(w, http.StatusBadRequest, "tenantId/userId 必填")
 		return
 	}
 	// 普通 tenant-admin：API Key 强制归属本租户（防跨租户创建）。
@@ -310,16 +300,16 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		Roles: in.Roles, Key: key, CreatedAt: time.Now(),
 	}
 	if err := h.repo.CreateAPIKey(r.Context(), k); err != nil {
-		writeErr(w, http.StatusConflict, err.Error())
+		httputil.WriteError(w, http.StatusConflict, err.Error())
 		return
 	}
-	writeData(w, k) // 创建时返明文一次
+	httputil.WriteData(w, k) // 创建时返明文一次
 }
 
 func (h *Handler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 	id := pathID(r, "/api/api-keys/")
 	if id == "" {
-		writeErr(w, http.StatusBadRequest, "缺少 id")
+		httputil.WriteError(w, http.StatusBadRequest, "缺少 id")
 		return
 	}
 	// 普通 tenant-admin：目标 Key 必须归属本租户（ListAPIKeys 过滤后核对，不泄漏存在性）。
@@ -327,7 +317,7 @@ func (h *Handler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.repo.DeleteAPIKey(r.Context(), id); err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -337,7 +327,7 @@ func (h *Handler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) apiKeyInCallerTenant(w http.ResponseWriter, r *http.Request, id string) bool {
 	ks, err := h.repo.ListAPIKeys(r.Context(), callerTenant(r))
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		httputil.WriteInternalError(w, err)
 		return false
 	}
 	for _, k := range ks {
@@ -345,7 +335,7 @@ func (h *Handler) apiKeyInCallerTenant(w http.ResponseWriter, r *http.Request, i
 			return true
 		}
 	}
-	writeErr(w, http.StatusNotFound, "API Key 不存在")
+	httputil.WriteError(w, http.StatusNotFound, "API Key 不存在")
 	return false
 }
 
@@ -361,9 +351,9 @@ func (h *Handler) ListRoles(w http.ResponseWriter, r *http.Request) {
 	builtin := BuiltinRoles()
 	out := make([]roleView, 0, len(builtin))
 	for _, r := range builtin {
-		out = append(out, roleView{Name: r.Name, Permissions: r.Permissions})
+		out = append(out, roleView{Name: r.Name, Permissions: r.Permissions}) //nolint:staticcheck // S1016: Role 字段多于 roleView，显式字面量比整型转换更清晰
 	}
-	writeData(w, out)
+	httputil.WriteData(w, out)
 }
 
 // —— 辅助 ——

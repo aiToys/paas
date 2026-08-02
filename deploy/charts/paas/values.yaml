@@ -44,6 +44,30 @@ devops:
   registryUser: ""                # registry docker login 用户名（无认证留空）
   registryPass: ""                # registry docker login 密码
 
+# MaaS 推理（airouter 统一真实推理入口）
+maas:
+  airouterApiKey: ""              # airouter 网关 API Key（形如 airouter-xxx）；留空则推理通道返凭证缺失
+
+# 可观测三支柱 + 控制面自身 OTel（指向 observability namespace 真实后端）。
+# 任一为空则该支柱降级为 memory 惰性 mock（三支柱独立可混用）。
+# 部署后端：见 deploy/observability/*.yaml（Prometheus + Loki + Tempo + Grafana）。
+observability:
+  prometheusURL: ""               # Prometheus 根地址（http://prom:9090），查 /api/v1/query_range
+  lokiURL: ""                     # Loki 根地址（http://loki:3100），查 /loki/api/v1/query_range
+  tempoURL: ""                    # Tempo 根地址（http://tempo:3200），按 tags 查 trace
+  otelEndpoint: ""                # OTLP/HTTP 推送地址（host:port，不含 scheme；tempo:4318）
+
+# 数据面 SDK 接入：把 K8s Endpoints 经 /dp/ API 暴露给数据面 SDK（如 zeus 经 paas-registry 插件）。
+# token 注入 service 类型 Pod env（PAAS_DP_TOKEN）；空则不注入。
+dataplane:
+  token: ""                       # API Key（绑 tenant）；演示可填 sk-acme-admin
+  endpoint: ""                    # /dp/ 地址，空用默认 http://paas-core.paas.svc.cluster.local/dp
+
+# 演示凭证 seed：true（默认，dev/demo 友好）灌入 admin/123456 + sk-acme-admin/sk-globex-admin/sk-acme-dev；
+# 生产部署必须设 false，关闭演示凭证防止开源仓公开值成为后门（PAAS_DISABLE_DEMO_SEED=true）。
+seed:
+  demo: true
+
 # core 容器资源
 resources:
   requests: { cpu: 100m, memory: 128Mi }

@@ -30,21 +30,24 @@ var validTypes = map[string]struct{}{
 
 // Workload 是应用的一个运行形态实例。
 type Workload struct {
-	ID        string    `json:"id"`
-	TenantID  string    `json:"tenantId,omitempty"` // ctx 写入，请求体忽略
-	AppID     string    `json:"appId"`              // 归属应用
-	EnvID     string    `json:"envId"`              // 归属环境
-	LaneID    string    `json:"laneId"`             // "default"=基线（单例）；其他=泳道（预留，本期不创建非 default）
-	Type      string    `json:"type"`               // service / job / cronjob
-	Name      string    `json:"name"`
-	Image     string    `json:"image"`
-	ImageRef  string    `json:"imageRef,omitempty"` // 不可变 digest（生产部署锁定，Release 编排写入）
-	Replicas  int       `json:"replicas"`           // 期望副本（service）；job 并行度；cronjob=0
-	Ready     int       `json:"ready"`              // 就绪副本
-	Status    string    `json:"status"`
-	Schedule  string    `json:"schedule,omitempty"` // cronjob 专属 cron 表达式
-	Command   string    `json:"command,omitempty"`  // 启动命令（可选）
-	CreatedAt time.Time `json:"createdAt"`
+	ID       string `json:"id"`
+	TenantID string `json:"tenantId,omitempty"` // ctx 写入，请求体忽略
+	AppID    string `json:"appId"`              // 归属应用
+	EnvID    string `json:"envId"`              // 归属环境
+	LaneID   string `json:"laneId"`             // "default"=基线（单例）；其他=泳道（预留，本期不创建非 default）
+	Type     string `json:"type"`               // service / job / cronjob
+	Name     string `json:"name"`
+	Image    string `json:"image"`
+	ImageRef string `json:"imageRef,omitempty"` // 不可变 digest（生产部署锁定，Release 编排写入）
+	Replicas int    `json:"replicas"`           // 期望副本（service）；job 并行度；cronjob=0
+	Ready    int    `json:"ready"`              // 就绪副本
+	Status   string `json:"status"`
+	Schedule string `json:"schedule,omitempty"` // cronjob 专属 cron 表达式
+	Command  string `json:"command,omitempty"`  // 启动命令（可选）
+	// Port 是 Service 对外暴露端口（service 类型且 >0 时建 K8s Service，让其他 Pod 能 DNS 解析）。
+	Port          int       `json:"port,omitempty"`
+	ContainerPort int       `json:"containerPort,omitempty"` // Pod 监听端口；0 时取 Port
+	CreatedAt     time.Time `json:"createdAt"`
 }
 
 // LaneDefault 是基线泳道的标识。基线 = 环境内稳定默认部署（每应用每环境唯一）。

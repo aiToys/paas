@@ -69,12 +69,14 @@ func (g *Gateway) ResolveChannels(model string) ([]*provider.Channel, error) {
 }
 
 // Models 返回全部已注册模型（富信息），按 ID 稳定排序。
+// 返回深拷贝，隔离调用方与内部状态，避免锁外 JSON 编码读 Channel.Status
+// 与 MarkChannelStatus 写竞态（string 非原子读写）。
 func (g *Gateway) Models() []*provider.Model {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 	out := make([]*provider.Model, 0, len(g.models))
 	for _, m := range g.models {
-		out = append(out, m)
+		out = append(out, m.Clone())
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out

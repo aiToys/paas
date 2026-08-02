@@ -32,7 +32,8 @@ export const useNoticeStore = defineStore('notice', () => {
         page: 1,
         size: 50,
       })
-      notices.value = res.records
+      // 后端公告端点可能缺失（返 404/空）；防御非数组响应，避免下游 .filter 崩溃。
+      notices.value = Array.isArray(res?.records) ? res.records : []
     } catch (e) {
       console.error('加载公告失败', e)
     } finally {

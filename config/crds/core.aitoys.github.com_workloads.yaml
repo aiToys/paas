@@ -43,6 +43,13 @@ spec:
                 type: string
               command:
                 type: string
+              containerPort:
+                description: |-
+                  ContainerPort 是 Pod 监听端口；为 0 时 reconciler 取 Port。建 Service 时映射 Port→ContainerPort，
+                  并据此给容器声明 containerPort + readiness probe（TCP，零侵入）。
+                format: int32
+                minimum: 1
+                type: integer
               envId:
                 type: string
               gpu:
@@ -63,6 +70,12 @@ spec:
                 type: string
               name:
                 type: string
+              port:
+                description: Port 是 Service 对外暴露端口（service 类型且 >0 时 reconciler 才建
+                  K8s Service）。
+                format: int32
+                minimum: 1
+                type: integer
               replicas:
                 format: int32
                 type: integer

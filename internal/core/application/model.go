@@ -3,6 +3,11 @@
 // 随应用生命周期联动。对齐前端 console-user 的 Application 契约。
 package application
 
+import (
+	"context"
+	"fmt"
+)
+
 // ResourceCount 记录应用绑定的各类资源数量。
 // 由 Bindings 派生（recount），不作为独立真源，避免计数与绑定项不一致。
 type ResourceCount struct {
@@ -17,6 +22,20 @@ type Binding struct {
 	Type string `json:"type"`
 	Name string `json:"name"`
 	Note string `json:"note,omitempty"` // 备注，如规格、副本等
+}
+
+// AppStats 是应用下工作负载的聚合统计（派生 Replicas/Status 用，非真源）。
+type AppStats struct {
+	Ready     int // 就绪副本合计
+	Total     int // 期望副本合计
+	Deploying int // 部署中的工作负载数
+	Failed    int // 异常的工作负载数
+}
+
+// WorkloadStats 提供租户内各应用的工作负载聚合统计，供应用列表派生 Replicas/Status
+// （依赖倒置：application 不依赖 workload）。未注入时 handler 透传 seed 原值（降级）。
+type WorkloadStats interface {
+	StatsByTenant(ctx context.Context) (map[string]AppStats, error)
 }
 
 // Application 是平台应用实体。
@@ -48,5 +67,41 @@ func (a *Application) Recount() {
 		case "dal":
 			a.Resources.DAL++
 		}
+	}
+}
+
+// ApplyStats 用工作负载聚合统计派生 Replicas/Status（覆盖 seed 静态假值，真实化）。
+// 规则：无工作负载 -> idle/"0/0"；有 failed 或未全部就绪 -> degraded；全就绪 -> healthy。
+// RPS 需应用级 metrics 埋点（留后续），暂清空不展示假值。
+func (a *Application) ApplyStats(st AppStats) {
+	a.Replicas = fmt.Sprintf("%d/%d", st.Ready, st.Total)
+	switch {
+	case st.Total == 0:
+		a.Status = "idle"
+	case st.Failed > 0 || st.Ready < st.Total:
+		a.Status = "degraded"
+	default:
+		a.Status = "healthy"
+	}
+	a.RPS = ""
+}
+
+// ApplyDefaults 补齐 Create 时缺失的展示字段（API 创建兜底，避免前端卡片图标/徽标空白）。
+// ID/TenantID 由 handler/repository 单独处理（ID 时间戳生成，TenantID 从 ctx 写入）。
+func (a *Application) ApplyDefaults() {
+	if a.Initial == "" && a.Name != "" {
+		for _, r := range a.Name { // 取 Name 首个 rune 作图标字母（兼容中文）
+			a.Initial = string(r)
+			break
+		}
+	}
+	if a.Status == "" {
+		a.Status = "idle"
+	}
+	if a.Env == "" {
+		a.Env = "开发"
+	}
+	if a.Gradient == "" {
+		a.Gradient = "linear-gradient(135deg,#64748b,#475569)"
 	}
 }

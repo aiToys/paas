@@ -7,9 +7,9 @@ import (
 
 // fakeRepo 是最小 Repository mock（不依赖 memory 包，避免循环 import）。
 type fakeRepo struct {
-	created  []Workload
-	updated  []string
-	deleted  []string
+	created   []Workload
+	updated   []string
+	deleted   []string
 	createErr error
 }
 

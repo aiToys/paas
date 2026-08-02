@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
@@ -60,7 +61,7 @@ func (h *Handler) allowProdResource(w http.ResponseWriter, r *http.Request, reso
 		return true
 	}
 	if !h.authorize(r, PermProdWrite) {
-		writeErr(w, http.StatusForbidden, "需要生产写权限（prod:write）")
+		httputil.WriteError(w, http.StatusForbidden, "需要生产写权限（prod:write）")
 		return false
 	}
 	return true
@@ -70,7 +71,7 @@ func (h *Handler) allowProdResource(w http.ResponseWriter, r *http.Request, reso
 func tenantID(w http.ResponseWriter, r *http.Request) (string, bool) {
 	tid, ok := tenant.TenantFrom(r.Context())
 	if !ok || tid == "" {
-		writeErr(w, http.StatusUnauthorized, "missing tenant context")
+		httputil.WriteError(w, http.StatusUnauthorized, "missing tenant context")
 		return "", false
 	}
 	return tid, true
@@ -86,13 +87,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(p, "/api/backups/") && r.Method == http.MethodDelete:
 		h.delete(w, r)
 	default:
-		writeErr(w, http.StatusMethodNotAllowed, "不支持的操作")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "不支持的操作")
 	}
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	if !h.authorize(r, "dataservice:read") {
-		writeErr(w, http.StatusForbidden, "无权限")
+		httputil.WriteError(w, http.StatusForbidden, "无权限")
 		return
 	}
 	tid, ok := tenantID(w, r)
@@ -102,20 +103,20 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 	res := r.URL.Query().Get("resourceId")
 	bs, err := h.repo.List(r.Context(), tid, res)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		httputil.WriteInternalError(w, err)
 		return
 	}
-	writeData(w, bs)
+	httputil.WriteData(w, bs)
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	if !h.authorize(r, "dataservice:write") {
-		writeErr(w, http.StatusForbidden, "无权限")
+		httputil.WriteError(w, http.StatusForbidden, "无权限")
 		return
 	}
 	var b Backup
 	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
-		writeErr(w, http.StatusBadRequest, "请求体格式错误")
+		httputil.WriteError(w, http.StatusBadRequest, "请求体格式错误")
 		return
 	}
 	tid, ok := tenantID(w, r)
@@ -124,7 +125,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	}
 	b.TenantID = tid
 	if b.ResourceID == "" {
-		writeErr(w, http.StatusBadRequest, "resourceId 必填")
+		httputil.WriteError(w, http.StatusBadRequest, "resourceId 必填")
 		return
 	}
 	// 生产数据服务的备份属高危操作：需 prod:write（developer 生产只读）。
@@ -141,15 +142,15 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	b.SizeMB = deterministicSize(b.ResourceID + b.Type)
 	b.CreatedAt = time.Now()
 	if err := h.repo.Create(r.Context(), b); err != nil {
-		writeErr(w, http.StatusConflict, err.Error())
+		httputil.WriteError(w, http.StatusConflict, err.Error())
 		return
 	}
-	writeData(w, b)
+	httputil.WriteData(w, b)
 }
 
 func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 	if !h.authorize(r, "dataservice:write") {
-		writeErr(w, http.StatusForbidden, "无权限")
+		httputil.WriteError(w, http.StatusForbidden, "无权限")
 		return
 	}
 	tid, ok := tenantID(w, r)
@@ -160,14 +161,14 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 	// 删除前先查备份归属资源，校验其环境的生产写权限。
 	b, err := h.repo.Get(r.Context(), tid, id)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	if !h.allowProdResource(w, r, b.ResourceID) {
 		return
 	}
 	if err := h.repo.Delete(r.Context(), tid, id); err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -177,15 +178,4 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 func deterministicSize(key string) int {
 	sum := sha256.Sum256([]byte(key))
 	return int(binary.BigEndian.Uint32(sum[:4])%500) + 10
-}
-
-func writeData(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"data": v})
-}
-
-func writeErr(w http.ResponseWriter, code int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]any{"error": msg})
 }

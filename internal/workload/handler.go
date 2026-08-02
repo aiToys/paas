@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/aitoys/paas/internal/httputil"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -39,6 +41,10 @@ type Handler struct {
 	// QuotaCheck 工作负载数配额检查（横切，可选）；nil 跳过。由 cmd/core 桥接 billing.CheckAndInc，
 	// 创建工作负载前拦截超配额。返回 error 时 Create 中止并回 429。
 	QuotaCheck func(ctx context.Context, delta int) error
+	// statusReader 数据面状态读取器（可选）；注入后 List 回填 K8s 真实 Ready/Status，
+	// 覆盖 store 静态值（reconciler 只回写 CRD status 不回写 store，故读路径需主动回填）。
+	// nil 透传 store 原值（降级：纯内存模式无真实状态）。
+	statusReader StatusReader
 }
 
 // NewHandler 创建工作负载 handler。可选 envResolver 注入启用生产写校验。
@@ -63,11 +69,17 @@ func WithQuotaCheck(f func(ctx context.Context, delta int) error) HandlerOpt {
 	return func(h *Handler) { h.QuotaCheck = f }
 }
 
+// WithStatusReader 注入数据面状态读取器，List 时回填 K8s 真实 Ready/Status
+// （非 store 静态值）。nil 降级透传 store 原值。
+func WithStatusReader(r StatusReader) HandlerOpt {
+	return func(h *Handler) { h.statusReader = r }
+}
+
 func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) bool {
 	if h.Authorize == nil || h.Authorize(r, perm) {
 		return true
 	}
-	writeErr(w, http.StatusForbidden, "forbidden: missing "+perm)
+	httputil.WriteError(w, http.StatusForbidden, "forbidden: missing "+perm)
 	return false
 }
 
@@ -87,6 +99,14 @@ func (h *Handler) allowProd(w http.ResponseWriter, r *http.Request, envID string
 	return true
 }
 
+// fillStatus 回填 K8s 真实运行状态（注入 statusReader 时覆盖 store 静态值）。
+// 读路径降级：失败仅忽略不阻塞（真实状态不可得时返 store 原值，优于 5xx）。
+func (h *Handler) fillStatus(ctx context.Context, list []Workload) {
+	if h.statusReader != nil {
+		_ = h.statusReader.FillStatus(ctx, list)
+	}
+}
+
 // ServeHTTP 按路径前缀分发到应用子路由或跨应用工作负载路由。
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -96,7 +116,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(r.URL.Path, "/api/workloads"):
 		h.serveCross(w, r)
 	default:
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
 }
 
@@ -105,7 +125,7 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/applications/")
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) != 2 || parts[1] != "workloads" {
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
 	appID := parts[0]
@@ -117,9 +137,10 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 		envID := r.URL.Query().Get("envId")
 		list, err := h.repo.List(r.Context(), envID, appID, "")
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			httputil.WriteInternalError(w, err)
 			return
 		}
+		h.fillStatus(r.Context(), list)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
 		return
 	}
@@ -130,12 +151,12 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 		}
 		var w0 Workload
 		if err := json.NewDecoder(r.Body).Decode(&w0); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
 		w0.AppID = appID // 以路径为准
 		if err := w0.Validate(); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			httputil.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		// 生产环境创建工作负载需 prod:write（developer 被拦，生产只读）
@@ -145,7 +166,7 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 		// 横切配额拦截：创建前检查工作负载数配额，超限回 429（不创建）。
 		if h.QuotaCheck != nil {
 			if err := h.QuotaCheck(r.Context(), 1); err != nil {
-				writeErr(w, http.StatusTooManyRequests, err.Error())
+				httputil.WriteError(w, http.StatusTooManyRequests, err.Error())
 				return
 			}
 		}
@@ -160,7 +181,7 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 			if h.QuotaCheck != nil {
 				_ = h.QuotaCheck(r.Context(), -1) // Create 失败回滚已递增的配额
 			}
-			writeErr(w, http.StatusBadRequest, err.Error())
+			httputil.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
@@ -168,7 +189,7 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
 // serveCross 处理 /api/workloads 与 /api/workloads/{id}。
@@ -185,9 +206,10 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 		envID := r.URL.Query().Get("envId")
 		list, err := h.repo.List(r.Context(), envID, "", wtype)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			httputil.WriteInternalError(w, err)
 			return
 		}
+		h.fillStatus(r.Context(), list)
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
 		return
 	}
@@ -201,7 +223,7 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 		// 生产环境扩缩容需 prod:write（先查 workload 所属环境；Get 失败直接 404，不跳过校验）
 		existing, err := h.repo.Get(r.Context(), id)
 		if err != nil {
-			writeErr(w, http.StatusNotFound, err.Error())
+			httputil.WriteError(w, http.StatusNotFound, err.Error())
 			return
 		}
 		if !h.allowProd(w, r, existing.EnvID) {
@@ -212,12 +234,12 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 			Status   string `json:"status"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
 		w0, err := h.repo.Update(r.Context(), id, body.Replicas, body.Status)
 		if err != nil {
-			writeErr(w, http.StatusNotFound, err.Error())
+			httputil.WriteError(w, http.StatusNotFound, err.Error())
 			return
 		}
 		_ = json.NewEncoder(w).Encode(w0)
@@ -231,24 +253,23 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 		// 生产环境删除需 prod:write（先查 workload 所属环境；Get 失败直接 404，不跳过校验）
 		existing, err := h.repo.Get(r.Context(), id)
 		if err != nil {
-			writeErr(w, http.StatusNotFound, err.Error())
+			httputil.WriteError(w, http.StatusNotFound, err.Error())
 			return
 		}
 		if !h.allowProd(w, r, existing.EnvID) {
 			return
 		}
 		if err := h.repo.Delete(r.Context(), id); err != nil {
-			writeErr(w, http.StatusNotFound, err.Error())
+			httputil.WriteError(w, http.StatusNotFound, err.Error())
 			return
+		}
+		// 删除成功回滚配额用量（与 Create 失败回滚对称；否则用量只增不减，永久消耗触发误拦截）。
+		if h.QuotaCheck != nil {
+			_ = h.QuotaCheck(r.Context(), -1)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"deleted": id})
 		return
 	}
 
-	writeErr(w, http.StatusNotFound, "not found")
-}
-
-func writeErr(w http.ResponseWriter, code int, msg string) {
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	httputil.WriteError(w, http.StatusNotFound, "not found")
 }

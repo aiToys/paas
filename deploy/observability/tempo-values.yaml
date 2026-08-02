@@ -1,0 +1,17 @@
+# Tempo 精简 values（dev 轻量但真实）。
+# single binary 模式，接收 OTLP/HTTP（4318）存 trace。
+# 平台控制面 OTel SDK（PAAS_OTEL_ENDPOINT）推送至此。
+---
+tempo:
+  repository: grafana/tempo
+  tag: latest
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+  persistence:
+    enabled: true
+    storageClassName: local-path
+    size: 5Gi
+
+# 监听 OTLP/HTTP（core PAAS_OTEL_ENDPOINT=http://tempo:4318）
+# tempo chart 默认开启 OTLP grpc(4317)/http(4318) receiver

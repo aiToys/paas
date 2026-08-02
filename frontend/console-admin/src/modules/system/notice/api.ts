@@ -40,9 +40,9 @@ export interface NoticeSearchResponse {
   size: number
 }
 
-// 获取公告列表
+// 获取公告列表（_silent：后端公告端点缺失时静默 404，不打扰首页用户）
 export const fetchNoticeList = (params: NoticeSearchRequest) =>
-  api.get<NoticeSearchResponse>('/api/system/notice', { params })
+  api.get<NoticeSearchResponse>('/api/system/notice', { params, _silent: true } as never)
 
 // 获取公告详情
 export const fetchNoticeDetail = (id: string) =>

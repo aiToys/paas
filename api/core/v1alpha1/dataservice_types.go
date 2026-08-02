@@ -13,17 +13,21 @@ type DataServiceSpec struct {
 	TenantID string            `json:"tenantId"`
 	AppID    string            `json:"appId,omitempty"`
 	EnvID    string            `json:"envId"`
-	Kind     string            `json:"kind"`  // db|cache|mq|storage|vector|search
-	Name     string            `json:"name"`  // 租户内唯一
-	Engine   string            `json:"engine"` // postgres|redis|kafka|minio|milvus|elasticsearch|...
+	Kind     string            `json:"kind"`           // db|cache|mq|storage|vector|search
+	Name     string            `json:"name"`           // 租户内唯一
+	Engine   string            `json:"engine"`         // postgres|redis|kafka|minio|milvus|elasticsearch|...
 	Spec     map[string]string `json:"spec,omitempty"` // 原始表单字段（version/size_gb/...）
+	// Connection 平台生成的连接信息（host/port/credentials/uri），控制面下发，reconciler 读：
+	//   - 敏感 key（password/token/secretKey/database/accessKey）→ 建 Secret，Pod env 引用；
+	//   - host/port/uri → 可观测/调试（不进 Secret）。
+	Connection map[string]string `json:"connection,omitempty"`
 }
 
 // DataServiceStatus 是 reconcile 后的实际状态（reconciler 回写）。
 type DataServiceStatus struct {
-	Ready  int32  `json:"ready"`
-	Phase  string `json:"phase"`  // running|creating|failed
-	Image  string `json:"image"`  // 实际落地的容器镜像（可观测）
+	Ready int32  `json:"ready"`
+	Phase string `json:"phase"` // running|creating|failed
+	Image string `json:"image"` // 实际落地的容器镜像（可观测）
 }
 
 // +kubebuilder:object:root=true

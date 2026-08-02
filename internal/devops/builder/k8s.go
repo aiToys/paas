@@ -40,7 +40,7 @@ type K8sJob struct {
 func (K8sJob) Real() bool { return true }
 
 // Build 创建构建 Job 并阻塞轮询至完成，返不可变 digest。失败返全量 Pod 日志作 Log。
-func (k K8sJob) Build(ctx context.Context, p Params) (Result, error) {
+func (k K8sJob) Build(ctx context.Context, p Params) (result Result, err error) {
 	// 全局凭证回退（Params 单条为空时用 K8sJob 配置，与 Real 一致）。
 	if p.Registry == "" {
 		p.Registry = k.Registry
@@ -88,6 +88,13 @@ func (k K8sJob) Build(ctx context.Context, p Params) (Result, error) {
 	if _, err := k.Clientset.BatchV1().Jobs(ns).Create(ctx, job, metav1.CreateOptions{}); err != nil {
 		return Result{}, fmt.Errorf("创建构建 Job 失败: %w", err)
 	}
+	// Job 创建成功后，任何错误返回前清理 Job（失败/超时/无 digest），避免残留占集群资源
+	// （GPU/调度）；TTL=86400 兜底，但失败立即删减少占用窗口。成功返回（err=nil）不删。
+	defer func() {
+		if err != nil {
+			k.deleteJob(context.Background(), ns, jobName)
+		}
+	}()
 
 	// 轮询 Job 状态（KISS：轮询而非 watch+回调，构建本就长耗时；watch 断线重连复杂度过高）。
 	timeoutCtx, cancel := context.WithTimeout(ctx, deadline)
@@ -117,6 +124,13 @@ func (k K8sJob) Build(ctx context.Context, p Params) (Result, error) {
 		case <-time.After(poll):
 		}
 	}
+}
+
+// deleteJob 删除构建 Job（失败/超时/无 digest 清理，幂等忽略 not-found，后台级联清 Pod）。
+func (k K8sJob) deleteJob(ctx context.Context, ns, name string) {
+	_ = k.Clientset.BatchV1().Jobs(ns).Delete(ctx, name, metav1.DeleteOptions{
+		PropagationPolicy: ptr.To(metav1.DeletePropagationBackground),
+	})
 }
 
 // podLogs 取 Job 关联 Pod 的容器日志（找 job-name=<jobName> 标签的 Pod）。

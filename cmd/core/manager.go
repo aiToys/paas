@@ -4,12 +4,14 @@ import (
 	"context"
 	"log"
 	"os"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
@@ -36,6 +38,14 @@ type k8sAppliers struct {
 // 启 Workload + DataService Reconciler 并返回 applier 供 repo 装饰；
 // 无可用 config 或启动失败则返回 nil（走纯 PG/memory，降级不阻塞）。
 func startManager() (k8sAppliers, context.CancelFunc) {
+	// 显式禁用开关：本地 dev 设 PAAS_K8S_ENABLED=false 强制纯内存模式。
+	// 原因：~/.kube/config 存在时 ctrl.GetConfig 会自动拾取，导致本地 core 启 manager
+	// 连集群数据面——dev 写操作经 ApplyRepo 投影 CRD 到集群（意外操作生产）+ manager
+	// informer/metrics 在非集群环境卡死。生产集群部署不设此开关（in-cluster 自动启用）。
+	if strings.EqualFold(os.Getenv("PAAS_K8S_ENABLED"), "false") {
+		log.Println("K8s 数据面: PAAS_K8S_ENABLED=false，纯内存模式（dev，不连集群）")
+		return k8sAppliers{}, nil
+	}
 	// PAAS_KUBECONFIG 作为 KUBECONFIG 覆盖（ctrl.GetConfig 读 KUBECONFIG，不读 PAAS_KUBECONFIG）。
 	if kc := os.Getenv("PAAS_KUBECONFIG"); kc != "" {
 		_ = os.Setenv("KUBECONFIG", kc)
@@ -56,15 +66,28 @@ func startManager() (k8sAppliers, context.CancelFunc) {
 	if metricsAddr == "" {
 		metricsAddr = ":8081"
 	}
-	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
+	ns := os.Getenv("PAAS_K8S_NAMESPACE") // CRD 落地 + cache 限定 namespace
+	mgrOpts := ctrl.Options{
 		Scheme:  scheme,
 		Metrics: metricsserver.Options{BindAddress: metricsAddr},
-	})
+	}
+	// 限定 cache namespace（ns 非空时），防 watch 全集群 CRD + 收敛数据面到本 ns（多租户隔离加固）。
+	// ns 空（本地 dev 未设）则不限定，兼容全命名空间。
+	if ns != "" {
+		mgrOpts.Cache = cache.Options{DefaultNamespaces: map[string]cache.Config{ns: {}}}
+	}
+	mgr, err := ctrl.NewManager(cfg, mgrOpts)
 	if err != nil {
 		log.Printf("K8s 数据面: 启动 manager 失败（降级为无 K8s）: %v", err)
 		return k8sAppliers{}, nil
 	}
-	if err := (&controller.WorkloadReconciler{Client: mgr.GetClient(), Scheme: scheme}).SetupWithManager(mgr); err != nil {
+	if err := (&controller.WorkloadReconciler{
+		Client: mgr.GetClient(), Scheme: scheme,
+		// 数据面接入 token/端点注入 service 类型 Pod env（zeus 应用经 paas-registry 插件发现 PaaS）。
+		// token 来自 PAAS_DP_TOKEN env（helm values dataplane.token），空则不注入。
+		DPToken:    os.Getenv("PAAS_DP_TOKEN"),
+		DPEndpoint: os.Getenv("PAAS_DP_ENDPOINT_DEFAULT"),
+	}).SetupWithManager(mgr); err != nil {
 		log.Printf("K8s 数据面: 注册 WorkloadReconciler 失败（降级为无 K8s）: %v", err)
 		return k8sAppliers{}, nil
 	}
@@ -79,7 +102,6 @@ func startManager() (k8sAppliers, context.CancelFunc) {
 			log.Printf("K8s 数据面: manager 退出: %v", err)
 		}
 	}()
-	ns := os.Getenv("PAAS_K8S_NAMESPACE")
 	// clientset 供 builder.K8sJob 创建构建 Job + 取 Pod 日志（controller-runtime typed client
 	// 不支持 pods/log 子资源）。构造失败不阻塞 workload/dataservice（applier 用 mgr.GetClient）。
 	var clientset kubernetes.Interface

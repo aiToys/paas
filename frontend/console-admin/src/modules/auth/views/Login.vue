@@ -61,7 +61,7 @@
 
 <script lang="ts" setup>
 import { reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useThemeStore } from '@/app/stores/theme'
 import { ElMessage, type FormInstance, type FormItemRule, type FormRules } from 'element-plus'
@@ -72,6 +72,7 @@ import { HttpError } from '@/lib/error/types'
 const { t } = useI18n()
 const ruleFormRef = ref<FormInstance>()
 const router = useRouter()
+const route = useRoute()
 const userStore = useUserStore()
 const themeStore = useThemeStore()
 const submitting = ref(false)
@@ -130,7 +131,8 @@ const submitForm = async (formEl: FormInstance | undefined) => {
   try {
     await authService.login(ruleForm)
     await userStore.loadProfile()
-    router.push('/')
+    // 登录后回原访问路径（guards 把未登录访问的 URL 写入 query.redirect），无则回首页。
+    router.push((route.query.redirect as string) || '/')
   } catch (e) {
     // auth 请求 _silent 抑制了拦截器全局提示，此处做领域内反馈：
     // HttpError 显示后端文案（如"用户名或密码错误"），其他异常走 i18n fallback

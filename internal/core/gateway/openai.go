@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 
+	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/pkg/provider"
 	"github.com/aitoys/paas/pkg/tenant"
 )
@@ -38,16 +40,16 @@ func ChatCompletions(gw *Gateway, meter *Meter) http.HandlerFunc {
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		var req chatReq
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid request body")
+			httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
 		if req.Model == "" || len(req.Messages) == 0 {
-			writeErr(w, http.StatusBadRequest, "model 与 messages 必填")
+			httputil.WriteError(w, http.StatusBadRequest, "model 与 messages 必填")
 			return
 		}
 		channels, err := gw.ResolveChannels(req.Model)
 		if err != nil {
-			writeErr(w, http.StatusNotFound, err.Error())
+			httputil.WriteError(w, http.StatusNotFound, err.Error())
 			return
 		}
 
@@ -77,8 +79,20 @@ func ChatCompletions(gw *Gateway, meter *Meter) http.HandlerFunc {
 			serveStream(w, r, stream, meter, req.Model)
 			return
 		}
-		// 全部通道失败
-		writeErr(w, http.StatusServiceUnavailable, fmt.Sprintf("全部通道不可用: %v", lastErr))
+		// 全部通道失败：脱敏 cause 返客户端（不泄漏上游 URL/IP/凭证状态），原始错误入服务端日志。
+		cause := "upstream error"
+		switch {
+		case errors.Is(lastErr, provider.ErrCredentialMissing), errors.Is(lastErr, provider.ErrCredentialInvalid):
+			cause = "credential issue"
+		case errors.Is(lastErr, provider.ErrUpstreamRateLimit):
+			cause = "rate limited"
+		case errors.Is(lastErr, provider.ErrUpstreamUnavailable):
+			cause = "upstream unavailable"
+		case errors.Is(lastErr, provider.ErrUpstreamConfig):
+			cause = "config error"
+		}
+		log.Printf("[gateway] %s %s 全部通道不可用: %v", r.Method, r.URL.Path, lastErr) //nolint:gosec // 请求 method/path 入日志是标准实践
+		httputil.WriteError(w, http.StatusServiceUnavailable, "all channels unavailable: "+cause)
 	}
 }
 
@@ -159,10 +173,4 @@ func CatalogModels(gw *Gateway) http.HandlerFunc {
 func writeSSE(w http.ResponseWriter, v interface{}) {
 	b, _ := json.Marshal(map[string]interface{}{"choices": []interface{}{v}})
 	_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
-}
-
-func writeErr(w http.ResponseWriter, code int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }

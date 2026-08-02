@@ -2,8 +2,12 @@ package environment
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/aitoys/paas/internal/httputil"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -35,7 +39,7 @@ func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) boo
 	if h.Authorize == nil || h.Authorize(r, perm) {
 		return true
 	}
-	writeErr(w, http.StatusForbidden, "forbidden: missing "+perm)
+	httputil.WriteError(w, http.StatusForbidden, "forbidden: missing "+perm)
 	return false
 }
 
@@ -52,7 +56,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		list, err := h.repo.List(r.Context())
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			httputil.WriteInternalError(w, err)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
@@ -66,11 +70,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		var e Environment
 		if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
+		// id 兜底：客户端未提供时生成（与 application/workload 同款），避免空 id 入库。
+		if e.ID == "" {
+			e.ID = fmt.Sprintf("env-%d", time.Now().UnixNano())
+		}
 		if err := e.Validate(); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			httputil.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		// 生产环境写操作需 prod:write（developer 被拦，生产只读）
@@ -78,11 +86,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := h.repo.Create(r.Context(), e); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			httputil.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(e)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": e})
 		return
 	}
 
@@ -95,7 +103,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		e, err := h.repo.Get(r.Context(), id)
 		if err != nil {
-			writeErr(w, http.StatusNotFound, err.Error())
+			httputil.WriteError(w, http.StatusNotFound, err.Error())
 			return
 		}
 		_ = json.NewEncoder(w).Encode(e)
@@ -116,17 +124,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if err := h.repo.Delete(r.Context(), id); err != nil {
-			writeErr(w, http.StatusNotFound, err.Error())
+			httputil.WriteError(w, http.StatusNotFound, err.Error())
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"deleted": id})
 		return
 	}
 
-	writeErr(w, http.StatusNotFound, "not found")
-}
-
-func writeErr(w http.ResponseWriter, code int, msg string) {
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	httputil.WriteError(w, http.StatusNotFound, "not found")
 }

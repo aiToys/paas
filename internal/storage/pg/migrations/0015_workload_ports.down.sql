@@ -1,0 +1,2 @@
+ALTER TABLE workloads DROP COLUMN IF EXISTS container_port;
+ALTER TABLE workloads DROP COLUMN IF EXISTS port;

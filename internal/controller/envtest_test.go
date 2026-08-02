@@ -4,10 +4,13 @@
 // 验证 WorkloadReconciler 在真实 K8s API server 下创建 Deployment。
 //
 // 运行前提：安装 KUBEBUILDER_ASSETS（envtest binary）：
-//   go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
-//   $(go env GOPATH)/bin/setup-envtest use latest --use-env
+//
+//	go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+//	$(go env GOPATH)/bin/setup-envtest use latest --use-env
+//
 // 然后：
-//   make test-envtest   # 或 KUBEBUILDER_ASSETS=... go test -tags=integration ./internal/controller/
+//
+//	make test-envtest   # 或 KUBEBUILDER_ASSETS=... go test -tags=integration ./internal/controller/
 //
 // 无 assets 时 envtest.Start 报错，测试 fail（非 skip）——CI 应预装 binary。
 package controller

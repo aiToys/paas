@@ -40,9 +40,17 @@ func TestSetQuota(t *testing.T) {
 	}
 }
 
-// TestUsageOverQuota 验证用量视图超限标记（acme GPU 用量 6 > 配额 4）。
+// TestUsageOverQuota 验证用量视图超限标记（自建 gpu 配额 4 + 用量 6 超限）。
 func TestUsageOverQuota(t *testing.T) {
 	s := NewStore()
+	// 自建配额：gpu 上限 4
+	if _, err := s.SetQuota(acmeCtx(), billing.ResourceQuota{Limits: map[string]int{billing.ResGPU: 4}}); err != nil {
+		t.Fatal(err)
+	}
+	// 自建用量：gpu 6 超限
+	if _, err := s.IncUsage(acmeCtx(), billing.ResGPU, 6); err != nil {
+		t.Fatal(err)
+	}
 	q, _ := s.GetQuota(acmeCtx())
 	u, _ := s.GetUsage(acmeCtx())
 	view := billing.BuildUsageView(q, u)
@@ -57,11 +65,15 @@ func TestUsageOverQuota(t *testing.T) {
 	}
 }
 
-// TestIncUsage 验证用量递增/递减。
+// TestIncUsage 验证用量递增/递减（自建起始用量 6，+10=16，-2=14）。
 func TestIncUsage(t *testing.T) {
 	s := NewStore()
+	// 自建起始用量 6
+	if _, err := s.IncUsage(acmeCtx(), billing.ResApplications, 6); err != nil {
+		t.Fatal(err)
+	}
 	u, _ := s.IncUsage(acmeCtx(), billing.ResApplications, 10)
-	if u.Counts[billing.ResApplications] != 16 { // seed 6 + 10
+	if u.Counts[billing.ResApplications] != 16 { // 6 + 10
 		t.Fatalf("递增后应 16，got %d", u.Counts[billing.ResApplications])
 	}
 	u, _ = s.IncUsage(acmeCtx(), billing.ResApplications, -2)
@@ -90,9 +102,14 @@ func TestCheckAndInc(t *testing.T) {
 	})
 	t.Run("超限拒绝且不递增", func(t *testing.T) {
 		s := NewStore()
-		// 设小配额：applications 上限 = 当前 seed 用量，+1 即超
+		// 自建用量 + 配额：用量=配额上限，+1 即超
+		if _, err := s.IncUsage(acmeCtx(), billing.ResApplications, 5); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.SetQuota(acmeCtx(), billing.ResourceQuota{Limits: map[string]int{billing.ResApplications: 5}}); err != nil {
+			t.Fatal(err)
+		}
 		before := usageOf(s, billing.ResApplications)
-		_, _ = s.SetQuota(acmeCtx(), billing.ResourceQuota{Limits: map[string]int{billing.ResApplications: before}})
 		_, err := s.CheckAndInc(acmeCtx(), billing.ResApplications, 1)
 		if !errors.Is(err, billing.ErrQuotaExceeded) {
 			t.Fatalf("应 ErrQuotaExceeded，got %v", err)
@@ -110,9 +127,16 @@ func TestCheckAndInc(t *testing.T) {
 	})
 }
 
-// TestGenerateBill 验证按用量 × 单价生成账单 + 覆盖。
+// TestGenerateBill 验证按用量 × 单价生成账单 + 覆盖（自建 gpu+workloads 用量）。
 func TestGenerateBill(t *testing.T) {
 	s := NewStore()
+	// 自建用量：gpu 6 + workloads 14
+	if _, err := s.IncUsage(acmeCtx(), billing.ResGPU, 6); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.IncUsage(acmeCtx(), billing.ResWorkloads, 14); err != nil {
+		t.Fatal(err)
+	}
 	rec, err := s.GenerateBill(acmeCtx(), "2026-07")
 	if err != nil {
 		t.Fatalf("生成账单失败: %v", err)
@@ -120,7 +144,7 @@ func TestGenerateBill(t *testing.T) {
 	if rec.Status != billing.StatusUnpaid {
 		t.Fatalf("新账单应 unpaid，got %s", rec.Status)
 	}
-	// GPU 6 × 100 = 600；Workloads 14 × 5 = 70；至少有这两项
+	// GPU 6 × 100 = 600；Workloads 14 × 5 = 70；至少 670
 	var total float64
 	for _, it := range rec.Items {
 		total += it.Amount
@@ -128,7 +152,7 @@ func TestGenerateBill(t *testing.T) {
 	if total != rec.Total {
 		t.Fatalf("明细之和 %v 应等于 total %v", total, rec.Total)
 	}
-	if rec.Total < 670 { // 600 + 70 已超 670？实际 670，含其他项更大
+	if rec.Total < 670 {
 		t.Fatalf("账单总额应 >= 670，got %v", rec.Total)
 	}
 

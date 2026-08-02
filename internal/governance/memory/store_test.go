@@ -35,10 +35,16 @@ func TestTenantIsolation(t *testing.T) {
 // TestCreateServiceDedup 验证租户内服务名唯一。
 func TestCreateServiceDedup(t *testing.T) {
 	s := NewStore()
-	_, err := s.CreateService(acmeCtx(), governance.Service{
+	// 先建一个 customer-svc
+	if _, err := s.CreateService(acmeCtx(), governance.Service{
 		Name: "customer-svc", EnvID: "env-acme-test", Protocol: governance.ProtocolHTTP, Port: 8080,
-	})
-	if err == nil {
+	}); err != nil {
+		t.Fatalf("建服务失败: %v", err)
+	}
+	// 同名再建应冲突
+	if _, err := s.CreateService(acmeCtx(), governance.Service{
+		Name: "customer-svc", EnvID: "env-acme-test", Protocol: governance.ProtocolHTTP, Port: 8080,
+	}); err == nil {
 		t.Fatal("同名服务应冲突")
 	}
 }
@@ -46,8 +52,15 @@ func TestCreateServiceDedup(t *testing.T) {
 // TestInstanceLifecycle 验证实例注册/发现/心跳/注销。
 func TestInstanceLifecycle(t *testing.T) {
 	s := NewStore()
+	// 先建服务，拿到 svcID（实例必须挂靠真实存在的服务）
+	svc, err := s.CreateService(acmeCtx(), governance.Service{
+		Name: "customer-svc", EnvID: "env-acme-test", Protocol: governance.ProtocolHTTP, Port: 8080,
+	})
+	if err != nil {
+		t.Fatalf("建服务失败: %v", err)
+	}
 	in, err := s.RegisterInstance(acmeCtx(), governance.Instance{
-		ServiceID: "svc-acme-cs", Addr: "10.0.1.99:8080",
+		ServiceID: svc.ID, Addr: "10.0.1.99:8080",
 	})
 	if err != nil {
 		t.Fatalf("注册实例失败: %v", err)
@@ -56,7 +69,7 @@ func TestInstanceLifecycle(t *testing.T) {
 		t.Fatalf("新实例默认 healthy，got %s", in.Status)
 	}
 	// 发现
-	list, _ := s.ListInstances(acmeCtx(), "svc-acme-cs")
+	list, _ := s.ListInstances(acmeCtx(), svc.ID)
 	found := false
 	for _, x := range list {
 		if x.ID == in.ID {
@@ -83,10 +96,23 @@ func TestInstanceLifecycle(t *testing.T) {
 // TestDeleteServiceCascade 验证注销服务级联清除实例。
 func TestDeleteServiceCascade(t *testing.T) {
 	s := NewStore()
-	if err := s.DeleteService(acmeCtx(), "svc-acme-cs"); err != nil {
+	// 先建服务 + 实例
+	svc, err := s.CreateService(acmeCtx(), governance.Service{
+		Name: "customer-svc", EnvID: "env-acme-test", Protocol: governance.ProtocolHTTP, Port: 8080,
+	})
+	if err != nil {
+		t.Fatalf("建服务失败: %v", err)
+	}
+	if _, err := s.RegisterInstance(acmeCtx(), governance.Instance{
+		ServiceID: svc.ID, Addr: "10.0.1.99:8080",
+	}); err != nil {
+		t.Fatalf("注册实例失败: %v", err)
+	}
+	// 注销服务应级联清实例
+	if err := s.DeleteService(acmeCtx(), svc.ID); err != nil {
 		t.Fatalf("注销服务失败: %v", err)
 	}
-	list, _ := s.ListInstances(acmeCtx(), "svc-acme-cs")
+	list, _ := s.ListInstances(acmeCtx(), svc.ID)
 	if len(list) != 0 {
 		t.Fatalf("服务注销应级联清实例，剩余 %d", len(list))
 	}
@@ -105,6 +131,19 @@ func TestMissingTenant(t *testing.T) {
 // TestRouteListAndFilter 验证路由列表 + 按 serviceID 过滤。
 func TestRouteListAndFilter(t *testing.T) {
 	s := NewStore()
+	// 自建 2 条 acme 路由，绑不同服务（Route 不校验 ServiceID 存在，纯逻辑配置）
+	if _, err := s.CreateRoute(acmeCtx(), governance.Route{
+		Name: "chat-api", Path: "/api/v1/chat/*", ServiceID: "svc-acme-cs",
+		Methods: []string{governance.MethodPost}, Enabled: true,
+	}); err != nil {
+		t.Fatalf("建路由 chat-api 失败: %v", err)
+	}
+	if _, err := s.CreateRoute(acmeCtx(), governance.Route{
+		Name: "recommend-grpc", Path: "/grpc.recommend/*", ServiceID: "svc-acme-rec",
+		Methods: []string{governance.MethodPost}, Enabled: true,
+	}); err != nil {
+		t.Fatalf("建路由 recommend-grpc 失败: %v", err)
+	}
 	all, _ := s.ListRoutes(acmeCtx(), "")
 	if len(all) != 2 {
 		t.Fatalf("acme 应 2 条路由，got %d", len(all))
@@ -156,11 +195,19 @@ func TestRouteValidate(t *testing.T) {
 // TestRouteUpdate 验证更新（启停）。
 func TestRouteUpdate(t *testing.T) {
 	s := NewStore()
-	r, err := s.UpdateRoute(acmeCtx(), governance.Route{ID: "route-acme-chat", Enabled: false})
+	// 自建路由，拿到 ID 后更新
+	r, err := s.CreateRoute(acmeCtx(), governance.Route{
+		Name: "chat-api", Path: "/api/v1/chat/*", ServiceID: "svc-acme-cs",
+		Methods: []string{governance.MethodPost}, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("建路由失败: %v", err)
+	}
+	updated, err := s.UpdateRoute(acmeCtx(), governance.Route{ID: r.ID, Enabled: false})
 	if err != nil {
 		t.Fatalf("更新失败: %v", err)
 	}
-	if r.Enabled {
+	if updated.Enabled {
 		t.Fatal("应已禁用")
 	}
 }
@@ -168,13 +215,27 @@ func TestRouteUpdate(t *testing.T) {
 // TestRouteTenantIsolation 验证路由跨租户隔离。
 func TestRouteTenantIsolation(t *testing.T) {
 	s := NewStore()
+	// acme 1 条 + globex 1 条
+	acmeR, err := s.CreateRoute(acmeCtx(), governance.Route{
+		Name: "chat-api", Path: "/api/v1/chat/*", ServiceID: "svc-acme-cs",
+		Methods: []string{governance.MethodPost}, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("建 acme 路由失败: %v", err)
+	}
+	if _, err := s.CreateRoute(globexCtx(), governance.Route{
+		Name: "agent-api", Path: "/api/agent/*", ServiceID: "svc-globex-agent",
+		Methods: []string{governance.MethodAny}, Enabled: true,
+	}); err != nil {
+		t.Fatalf("建 globex 路由失败: %v", err)
+	}
 	acme, _ := s.ListRoutes(acmeCtx(), "")
 	globex, _ := s.ListRoutes(globexCtx(), "")
 	if len(globex) != 1 {
 		t.Fatalf("globex 应 1 条路由，got %d", len(globex))
 	}
 	// globex 跨租户 Get acme 路由应 not found
-	if _, err := s.GetRoute(globexCtx(), "route-acme-chat"); err == nil {
+	if _, err := s.GetRoute(globexCtx(), acmeR.ID); err == nil {
 		t.Fatal("globex 不应见到 acme 路由")
 	}
 	for _, r := range acme {
@@ -187,10 +248,26 @@ func TestRouteTenantIsolation(t *testing.T) {
 // TestRouteDelete 验证删除 + 跨租户拒绝。
 func TestRouteDelete(t *testing.T) {
 	s := NewStore()
-	if err := s.DeleteRoute(globexCtx(), "route-acme-chat"); err == nil {
+	// 自建 2 条 acme 路由
+	r1, err := s.CreateRoute(acmeCtx(), governance.Route{
+		Name: "chat-api", Path: "/api/v1/chat/*", ServiceID: "svc-acme-cs",
+		Methods: []string{governance.MethodPost}, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("建路由 r1 失败: %v", err)
+	}
+	if _, err := s.CreateRoute(acmeCtx(), governance.Route{
+		Name: "recommend-grpc", Path: "/grpc.recommend/*", ServiceID: "svc-acme-rec",
+		Methods: []string{governance.MethodPost}, Enabled: true,
+	}); err != nil {
+		t.Fatalf("建路由 r2 失败: %v", err)
+	}
+	// 跨租户删除应拒绝
+	if err := s.DeleteRoute(globexCtx(), r1.ID); err == nil {
 		t.Fatal("跨租户删除应拒绝")
 	}
-	if err := s.DeleteRoute(acmeCtx(), "route-acme-chat"); err != nil {
+	// 同租户删除
+	if err := s.DeleteRoute(acmeCtx(), r1.ID); err != nil {
 		t.Fatalf("删除失败: %v", err)
 	}
 	all, _ := s.ListRoutes(acmeCtx(), "")
@@ -201,9 +278,24 @@ func TestRouteDelete(t *testing.T) {
 
 // —— CircuitBreaker ——
 
-// TestBreakerListAndFilter 验证 seed 加载 + serviceID 过滤。
+// TestBreakerListAndFilter 验证列表 + serviceID 过滤。
 func TestBreakerListAndFilter(t *testing.T) {
 	s := NewStore()
+	// 自建 2 条 acme 熔断器，绑不同服务
+	if _, err := s.CreateBreaker(acmeCtx(), governance.CircuitBreaker{
+		Name: "cs-error-breaker", ServiceID: "svc-acme-cs",
+		Strategy: governance.StrategyErrorRate, Threshold: 50,
+		MinRequests: 20, WindowSecs: 60, Enabled: true,
+	}); err != nil {
+		t.Fatalf("建熔断器 cs-error 失败: %v", err)
+	}
+	if _, err := s.CreateBreaker(acmeCtx(), governance.CircuitBreaker{
+		Name: "rec-slow-breaker", ServiceID: "svc-acme-rec",
+		Strategy: governance.StrategySlowCall, Threshold: 60,
+		MinRequests: 15, WindowSecs: 120, Enabled: true,
+	}); err != nil {
+		t.Fatalf("建熔断器 rec-slow 失败: %v", err)
+	}
 	all, err := s.ListBreakers(acmeCtx(), "")
 	if err != nil {
 		t.Fatalf("ListBreakers: %v", err)
@@ -242,28 +334,53 @@ func TestBreakerCreate(t *testing.T) {
 // TestBreakerUpdate 验证更新字段。
 func TestBreakerUpdate(t *testing.T) {
 	s := NewStore()
-	b, err := s.UpdateBreaker(acmeCtx(), governance.CircuitBreaker{
-		ID: "cb-acme-cs-err", Threshold: 75, Enabled: false,
+	// 自建熔断器，拿到 ID 后更新
+	b, err := s.CreateBreaker(acmeCtx(), governance.CircuitBreaker{
+		Name: "cs-error-breaker", ServiceID: "svc-acme-cs",
+		Strategy: governance.StrategyErrorRate, Threshold: 50,
+		MinRequests: 20, WindowSecs: 60, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("建熔断器失败: %v", err)
+	}
+	updated, err := s.UpdateBreaker(acmeCtx(), governance.CircuitBreaker{
+		ID: b.ID, Threshold: 75, Enabled: false,
 	})
 	if err != nil {
 		t.Fatalf("更新失败: %v", err)
 	}
-	if b.Threshold != 75 || b.Enabled {
-		t.Fatalf("更新未生效: %+v", b)
+	if updated.Threshold != 75 || updated.Enabled {
+		t.Fatalf("更新未生效: %+v", updated)
 	}
 }
 
 // TestBreakerTenantIsolation 验证跨租户不可见。
 func TestBreakerTenantIsolation(t *testing.T) {
 	s := NewStore()
+	// acme 1 条 + globex 1 条
+	acmeB, err := s.CreateBreaker(acmeCtx(), governance.CircuitBreaker{
+		Name: "cs-error-breaker", ServiceID: "svc-acme-cs",
+		Strategy: governance.StrategyErrorRate, Threshold: 50,
+		MinRequests: 20, WindowSecs: 60, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("建 acme 熔断器失败: %v", err)
+	}
+	if _, err := s.CreateBreaker(globexCtx(), governance.CircuitBreaker{
+		Name: "agent-error-breaker", ServiceID: "svc-globex-agent",
+		Strategy: governance.StrategyErrorRate, Threshold: 40,
+		MinRequests: 10, WindowSecs: 60, Enabled: true,
+	}); err != nil {
+		t.Fatalf("建 globex 熔断器失败: %v", err)
+	}
 	all, _ := s.ListBreakers(globexCtx(), "")
 	if len(all) != 1 {
 		t.Fatalf("globex 应 1 条熔断器，got %d", len(all))
 	}
-	if _, err := s.GetBreaker(globexCtx(), "cb-acme-cs-err"); err == nil {
+	if _, err := s.GetBreaker(globexCtx(), acmeB.ID); err == nil {
 		t.Fatal("跨租户 GetBreaker 应拒绝")
 	}
-	if err := s.DeleteBreaker(globexCtx(), "cb-acme-cs-err"); err == nil {
+	if err := s.DeleteBreaker(globexCtx(), acmeB.ID); err == nil {
 		t.Fatal("跨租户删除应拒绝")
 	}
 }
@@ -271,7 +388,23 @@ func TestBreakerTenantIsolation(t *testing.T) {
 // TestBreakerDelete 验证删除。
 func TestBreakerDelete(t *testing.T) {
 	s := NewStore()
-	if err := s.DeleteBreaker(acmeCtx(), "cb-acme-rec-slow"); err != nil {
+	// 自建 2 条 acme 熔断器
+	if _, err := s.CreateBreaker(acmeCtx(), governance.CircuitBreaker{
+		Name: "cs-error-breaker", ServiceID: "svc-acme-cs",
+		Strategy: governance.StrategyErrorRate, Threshold: 50,
+		MinRequests: 20, WindowSecs: 60, Enabled: true,
+	}); err != nil {
+		t.Fatalf("建熔断器 cs-error 失败: %v", err)
+	}
+	rec, err := s.CreateBreaker(acmeCtx(), governance.CircuitBreaker{
+		Name: "rec-slow-breaker", ServiceID: "svc-acme-rec",
+		Strategy: governance.StrategySlowCall, Threshold: 60,
+		MinRequests: 15, WindowSecs: 120, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("建熔断器 rec-slow 失败: %v", err)
+	}
+	if err := s.DeleteBreaker(acmeCtx(), rec.ID); err != nil {
 		t.Fatalf("删除失败: %v", err)
 	}
 	all, _ := s.ListBreakers(acmeCtx(), "")

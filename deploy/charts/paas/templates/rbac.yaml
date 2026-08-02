@@ -30,10 +30,18 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs", "cronjobs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Service（StatefulSet headless service）+ Pods/Events 只读（状态观测）。
+  # Service（workload service 类型建 K8s Service + StatefulSet headless）+ Pods 只读（状态观测）。
   - apiGroups: [""]
     resources: ["services", "pods"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Endpoints：数据面 /dp/instances 从 Endpoints 读 ready 实例（zeus 服务发现真源）。
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    verbs: ["get", "list", "watch"]
+  # DataService 凭证 Secret：reconciler 为 mysql/redis/nats/minio 创建凭证 Secret（DataServiceReconciler）。
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]

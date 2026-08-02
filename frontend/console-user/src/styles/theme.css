@@ -48,6 +48,47 @@
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
   --shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
   --shadow-brand: 0 8px 24px rgba(99, 102, 241, 0.25);
+
+  /* —— 复合面（曾硬编码在组件里，提为变量以支持亮色） —— */
+  --sidebar-bg: linear-gradient(180deg, #0d111c 0%, #0a0d14 100%);
+  --topbar-bg: rgba(10, 13, 20, 0.6);
+  --inset-bg: rgba(0, 0, 0, 0.25);
+  --scrollbar-thumb: rgba(255, 255, 255, 0.08);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.16);
+}
+
+/* —— 亮色主题：html 移除 .dark 即生效（与 Element Plus dark/css-vars 同款开关） —— */
+html:not(.dark) {
+  --bg: #f5f6fa;
+  --bg-grid: rgba(15, 23, 42, 0.025);
+  --surface: #ffffff;
+  --surface-2: #eef1f7;
+  --surface-hover: #e4e8f1;
+
+  --border: rgba(15, 23, 42, 0.08);
+  --border-strong: rgba(15, 23, 42, 0.14);
+
+  --text: #0f172a;
+  --text-dim: #475569;
+  --text-faint: #94a3b8;
+
+  /* 品牌色亮色下略加深以保证对比度（WCAG AA on white） */
+  --brand: #5457e6;
+  --brand-hover: #4346dd;
+  --brand-soft: rgba(84, 87, 230, 0.10);
+  --brand-glow: rgba(84, 87, 230, 0.22);
+
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
+  --shadow: 0 8px 32px rgba(15, 23, 42, 0.10);
+  --shadow-brand: 0 8px 24px rgba(84, 87, 230, 0.18);
+
+  --sidebar-bg: linear-gradient(180deg, #ffffff 0%, #f5f6fa 100%);
+  --topbar-bg: rgba(255, 255, 255, 0.7);
+  --inset-bg: rgba(15, 23, 42, 0.04);
+  --scrollbar-thumb: rgba(15, 23, 42, 0.14);
+  --scrollbar-thumb-hover: rgba(15, 23, 42, 0.24);
+
+  color-scheme: light;
 }
 
 /* —— Element Plus 深色变量覆盖 —— */
@@ -115,13 +156,13 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--scrollbar-thumb);
   border-radius: 8px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: var(--scrollbar-thumb-hover);
   background-clip: content-box;
 }
 
@@ -164,7 +205,7 @@ a {
   opacity: 0.55;
 }
 .devops-tab .build-log {
-  background: rgba(0, 0, 0, 0.25);
+  background: var(--inset-bg);
   padding: 12px 14px;
   border-radius: 6px;
   font-size: 12px;

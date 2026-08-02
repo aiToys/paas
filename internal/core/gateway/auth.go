@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/aitoys/paas/internal/core/identity"
+	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
@@ -17,12 +18,12 @@ func APIKeyAuth(idb identity.Repository) func(http.Handler) http.Handler {
 			h := r.Header.Get("Authorization")
 			const prefix = "Bearer "
 			if !strings.HasPrefix(h, prefix) {
-				writeErr(w, http.StatusUnauthorized, "missing api key")
+				httputil.WriteError(w, http.StatusUnauthorized, "missing api key")
 				return
 			}
 			k, err := idb.LookupAPIKey(r.Context(), strings.TrimPrefix(h, prefix))
 			if err != nil {
-				writeErr(w, http.StatusUnauthorized, "invalid api key")
+				httputil.WriteError(w, http.StatusUnauthorized, "invalid api key")
 				return
 			}
 			ctx := tenant.WithTenant(r.Context(), k.TenantID)

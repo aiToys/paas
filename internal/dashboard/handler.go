@@ -3,16 +3,16 @@
 package dashboard
 
 import (
-	"encoding/json"
 	"net/http"
 	"time"
 
 	"github.com/aitoys/paas/internal/core/identity"
+	"github.com/aitoys/paas/internal/httputil"
 )
 
 // StatItem 对齐 admin DashboardStats 的单项（值 + 趋势百分比）。
 type StatItem struct {
-	Value   int     `json:"value"`
+	Value    int     `json:"value"`
 	TrendPct float64 `json:"trendPct"`
 }
 
@@ -68,7 +68,7 @@ func (h *Handler) Stats(w http.ResponseWriter, r *http.Request) {
 	keys, _ := h.idb.ListAPIKeys(ctx, "")
 
 	ucount := len(users)
-	writeData(w, Stats{
+	httputil.WriteData(w, Stats{
 		Users:   StatItem{Value: ucount, TrendPct: trend(ucount)},
 		Orders:  StatItem{Value: len(keys), TrendPct: trend(len(keys))},
 		Revenue: StatItem{Value: 0, TrendPct: 0},
@@ -104,13 +104,13 @@ func (h *Handler) Charts(w http.ResponseWriter, r *http.Request) {
 		dist = append(dist, DistItem{Name: t.Name, Value: tenantCounts[t.ID]})
 	}
 
-	writeData(w, Charts{Trend: trend, Distribution: dist})
+	httputil.WriteData(w, Charts{Trend: trend, Distribution: dist})
 }
 
 // Activities: GET /api/dashboard/activities —— 静态系统提示（无审计跨租户聚合，留后续）。
 func (h *Handler) Activities(w http.ResponseWriter, _ *http.Request) {
 	now := time.Now().Format(time.RFC3339)
-	writeData(w, []Activity{
+	httputil.WriteData(w, []Activity{
 		{ID: "a1", Title: "平台运行正常", Desc: "所有核心服务在线", Time: now, Type: "success"},
 		{ID: "a2", Title: "欢迎使用 PaaS 控制台", Desc: "使用管理员账号登录，可管理租户与用户", Time: now, Type: "primary"},
 	})
@@ -125,8 +125,3 @@ func trend(n int) float64 {
 }
 
 // —— 响应辅助（core 契约 {data:T}/{error:msg}）——
-
-func writeData(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"data": v})
-}

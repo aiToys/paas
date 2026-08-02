@@ -32,6 +32,7 @@ const envStore = useEnvStore()
 
 const showCreate = ref(false)
 const form = ref({ name: '', type: 'test', cluster: '' })
+const submitting = ref(false)
 
 async function load() {
   loading.value = true
@@ -79,19 +80,26 @@ function open(e: Env) {
 async function create() {
   const body = { ...form.value }
   if (body.type !== 'prod') body.cluster = ''
-  const resp = await fetchAuth('/api/environments', {
-    method: 'POST',
-    body: JSON.stringify(body),
-  })
-  if (resp.ok) {
-    ElMessage.success('环境已创建')
-    showCreate.value = false
-    form.value = { name: '', type: 'test', cluster: '' }
-    load()
-    envStore.loadEnvs() // 同步顶栏 scope 选择器
-  } else {
-    const err = await resp.json().catch(() => ({}))
-    ElMessage.error(err.error || '创建失败（生产环境需管理员权限）')
+  submitting.value = true
+  try {
+    const resp = await fetchAuth('/api/environments', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+    if (resp.ok) {
+      ElMessage.success('环境已创建')
+      showCreate.value = false
+      form.value = { name: '', type: 'test', cluster: '' }
+      load()
+      envStore.loadEnvs() // 同步顶栏 scope 选择器
+    } else {
+      const err = await resp.json().catch(() => ({}))
+      ElMessage.error(err.error || '创建失败（生产环境需管理员权限）')
+    }
+  } catch (e) {
+    ElMessage.error('创建失败：' + (e as Error).message)
+  } finally {
+    submitting.value = false
   }
 }
 
@@ -117,6 +125,10 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
 
     <div v-if="loading" class="grid">
       <div v-for="i in 3" :key="i" class="skel" />
+    </div>
+    <div v-else-if="!envs.length" class="empty">
+      <Icon name="shield" :size="32" />
+      <p>暂无环境，点击右上角创建</p>
     </div>
     <div v-else class="grid">
       <article
@@ -173,7 +185,9 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
       <div class="create-hint">生产环境创建需管理员权限（prod:write）。</div>
       <template #footer>
         <el-button @click="showCreate = false">取消</el-button>
-        <el-button type="primary" :disabled="!form.name" @click="create">创建</el-button>
+        <el-button type="primary" :disabled="!form.name || submitting" @click="create">
+          {{ submitting ? '创建中…' : '创建' }}
+        </el-button>
       </template>
     </el-dialog>
   </div>
@@ -327,5 +341,21 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
   font-size: 12px;
   color: var(--text-faint);
   margin-top: -4px;
+}
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 60px 20px;
+  color: var(--text-faint);
+  text-align: center;
+}
+.empty :deep(svg) {
+  color: var(--brand);
+}
+.empty p {
+  margin: 0;
+  font-size: 13px;
 }
 </style>

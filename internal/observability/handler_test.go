@@ -29,7 +29,8 @@ func get(ctx context.Context, path string) *httptest.ResponseRecorder {
 	return w
 }
 
-// TestMetrics 验证指标查询（惰性补点）。
+// TestMetrics 降级模式无 series，返回空列表。
+// 接真实后端（PAAS_PROM_URL）时 metrics 由 real store 提供。
 func TestMetrics(t *testing.T) {
 	w := get(acmeCtx(), "/api/observability/metrics?targetType=app&targetId=app-cs&name=cpu")
 	if w.Code != http.StatusOK {
@@ -41,15 +42,13 @@ func TestMetrics(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
 		t.Fatalf("解析失败: %v", err)
 	}
-	if len(out.Data) != 1 || out.Data[0].Name != observability.MetricCPU {
-		t.Fatalf("应返回 cpu 单条，got %+v", out.Data)
-	}
-	if len(out.Data[0].Points) == 0 {
-		t.Fatal("应有点数")
+	if len(out.Data) != 0 {
+		t.Fatalf("降级模式应返空，got %d", len(out.Data))
 	}
 }
 
-// TestAlerts 验证告警评估。
+// TestAlerts 降级模式 series 空，无 firing 告警。
+// 接真实后端时 series 由 real store 提供，告警评估在 real 模式测。
 func TestAlerts(t *testing.T) {
 	w := get(acmeCtx(), "/api/observability/alerts")
 	if w.Code != http.StatusOK {
@@ -61,8 +60,8 @@ func TestAlerts(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
 		t.Fatalf("解析失败: %v", err)
 	}
-	if len(out.Data) == 0 {
-		t.Fatal("应有 firing 告警")
+	if len(out.Data) != 0 {
+		t.Fatalf("降级模式无 series 应无 firing 告警，got %d", len(out.Data))
 	}
 }
 

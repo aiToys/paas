@@ -254,19 +254,25 @@ func (s *Store) AuditsCount(ctx context.Context) (int, error) {
 	return n, nil
 }
 
-// SeedIfEmpty 在表空时灌入 seed 真源（启动期用，幂等）。
+// SeedIfEmpty 启动期 seed：表空灌全部示例 + 平台级凭证；表非空仅 ensure 平台级凭证
+// （airouter 等随 env 注入，重部署到已有数据的库也能自动补齐，不覆盖用户已填 value）。
 //
 // 直接 SQL INSERT 绕过 CreateSecret（要求 ctx tenant）与 RecordAudit（自动盖时间戳），
 // 平台级 Secret（ScopePlatform, TenantID=""）写 NULL tenant_id（与 CreateSecret 一致），
-// 保留 seed 的固定 ID/Actor/时间。主键冲突 DO NOTHING。不经租户过滤，全表一次灌完。
+// 保留 seed 的固定 ID/Actor/时间。主键冲突 DO NOTHING（不覆盖）。不经租户过滤，全表一次灌完。
 func (s *Store) SeedIfEmpty(ctx context.Context) error {
 	n, err := s.SecretsCount(ctx)
 	if err != nil {
 		return err
 	}
-	if n > 0 {
-		return nil
+	if n == 0 {
+		return s.seedAll(ctx)
 	}
+	return s.ensurePlatformSecrets(ctx)
+}
+
+// seedAll 灌入全部 seed（示例密钥 + 平台级凭证 + 审计），仅表空时调。
+func (s *Store) seedAll(ctx context.Context) error {
 	for _, sec := range secmemory.SeedSecrets() {
 		// 平台级写 NULL tenant_id（与 CreateSecret 一致，全租户可见）。
 		var tenantArg any
@@ -275,7 +281,7 @@ func (s *Store) SeedIfEmpty(ctx context.Context) error {
 		} else {
 			tenantArg = sec.TenantID
 		}
-		if _, err = s.db.Pool().Exec(ctx,
+		if _, err := s.db.Pool().Exec(ctx,
 			`INSERT INTO secrets (id, tenant_id, name, type, scope, value, "desc", updated_at)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 			 ON CONFLICT (id) DO NOTHING`,
@@ -284,11 +290,30 @@ func (s *Store) SeedIfEmpty(ctx context.Context) error {
 		}
 	}
 	for _, a := range secmemory.SeedAuditLogs() {
-		if _, err = s.db.Pool().Exec(ctx,
+		if _, err := s.db.Pool().Exec(ctx,
 			`INSERT INTO audit_logs (id, tenant_id, actor, action, resource_type, resource_id, detail, at)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 			 ON CONFLICT (id) DO NOTHING`,
 			a.ID, a.TenantID, a.Actor, a.Action, a.ResourceType, a.ResourceID, a.Detail, a.At); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ensurePlatformSecrets 仅 upsert 平台级凭证（ScopePlatform），表非空时调。
+// airouter 等凭证 value 从 env（PAAS_AIROUTER_API_KEY）读，重部署自动补齐；
+// ON CONFLICT DO NOTHING 不覆盖用户已填 value（尊重运维手填）。
+func (s *Store) ensurePlatformSecrets(ctx context.Context) error {
+	for _, sec := range secmemory.SeedSecrets() {
+		if sec.Scope != security.ScopePlatform {
+			continue
+		}
+		if _, err := s.db.Pool().Exec(ctx,
+			`INSERT INTO secrets (id, tenant_id, name, type, scope, value, "desc", updated_at)
+			 VALUES ($1,NULL,$2,$3,$4,$5,$6,$7)
+			 ON CONFLICT (id) DO NOTHING`,
+			sec.ID, sec.Name, sec.Type, sec.Scope, sec.Value, sec.Desc, sec.UpdatedAt); err != nil {
 			return err
 		}
 	}

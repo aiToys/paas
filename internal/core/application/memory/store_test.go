@@ -45,16 +45,16 @@ func TestBindResourceIncrementsAndIdempotent(t *testing.T) {
 	s := NewStore()
 	before, err := s.Get(acmeCtx(), "app-cs")
 	require.NoError(t, err)
-	require.Equal(t, 1, before.Resources.MQ)
+	require.Equal(t, 0, before.Resources.MQ, "seed 移除 mock 绑定，初始应为 0")
 
 	a, err := s.BindResource(acmeCtx(), "app-cs", "mq", "mq-new")
 	require.NoError(t, err)
-	assert.Equal(t, 2, a.Resources.MQ, "绑定后 mq 计数应 +1")
+	assert.Equal(t, 1, a.Resources.MQ, "绑定后 mq 计数应 +1")
 	assert.Len(t, a.Bindings, len(before.Bindings)+1, "绑定项应追加")
 
 	a2, err := s.BindResource(acmeCtx(), "app-cs", "mq", "mq-new")
 	require.NoError(t, err)
-	assert.Equal(t, 2, a2.Resources.MQ, "重复绑定应幂等")
+	assert.Equal(t, 1, a2.Resources.MQ, "重复绑定应幂等")
 }
 
 func TestBindResourceValidation(t *testing.T) {
@@ -71,6 +71,10 @@ func TestBindResourceValidation(t *testing.T) {
 
 func TestUnbind(t *testing.T) {
 	s := NewStore()
+	// 先绑定再解绑（seed 移除 mock 绑定，测试自建绑定验证解绑语义）
+	_, err := s.BindResource(acmeCtx(), "app-cs", "mq", "mq-order-events")
+	require.NoError(t, err)
+
 	a, err := s.Unbind(acmeCtx(), "app-cs", "mq", "mq-order-events")
 	require.NoError(t, err)
 	assert.Equal(t, 0, a.Resources.MQ, "解绑后 mq 计数应归零")

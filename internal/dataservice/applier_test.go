@@ -15,7 +15,7 @@ type fakeRepo struct {
 }
 
 func (f *fakeRepo) List(_ context.Context, _ string) ([]DataService, error) { return nil, nil }
-func (f *fakeRepo) Get(_ context.Context, _ string) (DataService, error)     { return DataService{}, nil }
+func (f *fakeRepo) Get(_ context.Context, _ string) (DataService, error)    { return DataService{}, nil }
 func (f *fakeRepo) Create(_ context.Context, d DataService) (DataService, error) {
 	f.saved = d
 	return d, nil
@@ -30,13 +30,21 @@ func (f *fakeRepo) Delete(_ context.Context, id string) error {
 }
 
 type fakeApplier struct {
-	applied  DataService
-	deleted  string
-	calledN  int
+	applied DataService
+	deleted string
+	calledN int
 }
 
-func (a *fakeApplier) Apply(_ context.Context, d DataService) error { a.applied = d; a.calledN++; return nil }
-func (a *fakeApplier) Delete(_ context.Context, id string) error    { a.deleted = id; a.calledN++; return nil }
+func (a *fakeApplier) Apply(_ context.Context, d DataService) error {
+	a.applied = d
+	a.calledN++
+	return nil
+}
+func (a *fakeApplier) Delete(_ context.Context, id string) error {
+	a.deleted = id
+	a.calledN++
+	return nil
+}
 
 func TestApplyRepoDecoratesCreate(t *testing.T) {
 	fr := &fakeRepo{}

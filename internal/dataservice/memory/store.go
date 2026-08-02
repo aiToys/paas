@@ -14,15 +14,47 @@ import (
 
 // Store 实现 dataservice.Repository。
 type Store struct {
-	mu       sync.RWMutex
-	services map[string]dataservice.DataService
-	seq      int
+	mu         sync.RWMutex
+	services   map[string]dataservice.DataService
+	nsResolver dataservice.NamespaceResolver
+	seq        int
 }
 
-func NewStore() *Store {
+// Option 配置 Store。
+type Option func(*Store)
+
+// WithNamespaceResolver 注入 K8s namespace 解析器，Create 时用于生成 Connection FQDN。
+// 未注入时兜底 dataservice.DefaultNamespace。
+func WithNamespaceResolver(r dataservice.NamespaceResolver) Option {
+	return func(s *Store) { s.nsResolver = r }
+}
+
+func NewStore(opts ...Option) *Store {
 	s := &Store{services: map[string]dataservice.DataService{}}
-	s.seed()
+	for _, o := range opts {
+		o(s)
+	}
+	// 不 seed mock 数据服务实例（去假数据）：用户经控制台创建真实数据服务（已有真实引擎 mysql/redis/nats/minio）。
 	return s
+}
+
+// namespace 返回当前 namespace（注入优先，否则兜底 DefaultNamespace）。
+func (s *Store) namespace() string {
+	if s.nsResolver != nil {
+		if ns := s.nsResolver.Namespace(); ns != "" {
+			return ns
+		}
+	}
+	return dataservice.DefaultNamespace
+}
+
+// cloneStrMap 深拷 map[string]string，隔离返回值/写入值与对端，避免并发 map 读写 panic（与 billing cloneIntMap 同款）。
+func cloneStrMap(m map[string]string) map[string]string {
+	cp := make(map[string]string, len(m))
+	for k, v := range m {
+		cp[k] = v
+	}
+	return cp
 }
 
 func tenantOrErr(ctx context.Context) (string, error) {
@@ -48,6 +80,8 @@ func (s *Store) List(ctx context.Context, kind string) ([]dataservice.DataServic
 		if kind != "" && d.Kind != kind {
 			continue
 		}
+		d.Spec = cloneStrMap(d.Spec)
+		d.Connection = cloneStrMap(d.Connection)
 		out = append(out, d)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
@@ -65,6 +99,8 @@ func (s *Store) Get(ctx context.Context, id string) (dataservice.DataService, er
 	if !ok || d.TenantID != tid {
 		return dataservice.DataService{}, fmt.Errorf("数据服务不存在: %s", id)
 	}
+	d.Spec = cloneStrMap(d.Spec)
+	d.Connection = cloneStrMap(d.Connection)
 	return d, nil
 }
 
@@ -84,12 +120,17 @@ func (s *Store) Create(ctx context.Context, d dataservice.DataService) (dataserv
 			return dataservice.DataService{}, fmt.Errorf("数据服务名已存在: %s", d.Name)
 		}
 	}
-	s.seq++
-	d.ID = fmt.Sprintf("ds-%d-%d", time.Now().UnixNano(), s.seq)
+	if d.ID == "" {
+		s.seq++
+		d.ID = fmt.Sprintf("ds-%d-%d", time.Now().UnixNano(), s.seq)
+	}
 	d.TenantID = tid
 	if d.Status == "" {
 		d.Status = dataservice.StatusRunning
 	}
+	// 生成并填充 Connection（凭证 + FQDN + uri）；凭证持久化（重启不变，Secret 引用）。
+	d.FillConnection(s.namespace())
+	d.Spec = cloneStrMap(d.Spec) // 隔离 caller 传入的 map
 	now := time.Now()
 	d.CreatedAt = now
 	d.UpdatedAt = now
@@ -118,13 +159,19 @@ func (s *Store) Update(ctx context.Context, d dataservice.DataService) (dataserv
 		ex.Status = d.Status
 	}
 	if d.Spec != nil {
-		ex.Spec = d.Spec
+		ex.Spec = cloneStrMap(d.Spec) // 隔离 caller 传入，避免外部改影响 store 内部
 	}
 	ex.UpdatedAt = time.Now()
+	// spec 改动后重算连接 uri/host（凭证保留，namespace 可能变）；spec 字段（如 db_name）影响 uri。
+	if ex.Connection != nil {
+		ex.FillConnection(s.namespace())
+	}
 	// 合并后复校验，防止 PUT 用空 spec 清空 Create 时强制的必填字段。
 	if err := ex.Validate(); err != nil {
 		return dataservice.DataService{}, err
 	}
+	ex.Spec = cloneStrMap(ex.Spec)
+	ex.Connection = cloneStrMap(ex.Connection)
 	s.services[d.ID] = ex
 	return ex, nil
 }
@@ -161,17 +208,10 @@ func SeedDataServices() []dataservice.DataService {
 		mk("ds-acme-cache", "t-acme", dataservice.KindCache, "acme-session-cache", "env-acme-test", dataservice.StatusRunning,
 			map[string]string{"engine": "redis", "mode": "cluster", "maxmemory_mb": "2048"}, -48*time.Hour),
 		mk("ds-acme-mq", "t-acme", dataservice.KindMQ, "acme-events-mq", "env-acme-prod-bj", dataservice.StatusRunning,
-			map[string]string{"engine": "kafka", "partitions": "6"}, -24*time.Hour),
+			map[string]string{"engine": "nats", "partitions": "6"}, -24*time.Hour),
 		mk("ds-globex-db", "t-globex", dataservice.KindDB, "globex-main-db", "env-globex-prod", dataservice.StatusRunning,
 			map[string]string{"engine": "mysql", "version": "8", "size_gb": "200"}, -36*time.Hour),
 		mk("ds-globex-vector", "t-globex", dataservice.KindVector, "globex-embedding", "env-globex-test", dataservice.StatusStopped,
 			map[string]string{"engine": "milvus", "dimension": "1536"}, -12*time.Hour),
 	}
-}
-
-func (s *Store) seed() {
-	for _, d := range SeedDataServices() {
-		s.services[d.ID] = d
-	}
-	s.seq = len(s.services)
 }

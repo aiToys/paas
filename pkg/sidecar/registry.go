@@ -46,7 +46,7 @@ func (c *Client) Register(ctx context.Context, in Instance) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return "", fmt.Errorf("注册失败: HTTP %d", resp.StatusCode)
 	}
@@ -71,7 +71,7 @@ func (c *Client) Heartbeat(ctx context.Context, instanceID string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("心跳失败: HTTP %d", resp.StatusCode)
 	}
@@ -90,7 +90,7 @@ func (c *Client) Deregister(ctx context.Context, serviceID, instanceID string) e
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return fmt.Errorf("注销失败: HTTP %d", resp.StatusCode)
 	}

@@ -5,12 +5,10 @@ import { onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
-import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 
 const route = useRoute()
 const router = useRouter()
-const envStore = useEnvStore()
 
 interface Service {
   id: string
@@ -54,9 +52,14 @@ async function load() {
     const resp = await fetchAuth(`/api/services/${id}`)
     if (resp.ok) {
       const json = await resp.json()
-      svc.value = json.service
-      instances.value = json.instances ?? []
+      // 兼容两种契约：fetchJSON 智能解包 {data:T}；此端点历史形态 {service,instances}。
+      // 双重兜底：data 形态优先，否则原样。
+      const payload = json && typeof json === 'object' && 'service' in json ? json : (json?.data ?? {})
+      svc.value = payload.service ?? null
+      instances.value = payload.instances ?? []
     }
+  } catch (e) {
+    ElMessage.error('加载服务详情失败：' + (e as Error).message)
   } finally {
     loading.value = false
   }
@@ -92,13 +95,17 @@ async function create() {
 }
 
 async function heartbeat(row: Instance) {
-  const resp = await fetchAuth(`/api/instances/${row.id}/heartbeat`, { method: 'PUT' })
-  if (resp.ok) {
-    ElMessage.success('心跳已更新')
-    load()
-  } else {
-    const err = await resp.json().catch(() => ({}))
-    ElMessage.error(err.error || '心跳失败')
+  try {
+    const resp = await fetchAuth(`/api/instances/${row.id}/heartbeat`, { method: 'PUT' })
+    if (resp.ok) {
+      ElMessage.success('心跳已更新')
+      load()
+    } else {
+      const err = await resp.json().catch(() => ({}))
+      ElMessage.error(err.error || '心跳失败')
+    }
+  } catch (e) {
+    ElMessage.error('心跳失败：' + (e as Error).message)
   }
 }
 
@@ -107,15 +114,20 @@ async function remove(row: Instance) {
     action: '注销实例',
     target: row.addr,
     requireNameConfirm: isProd(),
+    isProd: isProd(),
   })
   if (!ok) return
-  const resp = await fetchAuth(`/api/services/${svc.value!.id}/instances/${row.id}`, { method: 'DELETE' })
-  if (resp.ok) {
-    ElMessage.success('已注销实例')
-    load()
-  } else {
-    const err = await resp.json().catch(() => ({}))
-    ElMessage.error(err.error || '注销失败')
+  try {
+    const resp = await fetchAuth(`/api/services/${svc.value!.id}/instances/${row.id}`, { method: 'DELETE' })
+    if (resp.ok) {
+      ElMessage.success('已注销实例')
+      load()
+    } else {
+      const err = await resp.json().catch(() => ({}))
+      ElMessage.error(err.error || '注销失败')
+    }
+  } catch (e) {
+    ElMessage.error('注销失败：' + (e as Error).message)
   }
 }
 

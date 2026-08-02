@@ -3,6 +3,7 @@ package dataservice_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -38,6 +39,22 @@ func newReq(method, target, body, tid string) *http.Request {
 
 func allowAll(*http.Request, string) bool { return true }
 
+// createDS 经 POST /api/dataservices 自建数据服务（去 mock seed 后测试自建真源），
+// 返回创建结果（含 store 生成的 ID 与掩码后的 Connection）。
+func createDS(t *testing.T, h *dataservice.Handler, tid, kind, name, env, specJSON string) dataservice.DataService {
+	t.Helper()
+	body := fmt.Sprintf(`{"kind":%q,"name":%q,"spec":%s,"envId":%q}`, kind, name, specJSON, env)
+	r := newReq(http.MethodPost, "/api/dataservices", body, tid)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("创建 %s 应 201，got %d body=%s", name, w.Code, w.Body.String())
+	}
+	var d dataservice.DataService
+	decode(t, w, &d)
+	return d
+}
+
 func decode(t *testing.T, w *httptest.ResponseRecorder, v interface{}) {
 	t.Helper()
 	if err := json.Unmarshal(w.Body.Bytes(), v); err != nil {
@@ -67,6 +84,8 @@ func TestMeta(t *testing.T) {
 func TestListByKind(t *testing.T) {
 	h := dataservice.NewHandler(dsmemory.NewStore())
 	h.Authorize = allowAll
+	createDS(t, h, "t-acme", dataservice.KindDB, "acme-orders-db", "env-acme-test",
+		`{"engine":"postgres","version":"15","size_gb":"100"}`)
 	r := newReq(http.MethodGet, "/api/dataservices?kind=db", "", "t-acme")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -129,8 +148,10 @@ func TestProdDeleteAsAdmin(t *testing.T) {
 		types: map[string]string{"env-acme-prod-bj": "prod"},
 	}))
 	h.Authorize = allowAll // admin 有 prod:write
-	// ds-acme-mq 在生产环境 env-acme-prod-bj
-	r := newReq(http.MethodDelete, "/api/dataservices/ds-acme-mq", "", "t-acme")
+	// 自建生产环境 mq（env-acme-prod-bj）
+	mq := createDS(t, h, "t-acme", dataservice.KindMQ, "acme-events-mq", "env-acme-prod-bj",
+		`{"engine":"nats","partitions":"6"}`)
+	r := newReq(http.MethodDelete, "/api/dataservices/"+mq.ID, "", "t-acme")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
@@ -153,5 +174,68 @@ func TestTenantIsolation(t *testing.T) {
 		if d.TenantID == "t-acme" {
 			t.Fatal("globex 不应见到 acme 资源")
 		}
+	}
+}
+
+// TestListMasksSecret 验证 list 返回的 password/secretKey 掩码，不泄漏明文。
+func TestListMasksSecret(t *testing.T) {
+	h := dataservice.NewHandler(dsmemory.NewStore())
+	h.Authorize = allowAll
+	createDS(t, h, "t-acme", dataservice.KindDB, "acme-orders-db", "env-acme-test",
+		`{"engine":"postgres","version":"15","size_gb":"100"}`)
+	r := newReq(http.MethodGet, "/api/dataservices?kind=db", "", "t-acme")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	var resp struct {
+		Data []dataservice.DataService `json:"data"`
+	}
+	decode(t, w, &resp)
+	if len(resp.Data) != 1 {
+		t.Fatalf("acme db 应 1 个，got %d", len(resp.Data))
+	}
+	conn := resp.Data[0].Connection
+	if conn["password"] != dataservice.SecretMask {
+		t.Fatalf("list password 应掩码，got %q", conn["password"])
+	}
+	if conn["uri"] != dataservice.SecretMask {
+		t.Fatalf("list uri 应掩码（含明文密码），got %q", conn["uri"])
+	}
+	if conn["host"] == "" || conn["host"] == dataservice.SecretMask {
+		t.Fatalf("host 不应为空或掩码: %q", conn["host"])
+	}
+}
+
+// TestDetailMasksSecret 验证 Create/Detail 均返回掩码凭证（明文仅内部绑定注入用，
+// 防日志/proxy/MITM 捕获；与 security 模块 Create 也返 Masked 策略一致）。
+func TestDetailMasksSecret(t *testing.T) {
+	h := dataservice.NewHandler(dsmemory.NewStore(), dataservice.WithEnvResolver(stubResolver{
+		types: map[string]string{"env-acme-test": "test"},
+	}))
+	h.Authorize = allowAll
+	body := `{"kind":"cache","name":"detail-redis","spec":{"engine":"redis"},"envId":"env-acme-test"}`
+	r := newReq(http.MethodPost, "/api/dataservices", body, "t-acme")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	var created dataservice.DataService
+	decode(t, w, &created)
+	// POST 返掩码（write 权限者也只见掩码，明文仅内部绑定注入用）
+	if created.Connection["password"] != dataservice.SecretMask {
+		t.Fatalf("创建返回 password 应掩码，got %q", created.Connection["password"])
+	}
+
+	// GET 详情应掩码（read 权限者含 viewer 不可见明文）
+	r2 := newReq(http.MethodGet, "/api/dataservices/"+created.ID, "", "t-acme")
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, r2)
+	var detail dataservice.DataService
+	decode(t, w2, &detail)
+	if detail.Connection["password"] != dataservice.SecretMask {
+		t.Fatalf("详情 password 应掩码，got %q", detail.Connection["password"])
+	}
+	if detail.Connection["uri"] != dataservice.SecretMask {
+		t.Fatalf("详情 uri 应掩码（含明文密码），got %q", detail.Connection["uri"])
+	}
+	if detail.Connection["host"] == "" || detail.Connection["host"] == dataservice.SecretMask {
+		t.Fatalf("host 不应为空或掩码: %q", detail.Connection["host"])
 	}
 }

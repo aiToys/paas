@@ -18,6 +18,12 @@ interface ModelOpt {
   name: string
   vendor: string
 }
+// /api/models 富信息响应（仅取前端需要的字段，避免维护完整 schema）。
+interface ModelListItem {
+  id: string
+  name: string
+  vendor: string
+}
 
 const route = useRoute()
 const model = ref('')
@@ -42,7 +48,7 @@ onMounted(async () => {
   try {
     const resp = await fetchAuth('/api/models')
     const json = await resp.json()
-    modelOptions.value = (json.data ?? []).map((m: any) => ({ id: m.id, name: m.name, vendor: m.vendor }))
+    modelOptions.value = ((json.data ?? []) as ModelListItem[]).map((m) => ({ id: m.id, name: m.name, vendor: m.vendor }))
   } catch {
     ElMessage.error('加载模型列表失败')
   }

@@ -1,0 +1,70 @@
+# Prometheus 精简 values（dev 轻量但真实）。
+# 含：Prometheus server（持久化）+ node-exporter（节点指标）+ 抓 kubelet/cAdvisor（数据服务 Pod 指标）
+# 关：alertmanager、kube-state-metrics（YAGNI）
+---
+alertmanager:
+  enabled: false
+
+kubeStateMetrics:
+  enabled: false
+
+prometheus-node-exporter:
+  enabled: true
+  resources:
+    requests: { cpu: 50m, memory: 32Mi }
+    limits: { cpu: 200m, memory: 64Mi }
+
+# 额外抓取配置：kubelet cAdvisor（数据服务 Pod 真实指标来源）+ paas-core /metrics
+extraScrapeConfigs: |
+  # kubelet cAdvisor —— container_cpu_usage_seconds_total / container_memory_working_set_bytes 等
+  # 平台数据服务监控（real/metrics.go TargetDataservice）依赖这些。
+  - job_name: 'kubernetes-cadvisor'
+    scheme: https
+    tls_config:
+      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+      insecure_skip_verify: true
+    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+    kubernetes_sd_configs:
+      - role: node
+    relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+      - target_label: __address__
+        replacement: kubernetes.default.svc:443
+        source_labels: [__address__]
+        regex: (.+)
+      - source_labels: [__meta_kubernetes_node_name]
+        regex: (.+)
+        target_label: __metrics_path__
+        replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor
+
+  # paas-core 自身指标（controller-runtime 进程级 + 后续业务 paas_* 埋点）
+  - job_name: 'paas-core'
+    metrics_path: /metrics
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: ['paas']
+    relabel_configs:
+      # paas-core pod label 是 app.kubernetes.io/name（relabel 下划线替换点号）
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+        regex: paas-core
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_ip]
+        regex: (.+)
+        target_label: __address__
+        replacement: $1:8081
+
+server:
+  retention: "7d"
+  persistentVolume:
+    enabled: true
+    size: 10Gi
+    storageClass: local-path
+  resources:
+    requests: { cpu: 200m, memory: 512Mi }
+    limits: { cpu: "1", memory: 1Gi }
+
+# RBAC：需 nodes/proxy 权限才能抓 kubelet cAdvisor（chart 默认 ClusterRole 含）
+rbac:
+  create: true

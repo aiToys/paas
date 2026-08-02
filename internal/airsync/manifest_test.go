@@ -8,10 +8,10 @@ import (
 
 func TestBuildAndVerifyManifest(t *testing.T) {
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "paas-0.1.0.tgz"), []byte("fake chart"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "paas-0.1.0.tgz"), []byte("fake chart"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "core-0.1.0.tar"), []byte("fake image tar"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "core-0.1.0.tar"), []byte("fake image tar"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	images := []ImageRef{{Name: "ghcr.io/aitoys/paas-core", Tag: "0.1.0", File: "core-0.1.0.tar"}}
@@ -31,14 +31,14 @@ func TestBuildAndVerifyManifest(t *testing.T) {
 func TestVerifyDetectsTamper(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "core-0.1.0.tar")
-	if err := os.WriteFile(f, []byte("original"), 0o644); err != nil {
+	if err := os.WriteFile(f, []byte("original"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := BuildManifest(dir, "0.1.0", "0.1.0", "", []ImageRef{{File: "core-0.1.0.tar"}}, ""); err != nil {
 		t.Fatalf("BuildManifest: %v", err)
 	}
 	// 篡改文件
-	if err := os.WriteFile(f, []byte("TAMPERED"), 0o644); err != nil {
+	if err := os.WriteFile(f, []byte("TAMPERED"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, mismatch, _ := VerifyManifest(dir)
@@ -50,11 +50,11 @@ func TestVerifyDetectsTamper(t *testing.T) {
 func TestVerifyDetectsMissingFile(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "core.tar")
-	if err := os.WriteFile(f, []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	BuildManifest(dir, "0.1.0", "0.1.0", "", []ImageRef{{File: "core.tar"}}, "")
-	os.Remove(f)
+	_, _ = BuildManifest(dir, "0.1.0", "0.1.0", "", []ImageRef{{File: "core.tar"}}, "")
+	_ = os.Remove(f)
 	_, mismatch, _ := VerifyManifest(dir)
 	if len(mismatch) == 0 {
 		t.Fatalf("文件缺失应检出")

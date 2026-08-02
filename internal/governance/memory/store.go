@@ -25,26 +25,16 @@ type Store struct {
 	breakerSeq int
 }
 
+// NewStore 创建仓储（空，不 seed mock 演示数据）。
+// 去假数据：服务/实例/路由/熔断由用户配置产生。实例真源为 K8s Endpoints（/dp/ 已提供数据面
+// 发现）；governance /api/instances 切 K8s Endpoints 留后续（需 service->workload 映射设计）。
 func NewStore() *Store {
-	s := &Store{
+	return &Store{
 		services:  map[string]governance.Service{},
 		instances: map[string]governance.Instance{},
 		routes:    map[string]governance.Route{},
 		breakers:  map[string]governance.CircuitBreaker{},
 	}
-	for _, svc := range seedServices() {
-		s.services[svc.ID] = svc
-	}
-	for _, in := range seedInstances() {
-		s.instances[in.ID] = in
-	}
-	for _, r := range seedRoutes() {
-		s.routes[r.ID] = r
-	}
-	for _, b := range seedBreakers() {
-		s.breakers[b.ID] = b
-	}
-	return s
 }
 
 func tenantOrErr(ctx context.Context) (string, error) {
@@ -326,6 +316,7 @@ func (s *Store) CreateRoute(ctx context.Context, r governance.Route) (governance
 	r.ID = fmt.Sprintf("route-%d-%d", time.Now().UnixNano(), s.routeSeq)
 	r.TenantID = tid
 	r.UpdatedAt = time.Now()
+	r.Methods = append([]string(nil), r.Methods...) // 深拷贝，隔离调用方切片与 store 内部状态
 	s.routes[r.ID] = r
 	return r, nil
 }
@@ -348,7 +339,7 @@ func (s *Store) UpdateRoute(ctx context.Context, r governance.Route) (governance
 		ex.ServiceID = r.ServiceID
 	}
 	if r.Methods != nil {
-		ex.Methods = r.Methods
+		ex.Methods = append([]string(nil), r.Methods...) // 深拷贝，隔离调用方切片与 store 内部状态
 	}
 	ex.StripPath = r.StripPath
 	ex.Enabled = r.Enabled

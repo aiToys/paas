@@ -31,7 +31,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/aitoys/paas/internal/configcenter"
-	ccmemory "github.com/aitoys/paas/internal/configcenter/memory"
 	storagepg "github.com/aitoys/paas/internal/storage/pg"
 )
 
@@ -238,9 +237,21 @@ func (s *Store) UpsertItem(ctx context.Context, item configcenter.ConfigItem) (c
 	if err != nil {
 		return configcenter.ConfigItem{}, err
 	}
-	// 校验 namespace 存在且属本租户（与内存版同款语义）。
-	if _, err := s.GetNamespace(ctx, item.NamespaceID); err != nil {
+	// tx 内锁 namespace 行 + INSERT，防 GetNamespace 与 INSERT 间 DeleteNamespace 级联清产生孤儿 item。
+	tx, err := s.db.Pool().Begin(ctx)
+	if err != nil {
 		return configcenter.ConfigItem{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var nsTid string
+	if err = tx.QueryRow(ctx, `SELECT tenant_id FROM cc_namespaces WHERE id=$1 FOR UPDATE`, item.NamespaceID).Scan(&nsTid); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return configcenter.ConfigItem{}, fmt.Errorf("命名空间不存在: %s", item.NamespaceID)
+		}
+		return configcenter.ConfigItem{}, err
+	}
+	if nsTid != tid {
+		return configcenter.ConfigItem{}, fmt.Errorf("命名空间不存在: %s", item.NamespaceID)
 	}
 	if err := item.Validate(); err != nil {
 		return configcenter.ConfigItem{}, err
@@ -255,7 +266,7 @@ func (s *Store) UpsertItem(ctx context.Context, item configcenter.ConfigItem) (c
 	item.UpdatedAt = time.Now()
 	// ON CONFLICT 主路径：命中唯一键 (namespace_id, key) 则更新 value/type/updated_at，
 	// RETURNING 取实际落库行（含生成的 id 与 updated_at）。
-	row := s.db.Pool().QueryRow(ctx, `
+	row := tx.QueryRow(ctx, `
 INSERT INTO cc_items (`+itemCols+`)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (namespace_id, key) DO UPDATE
@@ -267,6 +278,9 @@ RETURNING `+itemCols,
 	)
 	var saved configcenter.ConfigItem
 	if err = scanItem(row, &saved); err != nil {
+		return configcenter.ConfigItem{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
 		return configcenter.ConfigItem{}, err
 	}
 	return saved, nil
@@ -341,6 +355,18 @@ func (s *Store) CreatePublish(ctx context.Context, namespaceID string) (configce
 		return configcenter.Publish{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }() // 已提交或失败均无害
+
+	// 锁 namespace 行复校验存在 + 归属（防 GetNamespace 与 tx 间 DeleteNamespace 级联清产生孤儿 publish）
+	var nsTid string
+	if err = tx.QueryRow(ctx, `SELECT tenant_id FROM cc_namespaces WHERE id=$1 FOR UPDATE`, namespaceID).Scan(&nsTid); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return configcenter.Publish{}, fmt.Errorf("命名空间不存在: %s", namespaceID)
+		}
+		return configcenter.Publish{}, err
+	}
+	if nsTid != tid {
+		return configcenter.Publish{}, fmt.Errorf("命名空间不存在: %s", namespaceID)
+	}
 
 	// 1) 下一版本号 = namespace 内 MAX(version)+1；无历史则 1。
 	var version int
@@ -510,48 +536,9 @@ func (s *Store) PublishesCount(ctx context.Context) (int, error) {
 	return n, err
 }
 
-// SeedIfEmpty 在表空时灌入 seed 真源（启动期用，幂等）。
-//
-// 直接 SQL INSERT 绕过 CreatePublish（重新生成快照 + 翻 active/rolled-back 状态机），
-// 保留 seed 的历史 Publish（active 状态 + Snapshot）。namespace UNIQUE(tenant,name)、
-// item UNIQUE(namespace,key)、publish UNIQUE(namespace,version) → ON CONFLICT DO NOTHING。
-// 不经租户过滤，全表一次灌完（与 billing/devops SeedIfEmpty 同款）。
+// SeedIfEmpty no-op（去假数据）：不灌 mock 命名空间/配置/发布。用户经控制台配置真实配置中心。
+// 保留签名兼容 seedPGAllIfEmpty 调用。
 func (s *Store) SeedIfEmpty(ctx context.Context) error {
-	n, err := s.NamespacesCount(ctx)
-	if err != nil {
-		return err
-	}
-	if n > 0 {
-		return nil
-	}
-	for _, ns := range ccmemory.SeedNamespaces() {
-		if _, err = s.db.Pool().Exec(ctx,
-			`INSERT INTO cc_namespaces (`+nsCols+`) VALUES ($1,$2,$3,$4,$5)
-			 ON CONFLICT (tenant_id, name) DO NOTHING`,
-			ns.ID, ns.TenantID, ns.Name, ns.Desc, ns.UpdatedAt); err != nil {
-			return err
-		}
-	}
-	for _, it := range ccmemory.SeedItems() {
-		if _, err = s.db.Pool().Exec(ctx,
-			`INSERT INTO cc_items (`+itemCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7)
-			 ON CONFLICT (namespace_id, key) DO NOTHING`,
-			it.ID, it.TenantID, it.NamespaceID, it.Key, it.Value, it.Type, it.UpdatedAt); err != nil {
-			return err
-		}
-	}
-	for _, p := range ccmemory.SeedPublishes() {
-		snapBytes, err := marshalSnapshot(p.Snapshot)
-		if err != nil {
-			return err
-		}
-		if _, err = s.db.Pool().Exec(ctx,
-			`INSERT INTO cc_publishes (`+pubCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7)
-			 ON CONFLICT (namespace_id, version) DO NOTHING`,
-			p.ID, p.TenantID, p.NamespaceID, p.Version, snapBytes, p.Status, p.CreatedAt); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 

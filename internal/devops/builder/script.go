@@ -34,5 +34,3 @@ if [ -z "$digest" ]; then digest=$(docker inspect --format '{{.Id}}' "$REF"); fi
 echo "PAAS_DIGEST=${digest#*@}"
 echo "PAAS_BUILD_DONE=1"
 `
-
-

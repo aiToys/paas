@@ -4,6 +4,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -197,6 +198,7 @@ func SeedSecrets() []security.Secret {
 		{ID: "sec-platform-openai", TenantID: "", Scope: security.ScopePlatform, Name: "openai-api-key", Type: security.TypeSecret, Value: "", Desc: "OpenAI 供应商 API Key（部署后填写）", UpdatedAt: t},
 		{ID: "sec-platform-deepseek", TenantID: "", Scope: security.ScopePlatform, Name: "deepseek-api-key", Type: security.TypeSecret, Value: "", Desc: "DeepSeek 供应商 API Key（部署后填写）", UpdatedAt: t},
 		{ID: "sec-platform-qwen", TenantID: "", Scope: security.ScopePlatform, Name: "qwen-api-key", Type: security.TypeSecret, Value: "", Desc: "通义千问 DashScope API Key（部署后填写）", UpdatedAt: t},
+		{ID: "sec-platform-airouter", TenantID: "", Scope: security.ScopePlatform, Name: "airouter-api-key", Type: security.TypeSecret, Value: os.Getenv("PAAS_AIROUTER_API_KEY"), Desc: "airouter LLM 网关 API Key（统一真实推理入口，部署时经 env 注入）", UpdatedAt: t},
 	}
 }
 

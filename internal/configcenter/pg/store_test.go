@@ -70,8 +70,8 @@ func resetSchema(t *testing.T, db *storagepg.DB) {
 	}
 }
 
-func acmeCtx() context.Context   { return tenant.WithTenant(context.Background(), "t-acme") }
-func globexCtx() context.Context { return tenant.WithTenant(context.Background(), "t-globex") }
+func acmeCtx() context.Context     { return tenant.WithTenant(context.Background(), "t-acme") }
+func globexCtx() context.Context   { return tenant.WithTenant(context.Background(), "t-globex") }
 func noTenantCtx() context.Context { return context.Background() }
 
 // sampleNamespace 构造一条合法 Namespace（不含 TenantID，由 ctx 写入）。

@@ -31,6 +31,10 @@ const showItem = ref(false)
 const itemForm = ref({ id: '', key: '', value: '', type: 'text' })
 const itemSubmitting = ref(false)
 
+const showNs = ref(false)
+const nsForm = ref({ name: '', desc: '' })
+const nsSubmitting = ref(false)
+
 const types = [
   { value: 'text', label: 'Text' },
   { value: 'json', label: 'JSON' },
@@ -75,18 +79,33 @@ function openNamespace(id: string) {
   router.push(`/platform/config-center/${id}`)
 }
 
-async function createNamespace() {
-  const name = window.prompt('命名空间名称（租户内唯一）')
-  if (!name) return
-  const resp = await fetchAuth('/api/configcenter/namespaces', {
-    method: 'POST', body: JSON.stringify({ name }),
-  })
-  if (resp.ok) {
-    ElMessage.success('已创建')
-    loadNamespaces()
-  } else {
-    const err = await resp.json().catch(() => ({}))
-    ElMessage.error(err.error || '创建失败')
+function createNamespace() {
+  nsForm.value = { name: '', desc: '' }
+  showNs.value = true
+}
+
+async function submitNs() {
+  if (!nsForm.value.name.trim()) {
+    ElMessage.warning('请输入名称')
+    return
+  }
+  nsSubmitting.value = true
+  try {
+    const resp = await fetchAuth('/api/configcenter/namespaces', {
+      method: 'POST', body: JSON.stringify(nsForm.value),
+    })
+    if (resp.ok) {
+      ElMessage.success('已创建')
+      showNs.value = false
+      loadNamespaces()
+    } else {
+      const err = await resp.json().catch(() => ({}))
+      ElMessage.error(err.error || '创建失败')
+    }
+  } catch (e) {
+    ElMessage.error('创建失败：' + (e as Error).message)
+  } finally {
+    nsSubmitting.value = false
   }
 }
 
@@ -116,6 +135,8 @@ async function saveItem() {
       const err = await resp.json().catch(() => ({}))
       ElMessage.error(err.error || '保存失败')
     }
+  } catch (e) {
+    ElMessage.error('保存失败：' + (e as Error).message)
   } finally {
     itemSubmitting.value = false
   }
@@ -124,36 +145,51 @@ async function saveItem() {
 async function deleteItem(row: ConfigItem) {
   const ok = await confirmDangerous({ action: '删除配置项', target: row.key })
   if (!ok) return
-  const resp = await fetchAuth(`/api/configcenter/namespaces/${cur.value!.id}/items/${row.id}`, { method: 'DELETE' })
-  if (resp.ok) {
-    ElMessage.success('已删除')
-    loadDetail()
+  try {
+    const resp = await fetchAuth(`/api/configcenter/namespaces/${cur.value!.id}/items/${row.id}`, { method: 'DELETE' })
+    if (resp.ok) {
+      ElMessage.success('已删除')
+      loadDetail()
+    } else {
+      const err = await resp.json().catch(() => ({}))
+      ElMessage.error(err.error || '删除失败')
+    }
+  } catch (e) {
+    ElMessage.error('删除失败：' + (e as Error).message)
   }
 }
 
 async function publish() {
   const ok = await confirmDangerous({ action: '发布', target: cur.value?.name ?? '' })
   if (!ok) return
-  const resp = await fetchAuth(`/api/configcenter/namespaces/${cur.value!.id}/publish`, { method: 'POST' })
-  if (resp.ok) {
-    ElMessage.success('已发布新版本')
-    loadDetail()
-  } else {
-    const err = await resp.json().catch(() => ({}))
-    ElMessage.error(err.error || '发布失败')
+  try {
+    const resp = await fetchAuth(`/api/configcenter/namespaces/${cur.value!.id}/publish`, { method: 'POST' })
+    if (resp.ok) {
+      ElMessage.success('已发布新版本')
+      loadDetail()
+    } else {
+      const err = await resp.json().catch(() => ({}))
+      ElMessage.error(err.error || '发布失败')
+    }
+  } catch (e) {
+    ElMessage.error('发布失败：' + (e as Error).message)
   }
 }
 
 async function rollback(p: Publish) {
   const ok = await confirmDangerous({ action: '回滚到', target: `v${p.version}` })
   if (!ok) return
-  const resp = await fetchAuth(`/api/configcenter/publishes/${p.id}/rollback`, { method: 'POST' })
-  if (resp.ok) {
-    ElMessage.success(`已回滚到 v${p.version}`)
-    loadDetail()
-  } else {
-    const err = await resp.json().catch(() => ({}))
-    ElMessage.error(err.error || '回滚失败')
+  try {
+    const resp = await fetchAuth(`/api/configcenter/publishes/${p.id}/rollback`, { method: 'POST' })
+    if (resp.ok) {
+      ElMessage.success(`已回滚到 v${p.version}`)
+      loadDetail()
+    } else {
+      const err = await resp.json().catch(() => ({}))
+      ElMessage.error(err.error || '回滚失败')
+    }
+  } catch (e) {
+    ElMessage.error('回滚失败：' + (e as Error).message)
   }
 }
 
@@ -296,6 +332,24 @@ watch(() => route.params.nsId, load)
           <el-button @click="showItem = false">取消</el-button>
           <el-button type="primary" :disabled="itemSubmitting" @click="saveItem">
             {{ itemSubmitting ? '保存中…' : '保存' }}
+          </el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 创建命名空间（el-dialog 表单，替代原生 window.prompt：暗黑模式兼容 + 可填描述） -->
+      <el-dialog v-model="showNs" title="创建命名空间" width="460px">
+        <el-form label-width="80px">
+          <el-form-item label="名称">
+            <el-input v-model="nsForm.name" placeholder="租户内唯一" />
+          </el-form-item>
+          <el-form-item label="描述">
+            <el-input v-model="nsForm.desc" type="textarea" :rows="2" placeholder="可选" />
+          </el-form-item>
+        </el-form>
+        <template #footer>
+          <el-button @click="showNs = false">取消</el-button>
+          <el-button type="primary" :disabled="nsSubmitting" @click="submitNs">
+            {{ nsSubmitting ? '创建中…' : '创建' }}
           </el-button>
         </template>
       </el-dialog>

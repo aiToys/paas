@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -26,7 +27,7 @@ func (c BundleConfig) Run() error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(work)
+	defer func() { _ = os.RemoveAll(work) }()
 
 	chartTgz := fmt.Sprintf("paas-%s.tgz", c.Version)
 
@@ -61,11 +62,11 @@ func tarGz(srcDir, outPath string) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
+	defer func() { _ = out.Close() }()
 	gz := gzip.NewWriter(out)
-	defer gz.Close()
+	defer func() { _ = gz.Close() }()
 	tw := tar.NewWriter(gz)
-	defer tw.Close()
+	defer func() { _ = tw.Close() }()
 	return filepath.Walk(srcDir, func(path string, fi os.FileInfo, err error) error {
 		if err != nil || fi.IsDir() {
 			return err
@@ -75,11 +76,13 @@ func tarGz(srcDir, outPath string) error {
 		if err := tw.WriteHeader(hdr); err != nil {
 			return err
 		}
-		data, err := os.ReadFile(path)
+		// 流式写：镜像 tar 可达 GB 级，os.ReadFile 全量入内存会 OOM（离线交付机器内存有限）。
+		f, err := os.Open(path)
 		if err != nil {
 			return err
 		}
-		_, err = tw.Write(data)
+		_, err = io.Copy(tw, f)
+		_ = f.Close()
 		return err
 	})
 }

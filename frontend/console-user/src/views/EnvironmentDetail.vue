@@ -2,7 +2,7 @@
 // 环境详情页（管理面）：单环境的深度视图。
 // 工作负载总览（按类型）+ 应用部署矩阵（工作负载反推 appID + 应用信息）。
 // 「在此环境工作」= 切顶栏 scope（操作面）+ 跳工作负载，桥接管理面 -> 操作面。
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
@@ -108,6 +108,8 @@ function openApp(appId: string) {
 }
 
 onMounted(load)
+// 同组件复用（URL 改 envId 或列表切不同环境）时 watch 路由参数刷新。
+watch(() => route.params.id, load)
 </script>
 
 <template>

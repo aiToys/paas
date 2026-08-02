@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/aitoys/paas/internal/backup"
 	"github.com/aitoys/paas/internal/billing"
 	"github.com/aitoys/paas/internal/configcenter"
+	"github.com/aitoys/paas/internal/controller"
 	"github.com/aitoys/paas/internal/core/application"
 	authPkg "github.com/aitoys/paas/internal/core/auth"
 	"github.com/aitoys/paas/internal/core/gateway"
@@ -27,10 +29,12 @@ import (
 	"github.com/aitoys/paas/internal/core/identity"
 	coreplugin "github.com/aitoys/paas/internal/core/plugin"
 	"github.com/aitoys/paas/internal/dashboard"
+	"github.com/aitoys/paas/internal/dataplane"
 	"github.com/aitoys/paas/internal/dataservice"
 	"github.com/aitoys/paas/internal/devops"
 	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/governance"
+	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/internal/maas"
 	"github.com/aitoys/paas/internal/messaging"
 	"github.com/aitoys/paas/internal/observability"
@@ -89,14 +93,23 @@ func run(ctx context.Context, plugins []plugin.Plugin, gw *gateway.Gateway, mete
 	// CredentialResolver 桥接 security store：注入 MaaS 插件解析平台级凭证。
 	// security.SecretStore 接口含 Resolve（PG/memory 透明）。
 	deps := realCoreDeps{gw: gw, resolver: secretResolver{store: stores.Security.(security.SecretStore)}}
-	go serveHTTP(gw, meter, stores)
+	// 注入进程级 ctx 给 devops store：构建 goroutine 感知 shutdown（runBuild 派生 baseCtx，
+	// K8sJob 子 ctx随之 cancel），避免 SIGTERM 后 in-flight 构建永久卡 running。
+	if ds, ok := stores.DevOpsBuilds.(interface{ SetBaseCtx(context.Context) }); ok {
+		ds.SetBaseCtx(ctx)
+	}
+	srv := serveHTTP(gw, meter, stores, appliers)
 	ran, err := bootstrapCore(ctx, plugins, deps)
 	if err != nil {
 		return err
 	}
 	log.Printf("core 启动完成，已运行插件: %v", ran)
 	<-ctx.Done()
-	log.Println("core 收到退出信号，停止")
+	// 优雅关闭：HTTP Shutdown 给 in-flight 请求（含 SSE 流式）30s grace 期，避免半写/连接强制断。
+	log.Println("core 收到退出信号，优雅关闭中（最多等 30s）...")
+	shutdownCtx, scancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer scancel()
+	_ = srv.Shutdown(shutdownCtx)
 	return nil
 }
 
@@ -196,7 +209,7 @@ func resolveJWTSecret() string {
 //   - EnvTypeResolver：注入 environment store（实现 EnvType 方法），prod:write 校验跨模块复用。
 //
 // 模型目录平台共享（不按租户过滤）；应用/治理/配置等业务模块按租户隔离。
-func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores) {
+func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, appliers k8sAppliers) *http.Server {
 	apiKey := resolveAPIKey()
 	// P3-2 计量采集：推理 token 用量回写 billing（meter.OnTokens 钩子，IncUsage 按 tenant 计）。
 	meter.OnTokens = func(tenantID string, tokens int) {
@@ -217,7 +230,15 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores) {
 	// 据此区分跨租户平台管理与本租户 tenant-admin，防越权。
 	idmHandler.IsPlatformAdmin = gateway.IsPlatformAdmin
 	adminGuard := func(h http.Handler) http.Handler {
-		return auth(gateway.Require(identity.Permission("tenant:admin"))(h))
+		// 平台级管理（租户/用户/API Key/dashboard 跨租户聚合）需 super_admin 角色，
+		// 防 tenant-admin 越权枚举全部租户与用户。auth 先解析身份注入 roles，再校验超管。
+		return auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !gateway.IsPlatformAdmin(r) {
+				httputil.WriteError(w, http.StatusForbidden, "需要平台超管权限")
+				return
+			}
+			h.ServeHTTP(w, r)
+		}))
 	}
 	// dashboard 聚合（console-admin 首页统计）。
 	dashHandler := dashboard.NewHandler(stores.Identity)
@@ -243,14 +264,21 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores) {
 	reg.Register("GET", "/api/models", auth(gateway.Require("model:read")(gateway.CatalogModels(gw))),
 		apiroute.Tags("MaaS"), apiroute.Summary("模型市场富信息（含通道）"),
 		apiroute.Perm("model:read"), apiroute.WithResp(nil))
+	// 共享 K8s 状态读取器：workload handler（List 回填真实 Ready/Status）+ 应用 handler
+	// （派生 Replicas/Status）复用同一实例。clientset nil（非集群部署）时 no-op 降级透传 store 原值。
+	statusReader := controller.NewK8sStatusReader(appliers.clientset, appliers.namespace)
 	// 应用为主线 REST API：方法级权限由 handler 内部按 application:*/binding:write 校验
 	// 横切配额拦截：创建应用前调 billing.CheckAndInc，超限回 429（stores.Billing 共享用量真源）。
-	appHandler := application.NewHandler(stores.Application)
+	// WithWorkloadStats 派生应用 Replicas/Status（从真实工作负载聚合，覆盖 seed 假值）。
+	appHandler := application.NewHandler(stores.Application,
+		application.WithWorkloadStats(&appWorkloadStats{wlRepo: stores.Workload, status: statusReader}))
 	appHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 	appHandler.QuotaCheck = func(ctx context.Context, delta int) error {
 		_, err := stores.Billing.CheckAndInc(ctx, billing.ResApplications, delta)
 		return err
 	}
+	// 绑定数据服务时自动注入连接信息到 appconfig（DATABASE_URL/REDIS_URL/...），工作负载重启即生效。
+	appHandler.Binder = &dsBindingInjector{dsRepo: stores.DataService, cfgRepo: stores.AppConfig, appRepo: stores.Application}
 
 	// 环境（物理隔离单元 prod|test）：方法级权限 environment:read/write + prod 写校验。
 	// 同时作 EnvTypeResolver 横切注入到 workload/devops/appconfig/governance/dataservice。
@@ -261,7 +289,12 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores) {
 
 	// 工作负载：注入 environment store 作 EnvTypeResolver，启用生产写校验（dev 生产只读）。
 	// stores.Workload 与 DevOps 共享：Release 编排要更新 Workload.ImageRef。
-	wlHandler := workload.NewHandler(stores.Workload, workload.WithEnvResolver(stores.Environment))
+	// statusReader 注入 K8s 实际状态读取器：List 时回填真实 Ready/Status（覆盖 store 静态值），
+	// clientset 为 nil（非集群部署）时 NewK8sStatusReader 内部 no-op，透传 store 原值（降级）。
+	wlHandler := workload.NewHandler(stores.Workload,
+		workload.WithEnvResolver(stores.Environment),
+		workload.WithStatusReader(statusReader),
+	)
 	wlHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 	// 横切配额拦截：创建工作负载前调 billing.CheckAndInc，超限回 429。
 	wlHandler.QuotaCheck = func(ctx context.Context, delta int) error {
@@ -286,6 +319,15 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores) {
 	// 服务/实例租户私有；本期进程内 mock，数据面 SDK 接入留后续。
 	govHandler := governance.NewHandler(stores.Governance, governance.WithEnvResolver(stores.Environment))
 	govHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+	// 数据面 SDK 接入 API（/dp/）：把 K8s Endpoints 暴露为 zeus 兼容服务发现真源。
+	// 鉴权复用 auth（dp token = API Key，绑 tenant）；reader 从 appliers.clientset 读 Endpoints
+	// （非集群部署 clientset=nil，/dp/instances 降级返空，与现状一致不破坏）。
+	dpHandler := dataplane.NewHandler(
+		dataplane.NewEndpointsReader(appliers.clientset),
+		appliers.namespace,
+		stores.Governance,
+	)
+	mux.Handle("/dp/", auth(dpHandler))
 
 	// 配置中心（治理四件套：运行时动态配置，版本/发布/回滚）。
 	// 独立于物理环境（namespace 逻辑隔离），不接 EnvTypeResolver；复用 governance:read/write 权限。
@@ -422,6 +464,17 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores) {
 	// /docs：Scalar 交互文档（拉 /openapi.json 渲染），公开无鉴权。
 	mux.Handle("/docs", apiroute.ServeDocs("/openapi.json", "PaaS API"))
 
+	// 未知 /api/* 与 /v1/* 返回 404 JSON，而非兜底到 SPA 的 index.html。
+	// 前端 axios 收到 HTML（200）会把字符串当响应数据，下游 .filter/.map 在非数组上崩溃白屏；
+	// 返回干净 404 JSON 让拦截器走错误分支优雅降级。ServeMux 最长前缀匹配：已注册的具体 API 路径不受影响。
+	apiNotFound := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = fmt.Fprintf(w, `{"error":"route not found: %s"}`, r.URL.Path) //nolint:gosec // G705: 404 错误响应写 URL.Path 到 JSON（Content-Type application/json），无 XSS 风险
+	}
+	mux.HandleFunc("/api/", apiNotFound)
+	mux.HandleFunc("/v1/", apiNotFound)
+
 	// 嵌入式前端 SPA（core 单镜像同域 serve，无 CORS）。API 路由已在上文注册，
 	// ServeMux 最长前缀匹配使 /api/* /v1/* /openapi.json /docs /livez 优先命中；
 	// 以下三者为剩余路径的前端入口，/ 兜底 landing。
@@ -557,6 +610,13 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores) {
 	reg.Operation("POST", "/api/backups", apiroute.Tags("数据服务"), apiroute.Summary("创建备份"), apiroute.Perm("dataservice:write"), apiroute.WithReqBody(backup.Backup{}), apiroute.WithResp(backup.Backup{}))
 	reg.Operation("DELETE", "/api/backups/{id}", apiroute.Tags("数据服务"), apiroute.Summary("删除备份"), apiroute.Perm("dataservice:write"))
 
+	// 数据面 SDK 接入（/dp/，zeus paas-registry 插件消费；mux 见 mux.Handle("/dp/")，BearerAuth 鉴权）。
+	reg.Operation("GET", "/dp/services", apiroute.Tags("数据面"), apiroute.Summary("列服务（Discovery）"), apiroute.Perm("dp:read"))
+	reg.Operation("GET", "/dp/instances", apiroute.Tags("数据面"), apiroute.Summary("列实例（?service=，从 K8s Endpoints 读）"), apiroute.Perm("dp:read"))
+	reg.Operation("POST", "/dp/register", apiroute.Tags("数据面"), apiroute.Summary("声明服务元信息（幂等）"), apiroute.Perm("dp:write"))
+	reg.Operation("DELETE", "/dp/register", apiroute.Tags("数据面"), apiroute.Summary("反注册服务（?id=）"), apiroute.Perm("dp:write"))
+	reg.Operation("PUT", "/dp/heartbeat", apiroute.Tags("数据面"), apiroute.Summary("心跳（兼容保留，K8s readiness 是真源）"), apiroute.Perm("dp:write"))
+
 	// identity 管理 API（平台级 CRUD，需 tenant:admin；super_admin 通行）。
 	reg.Register("GET", "/api/tenants", adminGuard(http.HandlerFunc(idmHandler.ListTenants)),
 		apiroute.Tags("身份管理"), apiroute.Summary("租户列表"), apiroute.WithResp([]identity.Tenant{}))
@@ -583,16 +643,29 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores) {
 
 	srv := &http.Server{
 		Addr: ":8080",
-		// otelhttp 包装 mux：自动为每个请求建 span（含 http.method/status_code/server.address）。
-		// 过滤探针/契约/文档端点（高频无业务语义，避免噪音 span 淹没真实链路）。
-		Handler: otelhttp.NewHandler(mux, "http.server",
+		// recovery 中间件包 mux 最内层（捕获 handler panic，防单请求挂掉进程，SSE 流式也保护）；
+		// otelhttp 再包外层（自动建 span，过滤探针/契约/文档端点避免噪音）。
+		Handler: otelhttp.NewHandler(recoveryMiddleware(mux), "http.server",
 			otelhttp.WithFilter(skipTelemetryPaths)),
 		ReadHeaderTimeout: 10 * time.Second, // 防 Slowloris 慢速头部攻击
 	}
-	log.Printf("HTTP 监听 :8080（默认 API Key: %s）", apiKey)
-	if err := srv.ListenAndServe(); err != nil {
-		log.Printf("HTTP 服务退出: %v", err)
+	// 仅打印 Key 前缀，避免生产 API Key 明文进容器日志/日志聚合系统（运维确认用长度 + 前 6 字符）。
+	if apiKey != "" {
+		prefix := apiKey
+		if len(prefix) > 6 {
+			prefix = prefix[:6]
+		}
+		log.Printf("HTTP 监听 :8080（API Key: %s***，len=%d）", prefix, len(apiKey))
+	} else {
+		log.Printf("HTTP 监听 :8080（无默认 API Key）")
 	}
+	// 后台监听；run() 在收到 SIGTERM 后调 srv.Shutdown 优雅关闭（in-flight 请求/SSE 流式有 grace 期）。
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Printf("HTTP 服务异常退出: %v", err)
+		}
+	}()
+	return srv
 }
 
 // skipTelemetryPaths 过滤探针/契约/文档端点，避免高频无业务语义请求污染链路。
@@ -602,4 +675,18 @@ func skipTelemetryPaths(r *http.Request) bool {
 		return false // 跳过（不建 span）
 	}
 	return true
+}
+
+// recoveryMiddleware 捕获 handler panic，防止单请求 panic（json.Decode 异常类型、nil map 写、
+// 越界等）挂掉整个进程（in-flight 请求/SSE 流被强断）。panic 栈入服务端日志，客户端只收 500 internal error。
+func recoveryMiddleware(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("[panic] %s %s: %v\n%s", r.Method, r.URL.Path, rec, debug.Stack()) //nolint:gosec // 请求 method/path 入日志是标准实践，非注入攻击面
+				httputil.WriteError(w, http.StatusInternalServerError, "internal error")
+			}
+		}()
+		h.ServeHTTP(w, r)
+	})
 }

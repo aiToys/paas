@@ -3,11 +3,11 @@ package auth
 // Menu 对齐 console-admin 的 MenuDTO（lib/router/types-menu.ts）。
 // component 为相对 src/modules/ 的路径（不含扩展名），由前端动态路由装载。
 type Menu struct {
-	Path      string `json:"path"`
-	Name      string `json:"name"`
-	Component string `json:"component,omitempty"`
+	Path      string   `json:"path"`
+	Name      string   `json:"name"`
+	Component string   `json:"component,omitempty"`
 	Meta      MenuMeta `json:"meta"`
-	Children  []Menu `json:"children,omitempty"`
+	Children  []Menu   `json:"children,omitempty"`
 }
 
 // MenuMeta 是菜单/路由元数据。

@@ -1,6 +1,7 @@
 package billing_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -35,9 +36,17 @@ func decode(t *testing.T, w *httptest.ResponseRecorder, v interface{}) {
 	}
 }
 
-// TestHandlerUsageView 验证用量视图含超限标记。
+// TestHandlerUsageView 验证用量视图含超限标记（自建 gpu 配额 4 + 用量 6 超限）。
 func TestHandlerUsageView(t *testing.T) {
-	h := billing.NewHandler(billingmemory.NewStore())
+	s := billingmemory.NewStore()
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	if _, err := s.SetQuota(ctx, billing.ResourceQuota{Limits: map[string]int{billing.ResGPU: 4}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.IncUsage(ctx, billing.ResGPU, 6); err != nil {
+		t.Fatal(err)
+	}
+	h := billing.NewHandler(s)
 	r := newReq(http.MethodGet, "/api/billing/usage", "", "t-acme")
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
@@ -77,9 +86,14 @@ func TestHandlerQuotaUpdate(t *testing.T) {
 	}
 }
 
-// TestHandlerGenerateAndPay 验证账单生成 + 支付闭环。
+// TestHandlerGenerateAndPay 验证账单生成 + 支付闭环（自建用量使账单 total>0）。
 func TestHandlerGenerateAndPay(t *testing.T) {
-	h := billing.NewHandler(billingmemory.NewStore())
+	s := billingmemory.NewStore()
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	if _, err := s.IncUsage(ctx, billing.ResGPU, 6); err != nil {
+		t.Fatal(err)
+	}
+	h := billing.NewHandler(s)
 
 	// 生成
 	r := newReq(http.MethodPost, "/api/billing/records/generate?period=2026-07", "", "t-acme")

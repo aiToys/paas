@@ -1,0 +1,201 @@
+/* 全局主题：与控制台品牌一致的深色技术感（indigo→violet 主色 + cyan 数据流 accent）。
+   不引外部字体（离线交付友好）；CSS 变量统一设计令牌。 */
+
+:root {
+  /* 面层 */
+  --bg: #0a0e1a;
+  --bg-elev: #111726;
+  --surface: #161d31;
+  --surface-2: #1d2540;
+
+  /* 品牌（与 console-user 同源） */
+  --brand: #6366f1;
+  --brand-2: #8b5cf6;
+  --brand-soft: rgba(99, 102, 241, 0.14);
+  --accent: #22d3ee; /* 数据流强调（基础设施的"流量"语义） */
+  --accent-soft: rgba(34, 211, 238, 0.12);
+
+  /* 文字 */
+  --text: #e6e9f2;
+  --text-dim: #9ca3b8;
+  --text-faint: #6b7390;
+
+  /* 描边 / 阴影 */
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.16);
+  --shadow: 0 24px 60px -20px rgba(0, 0, 0, 0.6);
+
+  /* 渐变 */
+  --grad-brand: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+
+  /* 排版 */
+  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC',
+    'Microsoft YaHei', sans-serif;
+  --mono: ui-monospace, 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
+
+  --radius: 10px;
+  --radius-lg: 16px;
+  --maxw: 1120px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--text);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* 全局背景：顶部品牌辉光 + 细栅格，营造"基础设施控制面"氛围 */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(900px 500px at 75% -8%, rgba(99, 102, 241, 0.18), transparent 60%),
+    radial-gradient(700px 400px at 12% 8%, rgba(34, 211, 238, 0.08), transparent 55%),
+    var(--bg);
+}
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: radial-gradient(circle at 50% 30%, #000 0%, transparent 75%);
+  -webkit-mask-image: radial-gradient(circle at 50% 30%, #000 0%, transparent 75%);
+}
+
+a {
+  color: var(--text);
+  text-decoration: none;
+  transition: color 0.15s;
+}
+
+h1, h2, h3 {
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  margin: 0;
+}
+
+p {
+  margin: 0;
+}
+
+.container {
+  max-width: var(--maxw);
+  margin: 0 auto;
+  padding: 0 28px;
+}
+
+/* eyebrow / section 标记 */
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  text-transform: uppercase;
+}
+.eyebrow::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 12px var(--accent);
+}
+
+.section {
+  padding: 96px 0;
+}
+.section-head {
+  max-width: 680px;
+  margin-bottom: 56px;
+}
+.section-head.center {
+  margin-left: auto;
+  margin-right: auto;
+  text-align: center;
+}
+.section-title {
+  font-size: 38px;
+  font-weight: 800;
+  margin: 14px 0 12px;
+}
+.section-sub {
+  font-size: 17px;
+  color: var(--text-dim);
+}
+
+/* 按钮 */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 22px;
+  border-radius: var(--radius);
+  font-family: inherit;
+  font-size: 14.5px;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  transition: all 0.15s;
+}
+.btn:hover {
+  border-color: var(--brand);
+  transform: translateY(-1px);
+}
+.btn.primary {
+  background: var(--grad-brand);
+  border: none;
+  color: #fff;
+  box-shadow: 0 10px 30px -8px rgba(99, 102, 241, 0.55);
+}
+.btn.primary:hover {
+  box-shadow: 0 14px 38px -8px rgba(99, 102, 241, 0.7);
+}
+.btn.ghost {
+  background: transparent;
+}
+
+.mono {
+  font-family: var(--mono);
+}
+
+@media (max-width: 768px) {
+  .section {
+    padding: 64px 0;
+  }
+  .section-title {
+    font-size: 28px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  .btn {
+    transition: none;
+  }
+}

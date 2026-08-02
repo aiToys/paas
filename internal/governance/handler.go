@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/aitoys/paas/internal/httputil"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -68,7 +70,7 @@ func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) boo
 	if h.Authorize == nil || h.Authorize(r, perm) {
 		return true
 	}
-	writeErr(w, http.StatusForbidden, "forbidden: missing "+perm)
+	httputil.WriteError(w, http.StatusForbidden, "forbidden: missing "+perm)
 	return false
 }
 
@@ -105,7 +107,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/api/breakers/"):
 		h.serveBreakerItem(w, r)
 	default:
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
 }
 
@@ -118,7 +120,7 @@ func (h *Handler) serveRouteCollection(w http.ResponseWriter, r *http.Request) {
 		}
 		list, err := h.repo.ListRoutes(r.Context(), r.URL.Query().Get("serviceId"))
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			httputil.WriteInternalError(w, err)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
@@ -130,19 +132,19 @@ func (h *Handler) serveRouteCollection(w http.ResponseWriter, r *http.Request) {
 		}
 		var rt Route
 		if err := json.NewDecoder(r.Body).Decode(&rt); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
 		saved, err := h.repo.CreateRoute(r.Context(), rt)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			httputil.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(saved)
 		return
 	}
-	writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
 // serveRouteItem 处理 /api/routes/{id}（PUT 更新 / DELETE 删除）。
@@ -150,7 +152,7 @@ func (h *Handler) serveRouteItem(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/routes/")
 	id = strings.TrimRight(id, "/")
 	if id == "" || strings.Contains(id, "/") {
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
 	switch r.Method {
@@ -160,13 +162,13 @@ func (h *Handler) serveRouteItem(w http.ResponseWriter, r *http.Request) {
 		}
 		var rt Route
 		if err := json.NewDecoder(r.Body).Decode(&rt); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
 		rt.ID = id
 		updated, err := h.repo.UpdateRoute(r.Context(), rt)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			httputil.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		_ = json.NewEncoder(w).Encode(updated)
@@ -175,12 +177,12 @@ func (h *Handler) serveRouteItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := h.repo.DeleteRoute(r.Context(), id); err != nil {
-			writeErr(w, http.StatusNotFound, err.Error())
+			httputil.WriteError(w, http.StatusNotFound, err.Error())
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"deleted": id})
 	default:
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
@@ -202,7 +204,7 @@ func (h *Handler) serveBreakerCollection(w http.ResponseWriter, r *http.Request)
 		}
 		list, err := h.repo.ListBreakers(r.Context(), r.URL.Query().Get("serviceId"))
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			httputil.WriteInternalError(w, err)
 			return
 		}
 		for i := range list {
@@ -217,12 +219,12 @@ func (h *Handler) serveBreakerCollection(w http.ResponseWriter, r *http.Request)
 		}
 		var b CircuitBreaker
 		if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
 		saved, err := h.repo.CreateBreaker(r.Context(), b)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			httputil.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		saved = h.fillBreakerState(saved)
@@ -230,7 +232,7 @@ func (h *Handler) serveBreakerCollection(w http.ResponseWriter, r *http.Request)
 		_ = json.NewEncoder(w).Encode(saved)
 		return
 	}
-	writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
 // serveBreakerItem 处理 /api/breakers/{id}（PUT 更新 / DELETE 删除）。
@@ -238,7 +240,7 @@ func (h *Handler) serveBreakerItem(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/breakers/")
 	id = strings.TrimRight(id, "/")
 	if id == "" || strings.Contains(id, "/") {
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
 	switch r.Method {
@@ -248,13 +250,13 @@ func (h *Handler) serveBreakerItem(w http.ResponseWriter, r *http.Request) {
 		}
 		var b CircuitBreaker
 		if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
 		b.ID = id
 		updated, err := h.repo.UpdateBreaker(r.Context(), b)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			httputil.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		_ = json.NewEncoder(w).Encode(h.fillBreakerState(updated))
@@ -263,12 +265,12 @@ func (h *Handler) serveBreakerItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := h.repo.DeleteBreaker(r.Context(), id); err != nil {
-			writeErr(w, http.StatusNotFound, err.Error())
+			httputil.WriteError(w, http.StatusNotFound, err.Error())
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"deleted": id})
 	default:
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
@@ -282,7 +284,7 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request) {
 		appID := r.URL.Query().Get("appId")
 		list, err := h.repo.ListServices(r.Context(), envID, appID)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			httputil.WriteInternalError(w, err)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
@@ -294,7 +296,7 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request) {
 		}
 		var s Service
 		if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
 		// 生产环境注册服务需 prod:write（developer 被拦，生产只读）
@@ -303,14 +305,14 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request) {
 		}
 		saved, err := h.repo.CreateService(r.Context(), s)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			httputil.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(saved)
 		return
 	}
-	writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
 // serveService 处理 /api/services/{id}[/instances[/{iid}]]。
@@ -318,7 +320,7 @@ func (h *Handler) serveService(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/services/")
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
 	id := parts[0]
@@ -329,16 +331,16 @@ func (h *Handler) serveService(w http.ResponseWriter, r *http.Request) {
 		if parts[1] == "instances" {
 			h.serveInstanceCreate(w, r, id)
 		} else {
-			writeErr(w, http.StatusNotFound, "not found")
+			httputil.WriteError(w, http.StatusNotFound, "not found")
 		}
 	case 3:
 		if parts[1] == "instances" {
 			h.serveInstanceDelete(w, r, id, parts[2])
 		} else {
-			writeErr(w, http.StatusNotFound, "not found")
+			httputil.WriteError(w, http.StatusNotFound, "not found")
 		}
 	default:
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
 }
 
@@ -350,12 +352,12 @@ func (h *Handler) serveServiceItem(w http.ResponseWriter, r *http.Request, id st
 		}
 		s, err := h.repo.GetService(r.Context(), id)
 		if err != nil {
-			writeErr(w, http.StatusNotFound, err.Error())
+			httputil.WriteError(w, http.StatusNotFound, err.Error())
 			return
 		}
 		instances, err := h.repo.ListInstances(r.Context(), id)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			httputil.WriteInternalError(w, err)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -371,26 +373,26 @@ func (h *Handler) serveServiceItem(w http.ResponseWriter, r *http.Request, id st
 		// 先取服务的环境类型校验生产权限（跨租户/不存在也走 not found，不泄漏）
 		s, err := h.repo.GetService(r.Context(), id)
 		if err != nil {
-			writeErr(w, http.StatusNotFound, err.Error())
+			httputil.WriteError(w, http.StatusNotFound, err.Error())
 			return
 		}
 		if !h.allowProd(w, r, s.EnvID) {
 			return
 		}
 		if err := h.repo.DeleteService(r.Context(), id); err != nil {
-			writeErr(w, http.StatusNotFound, err.Error())
+			httputil.WriteError(w, http.StatusNotFound, err.Error())
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"deleted": id})
 		return
 	}
-	writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
 // serveInstanceCreate POST /api/services/{id}/instances 注册实例。
 func (h *Handler) serveInstanceCreate(w http.ResponseWriter, r *http.Request, serviceID string) {
 	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !h.allow(w, r, PermGovernanceWrite) {
@@ -399,7 +401,7 @@ func (h *Handler) serveInstanceCreate(w http.ResponseWriter, r *http.Request, se
 	// 校验服务存在 + 取环境类型校验生产权限
 	s, err := h.repo.GetService(r.Context(), serviceID)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	if !h.allowProd(w, r, s.EnvID) {
@@ -407,13 +409,13 @@ func (h *Handler) serveInstanceCreate(w http.ResponseWriter, r *http.Request, se
 	}
 	var in Instance
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid body")
+		httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
 	in.ServiceID = serviceID
 	saved, err := h.repo.RegisterInstance(r.Context(), in)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		httputil.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusCreated)
@@ -423,7 +425,7 @@ func (h *Handler) serveInstanceCreate(w http.ResponseWriter, r *http.Request, se
 // serveInstanceDelete DELETE /api/services/{id}/instances/{iid} 注销实例。
 func (h *Handler) serveInstanceDelete(w http.ResponseWriter, r *http.Request, serviceID, instID string) {
 	if r.Method != http.MethodDelete {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !h.allow(w, r, PermGovernanceWrite) {
@@ -432,23 +434,23 @@ func (h *Handler) serveInstanceDelete(w http.ResponseWriter, r *http.Request, se
 	// 取实例所属服务的环境类型校验生产权限（先验实例确实属于该 service）
 	gotSvc, err := h.repo.InstanceServiceID(r.Context(), instID)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	if gotSvc != serviceID {
-		writeErr(w, http.StatusNotFound, "实例不属于该服务")
+		httputil.WriteError(w, http.StatusNotFound, "实例不属于该服务")
 		return
 	}
 	s, err := h.repo.GetService(r.Context(), serviceID)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	if !h.allowProd(w, r, s.EnvID) {
 		return
 	}
 	if err := h.repo.DeregisterInstance(r.Context(), instID); err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]string{"deleted": instID})
@@ -457,7 +459,7 @@ func (h *Handler) serveInstanceDelete(w http.ResponseWriter, r *http.Request, se
 // serveInstance PUT /api/instances/{iid}/heartbeat 心跳。
 func (h *Handler) serveInstance(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !h.allow(w, r, PermGovernanceWrite) {
@@ -466,7 +468,7 @@ func (h *Handler) serveInstance(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/instances/")
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) != 2 || parts[1] != "heartbeat" {
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
 	// 心跳是生产环境写操作：先解析实例归属服务的环境类型，prod 需 prod:write。
@@ -482,13 +484,8 @@ func (h *Handler) serveInstance(w http.ResponseWriter, r *http.Request) {
 	}
 	in, err := h.repo.Heartbeat(r.Context(), parts[0])
 	if err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	_ = json.NewEncoder(w).Encode(in)
-}
-
-func writeErr(w http.ResponseWriter, code int, msg string) {
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }

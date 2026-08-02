@@ -16,7 +16,15 @@ func TestSignParseRoundTrip(t *testing.T) {
 	tok, err := Sign(c, testSecret)
 	require.NoError(t, err)
 	// JWT 形如 header.payload.signature，含两个点
-	require.Equal(t, 2, func() int { n := 0; for _, ch := range tok { if ch == '.' { n++ } }; return n }())
+	require.Equal(t, 2, func() int {
+		n := 0
+		for _, ch := range tok {
+			if ch == '.' {
+				n++
+			}
+		}
+		return n
+	}())
 
 	got, err := Parse(tok, testSecret)
 	require.NoError(t, err)

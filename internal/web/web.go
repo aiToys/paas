@@ -17,7 +17,7 @@ import (
 )
 
 // distFS 嵌入 dist 下三套前端产物。Dockerfile 构建期填充；本地 dev 仅有 .gitkeep 占位
-//（目录必须存在否则编译期 embed 报错）——dev 时 core 不 serve 前端，仅 API，不影响功能。
+// （目录必须存在否则编译期 embed 报错）——dev 时 core 不 serve 前端，仅 API，不影响功能。
 //
 //go:embed all:dist
 var distFS embed.FS

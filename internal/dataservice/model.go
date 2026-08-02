@@ -68,7 +68,7 @@ var KindMetas = []KindMeta{
 		{Key: "maxmemory_mb", Label: "内存上限(MB)", Type: FieldText, Default: "1024"},
 	}},
 	{Kind: KindMQ, Label: "消息队列", Icon: "message", Fields: []SpecField{
-		{Key: "engine", Label: "引擎", Type: FieldSelect, Options: []string{"kafka", "rabbitmq", "rocketmq"}, Default: "kafka"},
+		{Key: "engine", Label: "引擎", Type: FieldSelect, Options: []string{"nats", "kafka", "rabbitmq", "rocketmq"}, Default: "nats"},
 		{Key: "partitions", Label: "分区数", Type: FieldText, Default: "3"},
 	}},
 	{Kind: KindStorage, Label: "对象存储", Icon: "storage", Fields: []SpecField{
@@ -116,25 +116,77 @@ func DefaultSpec(kind string) map[string]string {
 
 // DataService 是一个数据服务资源实例。
 type DataService struct {
-	ID        string            `json:"id"`
-	TenantID  string            `json:"tenantId,omitempty"` // ctx 写入，请求体忽略
-	Kind      string            `json:"kind"`
-	Name      string            `json:"name"` // 租户内唯一
-	Spec      map[string]string `json:"spec"`
-	Status    string            `json:"status"` // creating | running | stopped
-	EnvID     string            `json:"envId"`
-	AppID     string            `json:"appId,omitempty"` // 可选预留（Add-on 绑定）
-	CreatedAt time.Time         `json:"createdAt"`
-	UpdatedAt time.Time         `json:"updatedAt"`
+	ID       string            `json:"id"`
+	TenantID string            `json:"tenantId,omitempty"` // ctx 写入，请求体忽略
+	Kind     string            `json:"kind"`
+	Name     string            `json:"name"` // 租户内唯一
+	Spec     map[string]string `json:"spec"`
+	Status   string            `json:"status"` // creating | running | stopped
+	EnvID    string            `json:"envId"`
+	AppID    string            `json:"appId,omitempty"` // 可选预留（Add-on 绑定）
+	// Connection 平台生成（host/port/credentials/uri），Create 时由 FillConnection 填充。
+	// credentials（password/token/secretKey）持久化（重启不变，Secret 引用）；host/port/uri 是纯函数派生。
+	// list/detail 返回掩码（MaskConnection），create/update 返回明文（write 权限者）。
+	Connection map[string]string `json:"connection,omitempty"`
+	CreatedAt  time.Time         `json:"createdAt"`
+	UpdatedAt  time.Time         `json:"updatedAt"`
 }
 
-// Validate 校验 Kind/Name/Status/Spec 必填字段。
+// NamespaceResolver 提供 K8s namespace（控制面生成 FQDN 用）。由 cmd/core 注入 PAAS_K8S_NAMESPACE。
+// 未注入时 store 兜底用 DefaultNamespace（connection.go）。
+type NamespaceResolver interface {
+	Namespace() string
+}
+
+// EngineOf 返回 ds 的引擎（spec.engine 非空用之，否则按 Kind 默认，与 KindMetas Default 对齐）。
+// 供 FillConnection/BuildConnection 按 engine 区分端口/凭证/uri；applier 复用避免逻辑重复（DRY）。
+func EngineOf(d DataService) string {
+	if e, ok := d.Spec["engine"]; ok && e != "" {
+		return e
+	}
+	switch d.Kind {
+	case KindDB:
+		return "postgres"
+	case KindCache:
+		return "redis"
+	case KindMQ:
+		return "nats"
+	case KindStorage:
+		return "minio"
+	case KindVector:
+		return "milvus"
+	case KindSearch:
+		return "elasticsearch"
+	}
+	return ""
+}
+
+// FillConnection 为 DataService 生成并填充 Connection（凭证 + host/port/uri）。
+// host 用 d.ID（与 K8s Service/CRD 名一致：applier 以 d.ID 作 CRD 名 -> reconciler 建 Service<d.ID>，
+// 故 FQDN 必须基于 d.ID，应用才能 DNS 解析到 Service）。已有凭证则保留不重生（幂等：
+// 避免重启变密码 -> Secret 不一致），仅按当前 ns+engine 重算 host/port/uri。
+func (d *DataService) FillConnection(ns string) {
+	engine := EngineOf(*d)
+	hasCred := d.Connection != nil &&
+		(d.Connection["password"] != "" || d.Connection["token"] != "" || d.Connection["secretKey"] != "")
+	if !hasCred {
+		d.Connection = BuildConnection(d.ID, d.Kind, engine, ns, d.Spec, GenerateCredentials(d.Kind, engine))
+		return
+	}
+	d.Connection = BuildConnection(d.ID, d.Kind, engine, ns, d.Spec, d.Connection)
+}
+
+// Validate 校验 Kind/Name/EnvID/Status/Spec 必填字段。
+// EnvID 必填：数据服务绑定物理环境，且 prod:write 校验依赖 EnvID（空 EnvID 会绕过生产保护）。
 func (d DataService) Validate() error {
 	if _, ok := validKinds[d.Kind]; !ok {
 		return errInvalid("kind")
 	}
 	if d.Name == "" {
 		return errInvalid("name")
+	}
+	if d.EnvID == "" {
+		return errInvalid("envId")
 	}
 	// status 为空时由 store 补默认 running；非空则校验合法。
 	if d.Status != "" {

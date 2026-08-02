@@ -52,3 +52,33 @@ func (m *Model) HealthyChannels() []*Channel {
 	}
 	return out
 }
+
+// Clone 返回 Model 的深拷贝：标量字段值复制，Capabilities 与 Channels 切片新建，
+// 每个 Channel 也深拷贝。impl 引用保留（Provider 实现自身应线程安全，可安全共享）。
+// 用于隔离调用方与 Gateway 内部状态，避免锁外读 Channel.Status 与 MarkChannelStatus 写竞态。
+func (m *Model) Clone() *Model {
+	if m == nil {
+		return nil
+	}
+	cp := *m
+	if m.Capabilities != nil {
+		cp.Capabilities = append([]string(nil), m.Capabilities...)
+	}
+	if m.Channels != nil {
+		cp.Channels = make([]*Channel, len(m.Channels))
+		for i, c := range m.Channels {
+			cp.Channels[i] = c.Clone()
+		}
+	}
+	return &cp
+}
+
+// Clone 返回 Channel 的深拷贝。字段均为标量或接口引用，值复制即可；
+// impl 保留同一 Provider 实例（其实现应线程安全）。
+func (c *Channel) Clone() *Channel {
+	if c == nil {
+		return nil
+	}
+	cp := *c
+	return &cp
+}

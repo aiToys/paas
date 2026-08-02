@@ -78,17 +78,21 @@ async function create() {
     ElMessage.warning('请选择环境与镜像')
     return
   }
-  const resp = await fetchAuth(`/api/applications/${props.appId}/releases`, {
-    method: 'POST',
-    body: JSON.stringify(form.value),
-  })
-  if (resp.ok) {
-    ElMessage.success('发布成功')
-    showCreate.value = false
-    load()
-  } else {
-    const err = await resp.json().catch(() => ({}))
-    ElMessage.error(err.error || '发布失败')
+  try {
+    const resp = await fetchAuth(`/api/applications/${props.appId}/releases`, {
+      method: 'POST',
+      body: JSON.stringify(form.value),
+    })
+    if (resp.ok) {
+      ElMessage.success('发布成功')
+      showCreate.value = false
+      load()
+    } else {
+      const err = await resp.json().catch(() => ({}))
+      ElMessage.error(err.error || '发布失败')
+    }
+  } catch (e) {
+    ElMessage.error('发布失败：' + (e as Error).message)
   }
 }
 
@@ -99,13 +103,17 @@ async function rollback(r: Release) {
     requireNameConfirm: envStore.isProd,
   })
   if (!ok) return
-  const resp = await fetchAuth(`/api/releases/${r.id}/rollback`, { method: 'POST' })
-  if (resp.ok) {
-    ElMessage.success('已回滚')
-    load()
-  } else {
-    const err = await resp.json().catch(() => ({}))
-    ElMessage.error(err.error || '回滚失败')
+  try {
+    const resp = await fetchAuth(`/api/releases/${r.id}/rollback`, { method: 'POST' })
+    if (resp.ok) {
+      ElMessage.success('已回滚')
+      load()
+    } else {
+      const err = await resp.json().catch(() => ({}))
+      ElMessage.error(err.error || '回滚失败')
+    }
+  } catch (e) {
+    ElMessage.error('回滚失败：' + (e as Error).message)
   }
 }
 

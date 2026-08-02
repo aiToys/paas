@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+
+	"github.com/aitoys/paas/internal/httputil"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -58,7 +60,7 @@ func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) boo
 	if h.Authorize == nil || h.Authorize(r, perm) {
 		return true
 	}
-	writeErr(w, http.StatusForbidden, "forbidden: missing "+perm)
+	httputil.WriteError(w, http.StatusForbidden, "forbidden: missing "+perm)
 	return false
 }
 
@@ -87,7 +89,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/api/dataservices/"):
 		h.serveItem(w, r)
 	default:
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
 }
 
@@ -98,8 +100,12 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request) {
 		}
 		list, err := h.repo.List(r.Context(), r.URL.Query().Get("kind"))
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			httputil.WriteInternalError(w, err)
 			return
+		}
+		// list 掩码敏感字段（password/secretKey/token）；详情才返明文（read 权限者）。
+		for i := range list {
+			list[i].Connection = MaskConnection(list[i].Connection)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
 		return
@@ -110,30 +116,33 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request) {
 		}
 		var d DataService
 		if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
+		// 强制平台生成凭证（防用户传弱密码/自定义 password），FillConnection 重生。
+		d.Connection = nil
 		// 生产环境创建需 prod:write（developer 被拦，生产只读）
 		if !h.allowProd(w, r, d.EnvID) {
 			return
 		}
 		saved, err := h.repo.Create(r.Context(), d)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			httputil.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		saved.Connection = MaskConnection(saved.Connection) // 返回前掩码（与 List/Detail 一致，明文仅内部绑定注入用）
 		w.WriteHeader(http.StatusCreated)
 		_ = json.NewEncoder(w).Encode(saved)
 		return
 	}
-	writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
 func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimPrefix(r.URL.Path, "/api/dataservices/")
 	id = strings.TrimRight(id, "/")
 	if id == "" || strings.Contains(id, "/") {
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
 	switch r.Method {
@@ -143,9 +152,12 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request) {
 		}
 		d, err := h.repo.Get(r.Context(), id)
 		if err != nil {
-			writeErr(w, http.StatusNotFound, err.Error())
+			httputil.WriteError(w, http.StatusNotFound, err.Error())
 			return
 		}
+		// detail 也掩码敏感字段（与 security 模块一致：read 权限者含 viewer 不可见明文；
+		// 应用绑定经 repo.Get 拿明文注入，不受 handler 掩码影响）。
+		d.Connection = MaskConnection(d.Connection)
 		_ = json.NewEncoder(w).Encode(d)
 	case http.MethodPut:
 		if !h.allow(w, r, PermDataServiceWrite) {
@@ -154,7 +166,7 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request) {
 		// 先取现有（确认存在 + 拿 envID 校验生产权限）
 		ex, err := h.repo.Get(r.Context(), id)
 		if err != nil {
-			writeErr(w, http.StatusNotFound, err.Error())
+			httputil.WriteError(w, http.StatusNotFound, err.Error())
 			return
 		}
 		if !h.allowProd(w, r, ex.EnvID) {
@@ -162,15 +174,16 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request) {
 		}
 		var d DataService
 		if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
 		d.ID = id
 		updated, err := h.repo.Update(r.Context(), d)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			httputil.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		updated.Connection = MaskConnection(updated.Connection) // 返回前掩码
 		_ = json.NewEncoder(w).Encode(updated)
 	case http.MethodDelete:
 		if !h.allow(w, r, PermDataServiceWrite) {
@@ -178,23 +191,18 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request) {
 		}
 		ex, err := h.repo.Get(r.Context(), id)
 		if err != nil {
-			writeErr(w, http.StatusNotFound, err.Error())
+			httputil.WriteError(w, http.StatusNotFound, err.Error())
 			return
 		}
 		if !h.allowProd(w, r, ex.EnvID) {
 			return
 		}
 		if err := h.repo.Delete(r.Context(), id); err != nil {
-			writeErr(w, http.StatusNotFound, err.Error())
+			httputil.WriteError(w, http.StatusNotFound, err.Error())
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"deleted": id})
 	default:
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
-}
-
-func writeErr(w http.ResponseWriter, code int, msg string) {
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }

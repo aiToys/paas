@@ -17,6 +17,8 @@ var GroupVersion = schema.GroupVersion{Group: "core.aitoys.github.com", Version:
 // 等）到本 GroupVersion，使 client list/watch 的 parameter codec 能识别本 GV——
 // 否则真实集群 list 报 "ListOptions is not suitable for converting to core.aitoys/v1alpha1"
 // （fake client 不走 parameter codec，故单元测试无法暴露此问题）。
+//
+//nolint:staticcheck // SA1019: 上游标 scheme.Builder deprecated，但此处必须用（替代会破坏集群 list/watch parameter codec，见上方注释）
 var SchemeBuilder = &scheme.Builder{GroupVersion: GroupVersion}
 
 // AddToScheme 把本 group 类型注册进 scheme。

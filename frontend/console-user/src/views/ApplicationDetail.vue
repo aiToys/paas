@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
-import { fetchAuth } from '@/api'
+import { fetchJSON } from '@/api'
 import AppRepositories from './app-tabs/AppRepositories.vue'
 import AppBuilds from './app-tabs/AppBuilds.vue'
 import AppImages from './app-tabs/AppImages.vue'
@@ -62,7 +62,7 @@ const statusLabel: Record<string, string> = {
 const groups = computed(() => {
   if (!app.value) return []
   const byType = new Map<string, Binding[]>()
-  for (const b of app.value.bindings) {
+  for (const b of app.value.bindings ?? []) {
     const arr = byType.get(b.type) ?? []
     arr.push(b)
     byType.set(b.type, arr)
@@ -74,7 +74,7 @@ const groups = computed(() => {
     .map((t) => ({ key: t, meta: typeMeta[t], items: byType.get(t)! }))
 })
 
-const totalBindings = computed(() => app.value?.bindings.length ?? 0)
+const totalBindings = computed(() => app.value?.bindings?.length ?? 0)
 
 interface Workload {
   id: string
@@ -111,22 +111,15 @@ async function load() {
   loading.value = true
   const id = route.params.id as string
   try {
-    const resp = await fetchAuth(`/api/applications/${id}`)
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    app.value = (await resp.json()) as App
-    // 并行加载该应用的工作负载（部署 tab）与环境（分组映射）
-    const [wresp, eresp] = await Promise.all([
-      fetchAuth(`/api/applications/${id}/workloads`),
-      fetchAuth('/api/environments'),
+    // fetchJSON 自动解包 {data:T} 契约，杜绝手动 json.data ?? json 的契约遗漏。
+    app.value = await fetchJSON<App>(`/api/applications/${id}`)
+    // 并行加载该应用的工作负载（部署 tab）与环境（分组映射）；任一失败不阻塞主信息。
+    const [ws, es] = await Promise.allSettled([
+      fetchJSON<Workload[]>(`/api/applications/${id}/workloads`),
+      fetchJSON<Env[]>('/api/environments'),
     ])
-    if (wresp.ok) {
-      const wjson = await wresp.json()
-      workloads.value = (wjson.data ?? []) as Workload[]
-    }
-    if (eresp.ok) {
-      const ejson = await eresp.json()
-      envs.value = (ejson.data ?? []) as Env[]
-    }
+    workloads.value = ws.status === 'fulfilled' ? ws.value : []
+    envs.value = es.status === 'fulfilled' ? es.value : []
   } catch (e) {
     ElMessage.error('加载应用失败：' + (e as Error).message)
   } finally {
@@ -135,11 +128,22 @@ async function load() {
 }
 
 onMounted(load)
+// 同组件复用（列表切不同应用详情）时 watch 路由参数刷新，避免显示上一张应用陈旧数据。
+watch(() => route.params.id, load)
 
 // —— 绑定资源浮层 ——
 const showAdd = ref(false)
 const form = ref<{ type: TypeKey; name: string }>({ type: 'models', name: '' })
 const submitting = ref(false)
+
+// 数据服务 kind 集合：绑定后后端自动注入连接信息到 appconfig；前端据此提示 + placeholder。
+const DS_KINDS: TypeKey[] = ['db', 'cache', 'mq', 'storage', 'vector', 'search']
+// 数据服务类型支持名称或 ID（后端 resolveDS 容错）；其他类型填名称。
+const namePlaceholder = computed(() =>
+  DS_KINDS.includes(form.value.type)
+    ? '数据服务名称或 ID（如 acme-orders-db 或 ds-acme-db）'
+    : '如 qwen-cs-route、mq-order-events',
+)
 
 const addOptions: { typeKey: TypeKey; label: string; icon: string; hint: string; color: string }[] = [
   { typeKey: 'models', label: '模型推理', icon: 'market', hint: '部署 LLM / Embedding 模型', color: '#6366f1' },
@@ -148,6 +152,7 @@ const addOptions: { typeKey: TypeKey; label: string; icon: string; hint: string;
   { typeKey: 'mq', label: '消息队列', icon: 'message', hint: '创建 Topic / 申请 MQ 实例', color: '#10b981' },
   { typeKey: 'storage', label: '对象存储', icon: 'storage', hint: 'Bucket / CDN / 生命周期', color: '#0ea5e9' },
   { typeKey: 'vector', label: '向量数据库', icon: 'layers', hint: '索引 / 检索 / Embedding', color: '#8b5cf6' },
+  { typeKey: 'search', label: '搜索引擎', icon: 'search', hint: 'Elasticsearch / OpenSearch', color: '#06b6d4' },
 ]
 
 function openAdd() {
@@ -164,17 +169,18 @@ async function submitBind() {
   }
   submitting.value = true
   try {
-    const resp = await fetchAuth(`/api/applications/${app.value.id}/bindings`, {
+    app.value = await fetchJSON<App>(`/api/applications/${app.value.id}/bindings`, {
       method: 'POST',
       body: JSON.stringify({ type: form.value.type, name }),
     })
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}))
-      throw new Error(err.error || `HTTP ${resp.status}`)
-    }
-    app.value = (await resp.json()) as App
     showAdd.value = false
-    ElMessage.success(`已绑定 ${typeMeta[form.value.type].label}：${name}`)
+    // 数据服务绑定时后端 best-effort 注入连接信息（OnBind 失败仅 log 不阻断绑定）；
+    // 故文案用「将注入」不断言「已注入」，引导用户去「配置」tab 验证。
+    if (DS_KINDS.includes(form.value.type)) {
+      ElMessage.success(`已绑定 ${typeMeta[form.value.type].label}：${name}（连接信息将注入应用配置，可在「配置」tab 查看）`)
+    } else {
+      ElMessage.success(`已绑定 ${typeMeta[form.value.type].label}：${name}`)
+    }
   } catch (e) {
     ElMessage.error('绑定失败：' + (e as Error).message)
   } finally {
@@ -194,16 +200,13 @@ async function unbind(b: Binding) {
     return // 用户取消
   }
   try {
-    const resp = await fetchAuth(
+    app.value = await fetchJSON<App>(
       `/api/applications/${app.value.id}/bindings/${b.type}/${encodeURIComponent(b.name)}`,
       { method: 'DELETE' },
     )
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}))
-      throw new Error(err.error || `HTTP ${resp.status}`)
-    }
-    app.value = (await resp.json()) as App
-    ElMessage.success(`已解绑：${b.name}`)
+    // 数据服务解绑时后端 best-effort 清除注入的连接信息（与绑定时对称）。
+    const isDsUnbind = DS_KINDS.includes(b.type as TypeKey)
+    ElMessage.success(`已解绑：${b.name}` + (isDsUnbind ? '（连接信息将同步清除）' : ''))
   } catch (e) {
     ElMessage.error('解绑失败：' + (e as Error).message)
   }
@@ -219,6 +222,15 @@ async function pickImage(img: { id: string }) {
   await nextTick()
   pickedImageId.value = img.id
   activeTab.value = '发布'
+}
+
+// 头部「设置/部署」按钮：本期未开放独立入口，点击给明确反馈而非静默。
+// 「部署」引导用户切到「部署」tab（已存在工作负载视图），「设置」属应用配置未开放。
+function goDeploy() {
+  activeTab.value = '部署'
+}
+function settingsNotReady() {
+  ElMessage.info('应用级设置面板尚未开放；可在「配置」tab 管理工作负载级 env/Secret')
 }
 </script>
 
@@ -241,8 +253,8 @@ async function pickImage(img: { id: string }) {
           <p class="desc">{{ app.desc }}</p>
         </div>
         <div class="head-actions">
-          <button class="ghost">设置</button>
-          <button class="primary">部署</button>
+          <button class="ghost" @click="settingsNotReady">设置</button>
+          <button class="primary" @click="goDeploy">部署</button>
         </div>
       </header>
 
@@ -400,7 +412,7 @@ async function pickImage(img: { id: string }) {
           <input
             v-model="form.name"
             class="name-input"
-            placeholder="如 qwen-cs-route、mq-order-events"
+            :placeholder="namePlaceholder"
             @keyup.enter="submitBind"
           />
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aitoys/paas/internal/observability"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // TracesStore 调 Tempo HTTP API 实现 TracesReader。
@@ -43,8 +44,20 @@ func (s *TracesStore) ListTraces(ctx context.Context, appID, status string, limi
 	}
 	v := url.Values{}
 	v.Set("limit", strconv.Itoa(limit))
+	// Tempo tag 过滤：app=<appID> + tenant=<tid>（多租户隔离）。
+	// 注：应用 span 需 OTel 资源属性带 app/tenant，否则查不到（应用埋点留后续 P2）。
+	tags := ""
 	if appID != "" {
-		v.Set("tags", fmt.Sprintf("app=%s", appID)) // Tempo tag 过滤
+		tags = fmt.Sprintf("app=%s", appID)
+	}
+	if tid, ok := tenant.TenantFrom(ctx); ok && tid != "" {
+		if tags != "" {
+			tags += " "
+		}
+		tags += fmt.Sprintf("tenant=%s", tid)
+	}
+	if tags != "" {
+		v.Set("tags", tags)
 	}
 	now := time.Now()
 	v.Set("start", strconv.FormatInt(now.Add(-time.Hour).Unix(), 10))
@@ -63,7 +76,7 @@ func (s *TracesStore) ListTraces(ctx context.Context, appID, status string, limi
 	for _, t := range tr.Traces {
 		// StartTimeUnixNs 为 uint64，截断为 int64 时超 int63 会得到负时间戳；
 		// 这里取低 63 位派生确定性时间（trace 已按时间排序，绝对精度非关键）。
-		ns := int64(t.StartTimeUnixNs % (1 << 63))
+		ns := int64(t.StartTimeUnixNs % (1 << 63)) //nolint:gosec // G115: 已用 %(1<<63) 截断防 uint64->int64 overflow
 		trc := observability.Trace{
 			ID:         t.TraceID,
 			AppID:      appID,

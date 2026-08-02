@@ -45,9 +45,9 @@ func resetSchema(t *testing.T, db *storagepg.DB) {
 	}
 }
 
-func acmeCtx() context.Context       { return tenant.WithTenant(context.Background(), "t-acme") }
-func globexCtx() context.Context     { return tenant.WithTenant(context.Background(), "t-globex") }
-func noTenantCtx() context.Context   { return context.Background() }
+func acmeCtx() context.Context     { return tenant.WithTenant(context.Background(), "t-acme") }
+func globexCtx() context.Context   { return tenant.WithTenant(context.Background(), "t-globex") }
+func noTenantCtx() context.Context { return context.Background() }
 
 func sampleApp(id string) application.Application {
 	return application.Application{

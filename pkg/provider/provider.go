@@ -10,8 +10,8 @@ import (
 
 // Message 表示一条对话消息。
 type Message struct {
-	Role    string // "system" | "user" | "assistant"
-	Content string
+	Role    string `json:"role"` // "system" | "user" | "assistant"
+	Content string `json:"content"`
 }
 
 // ChatRequest 是一次推理请求。

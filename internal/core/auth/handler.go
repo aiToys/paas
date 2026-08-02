@@ -64,12 +64,14 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		writeAuthErr(w, http.StatusUnauthorized, "用户名或密码错误")
 		return
 	}
-	if u.Status != identity.StatusActive {
-		writeAuthErr(w, http.StatusForbidden, "账号已禁用")
-		return
-	}
+	// 先验密码（不存在/密码错统一 401，不泄漏账号存在性），再检查状态：
+	// 密码已验证后提示禁用不增加枚举风险（攻击者需已知密码才能发现账号禁用）。
 	if u.PasswordHash == "" || !CheckPassword(u.PasswordHash, req.Password) {
 		writeAuthErr(w, http.StatusUnauthorized, "用户名或密码错误")
+		return
+	}
+	if u.Status != identity.StatusActive {
+		writeAuthErr(w, http.StatusForbidden, "账号已禁用")
 		return
 	}
 	res, err := h.issueTokens(u)

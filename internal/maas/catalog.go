@@ -26,7 +26,7 @@ const (
 //   - mock/echo 演示模型：进程内，开箱可演示路由/降级，不依赖外部凭证
 func catalog(resolver provider.CredentialResolver) []*provider.Model {
 	echo := EchoProvider{}
-	return []*provider.Model{
+	models := []*provider.Model{
 		// —— 真实第三方供应商模型（OpenAI 兼容协议）——
 		mk("gpt-4o", "GPT-4o", "OpenAI", 128000,
 			[]string{"chat", "vision", "reasoning"}, 2.5, 10, "OpenAI 旗舰多模态，推理与视觉强",
@@ -67,6 +67,11 @@ func catalog(resolver provider.CredentialResolver) []*provider.Model {
 			ch("bge-m3#mock-a", 0, provider.StatusOffline, NewMockProvider("（embedding 模型，演示通道）")),
 		),
 	}
+
+	// airouter 精选真实模型（OpenAI 兼容 Bearer，需配 sec-platform-airouter Secret）。
+	// 未配凭证时通道注册仍成功，调用返 ErrCredentialMissing（与直连供应商同款语义）。
+	models = append(models, airouterCatalog(resolver)...)
+	return models
 }
 
 // mk 构造一个挂单/多通道的模型。

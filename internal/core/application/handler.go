@@ -3,8 +3,13 @@ package application
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
 	"strings"
+	"time"
+
+	"github.com/aitoys/paas/internal/httputil"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -17,6 +22,14 @@ const (
 // ErrQuotaExceededMarker 配额超限的 HTTP 语义：429（资源创建被配额拦截）。
 const StatusQuotaExceeded = http.StatusTooManyRequests
 
+// BindingInjector 在应用绑定/解绑资源时触发副作用注入（依赖倒置：application 不依赖具体资源模块）。
+// 典型：绑定 dataservice 时自动向 appconfig 注入连接信息（DATABASE_URL/REDIS_URL/...），工作负载重启即生效。
+// 失败仅记录日志、不阻断绑定本身（绑定是主操作，注入是增强）。
+type BindingInjector interface {
+	OnBind(ctx context.Context, appID, bindingType, bindingName string) error
+	OnUnbind(ctx context.Context, appID, bindingType, bindingName string) error
+}
+
 // Handler 暴露应用 REST API：列表、详情、创建、绑定资源。
 type Handler struct {
 	repo Repository
@@ -26,11 +39,28 @@ type Handler struct {
 	// QuotaCheck 应用数配额检查（横切，可选）；nil 跳过。由 cmd/core 桥接 billing.CheckAndInc，
 	// 创建应用前拦截超配额。返回 error 时 Create 中止并回 429。
 	QuotaCheck func(ctx context.Context, delta int) error
+	// Binder 绑定/解绑副作用注入器（可选）；nil 跳过。由 cmd/core 桥接 dataservice+appconfig。
+	Binder BindingInjector
+	// stats 工作负载聚合统计（可选）；注入后 List 派生真实 Replicas/Status（覆盖 seed 假值）。
+	// nil 透传 seed 原值（降级：无 workload repo 可查）。
+	stats WorkloadStats
+}
+
+// HandlerOpt 配置 Handler。
+type HandlerOpt func(*Handler)
+
+// WithWorkloadStats 注入工作负载聚合统计，List 时派生应用 Replicas/Status（真实化）。
+func WithWorkloadStats(s WorkloadStats) HandlerOpt {
+	return func(h *Handler) { h.stats = s }
 }
 
 // NewHandler 创建应用 API handler。
-func NewHandler(repo Repository) *Handler {
-	return &Handler{repo: repo}
+func NewHandler(repo Repository, opts ...HandlerOpt) *Handler {
+	h := &Handler{repo: repo}
+	for _, o := range opts {
+		o(h)
+	}
+	return h
 }
 
 // allow 统一权限校验：未注入或放行返回 true，否则写 403 返回 false。
@@ -38,13 +68,12 @@ func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) boo
 	if h.Authorize == nil || h.Authorize(r, perm) {
 		return true
 	}
-	writeErr(w, http.StatusForbidden, "forbidden: missing "+perm)
+	httputil.WriteError(w, http.StatusForbidden, "forbidden: missing "+perm)
 	return false
 }
 
 // ServeHTTP 路由到具体方法（Go 1.22 ServeMux 已按方法+路径分发，这里做子路由细分）。
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
 	path := strings.TrimPrefix(r.URL.Path, "/api/applications")
 	path = strings.Trim(path, "/")
 
@@ -55,10 +84,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		apps, err := h.repo.List(r.Context())
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			httputil.WriteInternalError(w, err)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": apps})
+		// 派生真实 Replicas/Status（从工作负载聚合，覆盖 seed 假值）；stats 不可得时透传原值。
+		if h.stats != nil {
+			if statsMap, sErr := h.stats.StatsByTenant(r.Context()); sErr == nil {
+				for i := range apps {
+					apps[i].ApplyStats(statsMap[apps[i].ID])
+				}
+			}
+		}
+		httputil.WriteData(w, apps)
 		return
 	}
 
@@ -69,13 +106,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		var a Application
 		if err := json.NewDecoder(r.Body).Decode(&a); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
+		// id 兜底：客户端未提供时生成（与 workload 同款），避免空 id 入库——
+		// 历史 PG 脏数据（id="" 应用）即由此产生，致前端 Applications 列表访问 statusMeta[""] 崩溃。
+		if a.ID == "" {
+			a.ID = fmt.Sprintf("app-%d", time.Now().UnixNano())
+		}
+		a.ApplyDefaults() // 补展示默认（图标/状态/环境/渐变色）
 		// 横切配额拦截：创建前检查应用数配额，超限回 429（不创建）。
 		if h.QuotaCheck != nil {
 			if err := h.QuotaCheck(r.Context(), 1); err != nil {
-				writeErr(w, StatusQuotaExceeded, err.Error())
+				httputil.WriteError(w, StatusQuotaExceeded, err.Error())
 				return
 			}
 		}
@@ -84,11 +127,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if h.QuotaCheck != nil {
 				_ = h.QuotaCheck(r.Context(), -1)
 			}
-			writeErr(w, http.StatusConflict, err.Error())
+			httputil.WriteError(w, http.StatusConflict, err.Error())
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(a)
+		httputil.WriteData(w, a)
 		return
 	}
 
@@ -102,10 +145,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		a, err := h.repo.Get(r.Context(), id)
 		if err != nil {
-			writeErr(w, http.StatusNotFound, err.Error())
+			httputil.WriteError(w, http.StatusNotFound, err.Error())
 			return
 		}
-		_ = json.NewEncoder(w).Encode(a)
+		httputil.WriteData(w, a)
 		return
 	}
 
@@ -119,16 +162,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		if body.Type == "" || body.Name == "" {
-			writeErr(w, http.StatusBadRequest, "missing type or name")
+			httputil.WriteError(w, http.StatusBadRequest, "missing type or name")
 			return
 		}
 		a, err := h.repo.BindResource(r.Context(), id, body.Type, body.Name)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			httputil.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		// 绑定资源后触发副作用注入（Binder 内部按 type 过滤，非 dataservice kind 无副作用；best-effort）。
+		if h.Binder != nil {
+			if err := h.Binder.OnBind(r.Context(), id, body.Type, body.Name); err != nil {
+				log.Printf("binding injector OnBind 失败（不阻断绑定）: app=%s %s=%s: %v", id, body.Type, body.Name, err) //nolint:gosec // G706 误报：日志格式化输出，非注入
+			}
+		}
 		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(a)
+		httputil.WriteData(w, a)
 		return
 	}
 
@@ -139,17 +188,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		a, err := h.repo.Unbind(r.Context(), id, parts[2], parts[3])
 		if err != nil {
-			writeErr(w, http.StatusNotFound, err.Error())
+			httputil.WriteError(w, http.StatusNotFound, err.Error())
 			return
 		}
-		_ = json.NewEncoder(w).Encode(a)
+		// 解绑资源时清理已注入的 appconfig 连接条目（Binder 内部按 type 过滤；best-effort）。
+		if h.Binder != nil {
+			if err := h.Binder.OnUnbind(r.Context(), id, parts[2], parts[3]); err != nil {
+				log.Printf("binding injector OnUnbind 失败（best-effort）: app=%s %s=%s: %v", id, parts[2], parts[3], err) //nolint:gosec // G706 误报：日志格式化输出，非注入
+			}
+		}
+		httputil.WriteData(w, a)
 		return
 	}
 
-	writeErr(w, http.StatusNotFound, "not found")
+	httputil.WriteError(w, http.StatusNotFound, "not found")
 }
 
-func writeErr(w http.ResponseWriter, code int, msg string) {
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
-}
+// writeData 写成功响应（统一 {data:T} 契约，与 List 一致；下游 fetchJSON<T> 期望此包裹）。

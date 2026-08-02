@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
@@ -13,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	intstr "k8s.io/apimachinery/pkg/util/intstr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -24,6 +26,19 @@ import (
 type WorkloadReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// DPToken 数据面接入 token（API Key），注入 service 类型 Pod env，供 zeus 应用经
+	// paas-registry 插件发现 PaaS 服务。空则不注入（K8s 部署但未配 token 的场景）。
+	DPToken string
+	// DPEndpoint 数据面 API 地址（覆盖默认 http://paas-core.paas.svc.cluster.local/dp）。
+	DPEndpoint string
+}
+
+// dpEndpoint 返回数据面 API 地址（空则默认集群内 core Service 地址）。
+func (r *WorkloadReconciler) dpEndpoint() string {
+	if r.DPEndpoint != "" {
+		return r.DPEndpoint
+	}
+	return "http://paas-core.paas.svc.cluster.local/dp"
 }
 
 // labelsFor 返回工作负载的 K8s 标签（含租户/应用隔离）。
@@ -43,7 +58,23 @@ func podSpec(w *v1alpha1.Workload) corev1.PodSpec {
 		Image: w.Spec.Image,
 	}
 	if w.Spec.Command != "" {
-		container.Command = []string{w.Spec.Command}
+		// Command 含空格（如 "nginx -v"）用 /bin/sh -c 执行（K8s Command 是 exec form，
+		// 直接包成单元素 slice 会把整串当可执行文件名找不到）；无空格则 exec 单命令。
+		if strings.Contains(w.Spec.Command, " ") {
+			container.Command = []string{"/bin/sh", "-c", w.Spec.Command}
+		} else {
+			container.Command = []string{w.Spec.Command}
+		}
+	}
+	// 端口声明 + readiness probe（TCP，对应用零侵入：容器 listen 即 ready）。
+	// readiness 驱动 K8s Endpoints 维护 ready 集合，是数据面服务发现（/dp/instances）的真源。
+	if w.Spec.ContainerPort > 0 {
+		cport := w.Spec.ContainerPort
+		container.Ports = []corev1.ContainerPort{{ContainerPort: cport}}
+		container.ReadinessProbe = &corev1.Probe{
+			ProbeHandler:  corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(cport)}},
+			PeriodSeconds: 10, FailureThreshold: 3,
+		}
 	}
 	if w.Spec.GPU.Count > 0 {
 		q := resource.MustParse(strconv.Itoa(w.Spec.GPU.Count))
@@ -101,10 +132,32 @@ func (r *WorkloadReconciler) applyDeployment(ctx context.Context, w *v1alpha1.Wo
 			ObjectMeta: metav1.ObjectMeta{Labels: labels},
 			Spec:       podSpec(w),
 		}
-		return nil
+		// service 类型注入数据面发现 env（zeus 应用经 paas-registry 插件用）。
+		// DPToken 空则跳过（K8s 部署但未配 token，不影响 Deployment 本身）。
+		if w.Spec.Type == "service" && r.DPToken != "" {
+			c := &dep.Spec.Template.Spec.Containers[0]
+			c.Env = append(c.Env,
+				corev1.EnvVar{Name: "PAAS_DP_ENDPOINT", Value: r.dpEndpoint()},
+				corev1.EnvVar{Name: "PAAS_DP_TOKEN", Value: r.DPToken},
+				corev1.EnvVar{Name: "PAAS_TENANT_ID", Value: w.Spec.TenantID},
+			)
+		}
+		// OwnerReference：CR 删除时 K8s GC 自动清理 Deployment（SetupWithManager 的 Owns 生效前提，
+		// 否则 ownerRef 空 → 删 CR 不删 Deployment → Pod/GPU 永久泄漏）。
+		return controllerutil.SetControllerReference(w, dep, r.Scheme)
 	})
 	if err != nil {
+		// 失败 best-effort 回写 failed 态（原 error 优先返回，触发 controller 重试）。
+		w.Status.Status = "failed"
+		_ = r.Status().Update(ctx, w)
 		return fmt.Errorf("apply deployment: %w", err)
+	}
+	// 先建 K8s Service 再回写 status（一次 Status().Update，避免 running/deploying 抖动 + apiserver 写放大）。
+	// service 类型且声明 Port 时建 Service；失败回写 failed + 返 error 触发重试（CreateOrUpdate 幂等）。
+	if serr := r.applyService(ctx, w); serr != nil {
+		w.Status.Status = "failed"
+		_ = r.Status().Update(ctx, w)
+		return fmt.Errorf("apply service: %w", serr)
 	}
 	// 回写 status.ready（从 Deployment 实际 ready 副本）。
 	w.Status.Ready = dep.Status.ReadyReplicas
@@ -112,16 +165,48 @@ func (r *WorkloadReconciler) applyDeployment(ctx context.Context, w *v1alpha1.Wo
 	if dep.Status.ReadyReplicas < replicas {
 		w.Status.Status = "deploying"
 	}
-	return r.Status().Update(ctx, w)
+	if err := r.Status().Update(ctx, w); err != nil {
+		return err
+	}
+	return nil
 }
 
-// applyJob CreateOrUpdate Job（一次性）。
+// applyService CreateOrUpdate K8s Service（仅 type=service 且 Port>0）。
+// Service 名 = Workload 名；selector 匹配 Pod label paas.aitoys/workload；端口映射 Port→ContainerPort。
+// OwnerRef 设 CR，删 CR 级联清 Service。readiness probe 驱动 Endpoints ready 集合（数据面发现真源）。
+func (r *WorkloadReconciler) applyService(ctx context.Context, w *v1alpha1.Workload) error {
+	if w.Spec.Type != "service" || w.Spec.Port <= 0 {
+		return nil
+	}
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: w.Name, Namespace: w.Namespace}}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
+		labels := labelsFor(w)
+		svc.SetLabels(labels)
+		// selector 创建后不可变：仅创建时设置，避免更新时 reconcile 死循环。
+		if svc.CreationTimestamp.IsZero() {
+			svc.Spec.Selector = labels
+		}
+		cport := w.Spec.ContainerPort
+		if cport <= 0 {
+			cport = w.Spec.Port
+		}
+		svc.Spec.Ports = []corev1.ServicePort{{
+			Port: w.Spec.Port, TargetPort: intstr.FromInt32(cport), Protocol: corev1.ProtocolTCP,
+		}}
+		return controllerutil.SetControllerReference(w, svc, r.Scheme)
+	})
+	return err
+}
+
+// applyJob CreateOrUpdate Job（一次性）+ 回写 status。
 func (r *WorkloadReconciler) applyJob(ctx context.Context, w *v1alpha1.Workload) error {
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: w.Name, Namespace: w.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, job, func() error {
 		labels := labelsFor(w)
 		job.SetLabels(labels)
 		job.Spec.Parallelism = ptrInt32(w.Spec.Replicas)
+		// Job 完成后 1 天自动清理（与 devops builder.K8sJob 一致），减少 etcd 存储 + list/watch 噪音。
+		job.Spec.TTLSecondsAfterFinished = ptrInt32(86400)
 		// Job 的 PodTemplate 创建后不可变：仅创建时设置；更新期改 image 需删旧建新（本期不处理）。
 		if job.CreationTimestamp.IsZero() {
 			job.Spec.Template = corev1.PodTemplateSpec{
@@ -129,15 +214,27 @@ func (r *WorkloadReconciler) applyJob(ctx context.Context, w *v1alpha1.Workload)
 				Spec:       podSpec(w),
 			}
 		}
-		return nil
+		// OwnerReference：CR 删除时 GC 清理 Job（同 Deployment）。
+		return controllerutil.SetControllerReference(w, job, r.Scheme)
 	})
 	if err != nil {
+		w.Status.Status = "failed"
+		_ = r.Status().Update(ctx, w)
 		return fmt.Errorf("apply job: %w", err)
 	}
-	return nil
+	// 回写 status（Job 一次性：Succeeded→succeeded，Failed→failed，否则 running）。
+	w.Status.Ready = job.Status.Succeeded
+	w.Status.Status = "running"
+	if job.Status.Failed > 0 {
+		w.Status.Status = "failed"
+	}
+	if job.Status.Succeeded > 0 {
+		w.Status.Status = "succeeded"
+	}
+	return r.Status().Update(ctx, w)
 }
 
-// applyCronJob CreateOrUpdate CronJob（定时）。
+// applyCronJob CreateOrUpdate CronJob（定时）+ 回写 status。
 func (r *WorkloadReconciler) applyCronJob(ctx context.Context, w *v1alpha1.Workload) error {
 	cj := &batchv1.CronJob{ObjectMeta: metav1.ObjectMeta{Name: w.Name, Namespace: w.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cj, func() error {
@@ -151,12 +248,18 @@ func (r *WorkloadReconciler) applyCronJob(ctx context.Context, w *v1alpha1.Workl
 				Spec:       podSpec(w),
 			}},
 		}
-		return nil
+		// OwnerReference：CR 删除时 GC 清理 CronJob（同 Deployment）。
+		return controllerutil.SetControllerReference(w, cj, r.Scheme)
 	})
 	if err != nil {
+		w.Status.Status = "failed"
+		_ = r.Status().Update(ctx, w)
 		return fmt.Errorf("apply cronjob: %w", err)
 	}
-	return nil
+	// 回写 status（CronJob 持续调度：Active 数为运行中 Job 数）。
+	w.Status.Ready = int32(len(cj.Status.Active)) //nolint:gosec // G115: CronJob Active 数为运行中 Job 数，实际不会超 int32 范围
+	w.Status.Status = "running"
+	return r.Status().Update(ctx, w)
 }
 
 func ptrInt32(v int32) *int32 { return &v }
@@ -168,5 +271,6 @@ func (r *WorkloadReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.Deployment{}).
 		Owns(&batchv1.Job{}).
 		Owns(&batchv1.CronJob{}).
+		Owns(&corev1.Service{}).
 		Complete(r)
 }

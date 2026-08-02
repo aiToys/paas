@@ -227,6 +227,9 @@ func (s *Store) IncUsage(ctx context.Context, resource string, delta int) (billi
 	}
 	counts := unmarshalIntMap(countsRaw)
 	counts[resource] += delta
+	if counts[resource] < 0 {
+		counts[resource] = 0 // 夹紧负值，与内存版语义一致，防配额检查误判绕过
+	}
 	countsBytes, err := marshalIntMap(counts)
 	if err != nil {
 		return billing.ResourceUsage{}, err
@@ -294,6 +297,9 @@ func (s *Store) CheckAndInc(ctx context.Context, resource string, delta int) (bi
 
 	// 4) 递增并落库。
 	counts[resource] = cur + delta
+	if counts[resource] < 0 {
+		counts[resource] = 0 // 夹紧负值（删除回滚/seed 偏差致计数为负时），防后续 CheckAndInc 误判绕过
+	}
 	countsBytes, err := marshalIntMap(counts)
 	if err != nil {
 		return billing.ResourceUsage{}, err
@@ -529,50 +535,9 @@ func (s *Store) RecordsCount(ctx context.Context) (int, error) {
 // quotas/usages 主键为 tenant_id，records 主键为 id + UNIQUE(tenant,period)，
 // 任意已存在则 ON CONFLICT DO NOTHING 跳过（多租户 seed 全表一次灌完，无需 ctx 租户）。
 func (s *Store) SeedIfEmpty(ctx context.Context) error {
-	n, err := s.QuotasCount(ctx)
-	if err != nil {
-		return err
-	}
-	if n > 0 {
-		return nil
-	}
-	t := time.Now()
-	for _, q := range memory.SeedQuotas(t) {
-		limitsBytes, err := marshalIntMap(q.Limits)
-		if err != nil {
-			return err
-		}
-		if _, err = s.db.Pool().Exec(ctx,
-			`INSERT INTO billing_quotas (`+quotaCols+`) VALUES ($1,$2,$3)
-			 ON CONFLICT (tenant_id) DO NOTHING`,
-			q.TenantID, limitsBytes, q.UpdatedAt); err != nil {
-			return err
-		}
-	}
-	for _, u := range memory.SeedUsages(t) {
-		countsBytes, err := marshalIntMap(u.Counts)
-		if err != nil {
-			return err
-		}
-		if _, err = s.db.Pool().Exec(ctx,
-			`INSERT INTO billing_usages (`+usageCols+`) VALUES ($1,$2,$3)
-			 ON CONFLICT (tenant_id) DO NOTHING`,
-			u.TenantID, countsBytes, u.UpdatedAt); err != nil {
-			return err
-		}
-	}
-	for _, b := range memory.SeedBills(t) {
-		itemsBytes, err := marshalItems(b.Items)
-		if err != nil {
-			return err
-		}
-		if _, err = s.db.Pool().Exec(ctx,
-			`INSERT INTO billing_records (`+recordCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-			 ON CONFLICT (tenant_id, period) DO NOTHING`,
-			b.ID, b.TenantID, b.Period, itemsBytes, b.Total, b.Status, b.CreatedAt, b.PaidAt); err != nil {
-			return err
-		}
-	}
+	// 去假数据：不灌 mock 配额/用量/账单。配额用 GetQuota 默认值（未设返默认非错误），
+	// 用量从 CheckAndInc 真实派生（应用/工作负载创建时递增），账单由 GenerateBill 真实产生。
+	// 保留签名兼容 seedPGAllIfEmpty 调用。
 	return nil
 }
 

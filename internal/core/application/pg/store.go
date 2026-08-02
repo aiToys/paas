@@ -114,17 +114,28 @@ func (s *Store) BindResource(ctx context.Context, id, resourceType, name string)
 	if _, err = s.Get(ctx, id); err != nil {
 		return application.Application{}, err
 	}
-	// 取下一个 ord（追加到末尾）。
+	// 取下一个 ord（追加到末尾）+ INSERT 同一事务，并用 advisory lock 串行化同 app 的并发绑定，
+	// 防止「SELECT MAX(ord) 与 INSERT 间另一并发也读到相同 nextOrd」导致 ord 重复（列表顺序不确定）。
+	tx, err := s.db.Pool().Begin(ctx)
+	if err != nil {
+		return application.Application{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, id); err != nil {
+		return application.Application{}, err
+	}
 	var nextOrd int
-	if err = s.db.Pool().QueryRow(ctx,
+	if err = tx.QueryRow(ctx,
 		`SELECT COALESCE(MAX(ord), -1) + 1 FROM application_bindings WHERE app_id=$1`, id).Scan(&nextOrd); err != nil {
 		return application.Application{}, err
 	}
-	_, err = s.db.Pool().Exec(ctx, bindingInsert, id, nextOrd, resourceType, name, "")
-	if err != nil {
+	if _, err = tx.Exec(ctx, bindingInsert, id, nextOrd, resourceType, name, ""); err != nil {
 		if pg.IsUniqueViolation(err) {
 			return application.Application{}, fmt.Errorf("绑定已存在: %s/%s", resourceType, name)
 		}
+		return application.Application{}, err
+	}
+	if err = tx.Commit(ctx); err != nil {
 		return application.Application{}, err
 	}
 	_ = tid // tid 已通过 Get 的租户过滤保证归属

@@ -20,4 +20,21 @@ export default defineConfig({
       '/api': { target: 'http://localhost:8080', changeOrigin: true },
     },
   },
+  build: {
+    // 生产去 console/debugger（esbuild 内置，无需 terser 额外依赖）。
+    // ElMessage 等用户可见反馈不受影响，只去掉调试 console.*。
+    chunkSizeWarningLimit: 800,
+    rollupOptions: {
+      output: {
+        // vendor 分包：稳定的第三方库独立 chunk，长效缓存（业务迭代不重下 vendor）。
+        manualChunks: {
+          vue: ['vue', 'vue-router', 'pinia'],
+          'element-plus': ['element-plus'],
+        },
+      },
+    },
+  },
+  esbuild: {
+    drop: ['console', 'debugger'],
+  },
 })

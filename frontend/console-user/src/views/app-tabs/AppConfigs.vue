@@ -40,17 +40,22 @@ const hasEnv = computed(() => !!envId.value)
 // secret 编辑时：值框是否禁用回填。编辑 secret 不回填（掩码非真值）。
 const isEditSecret = computed(() => !!form.value.id && form.value.type === TYPE_SECRET)
 
+// 自增请求 ID：快速切环境时，旧请求返回若非最新则丢弃，防数据错乱（A 慢于 B 覆盖 B 结果）。
+let loadReqId = 0
+
 async function load() {
+  const reqId = ++loadReqId
   if (!hasEnv.value) {
-    items.value = []
+    if (reqId === loadReqId) items.value = []
     return
   }
   loading.value = true
   try {
     const resp = await fetchAuth(`/api/applications/${props.appId}/configs?envId=${envId.value}`)
+    if (reqId !== loadReqId) return // 已有更新请求，丢弃本次结果
     if (resp.ok) items.value = (await resp.json()).data ?? []
   } finally {
-    loading.value = false
+    if (reqId === loadReqId) loading.value = false
   }
 }
 

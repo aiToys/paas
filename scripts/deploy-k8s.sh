@@ -29,12 +29,14 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 echo "╔══════════════════════════════════════════════╗"
-echo "║  PaaS K8s 部署（$IMAGE）"
+echo "║  PaaS K8s 部署（${IMAGE}）"
 echo "╚══════════════════════════════════════════════╝"
 
 echo ""
-echo "▶ 1/3 构建镜像（多阶段：前端 build + Go 交叉编译 amd64 + distroless）..."
-docker build -t "$IMAGE" -f Dockerfile .
+echo "▶ 1/3 构建镜像（多阶段：前端 build + Go 交叉编译 amd64 + alpine runtime）..."
+# DOCKER_BUILDKIT=0 走 legacy builder：base 镜像用本地（node/golang/alpine 经 daocloud 中转
+# retag 到本地同名），不查 remote registry metadata（避免 docker.io/gcr 拉取超时）。
+DOCKER_BUILDKIT=0 docker build -t "$IMAGE" -f Dockerfile .
 
 push_image() {
   # 优先 docker push；dockerd 到 registry 网络不通（如 colima VM 路由问题）时 fallback crane 直推。
@@ -67,11 +69,19 @@ echo "▶ 3/3 helm upgrade --install（CRD + RBAC + core + ingress）..."
 helm upgrade --install "$RELEASE" deploy/charts/paas \
   -n "$NS" --create-namespace \
   -f deploy/charts/paas/values-paas-k8s.yaml \
-  --set image.tag="$TAG"
+  --set image.tag="$TAG" \
+  --set maas.airouterApiKey="${PAAS_AIROUTER_API_KEY:-}"
+
+# image.tag 不变时 helm upgrade 不改 deployment spec，不触发 rollout ——
+# 会造成「部署成功但 Pod 跑旧镜像 digest」的假象。强制 rollout restart，
+# 配合 pullPolicy: Always 确保每次部署拉取最新 push 的 digest。
+echo ""
+echo "🔄 强制 rollout restart（拉取最新镜像 digest）..."
+kubectl -n "$NS" rollout restart deploy/"${RELEASE}-core"
 
 echo ""
 echo "⏳ 等待 Pod 就绪..."
-kubectl -n "$NS" rollout status deploy/"$RELEASE-core" --timeout=180s || true
+kubectl -n "$NS" rollout status deploy/"${RELEASE}-core" --timeout=180s || true
 
 echo ""
 echo "📊 部署状态:"

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -31,14 +32,18 @@ type Manifest struct {
 	GeneratedAt string            `json:"generatedAt"`
 }
 
-// ComputeSHA256 计算文件 sha256（十六进制）。
+// ComputeSHA256 计算文件 sha256（十六进制）。流式读取：镜像 tar 可达 GB 级，全量入内存会 OOM。
 func ComputeSHA256(path string) (string, error) {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:]), nil
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // BuildManifest 在 bundleDir 内为给定 images/chart 计算 sha256 并写 manifest.json。
@@ -74,7 +79,7 @@ func BuildManifest(bundleDir, paasVersion, chartVersion, chartFile string, image
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(filepath.Join(bundleDir, "manifest.json"), data, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(bundleDir, "manifest.json"), data, 0o600); err != nil {
 		return nil, err
 	}
 	return m, nil

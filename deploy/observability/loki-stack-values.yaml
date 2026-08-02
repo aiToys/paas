@@ -1,0 +1,32 @@
+# Loki + Promtail 精简 values（dev 轻量但真实）。
+# Promtail 以 DaemonSet 采集全集群 Pod 日志（/var/log/pods/*），自动带 pod label（app 等）。
+# 平台 logs 查询（real/logs.go）用 LogQL `{app="...",level="..."} |= "..."`。
+---
+loki:
+  enabled: true
+  # single binary，dev 不做高可用
+  persistence:
+    enabled: true
+    storageClassName: local-path
+    size: 10Gi
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: 500m, memory: 512Mi }
+  # 7 天保留
+  config:
+    limits_config:
+      retention_period: 168h
+
+promtail:
+  enabled: true
+  # 抓所有 namespace Pod 日志（含 paas namespace）
+  config:
+    clients:
+      - url: http://loki:3100/loki/api/v1/push
+  resources:
+    requests: { cpu: 50m, memory: 32Mi }
+    limits: { cpu: 200m, memory: 64Mi }
+
+# 关 pushgateway 等（不需要）
+fluent-bit:
+  enabled: false

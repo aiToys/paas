@@ -6,6 +6,7 @@ import (
 
 	"github.com/aitoys/paas/internal/core/auth"
 	"github.com/aitoys/paas/internal/core/identity"
+	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
@@ -20,7 +21,7 @@ func BearerAuth(idb identity.Repository, jwtSecret string) func(http.Handler) ht
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tok, err := auth.BearerToken(r)
 			if err != nil {
-				writeErr(w, http.StatusUnauthorized, "missing bearer token")
+				httputil.WriteError(w, http.StatusUnauthorized, "missing bearer token")
 				return
 			}
 			ctx := r.Context()
@@ -28,7 +29,7 @@ func BearerAuth(idb identity.Repository, jwtSecret string) func(http.Handler) ht
 				// JWT 通道
 				c, err := auth.ParseType(tok, jwtSecret, auth.TokenAccess)
 				if err != nil {
-					writeErr(w, http.StatusUnauthorized, "invalid token")
+					httputil.WriteError(w, http.StatusUnauthorized, "invalid token")
 					return
 				}
 				ctx = tenant.WithTenant(ctx, c.Tenant)
@@ -38,7 +39,7 @@ func BearerAuth(idb identity.Repository, jwtSecret string) func(http.Handler) ht
 				// API Key 通道（兼容现有程序化调用）
 				k, err := idb.LookupAPIKey(r.Context(), tok)
 				if err != nil {
-					writeErr(w, http.StatusUnauthorized, "invalid api key")
+					httputil.WriteError(w, http.StatusUnauthorized, "invalid api key")
 					return
 				}
 				ctx = tenant.WithTenant(ctx, k.TenantID)

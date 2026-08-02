@@ -32,18 +32,22 @@ async function load() {
 }
 
 async function bind() {
-  const resp = await fetchAuth(`/api/applications/${props.appId}/repositories`, {
-    method: 'POST',
-    body: JSON.stringify(form.value),
-  })
-  if (resp.ok) {
-    ElMessage.success('仓库已绑定')
-    showBind.value = false
-    form.value = { gitUrl: '', branch: 'main', dockerfile: 'Dockerfile', buildContext: '.' }
-    load()
-  } else {
-    const err = await resp.json().catch(() => ({}))
-    ElMessage.error(err.error || '绑定失败')
+  try {
+    const resp = await fetchAuth(`/api/applications/${props.appId}/repositories`, {
+      method: 'POST',
+      body: JSON.stringify(form.value),
+    })
+    if (resp.ok) {
+      ElMessage.success('仓库已绑定')
+      showBind.value = false
+      form.value = { gitUrl: '', branch: 'main', dockerfile: 'Dockerfile', buildContext: '.' }
+      load()
+    } else {
+      const err = await resp.json().catch(() => ({}))
+      ElMessage.error(err.error || '绑定失败')
+    }
+  } catch (e) {
+    ElMessage.error('绑定失败：' + (e as Error).message)
   }
 }
 
@@ -53,12 +57,19 @@ async function unbind(r: Repo) {
   } catch {
     return
   }
-  const resp = await fetchAuth(`/api/applications/${props.appId}/repositories/${r.id}`, {
-    method: 'DELETE',
-  })
-  if (resp.ok) {
-    ElMessage.success('已解绑')
-    load()
+  try {
+    const resp = await fetchAuth(`/api/applications/${props.appId}/repositories/${r.id}`, {
+      method: 'DELETE',
+    })
+    if (resp.ok) {
+      ElMessage.success('已解绑')
+      load()
+    } else {
+      const err = await resp.json().catch(() => ({}))
+      ElMessage.error(err.error || '解绑失败')
+    }
+  } catch (e) {
+    ElMessage.error('解绑失败：' + (e as Error).message)
   }
 }
 

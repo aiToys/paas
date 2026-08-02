@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+
+	"github.com/aitoys/paas/internal/httputil"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -79,7 +81,7 @@ func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) boo
 	if h.Authorize == nil || h.Authorize(r, perm) {
 		return true
 	}
-	writeErr(w, http.StatusForbidden, "forbidden: missing "+perm)
+	httputil.WriteError(w, http.StatusForbidden, "forbidden: missing "+perm)
 	return false
 }
 
@@ -107,7 +109,6 @@ func (h *Handler) userID(ctx context.Context) string {
 
 // ServeHTTP 按路径前缀分发到应用子路由或详情/动作路由。
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
 	path := strings.TrimRight(r.URL.Path, "/")
 	switch {
 	case strings.HasPrefix(path, "/api/applications/"):
@@ -126,7 +127,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(path, "/rollback"):
 		h.serveReleaseAction(w, r)
 	default:
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
 }
 
@@ -135,7 +136,7 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/applications/")
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) < 2 {
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
 	appID, sub := parts[0], parts[1]
@@ -147,28 +148,28 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 		case 3:
 			h.serveRepoDelete(w, r, parts[2])
 		default:
-			writeErr(w, http.StatusNotFound, "not found")
+			httputil.WriteError(w, http.StatusNotFound, "not found")
 		}
 	case "buildruns":
 		if len(parts) == 2 {
 			h.serveBuildRuns(w, r, appID)
 		} else {
-			writeErr(w, http.StatusNotFound, "not found")
+			httputil.WriteError(w, http.StatusNotFound, "not found")
 		}
 	case "images":
 		if len(parts) == 2 {
 			h.serveImages(w, r, appID)
 		} else {
-			writeErr(w, http.StatusNotFound, "not found")
+			httputil.WriteError(w, http.StatusNotFound, "not found")
 		}
 	case "releases":
 		if len(parts) == 2 {
 			h.serveReleases(w, r, appID)
 		} else {
-			writeErr(w, http.StatusNotFound, "not found")
+			httputil.WriteError(w, http.StatusNotFound, "not found")
 		}
 	default:
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
 }
 
@@ -181,10 +182,10 @@ func (h *Handler) serveRepos(w http.ResponseWriter, r *http.Request, appID strin
 		}
 		list, err := h.repos.ListRepos(r.Context(), appID)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			httputil.WriteInternalError(w, err)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
+		httputil.WriteData(w, list)
 		return
 	}
 	if r.Method == http.MethodPost {
@@ -193,34 +194,33 @@ func (h *Handler) serveRepos(w http.ResponseWriter, r *http.Request, appID strin
 		}
 		var repo CodeRepo
 		if err := json.NewDecoder(r.Body).Decode(&repo); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
 		repo.AppID = appID
 		if err := h.repos.CreateRepo(r.Context(), repo); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			httputil.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(repo)
+		httputil.WriteJSON(w, http.StatusCreated, repo)
 		return
 	}
-	writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
 func (h *Handler) serveRepoDelete(w http.ResponseWriter, r *http.Request, repoID string) {
 	if r.Method != http.MethodDelete {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !h.allow(w, r, PermRepoWrite) {
 		return
 	}
 	if err := h.repos.DeleteRepo(r.Context(), repoID); err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]string{"deleted": repoID})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"deleted": repoID})
 }
 
 // ---------- 构建 ----------
@@ -232,10 +232,10 @@ func (h *Handler) serveBuildRuns(w http.ResponseWriter, r *http.Request, appID s
 		}
 		list, err := h.builds.ListBuildRuns(r.Context(), appID)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			httputil.WriteInternalError(w, err)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
+		httputil.WriteData(w, list)
 		return
 	}
 	if r.Method == http.MethodPost {
@@ -244,29 +244,28 @@ func (h *Handler) serveBuildRuns(w http.ResponseWriter, r *http.Request, appID s
 		}
 		var b BuildRun
 		if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
 		b.AppID = appID
 		if b.RepoID == "" {
-			writeErr(w, http.StatusBadRequest, "repoId 不能为空")
+			httputil.WriteError(w, http.StatusBadRequest, "repoId 不能为空")
 			return
 		}
 		if err := h.builds.CreateBuildRun(r.Context(), b); err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			httputil.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "triggered"})
+		httputil.WriteJSON(w, http.StatusCreated, map[string]string{"status": "triggered"})
 		return
 	}
-	writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
 // serveBuildDetail 处理 /api/buildruns/{id}。
 func (h *Handler) serveBuildDetail(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !h.allow(w, r, PermBuildRead) {
@@ -274,22 +273,22 @@ func (h *Handler) serveBuildDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/buildruns/"), "/")
 	if id == "" {
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
 	b, err := h.builds.GetBuildRun(r.Context(), id)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	_ = json.NewEncoder(w).Encode(b)
+	httputil.WriteJSON(w, http.StatusOK, b)
 }
 
 // ---------- 镜像 ----------
 
 func (h *Handler) serveImages(w http.ResponseWriter, r *http.Request, appID string) {
 	if r.Method != http.MethodGet {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !h.allow(w, r, PermImageRead) {
@@ -297,7 +296,7 @@ func (h *Handler) serveImages(w http.ResponseWriter, r *http.Request, appID stri
 	}
 	list, err := h.images.ListImages(r.Context(), appID)
 	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+		httputil.WriteInternalError(w, err)
 		return
 	}
 	_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
@@ -306,7 +305,7 @@ func (h *Handler) serveImages(w http.ResponseWriter, r *http.Request, appID stri
 // serveImageDetail 处理 /api/images/{id}。
 func (h *Handler) serveImageDetail(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !h.allow(w, r, PermImageRead) {
@@ -314,15 +313,15 @@ func (h *Handler) serveImageDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/images/"), "/")
 	if id == "" {
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
 	im, err := h.images.GetImage(r.Context(), id)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	_ = json.NewEncoder(w).Encode(im)
+	httputil.WriteJSON(w, http.StatusOK, im)
 }
 
 // ---------- 发布 ----------
@@ -334,10 +333,10 @@ func (h *Handler) serveReleases(w http.ResponseWriter, r *http.Request, appID st
 		}
 		list, err := h.releases.ListReleases(r.Context(), appID)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			httputil.WriteInternalError(w, err)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
+		httputil.WriteData(w, list)
 		return
 	}
 	if r.Method == http.MethodPost {
@@ -346,7 +345,7 @@ func (h *Handler) serveReleases(w http.ResponseWriter, r *http.Request, appID st
 		}
 		var input ReleaseInput
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-			writeErr(w, http.StatusBadRequest, "invalid body")
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
 		input.AppID = appID
@@ -357,20 +356,19 @@ func (h *Handler) serveReleases(w http.ResponseWriter, r *http.Request, appID st
 		}
 		rel, err := h.releases.CreateRelease(r.Context(), input)
 		if err != nil {
-			writeErr(w, http.StatusBadRequest, err.Error())
+			httputil.WriteError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(rel)
+		httputil.WriteJSON(w, http.StatusCreated, rel)
 		return
 	}
-	writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
 // serveReleaseAction 处理 /api/releases/{id}/rollback。
 func (h *Handler) serveReleaseAction(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !h.allow(w, r, PermReleaseWrite) {
@@ -379,14 +377,14 @@ func (h *Handler) serveReleaseAction(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/releases/")
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) != 2 || parts[1] != "rollback" {
-		writeErr(w, http.StatusNotFound, "not found")
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
 	releaseID := parts[0]
 	// 生产环境回滚需 prod:write：先取发布单的环境类型再校验
 	orig, err := h.releases.GetRelease(r.Context(), releaseID)
 	if err != nil {
-		writeErr(w, http.StatusNotFound, err.Error())
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}
 	if !h.allowProd(w, r, orig.EnvID) {
@@ -394,13 +392,8 @@ func (h *Handler) serveReleaseAction(w http.ResponseWriter, r *http.Request) {
 	}
 	rb, err := h.releases.RollbackRelease(r.Context(), releaseID)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		httputil.WriteError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	_ = json.NewEncoder(w).Encode(rb)
-}
-
-func writeErr(w http.ResponseWriter, code int, msg string) {
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	httputil.WriteJSON(w, http.StatusOK, rb)
 }

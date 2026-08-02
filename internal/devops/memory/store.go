@@ -29,9 +29,11 @@ type Store struct {
 	releases  map[string]devops.Release
 	workload  workload.Repository // 注入；Release 编排找/建/更新基线 Workload
 	pipeline  builder.Pipeline    // 构建流水线（nil=Mock）；cmd/core 按 PAAS_DEVOPS_REAL 注入 Real
+	baseCtx   context.Context     // 进程级 ctx（cmd/core 注入）；构建 goroutine 派生之，nil=Background 兼容
 }
 
-// NewStore 创建仓储并 seed 跨两租户的演示数据。wlRepo 为 Release 编排提供 Workload 能力。
+// NewStore 创建仓储（空，不 seed mock 演示数据）。wlRepo 为 Release 编排提供 Workload 能力。
+// 去假数据：用户绑定真实 git 仓库 + 触发构建产生仓库/构建/镜像/发布记录。
 func NewStore(wlRepo workload.Repository) *Store {
 	s := &Store{
 		repos:     map[string]devops.CodeRepo{},
@@ -39,19 +41,6 @@ func NewStore(wlRepo workload.Repository) *Store {
 		images:    map[string]devops.Image{},
 		releases:  map[string]devops.Release{},
 		workload:  wlRepo,
-	}
-	repos, builds, images, releases := seed()
-	for _, r := range repos {
-		s.repos[r.ID] = r
-	}
-	for _, b := range builds {
-		s.buildruns[b.ID] = b
-	}
-	for _, im := range images {
-		s.images[im.ID] = im
-	}
-	for _, r := range releases {
-		s.releases[r.ID] = r
 	}
 	return s
 }
@@ -218,7 +207,9 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) error {
 
 	// CI runner：pending -> running -> success/failed（产出 Image）。
 	// 脱离请求 ctx（后台构建不应因请求取消而中断）；pipeline 决定 mock/real。
-	go s.runBuild(context.Background(), builder.Params{
+	// CI runner：pending -> running -> success/failed（产出 Image）。
+	// baseCtx 派生自进程级 ctx（cmd/core 注入）：进程退出时 cancel → 构建中断，避免卡 running。
+	go s.runBuild(s.baseCtxOrBg(), builder.Params{
 		TenantID: tid, AppID: b.AppID, BuildID: b.ID, Commit: b.Commit, Branch: b.Branch,
 		GitURL: repo.GitURL, Dockerfile: repo.Dockerfile, BuildContext: repo.BuildContext,
 	}) //nolint:gosec // G118 误报：后台构建须脱离请求生命周期，不持 request ctx 是有意为之
@@ -226,11 +217,29 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) error {
 }
 
 // SetPipeline 注入构建流水线（cmd/core 按 PAAS_DEVOPS_REAL 注入 Real）；nil=Mock。
-func (s *Store) SetPipeline(p builder.Pipeline) { s.pipeline = p }
+// 加锁写：防与 runBuild 异步读 s.pipeline 的 race（go test -race 会捕获）。
+func (s *Store) SetPipeline(p builder.Pipeline) {
+	s.mu.Lock()
+	s.pipeline = p
+	s.mu.Unlock()
+}
+
+// SetBaseCtx 注入进程级 ctx（cmd/core 在 run() 注入）；构建 goroutine 派生之感知 shutdown。
+func (s *Store) SetBaseCtx(ctx context.Context) { s.baseCtx = ctx }
+
+// baseCtxOrBg 返回 baseCtx（空则 Background，兼容测试/未注入场景）。
+func (s *Store) baseCtxOrBg() context.Context {
+	if s.baseCtx != nil {
+		return s.baseCtx
+	}
+	return context.Background()
+}
 
 // runBuild 执行构建流水线并持久化状态。pipeline nil 时用 Mock。
 func (s *Store) runBuild(ctx context.Context, p builder.Params) {
+	s.mu.Lock()
 	pipe := s.pipeline
+	s.mu.Unlock()
 	if pipe == nil {
 		pipe = builder.Mock{}
 	}
@@ -254,6 +263,10 @@ func (s *Store) runBuild(ctx context.Context, p builder.Params) {
 
 	// 执行流水线（clone→build→push 或 mock 派生）。
 	res, err := pipe.Build(ctx, p)
+	res.Log = builder.MaskToken(res.Log) // 脱敏日志中的 Git token（防泄漏给 build:read 权限者）
+	if err != nil {
+		err = builder.MaskErr(err) // err 可能含 git clone 失败 stderr（含 token URL）
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b = s.buildruns[p.BuildID]

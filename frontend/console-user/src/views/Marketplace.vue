@@ -114,6 +114,10 @@ function tryout(id: string) {
     <div v-if="loading" class="grid">
       <div v-for="i in 8" :key="i" class="skel" />
     </div>
+    <div v-else-if="!filtered.length" class="empty">
+      <Icon name="market" :size="32" />
+      <p>{{ models.length ? '当前分类暂无模型' : '模型市场暂无可用模型' }}</p>
+    </div>
     <div v-else class="grid">
       <article
         v-for="{ m, cat } in filtered"
@@ -347,5 +351,21 @@ function tryout(id: string) {
 .deploy-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 60px 20px;
+  color: var(--text-faint);
+  text-align: center;
+}
+.empty :deep(svg) {
+  color: var(--brand);
+}
+.empty p {
+  margin: 0;
+  font-size: 13px;
 }
 </style>

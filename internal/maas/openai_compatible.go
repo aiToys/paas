@@ -97,6 +97,9 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req provider.ChatRe
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	httpReq.Header.Set("Accept", "text/event-stream")
+	// 显式禁 gzip：Go Transport 默认自动加 Accept-Encoding: gzip 并透明解压，部分网关在
+	// HTTP/2 下返回 gzip body 解压异常，会导致 SSE 行被跳过。identity 要求上游返明文 SSE 流。
+	httpReq.Header.Set("Accept-Encoding", "identity")
 
 	resp, err := p.httpClient.Do(httpReq)
 	if err != nil {

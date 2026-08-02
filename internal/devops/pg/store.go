@@ -18,13 +18,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/aitoys/paas/internal/devops"
 	"github.com/aitoys/paas/internal/devops/builder"
-	devopsmemory "github.com/aitoys/paas/internal/devops/memory"
 	"github.com/aitoys/paas/internal/storage/pg"
 	"github.com/aitoys/paas/internal/workload"
 )
@@ -34,6 +34,8 @@ type Store struct {
 	db       *pg.DB
 	workload workload.Repository // 注入；Release 编排找/建/更新基线 Workload
 	pipeline builder.Pipeline    // 构建流水线（nil=Mock）；cmd/core 按 PAAS_DEVOPS_REAL 注入 Real
+	pipeMu   sync.RWMutex        // 专管 pipeline 字段读写（防 SetPipeline/runBuild race）
+	baseCtx  context.Context     // 进程级 ctx（cmd/core 注入）；构建 goroutine 派生之，nil=Background 兼容
 }
 
 // NewStore 创建 devops PG 仓储。db 必须已完成迁移；wlRepo 为 Release 编排提供 Workload 能力。
@@ -43,7 +45,24 @@ func NewStore(db *pg.DB, wlRepo workload.Repository) *Store {
 }
 
 // SetPipeline 注入构建流水线（cmd/core 按 PAAS_DEVOPS_REAL 注入 Real）；nil=Mock。
-func (s *Store) SetPipeline(p builder.Pipeline) { s.pipeline = p }
+// SetPipeline 注入构建流水线（cmd/core 按 PAAS_DEVOPS_REAL 注入 Real）；nil=Mock。
+// 加锁写：防与 runBuild 异步读 s.pipeline 的 race。
+func (s *Store) SetPipeline(p builder.Pipeline) {
+	s.pipeMu.Lock()
+	s.pipeline = p
+	s.pipeMu.Unlock()
+}
+
+// SetBaseCtx 注入进程级 ctx（cmd/core 在 run() 注入）；构建 goroutine 派生之感知 shutdown。
+func (s *Store) SetBaseCtx(ctx context.Context) { s.baseCtx = ctx }
+
+// baseCtxOrBg 返回 baseCtx（空则 Background，兼容测试/未注入场景）。
+func (s *Store) baseCtxOrBg() context.Context {
+	if s.baseCtx != nil {
+		return s.baseCtx
+	}
+	return context.Background()
+}
 
 // 列常量与各 struct 字段顺序严格对齐（scan 列序必须一致）。
 const (
@@ -258,8 +277,8 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) error {
 	}
 
 	// CI runner：pending -> running -> success/failed（产出 Image）。
-	// goroutine 持 *Store 引用 + 派生 ctx（不持请求 ctx，避免 cancel 影响，与内存版一致）。
-	go s.runBuild(context.Background(), builder.Params{
+	// goroutine 持 *Store 引用 + 派生 baseCtx（进程级，不持请求 ctx；进程退出 cancel 构建中断）。
+	go s.runBuild(s.baseCtxOrBg(), builder.Params{
 		TenantID: tid, AppID: b.AppID, BuildID: b.ID, Commit: b.Commit, Branch: b.Branch,
 		GitURL: repo.GitURL, Dockerfile: repo.Dockerfile, BuildContext: repo.BuildContext,
 	}) //nolint:gosec // G118 误报：后台构建任务须脱离请求生命周期，不持 request ctx 是有意为之
@@ -269,7 +288,9 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) error {
 // runBuild 执行构建流水线并持久化状态。pipeline nil 时用 Mock。
 // 流转用 UPDATE build_runs + INSERT images；panic/错误兜底标 failed。
 func (s *Store) runBuild(ctx context.Context, p builder.Params) {
+	s.pipeMu.RLock()
 	pipe := s.pipeline
+	s.pipeMu.RUnlock()
 	if pipe == nil {
 		pipe = builder.Mock{}
 	}
@@ -288,7 +309,9 @@ func (s *Store) runBuild(ctx context.Context, p builder.Params) {
 
 	// 执行流水线（clone→build→push 或 mock 派生）。
 	res, err := pipe.Build(ctx, p)
+	res.Log = builder.MaskToken(res.Log) // 脱敏日志中的 Git token（防泄漏给 build:read 权限者）
 	if err != nil {
+		err = builder.MaskErr(err) // err 可能含 git clone 失败 stderr（含 token URL）
 		_, _ = s.db.Pool().Exec(ctx,
 			`UPDATE build_runs SET status=$2, finished_at=$3, log=$4 WHERE id=$1`,
 			p.BuildID, devops.BuildFailed, time.Now(), err.Error()+"\n"+res.Log)
@@ -307,15 +330,44 @@ func (s *Store) runBuild(ctx context.Context, p builder.Params) {
 		BuiltAt:    time.Now(),
 		Status:     devops.ImageReady,
 	}
-	if _, err := s.db.Pool().Exec(ctx,
+	// 镜像落库 + 构建成功状态同一事务（原子），任一步失败回写 failed + 日志，
+	// 避免「镜像已落库但 build_run 卡 running」的孤儿镜像（runBuild 无返回值，靠状态机驱动）。
+	tx, txErr := s.db.Pool().Begin(ctx)
+	if txErr != nil {
+		s.markBuildFailed(ctx, p.BuildID, "开启事务失败: "+txErr.Error())
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+	if _, err := tx.Exec(ctx,
 		`INSERT INTO images (`+imageCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
 		img.ID, img.TenantID, img.AppID, img.Registry, img.Tag, img.Digest, img.Source,
 		img.Branch, img.BuildRunID, img.BuiltAt, img.Status); err != nil {
+		s.markBuildFailed(ctx, p.BuildID, "镜像落库失败: "+err.Error()+"\n"+res.Log)
 		return
 	}
-	_, _ = s.db.Pool().Exec(ctx,
+	if _, err := tx.Exec(ctx,
 		`UPDATE build_runs SET status=$2, image_id=$3, finished_at=$4, log=$5 WHERE id=$1`,
-		p.BuildID, devops.BuildSuccess, img.ID, time.Now(), res.Log)
+		p.BuildID, devops.BuildSuccess, img.ID, time.Now(), res.Log); err != nil {
+		s.markBuildFailed(ctx, p.BuildID, "构建状态回写失败: "+err.Error()+"\n"+res.Log)
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		s.markBuildFailed(ctx, p.BuildID, "事务提交失败: "+err.Error()+"\n"+res.Log)
+		return
+	}
+	committed = true
+}
+
+// markBuildFailed 回写构建失败状态 + 日志（best-effort，错误不再向上传播因 runBuild 无返回值）。
+func (s *Store) markBuildFailed(ctx context.Context, buildID, log string) {
+	_, _ = s.db.Pool().Exec(ctx,
+		`UPDATE build_runs SET status=$2, finished_at=$3, log=$4 WHERE id=$1`,
+		buildID, devops.BuildFailed, time.Now(), log)
 }
 
 // ---------- ImageRepository ----------
@@ -527,6 +579,13 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 		rel.Strategy, rel.Status, rel.WorkloadID, rel.PreviousImageID, rel.IsRollback,
 		rel.CreatedAt, rel.CreatedBy)
 	if err != nil {
+		// 补偿事务：workload 已切新镜像但 release 记录未落库 -> 回滚 workload 到发布前状态，
+		// 防丢失 PreviousImageID 回滚指针（best-effort，补偿失败不掩盖主错误）。
+		if len(wls) > 0 {
+			_, _ = s.workload.UpdateImage(ctx, wl.ID, wl.Image, wl.ImageRef) // 恢复原 display+digest
+		} else {
+			_ = s.workload.Delete(ctx, wl.ID) // 无基线时新建的 workload，删除
+		}
 		return devops.Release{}, err
 	}
 	return rel, nil
@@ -566,6 +625,13 @@ func (s *Store) RollbackRelease(ctx context.Context, releaseID string) (devops.R
 	}
 
 	// 2. 更新 Workload 回退镜像（经接口） —— 对齐内存版 step 2
+	// 取原 release 对应镜像的 display，供 tx 失败时补偿恢复 workload 用（best-effort）。
+	var origImg devops.Image
+	origDisplay := ""
+	if err = scanImage(s.db.Pool().QueryRow(ctx,
+		`SELECT `+imageCols+` FROM images WHERE id=$1 AND tenant_id=$2`, orig.ImageID, tid), &origImg); err == nil {
+		origDisplay = origImg.Registry + ":" + origImg.Tag
+	}
 	display := prevImg.Registry + ":" + prevImg.Tag
 	if _, err := s.workload.UpdateImage(ctx, orig.WorkloadID, display, prevImg.Digest); err != nil {
 		return devops.Release{}, err
@@ -591,7 +657,14 @@ func (s *Store) RollbackRelease(ctx context.Context, releaseID string) (devops.R
 	if err != nil {
 		return devops.Release{}, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }() // 已提交或失败均无害
+	committed := false
+	defer func() {
+		_ = tx.Rollback(ctx) // 已提交或失败均无害
+		if !committed && origDisplay != "" {
+			// tx 失败：workload 已回退到 prevImg 但 release 未记录 -> 补偿恢复到原镜像（best-effort）
+			_, _ = s.workload.UpdateImage(ctx, orig.WorkloadID, origDisplay, orig.ImageDigest)
+		}
+	}()
 	if _, err = tx.Exec(ctx,
 		`UPDATE releases SET status=$2 WHERE id=$1`, releaseID, devops.ReleaseRolledBack); err != nil {
 		return devops.Release{}, err
@@ -606,6 +679,7 @@ func (s *Store) RollbackRelease(ctx context.Context, releaseID string) (devops.R
 	if err = tx.Commit(ctx); err != nil {
 		return devops.Release{}, err
 	}
+	committed = true
 	return rb, nil
 }
 
@@ -646,58 +720,12 @@ func (s *Store) ReleasesCount(ctx context.Context) (int, error) {
 // repos/builds/images/releases 全表为空才灌（任一表已灌过即跳过）；主键冲突 DO NOTHING。
 // 不经租户过滤，全表一次灌完所有租户的 seed 数据（与 billing/cc SeedIfEmpty 同款）。
 func (s *Store) SeedIfEmpty(ctx context.Context) error {
-	n, err := s.ReposCount(ctx)
-	if err != nil {
-		return err
-	}
-	if n > 0 {
-		return nil
-	}
-	repos, builds, images, releases := devopsmemory.SeedDevOps()
-	for _, r := range repos {
-		if _, err = s.db.Pool().Exec(ctx,
-			`INSERT INTO code_repos (`+repoCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-			 ON CONFLICT (id) DO NOTHING`,
-			r.ID, r.TenantID, r.AppID, r.GitURL, r.Branch, r.Dockerfile, r.BuildContext, r.Status, r.CreatedAt); err != nil {
-			return err
-		}
-	}
-	for _, b := range builds {
-		if _, err = s.db.Pool().Exec(ctx,
-			`INSERT INTO build_runs (`+buildCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-			 ON CONFLICT (id) DO NOTHING`,
-			b.ID, b.TenantID, b.AppID, b.RepoID, b.Trigger, b.Commit, b.Branch, b.Message,
-			b.Status, b.ImageID, b.Log, b.StartedAt, b.FinishedAt); err != nil {
-			return err
-		}
-	}
-	for _, im := range images {
-		if _, err = s.db.Pool().Exec(ctx,
-			`INSERT INTO images (`+imageCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-			 ON CONFLICT (id) DO NOTHING`,
-			im.ID, im.TenantID, im.AppID, im.Registry, im.Tag, im.Digest, im.Source,
-			im.Branch, im.BuildRunID, im.BuiltAt, im.Status); err != nil {
-			return err
-		}
-	}
-	for _, rl := range releases {
-		if _, err = s.db.Pool().Exec(ctx,
-			`INSERT INTO releases (`+releaseCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-			 ON CONFLICT (id) DO NOTHING`,
-			rl.ID, rl.TenantID, rl.AppID, rl.EnvID, rl.ImageID, rl.ImageDigest, rl.Strategy,
-			rl.Status, rl.WorkloadID, rl.PreviousImageID, rl.IsRollback, rl.CreatedAt, rl.CreatedBy); err != nil {
-			return err
-		}
-	}
+	// 去假数据：不灌 mock 仓库/构建/镜像/发布。用户绑定真实 git 仓库 + 触发构建产生真实记录。
+	// 保留签名兼容 seedPGAllIfEmpty 调用。
 	return nil
 }
 
 // ---------- 辅助（与内存版同款，供 PG store 内部复用） ----------
-
-func sha256hex(s string) string {
-	h := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(h[:])
-}
 
 // newID 生成带前缀的短 ID（sha256 前 12 hex）。mock 期保证基本唯一，与内存版同款。
 func newID(prefix string) string {
@@ -708,20 +736,4 @@ func newID(prefix string) string {
 func mockCommit() string {
 	h := sha256.Sum256([]byte(fmt.Sprintf("commit-%d", time.Now().UnixNano())))
 	return hex.EncodeToString(h[:20]) // 40 hex chars
-}
-
-func safeShort(s string, n int) string {
-	if len(s) > n {
-		return s[:n]
-	}
-	return s
-}
-
-func mockBuildLog(tag string) string {
-	return fmt.Sprintf(`Step 1/5: FROM golang:1.22 AS build
-Step 2/5: WORKDIR /src && COPY . .
-Step 3/5: RUN CGO_ENABLED=0 go build -o /out/app ./cmd/app
-Step 4/5: FROM gcr.io/distroless/static
-Step 5/5: COPY /out/app /app && ENTRYPOINT ["/app"]
-=> 推送镜像: %s`, tag)
 }

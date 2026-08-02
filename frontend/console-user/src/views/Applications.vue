@@ -9,6 +9,12 @@ import Icon from '@/components/Icon.vue'
 import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
 
+// 新建应用：当前后端尚无 POST /api/applications 端点（应用为主线，本期未开放自助创建）。
+// 按钮保留引导性占位，点击给明确反馈而非静默无响应（避免用户误以为按钮坏了）。
+function notImplemented() {
+  ElMessage.info('应用创建接口尚未开放，敬请期待')
+}
+
 interface App {
   id: string
   name: string
@@ -88,10 +94,16 @@ function deployBadge(appId: string): { text: string; cls: string } {
   return { text: `${envSet.size} 个环境`, cls: 'multi' }
 }
 
-const statusMeta: Record<App['status'], { label: string; cls: string }> = {
+// statusMeta 只覆盖已知枚举值；后端若返回空串/未知值（历史脏数据、迁移残留）必须兜底，
+// 否则 statusMeta[status] 为 undefined，模板访问 .cls 直接崩溃整个应用列表。
+const STATUS_META: Record<string, { label: string; cls: string }> = {
   healthy: { label: '健康', cls: 'ok' },
   degraded: { label: '降级', cls: 'warn' },
   idle: { label: '空闲', cls: 'idle' },
+}
+const STATUS_UNKNOWN = { label: '未知', cls: 'idle' }
+function statusOf(s: string): { label: string; cls: string } {
+  return STATUS_META[s] ?? STATUS_UNKNOWN
 }
 
 function open(a: App) {
@@ -114,7 +126,7 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
     <div class="toolbar">
       <div class="right">
         <span class="count mono">{{ apps.length }} 个应用</span>
-        <button class="new-btn">+ 新建应用</button>
+        <button class="new-btn" @click="notImplemented">+ 新建应用</button>
       </div>
     </div>
 
@@ -132,9 +144,9 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
             </div>
             <div class="a-id mono">{{ a.id }}</div>
           </div>
-          <span class="status" :class="statusMeta[a.status].cls">
+          <span class="status" :class="statusOf(a.status).cls">
             <span v-if="a.status === 'healthy'" class="pulse-dot" />
-            {{ statusMeta[a.status].label }}
+            {{ statusOf(a.status).label }}
           </span>
         </div>
 
@@ -158,7 +170,7 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
         </div>
       </article>
 
-      <button class="add-card">
+      <button class="add-card" @click="notImplemented">
         <div class="add-icon">+</div>
         <div class="add-text">新建应用</div>
         <div class="add-hint">申请资源、部署服务</div>
