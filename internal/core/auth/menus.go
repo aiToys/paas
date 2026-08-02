@@ -50,6 +50,12 @@ func staticMenus() []Menu {
 					Component: "system/role/views/List",
 					Meta:      MenuMeta{Title: "角色管理", Icon: "UserFilled", ShowMenu: true},
 				},
+				{
+					Path:      "/system/apikey",
+					Name:      "systemApikey",
+					Component: "system/apikey/views/List",
+					Meta:      MenuMeta{Title: "API 密钥", Icon: "Key", ShowMenu: true},
+				},
 			},
 		},
 		{
