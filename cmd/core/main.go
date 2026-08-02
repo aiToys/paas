@@ -243,7 +243,8 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	authHandler = authHandler.WithAudit(&authAuditAdapter{store: stores.Security})
 	// identity 管理 API（/api/tenants、/api/users、/api/api-keys、/api/roles）：平台级，需 tenant:admin。
 	idmHandler := identity.NewHandler(stores.Identity).
-		HashPassword(authPkg.HashPassword)
+		HashPassword(authPkg.HashPassword).
+		PasswordValidator(authPkg.ValidatePassword)
 	// 注入平台超管判定：IsAdmin 用户 token 携带 super_admin 标记（auth.issueTokens），
 	// 据此区分跨租户平台管理与本租户 tenant-admin，防越权。
 	idmHandler.IsPlatformAdmin = gateway.IsPlatformAdmin

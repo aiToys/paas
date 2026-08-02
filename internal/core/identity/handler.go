@@ -16,11 +16,16 @@ import (
 // main.go 注入 auth.HashPassword）。
 type HashPasswordFn func(plain string) (string, error)
 
+// PasswordValidatorFn 校验明文密码强度（依赖倒置，避免 identity->auth 循环）。
+// 返 error 表示不达标。nil 时跳过校验（向后兼容）。
+type PasswordValidatorFn func(plain string) error
+
 // Handler 是 identity 管理 API 的 HTTP 处理器（/api/tenants、/api/users、/api/api-keys、/api/roles）。
 // 各方法以 http.HandlerFunc 暴露，由 main.go 经 reg.Register 注册（同时登记 OpenAPI）。
 type Handler struct {
-	repo         Repository
-	hashPassword HashPasswordFn
+	repo              Repository
+	hashPassword      HashPasswordFn
+	passwordValidator PasswordValidatorFn
 	// IsPlatformAdmin 判定调用者是否平台超管（main.go 注入 gateway.IsPlatformAdmin）。
 	// 平台超管可跨租户管理；普通 tenant-admin 仅限本租户（防越权）。
 	IsPlatformAdmin func(*http.Request) bool
@@ -31,6 +36,9 @@ func NewHandler(repo Repository) *Handler { return &Handler{repo: repo} }
 
 // HashPassword 设置密码哈希函数（main.go 注入 auth.HashPassword）。
 func (h *Handler) HashPassword(fn HashPasswordFn) *Handler { h.hashPassword = fn; return h }
+
+// PasswordValidator 设置密码强度校验器（main.go 注入 auth.ValidatePassword）。
+func (h *Handler) PasswordValidator(fn PasswordValidatorFn) *Handler { h.passwordValidator = fn; return h }
 
 // platformAdmin 判定调用者是否平台超管；未注入 IsPlatformAdmin 时保守按 false（最小权限）。
 func (h *Handler) platformAdmin(r *http.Request) bool {
@@ -165,6 +173,12 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		u.Status = StatusActive
 	}
 	if in.Password != "" && h.hashPassword != nil {
+		if h.passwordValidator != nil {
+			if err := h.passwordValidator(in.Password); err != nil {
+				httputil.WriteError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
 		hash, err := h.hashPassword(in.Password)
 		if err != nil {
 			httputil.WriteError(w, http.StatusInternalServerError, "密码哈希失败")
@@ -205,6 +219,12 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		IsAdmin: in.IsAdmin, Status: in.Status,
 	}
 	if in.Password != "" && h.hashPassword != nil {
+		if h.passwordValidator != nil {
+			if err := h.passwordValidator(in.Password); err != nil {
+				httputil.WriteError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
 		hash, err := h.hashPassword(in.Password)
 		if err != nil {
 			httputil.WriteError(w, http.StatusInternalServerError, "密码哈希失败")
