@@ -17,8 +17,8 @@ type MenuMeta struct {
 	ShowMenu bool   `json:"showMenu"`
 }
 
-// staticMenus 返回初期静态菜单，仅含 console-admin 已有视图（dashboard/profile）。
-// P0-3 接 PaaS 业务页时扩展为按角色过滤的动态菜单。
+// staticMenus 返回 console-admin 业务菜单（dashboard/system/profile）。
+// system 下含租户/用户/角色管理；按角色过滤留后续（super_admin 可见全部，普通 admin 仅本租户相关）。
 func staticMenus() []Menu {
 	return []Menu{
 		{
@@ -32,6 +32,12 @@ func staticMenus() []Menu {
 			Name: "system",
 			Meta: MenuMeta{Title: "系统管理", Icon: "Setting", ShowMenu: true},
 			Children: []Menu{
+				{
+					Path:      "/system/tenant",
+					Name:      "systemTenant",
+					Component: "system/tenant/views/List",
+					Meta:      MenuMeta{Title: "租户管理", Icon: "OfficeBuilding", ShowMenu: true},
+				},
 				{
 					Path:      "/system/user",
 					Name:      "systemUser",

@@ -265,6 +265,14 @@ func (s *Store) ListTenants(ctx context.Context) ([]identity.Tenant, error) {
 }
 
 func (s *Store) DeleteTenant(ctx context.Context, id string) error {
+	// 非空保护：有用户拒绝，引导先清用户（防孤儿 + 防误删）
+	var n int
+	if err := s.db.Pool().QueryRow(ctx, `SELECT count(*) FROM users WHERE tenant_id=$1`, id).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return fmt.Errorf("%w: %s", identity.ErrTenantNotEmpty, id)
+	}
 	ct, err := s.db.Pool().Exec(ctx, `DELETE FROM tenants WHERE id=$1`, id)
 	if err != nil {
 		return err
@@ -272,7 +280,7 @@ func (s *Store) DeleteTenant(ctx context.Context, id string) error {
 	if ct.RowsAffected() == 0 {
 		return fmt.Errorf("租户不存在: %s", id)
 	}
-	return nil // user_roles/api_keys FK CASCADE 自动清
+	return nil // api_keys FK CASCADE 自动清
 }
 
 // ListUsers tenantID 空则全租户。

@@ -167,6 +167,23 @@ func TestMenusNonEmpty(t *testing.T) {
 	decodeData(t, rec.Body.Bytes(), &menus)
 	assert.NotEmpty(t, menus)
 	assert.Equal(t, "home", menus[0].Name)
+	// system 子菜单含租户管理（P1.1）
+	var sysMenu *Menu
+	for i := range menus {
+		if menus[i].Name == "system" {
+			sysMenu = &menus[i]
+			break
+		}
+	}
+	require.NotNil(t, sysMenu, "应含 system 菜单")
+	var hasTenant bool
+	for _, c := range sysMenu.Children {
+		if c.Name == "systemTenant" {
+			hasTenant = true
+			break
+		}
+	}
+	assert.True(t, hasTenant, "system 下应含租户管理")
 }
 
 func TestLoginSetsCookies(t *testing.T) {

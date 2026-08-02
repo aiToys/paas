@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -97,6 +98,12 @@ func (f *fakeRepo) ListTenants(_ context.Context) ([]Tenant, error) {
 func (f *fakeRepo) DeleteTenant(_ context.Context, id string) error {
 	if _, ok := f.tenants[id]; !ok {
 		return errNotFound("租户")
+	}
+	// 非空保护：有用户拒绝（与 memory/pg 同源）
+	for _, u := range f.users {
+		if u.TenantID == id {
+			return fmt.Errorf("%w: %s", ErrTenantNotEmpty, id)
+		}
 	}
 	delete(f.tenants, id)
 	return nil
@@ -207,6 +214,21 @@ func TestTenantsCRUD(t *testing.T) {
 
 	rec = doReq(t, h.DeleteTenant, http.MethodDelete, "/api/tenants/t-new", "")
 	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestDeleteTenantNonEmptyRejected(t *testing.T) {
+	h := newAdminHandler()
+	// 建租户 + 用户
+	require.Equal(t, http.StatusOK, doReq(t, h.CreateTenant, http.MethodPost, "/api/tenants", `{"id":"t-ne","name":"NonEmpty"}`).Code)
+	require.Equal(t, http.StatusOK, doReq(t, h.CreateUser, http.MethodPost, "/api/users",
+		`{"id":"u-ne","tenantId":"t-ne","name":"ne-user","password":"secret","roles":["developer"]}`).Code)
+	// 删有用户的租户 -> 409
+	rec := doReq(t, h.DeleteTenant, http.MethodDelete, "/api/tenants/t-ne", "")
+	require.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "仍有用户")
+	// 清用户后删 -> 204
+	require.Equal(t, http.StatusNoContent, doReq(t, h.DeleteUser, http.MethodDelete, "/api/users/u-ne", "").Code)
+	assert.Equal(t, http.StatusNoContent, doReq(t, h.DeleteTenant, http.MethodDelete, "/api/tenants/t-ne", "").Code)
 }
 
 func TestUsersCRUDNoPasswordLeak(t *testing.T) {

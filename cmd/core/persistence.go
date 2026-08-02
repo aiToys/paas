@@ -331,7 +331,12 @@ func seedPGAllIfEmpty(
 
 // seedApplications 把内存版同一批预置应用灌入目标仓储（PG 路径用）。
 // 以每个应用自身的 TenantID 建 ctx（PG Create 以 ctx 租户为准），保证归属正确。
+//
+// PAAS_DISABLE_DEMO_SEED=true（chart seed.demo=false）时跳过，生产由用户自建。
 func seedApplications(ctx context.Context, appRepo application.Repository) {
+	if os.Getenv("PAAS_DISABLE_DEMO_SEED") == "true" {
+		return
+	}
 	for _, a := range appmemory.SeedApps() {
 		a.Recount()
 		appCtx := tenant.WithTenant(ctx, a.TenantID)

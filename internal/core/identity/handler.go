@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -116,6 +117,10 @@ func (h *Handler) DeleteTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.repo.DeleteTenant(r.Context(), id); err != nil {
+		if errors.Is(err, ErrTenantNotEmpty) {
+			httputil.WriteError(w, http.StatusConflict, "租户下仍有用户，请先删除或转移用户后再删除租户")
+			return
+		}
 		httputil.WriteError(w, http.StatusNotFound, err.Error())
 		return
 	}

@@ -112,13 +112,14 @@ func (s *Store) DeleteTenant(_ context.Context, id string) error {
 	if _, ok := s.tenants[id]; !ok {
 		return fmt.Errorf("租户不存在: %s", id)
 	}
-	delete(s.tenants, id)
-	// 级联清用户/API Key
-	for uid, u := range s.users {
+	// 非空保护：有用户拒绝，引导先清用户（防孤儿 + 防误删）
+	for _, u := range s.users {
 		if u.TenantID == id {
-			delete(s.users, uid)
+			return fmt.Errorf("%w: %s", identity.ErrTenantNotEmpty, id)
 		}
 	}
+	delete(s.tenants, id)
+	// 级联清 API Key（用户已无；Key 防御性清孤儿）
 	for key, k := range s.apiKeys {
 		if k.TenantID == id {
 			delete(s.apiKeys, key)

@@ -129,3 +129,20 @@ func TestCreateIgnoresBodyTenant(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "t-acme", got.TenantID, "TenantID 必须取自 ctx，忽略请求体")
 }
+
+func TestNewStore_DemoDisabled(t *testing.T) {
+	// PAAS_DISABLE_DEMO_SEED=true 时 NewStore 不灌演示应用，生产由用户自建。
+	t.Setenv("PAAS_DISABLE_DEMO_SEED", "true")
+	s := NewStore()
+	apps, err := s.List(acmeCtx())
+	require.NoError(t, err)
+	assert.Empty(t, apps, "demo 禁用时不应 seed 应用")
+}
+
+func TestNewStore_DemoEnabled(t *testing.T) {
+	// 默认（dev）灌入示例应用，acme 应有 app-cs/app-rec/app-lab 三个。
+	s := NewStore()
+	apps, err := s.List(acmeCtx())
+	require.NoError(t, err)
+	assert.Len(t, apps, 3, "acme 应有 3 个 seed 应用")
+}

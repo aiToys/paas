@@ -1,6 +1,13 @@
 package identity
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrTenantNotEmpty 删除租户时租户下仍有用户（防孤儿数据 + 防误删）。
+// handler 映射 409，引导先清用户。
+var ErrTenantNotEmpty = errors.New("租户下仍有用户")
 
 // Repository 是 Identity 持久化抽象。
 // 实现需在所有查询中强制按 tenant 过滤（Plan 2 的 PG 实现会在 SQL 层注入）。

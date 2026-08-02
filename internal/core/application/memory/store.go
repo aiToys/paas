@@ -5,6 +5,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"sync"
 
@@ -33,8 +34,15 @@ type Store struct {
 }
 
 // NewStore 创建仓储并 seed 示例应用。
+//
+// PAAS_DISABLE_DEMO_SEED=true（chart seed.demo=false）时跳过演示应用 seed，
+// 生产环境应用列表为空由用户自建；dev 默认灌入示例应用便于演示。
+// 与 seedIdentity 演示凭证门控同源，避免两套门控。
 func NewStore() *Store {
 	s := &Store{apps: map[string]application.Application{}}
+	if os.Getenv("PAAS_DISABLE_DEMO_SEED") == "true" {
+		return s
+	}
 	for _, a := range seed() {
 		a.Recount()
 		s.apps[a.ID] = a
