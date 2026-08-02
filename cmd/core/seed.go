@@ -42,10 +42,32 @@ func seedIdentity(idb identity.Repository, extraKey string) {
 			if hErr != nil {
 				log.Printf("[seed] hash admin 密码失败: %v", hErr)
 			} else if err := idb.CreateUser(ctx, identity.User{
-				ID: "u-acme-admin", TenantID: "t-acme", Name: "admin",
-				PasswordHash: hash, IsAdmin: true, Roles: []string{"tenant-admin"}, Status: identity.StatusActive,
+				ID: "u-super-admin", TenantID: "t-acme", Name: "admin",
+				PasswordHash: hash, IsAdmin: true, Roles: []string{"super_admin", "tenant-admin"}, Status: identity.StatusActive,
 			}); err != nil {
 				log.Printf("[seed] %v", err)
+			}
+		}
+		// 租户密码登录账号（与 3 演示 API Key 的 UserID 对齐，供 console-user 登录）。
+		for _, tu := range []struct {
+			id, name, tenant, role string
+		}{
+			{"u-acme-admin", "acme-admin", "t-acme", "tenant-admin"},
+			{"u-acme-dev", "acme-dev", "t-acme", "developer"},
+			{"u-globex-admin", "globex-admin", "t-globex", "tenant-admin"},
+		} {
+			if _, err := idb.GetUserByName(ctx, tu.name); err != nil {
+				hash, hErr := auth.HashPassword("123456")
+				if hErr != nil {
+					log.Printf("[seed] hash %s 密码失败: %v", tu.name, hErr)
+					continue
+				}
+				if err := idb.CreateUser(ctx, identity.User{
+					ID: tu.id, TenantID: tu.tenant, Name: tu.name,
+					PasswordHash: hash, Roles: []string{tu.role}, Status: identity.StatusActive,
+				}); err != nil {
+					log.Printf("[seed] %v", err)
+				}
 			}
 		}
 		keys = append(keys,
