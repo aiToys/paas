@@ -22,6 +22,7 @@ type HashPasswordFn func(plain string) (string, error)
 type PasswordValidatorFn func(plain string) error
 
 // Handler 是 identity 管理 API 的 HTTP 处理器（/api/admin/tenants、/api/admin/users、/api/admin/api-keys、/api/admin/roles）。
+// API Key 方法同时挂自助端点 /api/api-keys（auth 守卫，租户隔离见各方法 platformAdmin 分支）。
 // 各方法以 http.HandlerFunc 暴露，由 main.go 经 reg.Register 注册（同时登记 OpenAPI）。
 type Handler struct {
 	repo              Repository
@@ -30,6 +31,11 @@ type Handler struct {
 	// IsPlatformAdmin 判定调用者是否平台超管（main.go 注入 gateway.IsPlatformAdmin）。
 	// 平台超管可跨租户管理；普通 tenant-admin 仅限本租户（防越权）。
 	IsPlatformAdmin func(*http.Request) bool
+	// CallerUserID/CallerRoles 取调用者用户 ID 与角色集（main.go 注入 gateway.UserIDFrom/RolesFrom）。
+	// 自助 API Key 端点据此绑定密钥归属 + roles 封顶（只能赋予自身持有的角色，零提权）。
+	// 未注入时返空（UserID 空则保留 body 值，roles 求交为空 → 返空集），保守安全。
+	CallerUserID func(*http.Request) string
+	CallerRoles  func(*http.Request) []string
 }
 
 // NewHandler 创建 identity 管理 handler。
@@ -56,6 +62,41 @@ func (h *Handler) platformAdmin(r *http.Request) bool {
 func callerTenant(r *http.Request) string {
 	tid, _ := tenant.TenantFrom(r.Context())
 	return tid
+}
+
+// callerUserID 取调用者用户 ID（main.go 注入 CallerUserID）；未注入返空。
+func (h *Handler) callerUserID(r *http.Request) string {
+	if h.CallerUserID == nil {
+		return ""
+	}
+	return h.CallerUserID(r)
+}
+
+// callerRoles 取调用者角色集（main.go 注入 CallerRoles）；未注入返空。
+func (h *Handler) callerRoles(r *http.Request) []string {
+	if h.CallerRoles == nil {
+		return nil
+	}
+	return h.CallerRoles(r)
+}
+
+// capRoles 把请求角色收敛到调用者自身持有的角色集（求交）。
+// 求交为空（含请求未指定）→ 返调用者自身角色（镜像，零提权）：自助密钥权限不超自身。
+func capRoles(requested, owned []string) []string {
+	ownedSet := make(map[string]bool, len(owned))
+	for _, r := range owned {
+		ownedSet[r] = true
+	}
+	var out []string
+	for _, r := range requested {
+		if ownedSet[r] {
+			out = append(out, r)
+		}
+	}
+	if len(out) == 0 {
+		return owned
+	}
+	return out
 }
 
 // —— 响应辅助（core 契约 {data:T}/{error:msg}）——
@@ -311,13 +352,21 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, http.StatusBadRequest, "请求体格式错误")
 		return
 	}
+	// 非 platform-admin（自助/tenant-admin）：先从 ctx 补全归属（自助场景前端无需传 tenantId/userId），
+	// 再做必填校验，避免自助调用因缺字段 400。
+	if !h.platformAdmin(r) {
+		in.TenantID = callerTenant(r)
+		if uid := h.callerUserID(r); uid != "" {
+			in.UserID = uid
+		}
+	}
 	if in.TenantID == "" || in.UserID == "" {
 		httputil.WriteError(w, http.StatusBadRequest, "tenantId/userId 必填")
 		return
 	}
-	// 普通 tenant-admin：API Key 强制归属本租户（防跨租户创建）。
+	// roles 封顶：只能赋予自身持有角色（零提权：developer 无法创建 tenant-admin 密钥）。
 	if !h.platformAdmin(r) {
-		in.TenantID = callerTenant(r)
+		in.Roles = capRoles(in.Roles, h.callerRoles(r))
 	}
 	if in.ID == "" {
 		in.ID = "k-" + randHex(8)
@@ -335,7 +384,8 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
-	id := pathID(r, "/api/admin/api-keys/")
+	// lastID 取末段，兼容 /api/admin/api-keys/{id}（超管）与 /api/api-keys/{id}（自助）两挂载点。
+	id := lastID(r)
 	if id == "" {
 		httputil.WriteError(w, http.StatusBadRequest, "缺少 id")
 		return
@@ -392,6 +442,16 @@ func pathID(r *http.Request, prefix string) string {
 	// 去掉可能的子路径
 	if i := strings.Index(p, "/"); i >= 0 {
 		p = p[:i]
+	}
+	return p
+}
+
+// lastID 取路径末段非空 id（如 /api/api-keys/k-1 → k-1），不依赖固定前缀，
+// 供同时挂在多个前缀下的资源（如 api-keys 自助 + 超管）使用。
+func lastID(r *http.Request) string {
+	p := strings.TrimRight(r.URL.Path, "/")
+	if i := strings.LastIndex(p, "/"); i >= 0 {
+		return p[i+1:]
 	}
 	return p
 }

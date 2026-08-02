@@ -240,6 +240,18 @@ cmd/core serveHTTP
 - **响应解包契约**：console-admin http interceptor 按是否有 `data` 字段解包——list 端点 `{data:[...]}`→数组，item 端点对象直接返回（model/channel 无顶层 data 字段）。maas handler 与之匹配。
 - **留后续**：模型启用/禁用（软删）、通道健康检查（真实探活替代手动 status）、凭证测试（建通道时 ping 上游）、模型分组/标签、用量按模型维度计量。
 
+### P1.3 API Key 自助管理（去假 + 租户自助端点）
+
+承接 P1.2，去除 console-user `ApiKeys.vue` 纯假数据（硬编码 k1/k2/k3，按钮无后端对接）。补租户自助端点 + 前端真实化。复用 identity handler 既有 APIKey 方法（已是租户隔离），无需新增领域逻辑。
+
+- **租户自助端点**（`/api/api-keys`，`auth` 守卫，任意已认证用户管理本租户密钥）：`GET`（列本租户，掩码）/ `POST`（创建，返明文一次）/ `DELETE /{id}`。与 `/api/admin/api-keys`（super_admin 跨租户）并存——同一 handler 方法，靠 `platformAdmin` 分支区分作用域。
+- **授权模型（零提权）**：`identity.Handler` 注入 `CallerUserID`/`CallerRoles`（main.go 桥接 `gateway.UserIDFrom`/`RolesFrom`，依赖倒置避免 identity→gateway import）。非超管创建密钥时：① 强制 `tenantId=callerTenant`（防跨租户）；② 强制 `userId=callerUserID`（绑定调用者，自助场景前端无需传）；③ `roles` 经 `capRoles` 求交——只能赋予自身持有角色，求交为空（含未指定）→ 镜像调用者自身角色（developer 无法创建 tenant-admin/super_admin 密钥）。校验顺序：非超管先从 ctx 补全归属，再做必填校验（避免自助空 body 400）。
+- **lastID 路由兼容**：`DeleteAPIKey` 改用 `lastID(r)`（取路径末段，不依赖固定前缀），兼容 `/api/admin/api-keys/{id}` 与 `/api/api-keys/{id}` 两挂载点。
+- **console-user `ApiKeys.vue` 真实化**：`fetchJSON` 对接 `/api/api-keys`（cookie 会话鉴权）；列表掩码 + roles tag + 归属用户；创建弹确认 → 空 body POST → 明文仅显示一次（el-dialog + 复制按钮 + 「仅显示一次」警示）；吊销走普通确认（API Key 租户级资产，不按物理环境隔离，不走 prod gated）；空状态引导。
+- **MVP 取舍**：自助列表返本租户全部密钥（租户=信任边界，掩码不泄漏明文，租户内可见性可接受，按用户 scope 留后续）；创建不提供角色选择（镜像自身，最简最安全，角色细分留后续）。
+- **e2e 验证**：developer 登录 → 列表仅本租户（t-globex 不泄漏）→ 空 body 创建返明文+roles=[developer] → 请求 tenant-admin/super_admin 被封顶为 [developer]（零提权）→ 删本租户 204 / 跨租户 404 不泄漏。
+- **留后续**：密钥 name/label 字段（现以 id 展示）、按用户 scope 列表（自助只见自己的）、密钥过期/轮转、创建时角色细分选择、使用次数/最后使用时间统计、API Key 审计日志。
+
 ### 工作负载（应用运行形态）
 
 工作负载归属应用，分三类（Service/Job/CronJob），本期进程内 mock，真实 K8s 编排为下一切片：

@@ -273,6 +273,73 @@ func TestAPIKeyCreatePlaintextListMasks(t *testing.T) {
 	assert.NotEqual(t, key, masked)
 }
 
+// TestAPIKeySelfServiceCapsRoles 验证自助 API Key（/api/api-keys，非超管）：
+// 创建时强制本租户 + 绑定调用者用户 + roles 封顶（请求超自身角色被剔除→镜像自身，零提权）；
+// 删除经 lastID 兼容自助路径，跨租户删 404 不泄漏。
+func TestAPIKeySelfServiceCapsRoles(t *testing.T) {
+	repo := newFake()
+	// 预置 developer 用户作自助调用者。
+	require.NoError(t, repo.CreateUser(context.Background(), User{ID: "u-dev", TenantID: "t-acme", Name: "dev", Status: StatusActive}))
+
+	h := NewHandler(repo)
+	h.IsPlatformAdmin = func(*http.Request) bool { return false } // 自助/tenant-admin
+	h.CallerUserID = func(*http.Request) string { return "u-dev" }
+	h.CallerRoles = func(*http.Request) []string { return []string{"developer"} }
+
+	// developer 尝试创建 tenant-admin 密钥（提权尝试），并伪造他租户归属。
+	r := withTenantReq(httptest.NewRequest(http.MethodPost, "/api/api-keys",
+		strings.NewReader(`{"tenantId":"t-globex","userId":"u-x","roles":["tenant-admin"]}`)), "t-acme")
+	r.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.CreateAPIKey(rec, r)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var wrap struct {
+		Data map[string]any `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &wrap))
+	// 强制本租户 + 绑定调用者：body 的 t-globex/u-x 被覆盖。
+	assert.Equal(t, "t-acme", wrap.Data["tenantId"])
+	assert.Equal(t, "u-dev", wrap.Data["userId"])
+	// roles 封顶：请求 tenant-admin 被剔除 → 求交为空 → 镜像调用者 [developer]。
+	roles, _ := wrap.Data["roles"].([]any)
+	require.Len(t, roles, 1)
+	assert.Equal(t, "developer", roles[0])
+	// 明文 key 返回一次。
+	assert.True(t, strings.HasPrefix(wrap.Data["key"].(string), "sk-"))
+
+	// 自助删除经 lastID（/api/api-keys/{id}）。
+	kid := wrap.Data["id"].(string)
+	r = withTenantReq(httptest.NewRequest(http.MethodDelete, "/api/api-keys/"+kid, nil), "t-acme")
+	rec = httptest.NewRecorder()
+	h.DeleteAPIKey(rec, r)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	// 删除他租户密钥 → 404 不泄漏（apiKeyInCallerTenant 拒绝）。
+	require.NoError(t, repo.CreateAPIKey(context.Background(), APIKey{ID: "k-globex", TenantID: "t-globex", UserID: "u-g", Key: "sk-x"}))
+	r = withTenantReq(httptest.NewRequest(http.MethodDelete, "/api/api-keys/k-globex", nil), "t-acme")
+	rec = httptest.NewRecorder()
+	h.DeleteAPIKey(rec, r)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+
+	// 自助列表仅本租户（看不到 t-globex 的 key）。
+	r = withTenantReq(httptest.NewRequest(http.MethodGet, "/api/api-keys", nil), "t-acme")
+	rec = httptest.NewRecorder()
+	h.ListAPIKeys(rec, r)
+	require.Equal(t, http.StatusOK, rec.Code)
+	for _, k := range dataSlice(t, rec.Body.Bytes()) {
+		assert.Equal(t, "t-acme", k["tenantId"], "自助列表不应泄漏他租户密钥")
+	}
+
+	// 空 body 自助创建（前端真实路径，不传 tenantId/userId）：从 ctx 补全，不 400。
+	r = withTenantReq(httptest.NewRequest(http.MethodPost, "/api/api-keys",
+		strings.NewReader(`{}`)), "t-acme")
+	r.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	h.CreateAPIKey(rec, r)
+	require.Equal(t, http.StatusOK, rec.Code, "空 body 自助创建应从 ctx 补全归属")
+}
+
 func TestListRoles(t *testing.T) {
 	h := newAdminHandler()
 	rec := doReq(t, h.ListRoles, http.MethodGet, "/api/admin/roles", "")

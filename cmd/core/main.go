@@ -248,6 +248,13 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// 注入平台超管判定：IsAdmin 用户 token 携带 super_admin 标记（auth.issueTokens），
 	// 据此区分跨租户平台管理与本租户 tenant-admin，防越权。
 	idmHandler.IsPlatformAdmin = gateway.IsPlatformAdmin
+	// 注入调用者用户 ID/角色（桥接 gateway ctx）：自助 API Key 端点据此绑定密钥归属 +
+	// roles 封顶（只能赋予自身持有角色，零提权）。
+	idmHandler.CallerUserID = func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }
+	idmHandler.CallerRoles = func(r *http.Request) []string {
+		rs, _ := gateway.RolesFrom(r.Context())
+		return rs
+	}
 	adminGuard := func(h http.Handler) http.Handler {
 		// 平台级管理（租户/用户/API Key/dashboard 跨租户聚合）需 super_admin 角色，
 		// 防 tenant-admin 越权枚举全部租户与用户。auth 先解析身份注入 roles，再校验超管。
@@ -674,6 +681,16 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		apiroute.Tags("身份管理"), apiroute.Summary("删除 API Key"))
 	reg.Register("GET", "/api/admin/roles", adminGuard(http.HandlerFunc(idmHandler.ListRoles)),
 		apiroute.Tags("身份管理"), apiroute.Summary("内置角色列表（只读）"))
+
+	// API Key 自助端点（/api/api-keys，auth 守卫，任意已认证用户管理本租户密钥）。
+	// 复用 idmHandler 方法：非超管分支强制本租户 + 绑定调用者用户 + roles 封顶（零提权），
+	// super_admin 走 /api/admin/api-keys 跨租户视图。console-user ApiKeys.vue 消费此端点。
+	reg.Register("GET", "/api/api-keys", auth(http.HandlerFunc(idmHandler.ListAPIKeys)),
+		apiroute.Tags("API 密钥"), apiroute.Summary("本租户 API Key 列表（掩码）"), apiroute.WithResp([]identity.APIKey{}))
+	reg.Register("POST", "/api/api-keys", auth(http.HandlerFunc(idmHandler.CreateAPIKey)),
+		apiroute.Tags("API 密钥"), apiroute.Summary("创建本租户 API Key（返明文一次，roles 封顶自身）"), apiroute.WithReqBody(identity.APIKey{}), apiroute.WithResp(identity.APIKey{}))
+	reg.Register("DELETE", "/api/api-keys/{id}", auth(http.HandlerFunc(idmHandler.DeleteAPIKey)),
+		apiroute.Tags("API 密钥"), apiroute.Summary("删除本租户 API Key"))
 
 	srv := &http.Server{
 		Addr: ":8080",
