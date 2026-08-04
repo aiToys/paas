@@ -230,3 +230,18 @@ func (r *Registry) SortedSchemaNames() []string {
 	sort.Strings(names)
 	return names
 }
+
+// RegisteredPaths 返回去重并按字典序排序的已注册 path 列表。
+// 供 metrics middleware 做 route 归一化（最长前缀匹配，把实际 path 映射回带 {id} 的模板）。
+func (r *Registry) RegisteredPaths() []string {
+	seen := map[string]struct{}{}
+	for _, rt := range r.routes {
+		seen[rt.Path] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for p := range seen {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
+}
