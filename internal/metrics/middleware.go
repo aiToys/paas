@@ -83,3 +83,12 @@ func (s *statusRecorder) WriteHeader(code int) {
 	s.status = code
 	s.ResponseWriter.WriteHeader(code)
 }
+
+// Flush 转发底层 http.Flusher（如 httptest.ResponseRecorder / zeus / hermes statusRecorder）。
+// Go 接口嵌入 http.ResponseWriter 不自动转发额外接口，下游 handler 的 `w.(http.Flusher)`
+// 断言会失败 -> SSE 流式端点（/v1/chat/completions）无法逐 chunk flush，回归 P1.4 修过的缓冲问题。
+func (s *statusRecorder) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}

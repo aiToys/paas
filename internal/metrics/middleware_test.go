@@ -93,3 +93,44 @@ func TestStatusRecorderDefault(t *testing.T) {
 		t.Errorf("默认 status 应为 200:\n%s", out)
 	}
 }
+
+// 额外覆盖：statusRecorder 转发 http.Flusher（SSE 流式必需，防 P1.4 修过的缓冲回归）。
+func TestStatusRecorderForwardsFlusher(t *testing.T) {
+	reg := NewRegistry()
+	mw := HTTPMiddleware(reg, []string{"/sse"})
+
+	flushed := 0
+	inner := &flusherRW{ResponseWriter: httptest.NewRecorder(), onFlush: func() { flushed++ }}
+
+	// handler 内断言 w.(http.Flusher) 可达 + Flush 真转发到底层
+	var seenFlusher bool
+	h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f, ok := w.(http.Flusher)
+		if ok {
+			seenFlusher = true
+			f.Flush()
+		}
+	}))
+
+	req := httptest.NewRequest("GET", "/sse", nil)
+	h.ServeHTTP(inner, req)
+
+	if !seenFlusher {
+		t.Fatal("handler 内 w.(http.Flusher) 断言失败，SSE 流式会被缓冲")
+	}
+	if flushed != 1 {
+		t.Errorf("底层 Flush 调用次数 = %d, want 1", flushed)
+	}
+}
+
+// flusherRW 是实现 http.Flusher 的 fake ResponseWriter，记录 Flush 调用。
+type flusherRW struct {
+	http.ResponseWriter
+	onFlush func()
+}
+
+func (f *flusherRW) Flush() {
+	if f.onFlush != nil {
+		f.onFlush()
+	}
+}
