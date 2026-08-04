@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/pkg/provider"
@@ -93,6 +94,11 @@ func ChatCompletions(gw *Gateway, meter *Meter) http.HandlerFunc {
 			cause = "config error"
 		}
 		log.Printf("[gateway] %s %s 全部通道不可用: %v", r.Method, r.URL.Path, lastErr) //nolint:gosec // 请求 method/path 入日志是标准实践
+		// 失败也记推理指标（status=fail），便于 error_rate 计算。
+		if meter != nil {
+			tid, _ := tenant.TenantFrom(r.Context())
+			meter.recordInferenceMetrics(tid, req.Model, "fail", 0, 0)
+		}
 		httputil.WriteError(w, http.StatusServiceUnavailable, "all channels unavailable: "+cause)
 	}
 }
@@ -113,6 +119,8 @@ func serveStream(w http.ResponseWriter, r *http.Request, stream <-chan provider.
 	// 禁 nginx/ingress 缓冲：否则流被攒成大块转发，客户端失去打字机效果（逐 chunk 到达）。
 	w.Header().Set("X-Accel-Buffering", "no")
 	flusher, _ := w.(http.Flusher)
+
+	start := time.Now()
 
 	tokens := 0
 	ctx := r.Context()
@@ -149,6 +157,8 @@ loop:
 	if meter != nil {
 		tid, _ := tenant.TenantFrom(r.Context())
 		meter.Record(tid, model, tokens)
+		// Prometheus 推理指标（success）：tokens 粗估全计 completion，duration 用 wall clock。
+		meter.recordInferenceMetrics(tid, model, "success", tokens, time.Since(start).Seconds())
 	}
 }
 
