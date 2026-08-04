@@ -41,7 +41,7 @@ const font = reactive({
 })
 
 const watermarkContent = computed(() => [
-  profile.value?.username || 'vue-admin',
+  profile.value?.username || 'PaaS',
   profile.value?.nickname || ''
 ].filter(Boolean))
 

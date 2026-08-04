@@ -28,7 +28,18 @@ func (s *Store) List(ctx context.Context) ([]application.Application, error) {
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.Pool().Query(ctx, appSelect+` WHERE tenant_id=$1 ORDER BY id`, tid)
+	return s.listRows(ctx, appSelect+` WHERE tenant_id=$1 ORDER BY id`, tid)
+}
+
+// ListAll 跨租户列出全部应用（admin 平台总览，不过滤 tenant；按 tenant_id, id 排序）。
+func (s *Store) ListAll(ctx context.Context) ([]application.Application, error) {
+	return s.listRows(ctx, appSelect+` ORDER BY tenant_id, id`)
+}
+
+// listRows 执行给定查询并扫描行→附加绑定→按查询顺序组装返回列表。
+// List 与 ListAll 共用，避免 Query/scan/attachBindings 逻辑重复（DRY）。
+func (s *Store) listRows(ctx context.Context, query string, args ...any) ([]application.Application, error) {
+	rows, err := s.db.Pool().Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -160,6 +171,35 @@ func (s *Store) AppsCount(ctx context.Context) (int, error) {
 	var n int
 	err := s.db.Pool().QueryRow(ctx, `SELECT COUNT(*) FROM applications`).Scan(&n)
 	return n, err
+}
+
+// Delete 删除应用 + 内嵌 bindings（事务：先清 application_bindings，再删 applications 行；
+// ON DELETE CASCADE 已设，显式清仅为事务内幂等）。租户隔离：tenant_id 不匹配视为不存在。
+func (s *Store) Delete(ctx context.Context, id string) error {
+	tid, err := pg.TenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.Pool().Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var hit bool
+	if err := tx.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM applications WHERE id=$1 AND tenant_id=$2)`, id, tid).Scan(&hit); err != nil {
+		return err
+	}
+	if !hit {
+		return fmt.Errorf("应用不存在: %s", id)
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM application_bindings WHERE app_id=$1`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM applications WHERE id=$1 AND tenant_id=$2`, id, tid); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // —— 扫描 / 聚合辅助 ——

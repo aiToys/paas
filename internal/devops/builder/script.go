@@ -29,7 +29,7 @@ BUILD_ARGS="-t $REF"
 if [ -n "$DOCKERFILE" ]; then BUILD_ARGS="$BUILD_ARGS -f $DOCKERFILE"; fi
 docker build $BUILD_ARGS "$BUILD_CTX"
 docker push "$REF"
-digest=$(docker inspect --format '{{range .RepoDigests}}{{.}}{{end}}' "$REF")
+digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$REF")
 if [ -z "$digest" ]; then digest=$(docker inspect --format '{{.Id}}' "$REF"); fi
 echo "PAAS_DIGEST=${digest#*@}"
 echo "PAAS_BUILD_DONE=1"

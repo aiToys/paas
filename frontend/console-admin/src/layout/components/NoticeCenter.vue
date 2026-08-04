@@ -190,7 +190,7 @@ import {
   noticeTypeLabel as typeLabel,
 } from '@/app/constants/enums'
 import { t } from '@/lib/i18n'
-import type { NoticeInfo } from '@/modules/system/notice/api'
+import type { NoticeInfo } from '@/app/stores/notice'
 
 const router = useRouter()
 const noticeStore = useNoticeStore()

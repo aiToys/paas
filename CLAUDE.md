@@ -65,13 +65,14 @@ CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md LICENSE
 
 ### 集群部署（Helm + 前端嵌入单镜像）
 
-一套 Helm chart（`deploy/charts/paas`）一把梭部署到 K8s：core 单镜像同源 serve 前端 + API（无 CORS），参考 aiem 模式（`hub.wang.dd:5000` 私有 registry + `hermes` ingress）。
+一套 Helm chart（`deploy/charts/paas`）一把梭部署到 K8s：core 单镜像同源 serve 前端 + API（无 CORS），**集群内自建 registry**（`deploy/k8s/registry.yaml`，NodePort 30050）+ `hermes` ingress。所有镜像依赖统一来自集群内 registry（去除外部 hub.wang.dd 依赖），镜像清单 + 同步 + 排查见 `docs/deploy/dependencies.md`。
 
+- **集群内自建 registry**（去除 hub.wang.dd 依赖）：`deploy/k8s/registry.yaml`（registry:2 + local-path PVC 20Gi + Service NodePort 30050）。所有镜像地址统一 `<nodeIP>:30050`——kubelet/CRI 在节点拉镜像**无法解析 `svc.cluster.local`**，故 Pod 镜像也用 IP:NodePort（builder daemon push / core Pod registry client / Mac 导入同址）。`scripts/deploy-k8s.sh` 自动检测 worker nodeIP + `envsubst` 注入 `values-paas-k8s.yaml` 的 `${NODE_IP}` 占位。`scripts/sync-images.sh` 列表驱动导入核心镜像（postgres/docker:git/gitea/引擎等，daocloud 中转）。**core hostNetwork 退役**（早期为访问外部 hub.wang.dd 的 hack，自建 registry 后 core Pod 经 Pod 网络→NodePort 可达，`values-paas-k8s.yaml` 设 `core.hostNetwork=false`）。
 - **前端嵌入 core**：三套 SPA（console-user/console-admin/landing）构建产物 `//go:embed` 进 core 二进制（`internal/web/`），core 同域 serve。同域路由（ServeMux 最长前缀匹配）：`/api/*` `/v1/*` `/openapi.json` `/docs` `/livez` → API（精确匹配优先）；`/console/*` → console-user；`/admin/*` → console-admin；`/*` → landing（兜底）。前端 base path 子路径化：console-user `base:'/console/'`、console-admin `VITE_BASE='/admin/'`、landing 默认 `/`。
 - **Dockerfile 多阶段**：node:22-alpine 构建三套前端（console-admin 需 Node ≥ 22.13）→ golang:1.26-alpine Go 交叉编译（`ARG GOARCH=amd64`，builder 跑本地架构交叉编译到 amd64 避 QEMU）→ distroless runtime。国内源默认（`ARG NPM_REGISTRY=https://registry.npmmirror.com`、`ARG GOPROXY=https://goproxy.cn,direct`），海外 `--build-arg` 覆盖。无 `# syntax=` 指令（避免 buildkit 拉远程 frontend）。
 - **Helm chart 组件**：`templates/crds.yaml`（Workload+DataService CRD，`crds.install` 门控）+ `templates/rbac.yaml`（ServiceAccount + ClusterRole[core.aitoys CRD + apps/batch workload + pods/services/events] + ClusterRoleBinding）+ core-deployment（`serviceAccountName` + `PAAS_K8S_NAMESPACE` + `PAAS_METRICS_ADDR=0`）+ ingress（`hermes` class，host 配）+ 内置 postgres（`db.enabled` 开关）。
 - **in-cluster 数据面**：core 容器内 `startManager` 用 `ctrl.GetConfig()` 自动检测（PAAS_KUBECONFIG 显式 或 in-cluster SA token + KUBERNETES_SERVICE_HOST），集群内部署无需 PAAS_KUBECONFIG 文件，SA token 自动挂载 + RBAC 授权。**关键修复**：原以 `PAAS_KUBECONFIG` 非空作启 manager 的唯一门控，导致集群内部署（SA token 可用但 env 空）数据面不生效——改用 `ctrl.GetConfig()` 容错（无 config 才降级）。此 bug 单元测试测不出（无 in-cluster 环境），真实集群部署才暴露。
-- **部署脚本**：`scripts/deploy-k8s.sh`（docker build → push → helm upgrade）。docker push 在某些环境（如 colima VM 到 registry 路由不通）超时时，自动 fallback `crane push --insecure`（不经 dockerd，直 HTTP 推）。集群覆盖文件 `deploy/charts/paas/values-paas-k8s.yaml`（registry=hub.wang.dd:5000/paas、ingress=hermes/paas.k8s.dd、本集群无 StorageClass 时 `db.enabled=false` 内存模式）。
+- **部署脚本**：`scripts/deploy-k8s.sh`（检测 nodeIP → docker build → push 集群内 registry → envsubst values → helm upgrade）。docker push 超时（colima VM 路由问题）自动 fallback `crane push --insecure`。集群覆盖文件 `deploy/charts/paas/values-paas-k8s.yaml`（`${NODE_IP}:30050` 占位、ingress=hermes/paas.k8s.dd、`core.hostNetwork=false`）。首次部署需先 `kubectl apply -f deploy/k8s/registry.yaml` + `./scripts/sync-images.sh` 导入镜像（见 `docs/deploy/dependencies.md`）。
 
 ```bash
 ./scripts/deploy-k8s.sh                          # 构建前端 embed 镜像 + push + helm install（paas.k8s.dd）
@@ -103,9 +104,9 @@ git tag v0.1.0 && git push origin v0.1.0   # 发版：推 tag v* 触发 CI 多�
 curl -H "Authorization: Bearer sk-acme-admin" http://localhost:8080/v1/models
 # 模型市场富信息（含通道列表）
 curl -H "Authorization: Bearer sk-acme-admin" http://localhost:8080/api/models
-# 流式推理（mock 通道，需 model:infer 权限）
+# 流式推理（airouter 真实通道，需 model:infer 权限 + 配 sec-platform-airouter 凭证）
 curl -N -H "Authorization: Bearer sk-acme-dev" -H "Content-Type: application/json" \
-  -d '{"model":"qwen2.5-7b","messages":[{"role":"user","content":"你好"}],"stream":true}' \
+  -d '{"model":"glm-5.2","messages":[{"role":"user","content":"你好"}],"stream":true}' \
   http://localhost:8080/v1/chat/completions
 # 多租户隔离：Acme 只见 Acme 应用；跨租户访问 404 不泄漏
 curl -H "Authorization: Bearer sk-acme-admin" http://localhost:8080/api/applications
@@ -131,18 +132,18 @@ pnpm build                    # 构建三套
 ```
 console-user 模型市场(/api/models) / Playground(/v1/chat/completions)
   → Gateway(API Key 鉴权 + OpenAI 兼容 SSE + Token 计量 + 请求级 failover)
-  → MaaS 插件(catalog seed 真实供应商通道 + mock 演示)
+  → MaaS 插件(catalog seed 仅 airouter 真实通道)
   → Channel(openai-compatible Provider 转发 / mock·echo 进程内) → 流式返回
 ```
 
 - `pkg/provider/`：`Provider`（`Name()+Chat()`）/ `Model` / `Channel`（含 `UpstreamModel`/`CredentialRef` 第三方通道字段）/ `GatewayRegistrar` / `CredentialResolver`（凭证解析接口，依赖倒置）/ 5 个错误 sentinel（`ErrCredentialMissing`/`ErrCredentialInvalid`/`ErrUpstreamRateLimit`/`ErrUpstreamUnavailable`/`ErrUpstreamConfig`，驱动降级分类）。
-- `internal/maas/`：MaaS 插件 + `OpenAICompatibleProvider`（一个适配器覆盖三家 OpenAI 兼容协议，纯 `net/http` + SSE 解析）+ catalog seed（gpt-4o/gpt-4o-mini/qwen-plus 双通道容灾/deepseek-chat/deepseek-reasoner + echo-demo/qwen2.5-7b mock 演示）+ `MockProvider`/`EchoProvider`。
+- `internal/maas/`：MaaS 插件 + `OpenAICompatibleProvider`（一个适配器覆盖 OpenAI 兼容协议，纯 `net/http` + SSE 解析）+ catalog seed（**仅 airouter 网关真实模型 12 个**，配 `sec-platform-airouter` 即全模型真实可推理）+ `MockProvider`/`EchoProvider`（BuildProvider fallback 用，不在默认 catalog）。**catalog 已收敛清理**：早期混入的直连供应商占位（gpt-4o/qwen-plus/deepseek-* 等，需各自独立凭证未配即不可用）+ mock/echo 演示（echo-demo/qwen2.5-7b/bge-m3，非真实推理）已全部移除，ID 列入 `DeprecatedSeedModelIDs`，启动 seed 自动清理遗留 PG 记录（CASCADE 清通道），保证模型市场「全部真实可用」。
 - `internal/core/gateway/`：API Gateway（`ResolveChannels` 候选列表 / 请求级 failover：degraded 类错误切备通道，offline 类标 offline / `MarkChannelStatus` / API Key 中间件 / OpenAI 流式 handler / Meter）。
 - 凭证：平台级 Secret（`security.Scope=platform`，全租户共享，仅 tenant-admin 可写）经 `Resolve` 取明文（仅内存），`main.go` 桥接 security store → `CredentialResolver` 注入 MaaS 插件。
 - 路由策略：通道按 `Priority` 升序，跳过 `offline`；请求时 degraded 类错误（限流/5xx/超时）自动 failover，offline 类（凭证/配置）切下一通道，全部失败 503。
 - `pkg/plugin.CoreDeps` 的 `Gateway()` + `SecretResolver()` 注入点（依赖倒置，破除 maas→security import）。
-- 切片**不依赖 K8s/GPU**；未配凭证时真实通道返回 `ErrCredentialMissing` → 503，echo-demo 开箱可演示。
-- **airouter 真实推理入口（统一真实化）**：catalog 追加 12 个 airouter 网关模型（通义/DeepSeek/智谱/月之暗面/豆包/万相，覆盖文本/推理/视觉/图片/向量，`internal/maas/airouter_catalog.go`，复用 `OpenAICompatibleProvider` Bearer），`baseAirouter=https://airouter.ddmc-inc.com/api/v1` + `credAirouter=sec-platform-airouter`。airouter 内部已聚合百炼/千帆/豆包多供应商容灾，平台配一个 api_key 即全模型真实可用（白嫖其容灾链路，无需各自申请百炼/千帆/豆包 Key）。api_key **不入库**：经 env `PAAS_AIROUTER_API_KEY`（helm values `maas.airouterApiKey`，部署 `--set`）注入，启动 seed 到平台级 Secret。security pg seed 改为「表非空也 ensure 平台级凭证」（`ensurePlatformSecrets`，`ON CONFLICT DO NOTHING` 不覆盖用户已填值），重部署到已有 PG 自动补齐 airouter 凭证。
+- 切片**不依赖 K8s/GPU**；未配 airouter 凭证时真实通道返回 `ErrCredentialMissing` → 503；配 `PAAS_AIROUTER_API_KEY`（helm `maas.airouterApiKey`）后全模型真实可推理。
+- **airouter 真实推理入口（统一真实化，默认 catalog 唯一来源）**：catalog 即 12 个 airouter 网关模型（通义/DeepSeek/智谱/月之暗面/豆包/万相，覆盖文本/推理/视觉/图片/向量，`internal/maas/airouter_catalog.go`，复用 `OpenAICompatibleProvider` Bearer），`baseAirouter=https://airouter.ddmc-inc.com/api/v1` + `credAirouter=sec-platform-airouter`。airouter 内部已聚合百炼/千帆/豆包多供应商容灾，平台配一个 api_key 即全模型真实可用（白嫖其容灾链路，无需各自申请百炼/千帆/豆包 Key）。api_key **不入库**：经 env `PAAS_AIROUTER_API_KEY`（helm values `maas.airouterApiKey`，部署 `--set`）注入，启动 seed 到平台级 Secret。security pg seed 改为「表非空也 ensure 平台级凭证」（`ensurePlatformSecrets`，`ON CONFLICT DO NOTHING` 不覆盖用户已填值），重部署到已有 PG 自动补齐 airouter 凭证。**catalog 收敛**：早期直连供应商占位 + mock/echo 演示已移除（`DeprecatedSeedModelIDs`，启动自动清遗留 PG 记录），airouter 成为默认 catalog 唯一内容，模型市场全部真实可用。
 
 ### 应用为主线（统一控制台）
 
@@ -211,6 +212,7 @@ cmd/core serveHTTP
 - **`GET /docs`**：Scalar 交互文档（公开无鉴权），拉 `/openapi.json` 渲染，支持 try-it-out（填 API Key 试请求）；CDN 加载 Scalar（Apache 2.0），离线场景 noscript 降级提示。
 - 前端：`openapi-typescript`（devDep）+ `pnpm gen:api`（需先 `make run`）从 `/openapi.json` 生成 `src/api/types.gen.ts`；`fetchJSON<T>` 泛型 helper 消费生成类型。新代码用生成类型，存量 49 个手写 interface 渐进迁移（YAGNI，不一次性重写）。
 - **写操作请求体全覆盖**：所有接收 JSON body 的 POST/PUT 均登记 `WithReqBody`（含 devops/configcenter 漏登记的 4 个 POST Operation）；无 body 的写操作（rollback/pay/heartbeat/publish/generate）按 REST 语义不强加 requestBody。
+- **响应契约全平台统一**（深度检测 P1）：所有平台 CRUD 成功响应一律 `{data:T}`（经 `httputil.WriteData`/`WriteDataCreated`），错误一律 `{error:msg}`（`WriteError`），500 脱敏（`WriteInternalError`）。**仅以下协议端点保留裸 JSON**（`httputil.WriteJSON`，非 `{data:T}`）：OpenAI 兼容 `/v1/*`（`{"object":"list","data":[...]}`）、K8s 探针 `/livez`（`{"status":"ok"}`）、数据面 SDK `/dp/*`（zeus 发现协议 shape）、配置中心发现 `/api/configcenter/.../published`（`{published,version,snapshot,publishId}` 客户端直取）。前端两路消费均兼容：console-user `fetchJSON` 智能解包 `{data:T}` 否则原样；console-admin http interceptor 检测 `'data' in payload` 自动解包。消除各 handler 50+ 处裸 `json.NewEncoder` + auth 自定义 `writeAuthData/writeErr` 重复（DRY 收敛到 httputil 单一真源）。单资源响应聚合用专用类型（如 `governance.ServiceDetail{Service,Instances}`）+ spec `WithResp` 对齐。
 - **后续**：vendored 本地 Scalar JS（离线）、自动 mock。
 
 ### P1.1 应用去假 + 租户开通（生产可用起步）
@@ -240,6 +242,19 @@ cmd/core serveHTTP
 - **响应解包契约**：console-admin http interceptor 按是否有 `data` 字段解包——list 端点 `{data:[...]}`→数组，item 端点对象直接返回（model/channel 无顶层 data 字段）。maas handler 与之匹配。
 - **留后续**：模型启用/禁用（软删）、通道健康检查（真实探活替代手动 status）、凭证测试（建通道时 ping 上游）、模型分组/标签、用量按模型维度计量。
 
+### P1.2+ 供应商管理（Vendor 实体：选供应商自动带入 BaseURL/凭证）
+
+承接 P1.2，解决「每个 openai-compatible 通道都要手填 BaseURL + 选凭证」的痛点。把公共部分（BaseURL + 凭证 + Type）抽成可复用 `Vendor` 预设，创建通道选供应商即带入，免去手填。
+
+- **领域**：`pkg/provider.Vendor{ID/Name/Type/BaseURL/CredentialRef/Description}`（平台级，全租户共享）；`Channel` 加 `VendorID` 关联（非空时 handler 从 Vendor 解析 BaseURL/CredentialRef 回填到通道字段，BuildProvider 不动——仍用 Channel 的 Endpoint/CredentialRef 构造 Provider，向后兼容旧通道）。
+- **Repository**：`maas.Repository` 加 Vendor CRUD 六方法（ListVendors/GetVendor/CreateVendor/UpdateVendor/DeleteVendor/VendorsCount）+ sentinel（`ErrVendorNotFound/Exists`）；memoryStore + pg.Store 双实现（克隆 Model CRUD 模式）。
+- **PG 持久化**：migration `0001`（新部署）含 `maas_vendors` 表 + `maas_channels.vendor_id` 列；`0003_maas_vendor`（已部署 PG 增量，`ADD COLUMN IF NOT EXISTS` + `CREATE TABLE IF NOT EXISTS` + UPDATE 回填存量 airouter 通道 vendor_id，幂等）。`chCols` 加 vendor_id（3 处 Scan 同步，列错位 panic 是最易踩坑）。
+- **REST**（`/api/admin/providers`，composite 按路径分发，复用 maasHandler + adminGuard super_admin）：`GET/POST /api/admin/providers` + `GET/PUT/DELETE /{id}`。Vendor 不是路由实体（不进 gateway），CRUD 后无需 reloadModel。OpenAPI Operation 登记 5 操作。
+- **通道创建回填**（handler `serveChannels` POST/`serveChannel` PUT）：`VendorID` 非空时 `GetVendor` 解析 BaseURL/CredentialRef 覆盖通道字段（「选供应商自动带入」真正落点）；vendor 不存在 -> 404。
+- **airouter 预置**：`AirouterVendor()`（airouter_catalog.go 导出）seed 时 ensure（`persistence.seedMaasCatalog` 在 ModelsCount 判空前 CreateVendor，不被「表非空跳过」门控跳过；ON CONFLICT 幂等）。12 个 airouter 通道 VendorID 均指向 airouter，admin 修改其 BaseURL/凭证后新通道带入（存量通道字段不自动同步留后续）。
+- **console-admin 供应商管理**（super_admin）：菜单「供应商管理」（`/provider`，Connection 图标，dynamic.ts 自动识别）。`modules/provider/`：`api.ts`（re-export model/api 的 Vendor CRUD + 假分页）+ `List.vue`（SearchTable+useCrud，BaseURL/凭证列，删除输入 ID 确认）+ `ProviderFormDrawer.vue`（id/name/type/baseUrl/credentialRef 选平台 Secret/description）。`model/views/ChannelFormDrawer.vue` 改造：openai-compatible 时显 vendorId select（替代手填 endpoint/credentialRef）+ upstreamModel，endpoint/vendor/credentialRef 隐藏（后端回填）。
+- **留后续**：Vendor 改 BaseURL/凭证后存量通道自动同步（反向级联 reloadModel）、凭证测试（建供应商时 ping 上游）、通道健康检查真实探活。
+
 ### P1.3 API Key 自助管理（去假 + 租户自助端点）
 
 承接 P1.2，去除 console-user `ApiKeys.vue` 纯假数据（硬编码 k1/k2/k3，按钮无后端对接）。补租户自助端点 + 前端真实化。复用 identity handler 既有 APIKey 方法（已是租户隔离），无需新增领域逻辑。
@@ -253,6 +268,17 @@ cmd/core serveHTTP
 - **e2e 验证**：developer 登录 → 列表仅本租户（t-globex 不泄漏）→ 空 body 创建返明文+roles=[developer] → 请求 tenant-admin/super_admin 被封顶为 [developer]（零提权）→ 删本租户 204 / 跨租户 404 不泄漏。
 - **留后续**：密钥 name/label 字段（现以 id 展示）、按用户 scope 列表（自助只见自己的）、密钥过期/轮转、创建时角色细分选择、使用次数/最后使用时间统计、API Key 审计日志。
 
+### P1.4 后台管理重构（菜单分组 + 跨租户资源总览 + 推理流式增强）
+
+解决 console-admin 三大痛点：菜单散乱（个人中心/模型/供应商都是顶级）、管理员无法跨租户查看用户数据、推理模型流式思考过程丢失。设计见 `docs/superpowers/specs/2026-08-02-p1-real-platform.md`。
+
+- **菜单架构重构**（`auth/menus.go` staticMenus）：按平台运维职责分组——工作台 / 身份与权限（租户/用户/角色/密钥）/ 推理服务（模型/供应商）/ 资源总览（应用/工作负载/数据服务）。个人中心移出侧栏（`ShowMenu:false`），路由保留供右上角用户下拉入口。子菜单 path 保持稳定（不随分组前缀化），前端跳转引用零牵连。system 重命名「身份与权限」（Lock 图标）。
+- **跨租户资源总览**（核心：管理员管理用户数据）：各业务 Repository 加 `ListAll(ctx)`（跨租户，不过滤 tenant，返回对象带 `TenantID`，pg 提取共享查询 helper 复用 DRY）；REST `/api/admin/applications|workloads|dataservices`（`adminGuard` super_admin，**只读**——跨租户写越权风险高，资源运维仍在 console-user 租户内）。console-admin `modules/resources/` 模块 3 页（SearchTable + useCrud 假分页，租户列 + keyword + tenantId 过滤）。dataservice admin 总览同样 `MaskConnection`（与 list/detail 同源，明文仅内部绑定注入用）。
+- **全模块 admin 总览扩展**（每个模块管理功能完善 + 闭环，2026-08-04）：解决「每个模块都有后台管理、管理员能管理其他用户数据」核心诉求。environment/devops/configcenter/governance/observability/security/billing 7 模块补 `ListAll`（Repository 接口 + memory + pg）+ 11 端点（`/api/admin/environments|buildruns|images|releases|namespaces|services|alert-rules|secrets|audit-logs|quotas|bills`，`adminGuard` super_admin 只读）+ 11 前端总览页（`resources/views/{Environments,BuildRuns,Images,Releases,Namespaces,Services,AlertRules,Secrets,AuditLogs,Quotas,Bills}.vue`）+ 菜单 11 子项。security `ListAllSecrets` 返回 `Masked()`；billing `Limits`/`Items` 深拷贝防 race；observability 用 alert-rules（metrics/logs/traces 惰性时序不适总览）；devops 三实体各一端点。console-admin 后台现覆盖全部模块（身份 4 + 推理 2 + 资源总览 14 = 20 管理页），每个模块管理功能闭环。
+- **推理流式增强**（Playground 真正 SSE 效果）：推理模型（GLM/QwQ/Doubao/DeepSeek-R1 等）流式返回 `reasoning_content`（思考过程），原代码只解析 `content` 致思考阶段被丢弃→前端长时间空白。`provider.Chunk` 加 `Reasoning` 字段 → `OpenAICompatibleProvider` 解析 `delta.reasoning_content` → gateway `serveStream` 透传为 `deltaMessage.ReasoningContent` + 加 `X-Accel-Buffering: no`（防 nginx/ingress 缓冲，确保逐 chunk 到达）→ console-user Playground 渲染**可折叠「思考过程」**（流式中显「思考中…」脉动徽标）+ 正文实时流式。链路完整、断连有退出路径无 goroutine 泄漏。
+- **SSE 经 hermes ingress 缓冲修复（三层根因）**：SSE 流式经 hermes ingress 被缓冲成一次性大块，三层根因逐一修复——① **zeus accesslog `statusRecorder` 未实现 `http.Flusher`**：嵌入 `http.ResponseWriter` 但 Go 接口嵌入不转发额外接口，代理/ReverseProxy 的 `w.(http.Flusher)` 断言失败 → flush 空操作 → 全量缓冲。修复：加 `Flush()` 委托底层（`if f, ok := r.ResponseWriter.(http.Flusher); ok { f.Flush() }`）。② **hermes metrics `statusRecorder` 同样问题**：同模式修复。③ **hermes SSE 分流依赖请求 Accept 头**：`isSSERequest` 检 `Accept: text/event-stream`，前端 `fetch()` 默认 `Accept: */*` → 落 `handleHTTP`。修复：Playground fetch 加 `Accept: text/event-stream`（SSE 标准声明）。修复后 `httputil.ReverseProxy` 的 `flushInterval`（对 `text/event-stream` 返回 -1 立即 flush）穿透中间件链正常工作：**无 Accept 头也 71 chunk 逐块到达**（~30-50ms/块，与直连 service 一致）。验证：修复前 ingress 1 块 vs 修复后 71 块。zeus/hermes 镜像已重建部署。
+- **深度检测第 1 轮**：19 条 `/api/admin/*` 端点全挂 adminGuard（无漏挂）；ListAll 仅 admin 路径调用，普通 List 仍强制 tenant 过滤；PG 全参数化无注入；memory 锁+深拷贝正确。修复 2 项 Important：① admin dataservices 端点 Connection 掩码（补 `MaskConnection`）；② model.go 过时注释纠正。
+
 ### 工作负载（应用运行形态）
 
 工作负载归属应用，分三类（Service/Job/CronJob），本期进程内 mock，真实 K8s 编排为下一切片：
@@ -264,9 +290,10 @@ internal/workload/  领域（Type/Status 常量 + Validate）+ Repository（租�
 ```
 
 - `internal/workload/`：`Workload`（期望 Replicas vs 就绪 Ready 分离，为 controller-runtime 铺路）/ Repository / 内存实现（seed 5 条跨两租户）/ handler。
-- 路由：`GET/POST /api/applications/{id}/workloads`、`GET /api/workloads?type=`、`PUT /api/workloads/{id}`（扩缩容/状态）、`DELETE /api/workloads/{id}`。
+- 路由：`GET/POST /api/applications/{id}/workloads`、`GET /api/workloads?type=`、`GET /api/workloads/{id}`（详情含运行实例）、`GET /api/workloads/{id}/logs?pod=&tail=&previous=`（实例 Pod 日志）、`PUT /api/workloads/{id}`（扩缩容/状态）、`DELETE /api/workloads/{id}`。
 - cmd/core 用 composite handler 按 `/workloads` 后缀分发，避免与 application 的 `/api/applications/` 前缀冲突。
-- console-user：`Workloads.vue`（按类型 tab 接真实 API + 扩缩容/删除）+ 应用详情「部署」tab 渲染该应用工作负载。
+- **详情 + 运行实例（Pod 级）+ 日志**（Job/CronJob 看运行详情）：`workload.Instance`（Pod 级：name/status/ready 重启/节点/IP/启动时间/message）+ `workload.Detail{Workload,Instances}`；`StatusReader` 接口加 `Instances(ctx,id)`（K8s 按 label `paas.aitoys/tenant+workload` 查 Pod 映射）+ `PodLogs(ctx,id,pod,tail,previous)`（K8s Pods.Logs，**越权校验**：先 Get Pod 确认 label 同时含本租户+本 workload 否则拒绝，跨租户/跨 workload 统一 not found 不泄漏）；handler `GET /api/workloads/{id}` 返回 Detail（聚合期望态+实例），`GET /api/workloads/{id}/logs` 透传日志流（text/plain，`previous=true` 取上次终止容器日志，Job 崩溃排查关键）。无 clientset 降级返空/友好错误（详情页仍展示期望态）。console-user `Workloads.vue` 详情抽屉（实例表格 + 每行「日志」按钮 + 日志对话框含「查看上次终止日志」开关）。fake client 测（实例映射/就绪重启/降级/越权拒绝）。
+- console-user：`Workloads.vue`（按类型 tab 接真实 API + 扩缩容/删除 + 详情/日志）+ 应用详情「部署」tab 渲染该应用工作负载。
 - 切片**不依赖 K8s**（进程内 mock）。
 - **K8s 数据面纳管（env 开关，端到端已验证）**：`api/core/v1alpha1` Workload CRD（期望状态 spec/status）+ `internal/controller` WorkloadReconciler（watch CRD → CreateOrUpdate Deployment(service)/Job/CronJob + GPU `nvidia.com/gpu` request + `podAntiAffinity` 反亲和 + 回写 CRD status.ready）+ `workload.Applier`/`ApplyRepo` 装饰器（包装 Repository，写操作投影 CRD；devops Release 编排透明继承）+ `cmd/core` manager（`PAAS_KUBECONFIG` 非空启 controller-runtime + WorkloadReconciler，空则保持 PG/memory 现状）。控制面/数据面解耦（Deployment 归 K8s，manager 挂了不删）。fake client 测试（创建/幂等/GPU 反亲和/CronJob）。引入 controller-runtime v0.24.1 + k8s.io v0.36.0。`make manifests` 生成 CRD + deepcopy（controller-gen）。CRD 落地 namespace 由 `PAAS_K8S_NAMESPACE` 控制。**已真实集群端到端验证**：API 创建 Workload → CRD 投影 → Deployment 落地 → Pod Running → status 回写（ready/running）； DataService → StatefulSet 落地 + status.phase 回写。**关键修复**：`groupversion_info.go` 必须用 controller-runtime `scheme.Builder`（非裸 `runtime.NewSchemeBuilder`），否则真实集群 list/watch 报 ListOptions parameter codec 错（fake client 测不出）。manager metrics 默认 :8080 与 core HTTP 冲突，改 `PAAS_METRICS_ADDR`（默认 :8081，0=禁用）+ 注入 zap logger。
 - **留后续**：envtest 集成测试（本地 etcd/apiserver binary）、GPU 自定义 gpu-memory extended resource 查询、PG Ready 实时反向同步、多租户 namespace 隔离、真实 vLLM 纳管。
@@ -329,14 +356,55 @@ console-user 弃用 localStorage 明文 API Key 裸奔模式，改走密码登�
 - **错误响应脱敏**：`httputil.WriteInternalError(w, err)` 统一 500 返 "internal error"（不泄漏 SQL 语句/表名/连接串），原始错误入日志；替换散落 40+ 处 `WriteError(w, 500, err.Error())`。`/v1/chat/completions` 503 按 sentinel 分类返脱敏 cause（credential issue/rate limited/upstream unavailable），不泄漏上游 URL/IP。
 - **构建日志 Git token 脱敏**：`builder.MaskToken/MaskErr` 对 `https://<token>@host` -> `https://***@` 脱敏，store `runBuild` 拿 res 后统一应用，防 git clone 失败 stderr 经 `BuildRun.Log` -> `GET /api/buildruns/{id}` 泄漏给 build:read。
 - **启动日志 API Key 脱敏**：只打前 6 字符 + 长度，防生产 Key 明文进容器日志聚合。
-- **登录防账号枚举**：先验密码（不存在/密码错统一 401），密码正确后再查状态（禁用 403），攻击者需已知密码才能发现账号禁用。
+- **登录防账号枚举**：先验密码（不存在/密码错统一 401），密码正确后再查状态（禁用 403），攻击者需已知密码才能发现账号禁用。用户不存在路径补 dummy bcrypt 比对（见第 3 轮），防时序侧信道。
 - **数据服务 Create/Update 凭证掩码**：与 List/Detail 一致返 `MaskConnection`，明文仅内部绑定注入用（防日志/proxy/MITM 捕获）。
 - **K8s 数据面 Port 投影修复**：`K8sApplier.Apply` 投影 CRD spec 补 `Port/ContainerPort`（原遗漏致 reconciler 不建 Service + 不加 readiness probe -> Pod 间 DNS 不可达 + Endpoints 永不 ready -> `/dp/instances` 返空，数据面失效；fake client 测不出）。
 - **K8s manager cache namespace 限定**：`Cache.DefaultNamespaces` 按 `PAAS_K8S_NAMESPACE` 限定（ns 非空时），防 watch 全集群 CRD + 收敛数据面到本 ns（多租户隔离加固）。
 - **Job TTL 清理**：WorkloadReconciler `applyJob` 设 `TTLSecondsAfterFinished=86400`（与 devops builder 一致），防完成 Job/Pod 永久残留拖慢 list/watch。
+- **Job/CronJob restartPolicy 修复**：`podSpec()` 未设 `RestartPolicy`，Job/CronJob 的 Pod template 默认 `Always` 被 apiserver 拒绝（"Required value: valid values OnFailure/Never"）-> Job 永远创建失败 + reconciler 疯狂报错。`applyJob`/`applyCronJob` 显式设 `RestartPolicyNever`（与 `BackoffLimit=0` 一致，失败即终止不重试）；fake client 测不出（无 apiserver 校验），真实集群才暴露。回归测试断言 restartPolicy=Never。
 - **applyService 顺序调整**：先建 Service 再回写 status（一次 Status().Update），避免 running/deploying 抖动 + apiserver 写放大。
 - **跨 store 编排补偿事务**：devops PG `CreateRelease`（INSERT release 失败回滚 workload 镜像）+ `RollbackRelease`（tx 失败补偿恢复 workload），防丢失回滚指针。
 - **并发深拷贝防御**：Gateway `Models()` 深拷贝防 `Channel.Status` 撕裂读；billing `GenerateBill` 返回深拷贝；configcenter `clonePublish`（Snapshot map）+ 锁内复校验 namespace；governance `Route.Methods` 深拷贝；billing PG `IncUsage/CheckAndInc` 负值夹紧防配额绕过；application PG `BindResource` advisory lock 防 ord 重复。
+
+### 深度检测第 3 轮（安全 + 前端双路审计，2026-08-04）
+
+安全维度 + 前端质量两路 agent 审计，修核心 Critical/Important：
+
+- **平台级 Secret 越权（Critical）**：`security.WithIsAdmin` 从 `gateway.IsAdmin`（校验 `tenant:admin`，每租户 admin 都有）改 `gateway.IsPlatformAdmin`（super_admin）。原实现致任意 tenant-admin 可删 `sec-platform-airouter` → 全平台推理 503，或伪造平台级 Secret 诱导跨租户绑定。
+- **Provider SSRF（Critical）**：`OpenAICompatibleProvider` 默认 httpClient 加 `CheckRedirect: http.ErrUseLastResponse`（不跟随重定向），防 baseURL 被配为攻击者主机返 302→metadata 时平台 airouter Key（Authorization 头）被外发。
+- **CodeRepo 注入/RCE（Critical）**：`CodeRepo.Validate` external 仓库加 URL/branch 校验——scheme 仅 http/https（拒 `file:///ssh:///ext::` 防 git 历史 RCE 如 CVE-2018-17456）、拒云元数据 host（169.254.169.254/metadata/loopback，防诱导 builder 把 `PAAS_GIT_TOKEN` 发往云元数据接口）、GitURL 不得自带 user info（凭证由 injectToken 从 env 注入）、Branch 正则 `^[A-Za-z0-9._/-]+$` + 拒 `-` 前缀（防 git argv flag 注入 `--upload-pack=sh -c...`）。
+- **Playground SSE 流式渲染（Critical）**：根因是 Vue 响应式引用 bug——`messages.value.push(原始对象)` 后改原对象属性不触发 trigger，token 流式到达但视图不刷新（一次性出现）。改取 `messages.value[len-1]`（reactive proxy）再修改。非后端/ingress/fetchAuth 问题（均已验证正确）。
+- **BuildRun panic 日志脱敏（Important）**：memory/pg store 的 `recover()` 分支 `构建异常: %v` 未走 `MaskToken`，panic 栈含 `cloneURL=https://<PAAS_GIT_TOKEN>@...`，统一补 `MaskToken`（与正常错误路径一致），防 build:read 权限者读平台 Git 凭证。
+- **Workload 绕过 prod:write（Important）**：`Workload.Validate` 强制 EnvID 必填（与 dataservice/governance 一致）；`allowProd` 区分「未注入 envResolver」（跳过，测试场景）与「EnvID 空」（fail-closed 保守按生产要 prod:write）。原 `envID==""` 直接放行，developer 可提交无环境归属负载绕过生产写防护。
+- **生产 cookieSecure 强制（Important）**：`PAAS_PROD=true` 且未开 `PAAS_COOKIE_SECURE=true` 时拒启，防生产误用 HTTP 致 access(15min)+refresh(7d) cookie 被嗅探。
+- **JWT secret 弱串防护（Important）**：生产模式 secret `<32` 字节拒启，防运维误配 `"paas"` 等弱串被 hashcat 暴破伪造 token。
+- **登录时序侧信道（Important）**：用户不存在路径补一次 dummy bcrypt 比对（`dummyHash` 启动生成 cost=10），使响应时间与「密码错」路径一致，防时序枚举用户名。
+- **限流 XFF 伪造（Important）**：`clientIP` 从「信任 XFF 首段」（客户端可控，每请求换随机 XFF 即绕过 per-IP 限流）改为优先 `X-Real-IP`（ingress 覆盖）→ XFF 最右段（ingress 追加）→ RemoteAddr。
+- **审计已验证正确**：13 个 pg store 全参数化无 SQL 注入；airouter api_key 经 env 注入不入库；Secret/Connection 全端点掩码；JWT `hmac.Equal` 常量时间比较；`/api/admin/*` 13 端点全挂 adminGuard；自助 API Key `capRoles` 求交零提权；未发现 v-html XSS。
+- **留后续（下一轮）**：I8/I9 错误响应脱敏（20+ 处 `WriteError(err.Error())` 泄漏 pgx 错误细节）、I10 CSRF Origin 校验、I4 parseDigest 信任 Pod 日志、I5/I6 各 client CheckRedirect 纵深、I13/I14 refresh rotation + logout 撤销（jti 黑名单）、I16 限流多副本 Redis、前端审计项（console-admin 401 自动刷新拦截器 / lib 死代码清理 / mock 双重门控 / vue-admin 品牌文案替换）。
+### 深度检测第 4-8 轮（横切加固 + 前端死代码清理，2026-08-04）
+
+承接第 3 轮留后续项，逐轮修复 + 开源打磨：
+
+- **第 4-5 轮（CSRF + mock 门控 + 401 拦截器 + 品牌）**：① CSRF SameSite=Lax 主防线 + Origin/Referer 同源校验纵深（`csrfMiddleware`，非 safe 方法校验 host==r.Host，跨站 403；origin 空放行兼容同源 GET 跳转）。② console-admin mock 双重门控（`enableMock = DEV && VITE_ENABLE_MOCK==='true'`，生产默认关）。③ console-admin 401 自动刷新拦截器（`RefreshHandler` interface + `setRefreshHandler` + `refreshAccessToken`，401 且非 _retry 且非 /refresh 时刷新重试一次，失败走登录）。④ vue-admin 品牌->PaaS（Footer/Sidebar/Index）。
+- **第 6 轮（I8/I9 错误响应脱敏）**：`httputil.WriteServiceError(w, status, err)` 特征分流--底层英文技术错误（pgx/SQLSTATE/dial tcp/`*.svc.cluster.local`/duplicate key 等 `internalErrorMarkers`）-> 500 脱敏（`WriteInternalError`），业务中文消息 -> 按传入 status 返回。全局替换散落 `WriteError(w, 500, err.Error())`，防 pgx 错误细节泄漏 build:read 权限者。
+- **第 7 轮（数据一致性 + I1 PG 侧）**：① I2 devops PG CreateRelease/RollbackRelease 补偿事务用 `context.WithoutCancel(ctx)` + log 失败（不阻断主流程）。② I3 application Delete 成功后 QuotaCheck(-1) 回滚配额。③ I4 identity DeleteTenant 单事务 + `SELECT ... FOR UPDATE` 行锁防并发。④ I5 devops `SweepInterrupted(ctx)` 启动恢复（pending/running build_runs -> failed，防进程退出后构建卡 running）。⑤ I1 PG 侧 CreateRelease `pg_advisory_xact_lock(hashtext(app|env))` 串行化同 (app,env) 发布。
+- **第 8 轮（I1 memory 侧对齐 + 前端死代码清理）**：① I1 memory 侧 CreateRelease 把 step2（List->UpdateImage）+ step3（存 release）包进 `s.mu` 临界区（与 PG advisory lock 语义对齐；跨 store 嵌套 devops.mu -> workload.mu 单向无死锁；`-race` + 全量 devops 测试验证通过）。② **前端基座演示死代码清理**（开源打磨）：删 6 个 vue-admin 遗留演示模块（`modules/system/{dept,dict,permission,menu,log,notice}`）+ 关联组件（`DeptSelector`/`DictTag`）+ composable（`useDict`）+ mock handler（dept/dict/permission/menu-manage/log/notice）+ 死常量（DICT/DEPT/PERMISSION/MENU/NOTICE/LOG 共 10 个）+ `MODULE_STATUS_MAP`（仅 permission List 用）；`NoticeInfo` 类型迁移到 `app/stores/notice`（保留 notice UI 壳 Header 铃铛 + dashboard 横幅，数据已短路为空）；`mock/handlers/menu.ts` 重写为基座最小演示（home + 访问控制 user/role）。i18n 零 dept/dict 文案（无需动）。vue-tsc + vite build 双通过。②b **i18n 死 key 命名空间清理**：删 `dept/permission/menu/crud/dict/log` 6 个死 key 命名空间（zh-CN + en-US 共 12 块，对应模块已删全无引用，Serena regex 跨文件批量删，vue-tsc 验证通过）；`notice` 命名空间保留（NoticeCenter 壳在用）。③ **后端资源泄漏 + 前端代码质量双路审计完成，无严重新发现**：后端关键点（`observability/real/http.go` defer Body.Close、`maas/{openai_compatible,mock,echo}` goroutine `select <-ctx.Done()` 断连退出 + defer close/body close、devops runBuild baseCtx 进程退出 cancel）全部正确处理，印证第 3 轮验证；前端 5 个轮询文件（App/Observability/DevOps/DataServiceDetail/AppBuilds）`setInterval` 均 `onUnmounted clearInterval` 清理，无 v-html/innerHTML、无 localStorage/sessionStorage 残留（已迁 cookie）、无 pinia persist、无 document.cookie 直接操作。
+- **留后续**：I4 parseDigest 信任 Pod 日志、I5/I6 各 client CheckRedirect 纵深、I13/I14 refresh rotation + logout 撤销（jti 黑名单，架构级）、I16 限流多副本 Redis、告警通知通道、Tempo span 详情、Vendor 改 BaseURL/凭证后存量通道自动同步。
+
+### 深度检测第 9 轮（资源泄漏 + 性能 + 死锁，2026-08-04）
+
+第 7 轮留后续审计 agent 发现项逐个修复（grep 误报剔除 + 真实项修）：
+
+- **devops memory CreateRelease 自死锁（Critical）**：第 7 轮 I1 memory 侧把 step2-3 包进 `s.mu` 临界区，但 step2 内调 `findImageIDByDigest`（取回滚指针）该函数自己又 `s.mu.Lock()` → **Go mutex 不可重入，自死锁**。`TestReleasePreviousAndRollback` 10min 超时暴露（`-race` 检测不出死锁，只检测数据竞争）。修复：`findImageIDByDigest` 去掉自取锁改「调用方已持锁」语义（注释明确），CreateRelease 临界区内直调。
+- **登录限流内存泄漏（Important）**：`loginLimiter.fails` map 永不清理过期条目（lockedUntil 过 + 窗口外的条目永久残留），长跑内存单调增长。修复：惰性 GC `sweep`（写操作时若距上次清理 > `loginWindow` 即扫除完全过期条目），持锁内调用无额外开销。
+- **identity PG ListUsers/ListAPIKeys N+1（Important）**：列表先查全部用户/Key，再逐条 `userRoles`/`apiKeyRoles` 查角色（N 次查询）。admin 跨租户列表可能很大。修复：加 `usersRolesBatch`/`apiKeysRolesBatch`（`WHERE user_id = ANY($1)` 一次查回 map），列表路径用批量聚合（单/Get 路径保留单查）。
+- **审计日志无分页 LIMIT（Important）**：`ListAuditLogs`/`ListAllAuditLogs` 无 LIMIT，审计增长后全量返回撑爆/超时。修复：SQL 末尾 `LIMIT 1000`（防御性上界，不改接口签名，前端可后续加分页）。
+- **误报剔除**：grep `for {` 命中三处「无限循环」——gateway `serveStream`（select ctx.Done+channel close 退出的事件循环）、k8s builder 轮询、airsync install，均为带退出条件的正常循环，非 bug，不改。
+- **出站 HTTP client CheckRedirect 纵深（I5/I6 收口）**：第 3 轮只修了 `OpenAICompatibleProvider`（airouter Key），其余 4 个平台 client（gitea basic auth / registry / observability Prom·Loki·Tempo）仍裸 `&http.Client{Timeout}` 跟随重定向——gitea 携带 paas-bot 密码，端点被劫持/误配返 302→攻击者主机会泄漏凭证。抽 `httputil.NewClient(timeout)`（内置 `CheckRedirect=ErrUseLastResponse` 不跟随），5 处统一改用（DRY，单一真源）。
+- **前端死代码复核（确认已干净）**：lib/ 子系统全在用（http/client 是 10+ 模块 api 入口，interceptors→notify/problem/token 链完整；auth 模块经 authService 公共入口内部消费）；resources/views 经 dynamic.ts `import.meta.glob` 约定路由加载（非孤儿）；console-user 零孤儿；全仓无 notImplemented/即将/敬请期待假占位（唯一「即将」是 Icon.vue 装饰火箭图标注释），后端零 TODO/FIXME。基座已达开源标准。
+- 全量 `go test ./...` 45 包通过（修死锁后）。
+
 
 ### DevOps CI/CD（代码->构建->镜像->发布->回滚）
 
@@ -362,6 +430,22 @@ console-user 弃用 localStorage 明文 API Key 裸奔模式，改走密码登�
   - **`process` 模式**：core 进程内 `os/exec` git/docker（`builder.Real`，本地 dev；distroless/K8s 部署不可用——故集群必须用 `k8s`）。
   - **`mock` 模式**：`sha256(commit+app+build)` 派生 digest，零依赖。
   - Release 部署经 workload K8s 数据面落地（Deployment）。策略接口开放（rolling/blue-green/canary），实现 YAGNI（只 rolling），蓝绿/金丝雀归后续（灰度耦合泳道归服务治理）。
+
+### 内置 Git 后端 + 镜像库管理 UI（一站式完善）
+
+一站式 PaaS 不让用户跳出平台。补齐「代码托管 + 镜像库管理」两块 UI，后端服务无头、管理 UI 全在 console-user：
+
+- **内置 Git 后端（Gitea 无头）**：`deploy/devops/gitea.yaml`（独立 yaml，`kubectl apply` 部署，paas ns 与 postgres 同形 ClusterIP，SQLite+local-path 10Gi PVC，worker nodeAffinity，不建 ingress）。initContainer 幂等创建 paas-bot admin（password 来自 Secret `paas-gitea`，GITEA__* env 配置：关注册/OAuth/安装页）。镜像内网化 `hub.wang.dd:5000/devtools/gitea:1.22.6`（集群内 DooD Job 中转 daocloud，因 colima 到 registry 路由不通）。
+- **Gitea API 客户端**（`internal/devops/gitea/client.go`）：纯 net/http + basic auth（paas-bot:password，避免 token 生成）；CreateRepo/GetRepo/GetTree/ListCommits/GetFileContent/CloneURLWithAuth；sentinel 错误（ErrRepoExists/ErrRepoNotFound/ErrGiteaUnavailable）驱动 handler HTTP 映射。
+- **镜像库 v2 适配**（`internal/devops/registry/client.go`）：纯 net/http 调 `hub.wang.dd:5000`（复用裸 registry:2）；Catalog/Tags（HEAD manifests 取 Docker-Content-Digest）；ErrRegistryUnavailable/ErrRepoNotFound 降级。`New()` 容错补 `http://` scheme（`PAAS_REGISTRY` env 无 scheme，同时供 builder docker push 用）。
+- **镜像库 UI 网络方案（core hostNetwork）**：dev 集群 Pod 网络与外部物理网隔离，core Pod 无法直访 `hub.wang.dd:5000`（registry client 503）。builder push 不受影响（经挂载 docker.sock 走节点 daemon）。helm chart `core.hostNetwork` 开关（`values-paas-k8s.yaml` 设 true）：core Pod `hostNetwork: true` + `dnsPolicy: ClusterFirstWithHostNet`（保留集群 DNS，gitea/postgres ClusterIP 仍可解析），用节点网络访问 registry。core pod IP 变节点物理网段，ingress（hermes）转发到 Service 不受影响。生产/普通部署保持 false。镜像代码未变时只需 `helm upgrade` 应用 hostNetwork，无需 docker build。
+- **CodeRepo 扩展**：加 `Source`（internal/external，默认 external 兼容历史）+ `GiteaOwner`/`GiteaRepo`+ `CloneURL`（`json:"-"` 含 basic auth，builder 内部 Go 调用读，永不序列化防凭证泄漏前端）。internal 仓库：handler 调 Gitea CreateRepo + 回填 GitURL（展示，不含凭证）+ CloneURL（含 paas-bot:pass@）。PG migration 0001 code_repos 加 source/gitea_owner/gitea_repo/clone_url 列；**已部署 PG 实例 0001 不重跑**，新增 `0002_code_repos_source.up.sql`（`ADD COLUMN IF NOT EXISTS`）增量补列（全新部署 0001 已含，IF NOT EXISTS 跳过，无副作用）。
+- **构建内网 clone**：builder runBuild 用 CloneURL 优先（internal）否则 GitURL（external）；`injectToken` 加 `@` 检测（含凭证 URL 跳过 token 注入），Gitea http CloneURL 原样透传，git 用 URL 内 basic auth clone（`http://paas-bot:pass@gitea.paas.svc.../repo.git`，不走公网）。天然契合，builder 核心零改动。
+- **REST**：仓库浏览 `GET /api/applications/{id}/repositories/{rid}/{tree|commits|file}`（仅 internal，external 返 405）；`file` action 取单文件内容（`?path=Dockerfile` -> `GetFileContent` base64 解码返 `{path,size,content}`，驱动前端点击文件查看代码）；registry 实时视图 `GET /api/registry/repositories`（catalog）+ `GET /api/registry/tags?repository=<name>`（tag+digest，仓库名含 `/` 用 query 避免路径歧义）。复用 image:read 权限。`/api/registry/` 需在 mux 显式注册（`cmd/core` 加 `mux.Handle`，否则落兜底 404）+ OpenAPI Operation 登记。
+- **构建 commit/message 真实化**：handler 创建 BuildRun 时，internal 仓库调 `gitea.ListCommits` 拿最新 commit 的**真实 sha + message** 填入 `b.Commit`/`b.Message`（替代 store 的 `mockCommit()`/`"mock: update "+branch`）。否则 builder script `if [ -z "$COMMIT" ]` 因 COMMIT 非空（mock）不 rev-parse HEAD -> commit/tag/message 全 mock（构建记录显示 `a3496eb7 / mock: update main` 与仓库真实 commit 不符，"看起来假"）。external 仓库或 Gitea 不可达回退 store mock（保持原行为）。
+- **闭环验证（2026-08-03 全通）**：内置建仓(source=internal)-> 浏览(tree/commits)-> git push Dockerfile -> 构建触发(builder Job clone 内置 Gitea + docker build + push hub.wang.dd:5000 + 解析 PAAS_DIGEST)-> Image 落地(digest 与构建日志一致)-> 镜像库 UI(catalog/tags/digest)。文件点击查看内容（Dockerfile 显示 FROM/COPY/CMD）；构建记录真实 commit/message（`85e3ca86 / add Dockerfile`，非 mock）。
+- **console-user**：应用详情「代码仓库」tab 加来源单选（内置 Gitea 创建/绑定外部 gitUrl）+ RepoBrowser 抽屉（el-tree 文件树从扁平 path 构建 + el-timeline 提交历史 + **文件叶子节点 @node-click 查看内容**：调 file 端点加载，展示文件头📄路径+关闭 + 等宽 pre 代码区，可滚动）；DevOps 中心「镜像库」tab 改 registry 实时视图（展开行按需加载 tag+digest，避免 N+1）。
+- **留后续**：Webhook（Gitea push 自动触发构建）、registry delete 落地（registry:2 需启 `REGISTRY_STORAGE_DELETE_ENABLED=true`+GC）、租户级 Gitea org 隔离（当前 repo 名租户内唯一够用）、Git diff/MR/分支管理（完整 Git Web UI 替代）。
 
 ### 应用配置（工作负载级 env/Secret）
 

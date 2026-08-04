@@ -77,6 +77,24 @@ func (s *Store) List(ctx context.Context, envID, appID, wtype string) ([]workloa
 	return out, nil
 }
 
+// ListAll 跨租户返回全部工作负载（admin 视图，不过滤 tenant，返回对象带 TenantID）。
+// 不做 env/app/type 过滤；按 TenantID 升序、再 ID 升序排序。深拷贝防外部修改污染 store。
+func (s *Store) ListAll(ctx context.Context) ([]workload.Workload, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]workload.Workload, 0, len(s.workloads))
+	for _, w := range s.workloads {
+		out = append(out, w) // map 迭代返回值副本，append 即深拷贝（切片字段除外，Workload 无引用语义切片）
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TenantID != out[j].TenantID {
+			return out[i].TenantID < out[j].TenantID
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
+
 func (s *Store) Get(ctx context.Context, id string) (workload.Workload, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {

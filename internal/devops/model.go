@@ -10,12 +10,24 @@
 // Repository 接口为未来接真实 OCI registry / Tekton / Argo 铺路。
 package devops
 
-import "time"
+import (
+	"net/url"
+	"strings"
+	"time"
+)
 
 // 代码仓库状态。
 const (
 	RepoStatusActive   = "active"
 	RepoStatusDisabled = "disabled"
+)
+
+// 代码仓库来源（一站式：内置 Gitea 为主，兼容外部 GitHub/GitLab）。
+const (
+	// RepoSourceInternal 内置 Gitea 仓库：创建时 PaaS 调 Gitea API 建仓，clone 走内网。
+	RepoSourceInternal = "internal"
+	// RepoSourceExternal 外部仓库：用户填 gitUrl，clone 走公网/外部。
+	RepoSourceExternal = "external"
 )
 
 // 构建触发来源。
@@ -65,21 +77,101 @@ type CodeRepo struct {
 	ID           string    `json:"id"`
 	TenantID     string    `json:"tenantId,omitempty"` // ctx 写入，请求体忽略
 	AppID        string    `json:"appId"`
-	GitURL       string    `json:"gitUrl"`
+	GitURL       string    `json:"gitUrl"`                 // external：用户填的外部 git URL；internal：Gitea 建仓后回填内网 clone URL
 	Branch       string    `json:"branch"`
 	Dockerfile   string    `json:"dockerfile"`
 	BuildContext string    `json:"buildContext"`
 	Status       string    `json:"status"`
-	CreatedAt    time.Time `json:"createdAt"`
+	// Source 标识仓库来源（internal/external）。空视为 external（兼容历史数据）。
+	Source     string    `json:"source"`
+	// GiteaOwner/GiteaRepo 仅 internal 有效：内置 Gitea 的 owner/repo（owner 固定 paas-bot）。
+	GiteaOwner string    `json:"giteaOwner,omitempty"`
+	GiteaRepo  string    `json:"giteaRepo,omitempty"`
+	// CloneURL 含凭证的 git clone URL（internal：含 paas-bot basic auth；external 空）。
+	// json:"-" 永不序列化到响应（防凭证泄漏前端）；builder 内部 Go 调用直接读此字段。
+	CloneURL  string    `json:"-"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
-// Validate 校验仓库字段：GitURL/Branch 必填；Dockerfile/BuildContext 空则由调用方补默认值。
+// Validate 校验仓库字段：external 时 GitURL/Branch 必填；internal 时 GitURL 可空（建仓后回填），
+// 但 Branch 必填（Gitea 默认分支）。Dockerfile/BuildContext 空则由调用方补默认值。
 func (r CodeRepo) Validate() error {
+	if r.Source == "" {
+		r.Source = RepoSourceExternal
+	}
+	if r.Source == RepoSourceInternal {
+		// 内置仓库：GitURL 由 Gitea 建仓后回填，校验时可不要求；Branch 必填（默认分支）。
+		if r.Branch == "" {
+			return errInvalid("branch")
+		}
+		return nil
+	}
+	// 外部仓库：GitURL/Branch 必填。
 	if r.GitURL == "" {
 		return errInvalid("gitUrl")
 	}
 	if r.Branch == "" {
 		return errInvalid("branch")
+	}
+	if err := validateExternalGitURL(r.GitURL); err != nil {
+		return err
+	}
+	if err := validateBranch(r.Branch); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateExternalGitURL 校验外部仓库 GitURL，防多租户攻击面：
+//   - scheme 仅 http/https：拒绝 file:///ssh:///ext:: 等（git 历史多处 ext:: RCE，如 CVE-2018-17456）
+//   - 拒绝云元数据端点 169.254.169.254：防 builder 把 PAAS_GIT_TOKEN 拼成 https://<token>@<host> 后
+//     被诱导发往云元数据接口窃取节点云凭证
+//   - 拒绝 user info 内已含凭证的 URL（防前端把明文凭证写入 GitURL）
+//
+// 不拒绝私网段（10/172.16/192.168）：企业内部 GitLab 属合法场景。
+func validateExternalGitURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return errInvalid("gitUrl")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errInvalid("gitUrl")
+	}
+	if u.User != nil {
+		return errInvalid("gitUrl") // GitURL 不得自带凭证（凭证由 injectToken 从 env 注入）
+	}
+	host := u.Hostname()
+	if isMetadataHost(host) {
+		return errInvalid("gitUrl")
+	}
+	return nil
+}
+
+// isMetadataHost 判定是否云元数据/回环等高敏地址（builder 不得主动连）。
+func isMetadataHost(host string) bool {
+	h := strings.ToLower(host)
+	switch {
+	case h == "169.254.169.254", h == "metadata", h == "metadata.google.internal":
+		return true
+	case h == "127.0.0.1", h == "localhost", h == "::1":
+		return true
+	}
+	return false
+}
+
+// validateBranch 校验分支名，防 git argv flag 注入（Branch 作 --branch 传入）。
+// 仅允许字母/数字/._- 和路径分隔（/），拒绝 -- 前缀与 shell 元字符。
+func validateBranch(b string) error {
+	if b == "" || strings.HasPrefix(b, "-") {
+		return errInvalid("branch")
+	}
+	for _, c := range b {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '.', c == '_', c == '-', c == '/':
+		default:
+			return errInvalid("branch")
+		}
 	}
 	return nil
 }

@@ -41,18 +41,15 @@ import { useRouter } from 'vue-router'
 import {
   User,
   UserFilled,
-  Lock,
-  DataBoard,
-  Menu as MenuIcon,
-  Bell,
-  Document,
-  Setting
+  Setting,
+  OfficeBuilding,
+  Key,
+  Cpu
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { t } from '@/lib/i18n'
 import { useUserStore } from '@/app/stores/user'
 import { usePermissionStore } from '@/app/stores/permission'
-import { Permissions, PERMISSION_WILDCARD } from '@/app/constants/permissions'
 import {
   fetchDashboardStats,
   fetchDashboardCharts,
@@ -128,15 +125,15 @@ interface QAction {
   perm?: string[]
 }
 const quickActions = computed<QAction[]>(() => {
+  // 仅保留 PaaS 实际存在的路由（menus.go 声明：system/{tenant,user,role,apikey} + model + profile）。
+  // 基座默认的 permission/dict/menu/notice/crud 等模块未在 PaaS 启用，跳过避免跳转到未注册路由。
   const actions: QAction[] = [
-    { key: 'user', label: t('dashboard.quickAction.user'), icon: User, path: '/system/user', perm: [Permissions.USER_READ, PERMISSION_WILDCARD] },
-    { key: 'role', label: t('dashboard.quickAction.role'), icon: UserFilled, path: '/system/role', perm: [Permissions.ROLE_READ, PERMISSION_WILDCARD] },
-    { key: 'permission', label: t('dashboard.quickAction.permission'), icon: Lock, path: '/system/permission', perm: [Permissions.PERMISSION_READ, PERMISSION_WILDCARD] },
-    { key: 'dict', label: t('dashboard.quickAction.dict'), icon: DataBoard, path: '/system/dict', perm: [Permissions.DICT_READ, PERMISSION_WILDCARD] },
-    { key: 'menu', label: t('dashboard.quickAction.menu'), icon: MenuIcon, path: '/system/menu', perm: [Permissions.MENU_READ, PERMISSION_WILDCARD] },
-    { key: 'notice', label: t('dashboard.quickAction.notice'), icon: Bell, path: '/system/notice', perm: [Permissions.NOTICE_READ, PERMISSION_WILDCARD] },
-    { key: 'crud', label: t('dashboard.quickAction.crud'), icon: Document, path: '/crud' },
-    { key: 'profile', label: t('dashboard.quickAction.profile'), icon: Setting, path: '/profile' }
+    { key: 'tenant', label: '租户管理', icon: OfficeBuilding, path: '/system/tenant' },
+    { key: 'user', label: '用户管理', icon: User, path: '/system/user' },
+    { key: 'role', label: '角色管理', icon: UserFilled, path: '/system/role' },
+    { key: 'apikey', label: 'API 密钥', icon: Key, path: '/system/apikey' },
+    { key: 'model', label: '模型管理', icon: Cpu, path: '/model' },
+    { key: 'profile', label: '个人中心', icon: Setting, path: '/profile' }
   ]
   return actions
 })

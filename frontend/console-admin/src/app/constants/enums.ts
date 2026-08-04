@@ -22,16 +22,6 @@ export const COMMON_STATUS_MAP: StatusMapEntry = {
   inactive: { type: 'info', text: '禁用' },
 }
 
-/** 权限模块（permission List 用）。text 存 i18n key，由 StatusTag 经 t() 翻译。 */
-export const MODULE_STATUS_MAP: StatusMapEntry = {
-  system: { type: 'primary', text: 'permission.option.moduleSystem' },
-  user: { type: 'info', text: 'permission.option.moduleUser' },
-  role: { type: 'warning', text: 'permission.option.moduleRole' },
-  permission: { type: 'success', text: 'permission.option.modulePermission' },
-  dict: { type: 'danger', text: 'permission.option.moduleDict' },
-  config: { type: 'info', text: 'permission.option.moduleConfig' },
-}
-
 /** 通知优先级 i18n key（由 priorityLabel 经 t() 翻译） */
 export const PRIORITY_LABEL: Record<string, string> = {
   high: 'notice.priority.high',

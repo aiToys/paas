@@ -17,9 +17,24 @@ import (
 // 把它当作单一 OpenAI 兼容供应商接入，复用 OpenAICompatibleProvider（Bearer），
 // 白嫖其容灾链路，无需各自申请百炼/千帆/豆包 API Key。
 const (
-	baseAirouter = "https://airouter.ddmc-inc.com/api/v1"
-	credAirouter = "sec-platform-airouter" //nolint:gosec // G101 误报：Secret ID 引用，非凭证明文
+	baseAirouter  = "https://airouter.ddmc-inc.com/api/v1"
+	credAirouter  = "sec-platform-airouter"  //nolint:gosec // G101 误报：Secret ID 引用，非凭证明文
+	vendorAirouter = "airouter"              // 预置供应商 ID（airouter 通道 VendorID 关联）
 )
+
+// AirouterVendor 返回 airouter 预置供应商（seed 时灌入 Vendor 表，admin 可见可改）。
+// 12 个 airouter 模型通道的 VendorID 均指向它；admin 修改其 BaseURL/凭证后，
+// 新创建通道选此供应商即带入（存量通道字段不自动同步，留后续）。
+func AirouterVendor() *provider.Vendor {
+	return &provider.Vendor{
+		ID:            vendorAirouter,
+		Name:          "airouter 网关",
+		Type:          ProviderOpenAICompatible,
+		BaseURL:       baseAirouter,
+		CredentialRef: credAirouter,
+		Description:   "聚合百炼/千帆/豆包多供应商容灾的 OpenAI 兼容网关，配单一 api_key 即全模型可用",
+	}
+}
 
 // airSpec 是精选模型的静态数据（提炼自上游模型目录，启动即注册到模型市场）。
 type airSpec struct {
@@ -33,8 +48,8 @@ type airSpec struct {
 }
 
 // airouterModels 精选策略：覆盖多厂商 + 多模态（文本/推理/视觉/图片/向量），各取代表，
-// 避免全量灌入。已剔除与直连 catalog 同名的 qwen-plus / deepseek-reasoner（保留直连版，
-// 由各自供应商凭证驱动），其余均为直连 catalog 未覆盖的模型。
+// 避免全量灌入。此列表即默认 catalog 的唯一内容（catalog() 直接返回 airouterCatalog），
+// 配单一 sec-platform-airouter Secret 后全部真实可推理。
 var airouterModels = []airSpec{
 	// —— 通义千问（文本 + 长文本 + 视觉）——
 	{ID: "qwen-turbo", Vendor: "通义千问", Ctx: "131072", Caps: []string{"chat", "reasoning"}, In: 0.3, Out: 3, Desc: "Qwen3-Turbo，轻量高性价比，高频对话"},
@@ -70,7 +85,7 @@ func airouterCatalog(resolver provider.CredentialResolver) []*provider.Model {
 			OutputPrice:   m.Out,
 			Description:   m.Desc,
 			Channels: []*provider.Channel{
-				realCh(m.ID+"#airouter", 0, "airouter", baseAirouter, m.ID, credAirouter, resolver),
+				realCh(m.ID+"#airouter", 0, "airouter", baseAirouter, m.ID, credAirouter, vendorAirouter, resolver),
 			},
 		})
 	}

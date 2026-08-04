@@ -26,6 +26,7 @@ export interface ModelChannel {
   vendor?: string
   upstreamModel?: string
   credentialRef?: string
+  vendorId?: string
 }
 
 export interface ModelInfo {
@@ -60,6 +61,7 @@ export interface ChannelCreateRequest {
   vendor?: string
   upstreamModel?: string
   credentialRef?: string
+  vendorId?: string
 }
 
 const BASE = '/api/admin/models'
@@ -124,3 +126,23 @@ export const fetchPlatformSecrets = async (): Promise<SecretOption[]> => {
     .filter((s) => s.scope === 'platform')
     .map((s) => ({ id: s.id, name: s.name }))
 }
+
+// ===== 供应商管理（Vendor：预设 BaseURL+凭证+Type，创建通道选供应商即带入） =====
+// 供应商类型（与通道 type 同源；当前仅 openai-compatible 有意义）。
+export const PROVIDER_TYPES = [{ label: 'OpenAI 兼容', value: 'openai-compatible' }]
+
+export interface Vendor {
+  id: string
+  name: string
+  type: string
+  baseUrl: string
+  credentialRef: string
+  description?: string
+}
+
+const VENDOR_BASE = '/api/admin/providers'
+export const fetchVendorList = () => api.get<Vendor[]>(VENDOR_BASE)
+export const createVendor = (data: Vendor) => api.post<Vendor>(VENDOR_BASE, data)
+export const updateVendor = (id: string, data: Partial<Vendor>) =>
+  api.put<Vendor>(`${VENDOR_BASE}/${id}`, data)
+export const deleteVendor = (id: string) => api.del(`${VENDOR_BASE}/${id}`)

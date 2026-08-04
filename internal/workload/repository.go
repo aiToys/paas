@@ -7,6 +7,8 @@ import "context"
 type Repository interface {
 	// List 按租户过滤；envID 空串表示所有环境；appID 空串表示跨应用；wtype 空串表示所有类型。
 	List(ctx context.Context, envID, appID, wtype string) ([]Workload, error)
+	// ListAll 跨租户列出全部工作负载（admin 平台总览，不过滤 tenant；返回对象带 TenantID）。
+	ListAll(ctx context.Context) ([]Workload, error)
 	Get(ctx context.Context, id string) (Workload, error)
 	Create(ctx context.Context, w Workload) error
 	// Update 调整期望副本与状态（扩缩容/暂停/恢复）。返回更新后的工作负载。

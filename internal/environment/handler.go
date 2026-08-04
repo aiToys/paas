@@ -59,7 +59,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteInternalError(w, err)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
+		httputil.WriteData(w, list)
 		return
 	}
 
@@ -78,7 +78,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			e.ID = fmt.Sprintf("env-%d", time.Now().UnixNano())
 		}
 		if err := e.Validate(); err != nil {
-			httputil.WriteError(w, http.StatusBadRequest, err.Error())
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
 		// 生产环境写操作需 prod:write（developer 被拦，生产只读）
@@ -86,11 +86,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := h.repo.Create(r.Context(), e); err != nil {
-			httputil.WriteError(w, http.StatusBadRequest, err.Error())
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": e})
+		httputil.WriteDataCreated(w, e)
 		return
 	}
 
@@ -103,10 +102,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		e, err := h.repo.Get(r.Context(), id)
 		if err != nil {
-			httputil.WriteError(w, http.StatusNotFound, err.Error())
+			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(e)
+		httputil.WriteData(w, e)
 		return
 	}
 
@@ -124,10 +123,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if err := h.repo.Delete(r.Context(), id); err != nil {
-			httputil.WriteError(w, http.StatusNotFound, err.Error())
+			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]string{"deleted": id})
+		httputil.WriteData(w, map[string]string{"deleted": id})
 		return
 	}
 

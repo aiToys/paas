@@ -34,10 +34,17 @@ func NewHandler(repo Repository, gw provider.GatewayRegistrar, resolver provider
 	return &Handler{repo: repo, gw: gw, resolver: resolver}
 }
 
-// ServeHTTP 按路径分发 model / channel 子资源。
+// ServeHTTP 按路径分发 model / channel / vendor 子资源。
+//
+// /api/admin/providers/*  -> vendor CRUD（供应商预设管理）
+// /api/admin/models/*     -> model + channel CRUD
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	path := strings.TrimRight(r.URL.Path, "/")
+	if strings.HasPrefix(path, "/api/admin/providers") {
+		h.serveProvidersRoute(w, r)
+		return
+	}
 	rest := strings.TrimPrefix(path, "/api/admin/models")
 	if rest == "" {
 		h.serveModels(w, r)
@@ -98,7 +105,7 @@ func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteInternalError(w, err)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": list})
+		httputil.WriteData(w, list)
 	case http.MethodPost:
 		var m provider.Model
 		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
@@ -118,8 +125,7 @@ func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		saved, _ := h.repo.GetModel(r.Context(), m.ID)
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(saved)
+		httputil.WriteDataCreated(w, saved)
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -133,7 +139,7 @@ func (h *Handler) serveModel(w http.ResponseWriter, r *http.Request, id string) 
 			writeMaasErr(w, err)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(m)
+		httputil.WriteData(w, m)
 	case http.MethodPut:
 		var m provider.Model
 		if err := json.NewDecoder(r.Body).Decode(&m); err != nil {
@@ -149,7 +155,7 @@ func (h *Handler) serveModel(w http.ResponseWriter, r *http.Request, id string) 
 			return
 		}
 		saved, _ := h.repo.GetModel(r.Context(), id)
-		_ = json.NewEncoder(w).Encode(saved)
+		httputil.WriteData(w, saved)
 	case http.MethodDelete:
 		if err := h.repo.DeleteModel(r.Context(), id); err != nil {
 			writeMaasErr(w, err)
@@ -158,7 +164,7 @@ func (h *Handler) serveModel(w http.ResponseWriter, r *http.Request, id string) 
 		if h.gw != nil {
 			h.gw.UnregisterModel(id)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]string{"deleted": id})
+		httputil.WriteData(w, map[string]string{"deleted": id})
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -172,7 +178,7 @@ func (h *Handler) serveChannels(w http.ResponseWriter, r *http.Request, modelID 
 			writeMaasErr(w, err)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": list})
+		httputil.WriteData(w, list)
 	case http.MethodPost:
 		var c provider.Channel
 		if err := json.NewDecoder(r.Body).Decode(&c); err != nil {
@@ -186,6 +192,20 @@ func (h *Handler) serveChannels(w http.ResponseWriter, r *http.Request, modelID 
 		if c.Status == "" {
 			c.Status = provider.StatusHealthy
 		}
+		// 选供应商自动带入：VendorID 非空时从 Vendor 解析 BaseURL/CredentialRef 回填，免去手填。
+		// vendor 不存在 -> 404（writeMaasErr 映射 ErrVendorNotFound）。
+		if c.VendorID != "" {
+			v, err := h.repo.GetVendor(r.Context(), c.VendorID)
+			if err != nil {
+				writeMaasErr(w, err)
+				return
+			}
+			c.Endpoint = v.BaseURL
+			c.CredentialRef = v.CredentialRef
+			if c.Vendor == "" {
+				c.Vendor = v.Name
+			}
+		}
 		if err := h.repo.CreateChannel(r.Context(), modelID, &c); err != nil {
 			writeMaasErr(w, err)
 			return
@@ -193,8 +213,7 @@ func (h *Handler) serveChannels(w http.ResponseWriter, r *http.Request, modelID 
 		if !h.reloadModel(w, r, modelID) {
 			return
 		}
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(c)
+		httputil.WriteDataCreated(w, c)
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -209,6 +228,19 @@ func (h *Handler) serveChannel(w http.ResponseWriter, r *http.Request, modelID, 
 			return
 		}
 		c.ID = channelID
+		// 选供应商自动带入（同 Create）：VendorID 非空时回填 BaseURL/CredentialRef。
+		if c.VendorID != "" {
+			v, err := h.repo.GetVendor(r.Context(), c.VendorID)
+			if err != nil {
+				writeMaasErr(w, err)
+				return
+			}
+			c.Endpoint = v.BaseURL
+			c.CredentialRef = v.CredentialRef
+			if c.Vendor == "" {
+				c.Vendor = v.Name
+			}
+		}
 		if err := h.repo.UpdateChannel(r.Context(), modelID, &c); err != nil {
 			writeMaasErr(w, err)
 			return
@@ -216,7 +248,7 @@ func (h *Handler) serveChannel(w http.ResponseWriter, r *http.Request, modelID, 
 		if !h.reloadModel(w, r, modelID) {
 			return
 		}
-		_ = json.NewEncoder(w).Encode(c)
+		httputil.WriteData(w, c)
 	case http.MethodDelete:
 		if err := h.repo.DeleteChannel(r.Context(), modelID, channelID); err != nil {
 			writeMaasErr(w, err)
@@ -225,20 +257,103 @@ func (h *Handler) serveChannel(w http.ResponseWriter, r *http.Request, modelID, 
 		if !h.reloadModel(w, r, modelID) {
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]string{"deleted": channelID})
+		httputil.WriteData(w, map[string]string{"deleted": channelID})
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
 // writeMaasErr 把仓储错误映射为 HTTP 状态：not found→404，exists→409，其余→400。
+// serveProvidersRoute 分发 /api/admin/providers[/{id}]：vendor CRUD（供应商预设管理）。
+// Vendor 不是路由实体（不进 gateway），CRUD 后无需 reloadModel。
+func (h *Handler) serveProvidersRoute(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimRight(r.URL.Path, "/")
+	rest := strings.TrimPrefix(path, "/api/admin/providers")
+	if rest == "" || rest == "/" {
+		h.serveVendors(w, r)
+		return
+	}
+	id := strings.TrimPrefix(rest, "/")
+	if id == "" {
+		httputil.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	h.serveVendor(w, r, id)
+}
+
+func (h *Handler) serveVendors(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		list, err := h.repo.ListVendors(r.Context())
+		if err != nil {
+			httputil.WriteInternalError(w, err)
+			return
+		}
+		httputil.WriteData(w, list)
+	case http.MethodPost:
+		var v provider.Vendor
+		if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+			return
+		}
+		if v.ID == "" {
+			httputil.WriteError(w, http.StatusBadRequest, "vendor id 不能为空")
+			return
+		}
+		if v.Type == "" {
+			v.Type = ProviderOpenAICompatible
+		}
+		if err := h.repo.CreateVendor(r.Context(), &v); err != nil {
+			writeMaasErr(w, err)
+			return
+		}
+		saved, _ := h.repo.GetVendor(r.Context(), v.ID)
+		httputil.WriteDataCreated(w, saved)
+	default:
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (h *Handler) serveVendor(w http.ResponseWriter, r *http.Request, id string) {
+	switch r.Method {
+	case http.MethodGet:
+		v, err := h.repo.GetVendor(r.Context(), id)
+		if err != nil {
+			writeMaasErr(w, err)
+			return
+		}
+		httputil.WriteData(w, v)
+	case http.MethodPut:
+		var v provider.Vendor
+		if err := json.NewDecoder(r.Body).Decode(&v); err != nil {
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+			return
+		}
+		v.ID = id
+		if err := h.repo.UpdateVendor(r.Context(), &v); err != nil {
+			writeMaasErr(w, err)
+			return
+		}
+		saved, _ := h.repo.GetVendor(r.Context(), id)
+		httputil.WriteData(w, saved)
+	case http.MethodDelete:
+		if err := h.repo.DeleteVendor(r.Context(), id); err != nil {
+			writeMaasErr(w, err)
+			return
+		}
+		httputil.WriteData(w, map[string]string{"deleted": id})
+	default:
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
 func writeMaasErr(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, ErrModelNotFound), errors.Is(err, ErrChannelNotFound):
-		httputil.WriteError(w, http.StatusNotFound, err.Error())
-	case errors.Is(err, ErrModelExists), errors.Is(err, ErrChannelExists):
-		httputil.WriteError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, ErrModelNotFound), errors.Is(err, ErrChannelNotFound), errors.Is(err, ErrVendorNotFound):
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
+	case errors.Is(err, ErrModelExists), errors.Is(err, ErrChannelExists), errors.Is(err, ErrVendorExists):
+		httputil.WriteServiceError(w, http.StatusConflict, err)
 	default:
-		httputil.WriteError(w, http.StatusBadRequest, err.Error())
+		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 	}
 }

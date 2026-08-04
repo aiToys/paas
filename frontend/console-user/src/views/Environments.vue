@@ -4,10 +4,11 @@
 // 卡片显示统计（工作负载数/健康度）；点击进环境详情页（不再跳工作负载列表）。
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
+import { confirmDangerous } from '@/composables/useDangerConfirm'
 
 interface Env {
   id: string
@@ -75,6 +76,41 @@ function health(envId: string): { label: string; cls: string } {
 
 function open(e: Env) {
   router.push(`/environments/${e.id}`)
+}
+
+// 删除环境：生产环境输入环境 ID 确认。删除前提示该环境下工作负载数。
+async function remove(e: Env) {
+  const count = wlCount(e.id)
+  const hint = count > 0 ? `该环境下有 ${count} 个工作负载，删除环境不影响已部署工作负载但将解除环境元数据。` : ''
+  const isProd = e.type === 'prod'
+  const ok = await confirmDangerous({
+    action: '删除环境',
+    target: e.id,
+    requireNameConfirm: isProd,
+    isProd,
+  })
+  if (!ok) return
+  try {
+    await ElMessageBox.confirm(
+      `${hint}确认删除环境「${e.name}」？`.trim(),
+      '二次确认',
+      { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  try {
+    const resp = await fetchAuth(`/api/environments/${e.id}`, { method: 'DELETE' })
+    if (resp.ok) {
+      ElMessage.success('环境已删除')
+      load()
+    } else {
+      const err = await resp.json().catch(() => ({}))
+      ElMessage.error(err.error || '删除失败（生产环境需管理员权限）')
+    }
+  } catch (e2) {
+    ElMessage.error('删除失败：' + (e2 as Error).message)
+  }
 }
 
 async function create() {
@@ -149,6 +185,7 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
             </div>
             <div class="e-id mono">{{ e.id }}</div>
           </div>
+          <button class="del-btn" title="删除环境" @click.stop="remove(e)">删除</button>
         </div>
         <div class="card-foot">
           <div class="foot-stat">
@@ -264,6 +301,27 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
   display: flex;
   align-items: center;
   gap: 12px;
+  position: relative;
+}
+.del-btn {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  border: none;
+  background: transparent;
+  color: var(--el-color-danger);
+  font-size: 12px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+  padding: 2px 6px;
+}
+.env-card:hover .del-btn {
+  opacity: 0.85;
+}
+.del-btn:hover {
+  opacity: 1;
+  text-decoration: underline;
 }
 .e-icon {
   width: 40px;

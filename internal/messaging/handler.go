@@ -107,7 +107,7 @@ func (h *Handler) createTopic(w http.ResponseWriter, r *http.Request) {
 	}
 	t.CreatedAt = time.Now()
 	if err := h.repo.CreateTopic(r.Context(), t); err != nil {
-		httputil.WriteError(w, http.StatusConflict, err.Error())
+		httputil.WriteServiceError(w, http.StatusConflict, err)
 		return
 	}
 	httputil.WriteData(w, t)
@@ -124,7 +124,7 @@ func (h *Handler) deleteTopic(w http.ResponseWriter, r *http.Request) {
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/mq-topics/")
 	if err := h.repo.DeleteTopic(r.Context(), tid, id); err != nil {
-		httputil.WriteError(w, http.StatusNotFound, err.Error())
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -175,7 +175,7 @@ func (h *Handler) createGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	g.CreatedAt = time.Now()
 	if err := h.repo.CreateConsumerGroup(r.Context(), g); err != nil {
-		httputil.WriteError(w, http.StatusConflict, err.Error())
+		httputil.WriteServiceError(w, http.StatusConflict, err)
 		return
 	}
 	httputil.WriteData(w, g)
@@ -192,7 +192,7 @@ func (h *Handler) deleteGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/consumer-groups/")
 	if err := h.repo.DeleteConsumerGroup(r.Context(), tid, id); err != nil {
-		httputil.WriteError(w, http.StatusNotFound, err.Error())
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

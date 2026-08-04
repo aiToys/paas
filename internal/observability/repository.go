@@ -17,6 +17,8 @@ type Repository interface {
 	DeleteAlertRule(ctx context.Context, id string) error
 	// ListAlerts 即时评估所有 enabled 规则，返回命中（firing）告警列表。
 	ListAlerts(ctx context.Context) ([]Alert, error)
+	// ListAllAlertRules 跨租户列出全部告警规则（admin 平台总览，不过滤 tenant，返回对象带 TenantID）。
+	ListAllAlertRules(ctx context.Context) ([]AlertRule, error)
 	// ListLogs 应用日志查询（惰性补点：查询时按时间间隔追加 mock 日志）。
 	// appID/level 为空表示不限；q 为消息关键字（大小写不敏感）；limit<=0 时用默认上限。
 	// 按时间倒序返回。

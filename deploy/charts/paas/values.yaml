@@ -43,6 +43,12 @@ devops:
   gitToken: ""                    # 私有 git 仓库 HTTPS token（公开仓库留空）
   registryUser: ""                # registry docker login 用户名（无认证留空）
   registryPass: ""                # registry docker login 密码
+  # 内置 Git 后端（Gitea 无头，一站式代码托管）。空则内置仓库创建/浏览降级（外部仓库构建不受影响）。
+  # 部署 Gitea：kubectl apply -f deploy/devops/gitea.yaml（paas namespace，ClusterIP）。
+  gitea:
+    url: ""                       # Gitea API 根地址（如 http://gitea.paas.svc.cluster.local:3000）
+    username: ""                  # 平台账号（paas-bot，initContainer 创建）
+    password: ""                  # 平台账号密码（与 deploy/devops/gitea.yaml Secret 一致）
 
 # MaaS 推理（airouter 统一真实推理入口）
 maas:

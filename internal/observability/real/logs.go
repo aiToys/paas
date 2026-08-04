@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/internal/observability"
 	"github.com/aitoys/paas/pkg/tenant"
 )
@@ -23,7 +24,7 @@ type LogsStore struct {
 
 // NewLogsStore 创建 Loki 适配。lokiURL 为 Loki 根地址（如 http://loki:3100）。
 func NewLogsStore(lokiURL string) *LogsStore {
-	return &LogsStore{lokiURL: lokiURL, client: &http.Client{Timeout: 10 * time.Second}}
+	return &LogsStore{lokiURL: lokiURL, client: httputil.NewClient(10 * time.Second)}
 }
 
 // lokiResponse 是 Loki /loki/api/v1/query_range 响应的最小子集。

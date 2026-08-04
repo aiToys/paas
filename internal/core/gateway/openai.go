@@ -21,8 +21,9 @@ type chatReq struct {
 }
 
 type deltaMessage struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
+	Role             string `json:"role,omitempty"`
+	Content          string `json:"content,omitempty"`
+	ReasoningContent string `json:"reasoning_content,omitempty"` // 推理模型思考过程（透传给前端）
 }
 
 type chatChoice struct {
@@ -49,7 +50,7 @@ func ChatCompletions(gw *Gateway, meter *Meter) http.HandlerFunc {
 		}
 		channels, err := gw.ResolveChannels(req.Model)
 		if err != nil {
-			httputil.WriteError(w, http.StatusNotFound, err.Error())
+			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
 
@@ -109,6 +110,8 @@ func serveStream(w http.ResponseWriter, r *http.Request, stream <-chan provider.
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	// 禁 nginx/ingress 缓冲：否则流被攒成大块转发，客户端失去打字机效果（逐 chunk 到达）。
+	w.Header().Set("X-Accel-Buffering", "no")
 	flusher, _ := w.(http.Flusher)
 
 	tokens := 0
@@ -124,6 +127,11 @@ loop:
 			}
 			if chunk.Role != "" {
 				writeSSE(w, chatChoice{Delta: deltaMessage{Role: chunk.Role}})
+			}
+			// 思考过程先于答案到达，透传 reasoning_content delta 供前端实时渲染。
+			if chunk.Reasoning != "" {
+				tokens += len([]rune(chunk.Reasoning))
+				writeSSE(w, chatChoice{Delta: deltaMessage{ReasoningContent: chunk.Reasoning}})
 			}
 			if chunk.Content != "" {
 				tokens += len([]rune(chunk.Content))
@@ -157,16 +165,15 @@ func ListModels(gw *Gateway) http.HandlerFunc {
 		for _, m := range models {
 			data = append(data, modelObj{ID: m.ID, Object: "model", OwnedBy: m.Vendor})
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"object": "list", "data": data})
+		// OpenAI 兼容协议固定形态 {"object":"list","data":[...]}，不走平台 {data:T} 契约。
+		httputil.WriteJSON(w, http.StatusOK, map[string]interface{}{"object": "list", "data": data})
 	}
 }
 
 // CatalogModels 实现 /api/models（完整富信息，含通道列表，供模型市场前端）。
 func CatalogModels(gw *Gateway) http.HandlerFunc {
 	return func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": gw.Models()})
+		httputil.WriteData(w, gw.Models())
 	}
 }
 

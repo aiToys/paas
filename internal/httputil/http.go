@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strings"
 )
 
 // WriteJSON 以指定状态码写裸 JSON 响应（不包裹 data/error）。
@@ -42,4 +43,45 @@ func WriteError(w http.ResponseWriter, code int, msg string) {
 func WriteInternalError(w http.ResponseWriter, err error) {
 	log.Printf("[internal-error] %v", err)
 	WriteError(w, http.StatusInternalServerError, "internal error")
+}
+
+// internalErrorMarkers 是底层技术错误的特征子串（PG/网络/内部 FQDN/约束名）。
+// 项目业务错误统一中文（Validate fieldErr / sentinel / fmt.Errorf 中文包装），
+// 命中这些英文特征几乎必为未包装的底层错误，应脱敏而非回显客户端。
+var internalErrorMarkers = []string{
+	"SQLSTATE", "ERROR: ", "pgx", "dial tcp", "connection refused", "connection reset",
+	"no such host", ".svc.cluster.local", "duplicate key value", "violates foreign key",
+	"violates unique constraint", "value too long for type", "_pkey", "_fkey",
+	"connection reset by peer", "i/o timeout", "TLS handshake",
+}
+
+// isInternalErrorText 判定错误消息是否含底层技术特征（需脱敏）。
+func isInternalErrorText(msg string) bool {
+	for _, m := range internalErrorMarkers {
+		if strings.Contains(msg, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// WriteServiceError 统一 handler 的 repo/store 错误响应，消除「err.Error() 直接回客户端」泄漏。
+//
+// 分流逻辑：
+//   - err 含底层技术特征（PG SQLSTATE/连接错误/内部 FQDN/约束名等）→ 500 脱敏（WriteInternalError），
+//     防泄漏 SQL 语句/表名/连接串/集群内部地址给前端
+//   - 否则视为业务错误（Validate/sentinel/中文 fmt.Errorf，消息安全）→ 按传入 status 返回 err.Error()
+//
+// 用法：handler 中 repo 调用失败处，由 WriteError(w, code, err.Error()) 改为 WriteServiceError(w, code, err)。
+// 业务 sentinel 已提前 errors.Is 分流为固定中文 4xx 的调用点不受影响。
+func WriteServiceError(w http.ResponseWriter, status int, err error) {
+	if err == nil {
+		return
+	}
+	msg := err.Error()
+	if isInternalErrorText(msg) {
+		WriteInternalError(w, err)
+		return
+	}
+	WriteError(w, status, msg)
 }

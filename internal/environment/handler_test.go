@@ -21,6 +21,7 @@ type stubRepo struct {
 }
 
 func (s *stubRepo) List(context.Context) ([]Environment, error) { return s.list, nil }
+func (s *stubRepo) ListAll(context.Context) ([]Environment, error) { return s.list, nil }
 func (s *stubRepo) Get(_ context.Context, id string) (Environment, error) {
 	for _, e := range s.list {
 		if e.ID == id {

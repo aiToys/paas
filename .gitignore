@@ -34,4 +34,6 @@ dist/
 
 # 本地工具产物（Playwright MCP 抓取的快照/日志，勿提交）
 .playwright-mcp/
+# 本地 AI 辅助开发工作区（superpowers sdd ledger/briefs 等），勿提交
+.superpowers/
 /core

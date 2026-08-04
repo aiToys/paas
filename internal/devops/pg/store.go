@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -56,6 +57,16 @@ func (s *Store) SetPipeline(p builder.Pipeline) {
 // SetBaseCtx 注入进程级 ctx（cmd/core 在 run() 注入）；构建 goroutine 派生之感知 shutdown。
 func (s *Store) SetBaseCtx(ctx context.Context) { s.baseCtx = ctx }
 
+// SweepInterrupted 把进程重启中断的构建（pending/running）标记为 failed。启动时调用一次。
+// 复现：INSERT(pending) 后 goroutine 启动前崩溃 → 永卡 pending；构建中途 kill -9/OOM/Pod 强删 → 永卡 running。
+// 正常 SIGTERM 有 baseCtx cancel 兜底标 failed，但强杀不覆盖，故启动 sweep 兜底（无超时/回收机制时的最简恢复）。
+func (s *Store) SweepInterrupted(ctx context.Context) error {
+	_, err := s.db.Pool().Exec(ctx,
+		`UPDATE build_runs SET status=$1, finished_at=NOW(), log=$2 WHERE status IN ('pending','running')`,
+		devops.BuildFailed, "进程重启中断构建")
+	return err
+}
+
 // baseCtxOrBg 返回 baseCtx（空则 Background，兼容测试/未注入场景）。
 func (s *Store) baseCtxOrBg() context.Context {
 	if s.baseCtx != nil {
@@ -66,7 +77,7 @@ func (s *Store) baseCtxOrBg() context.Context {
 
 // 列常量与各 struct 字段顺序严格对齐（scan 列序必须一致）。
 const (
-	repoCols    = `id, tenant_id, app_id, git_url, branch, dockerfile, build_context, status, created_at`
+	repoCols    = `id, tenant_id, app_id, git_url, branch, dockerfile, build_context, status, created_at, source, gitea_owner, gitea_repo, clone_url`
 	buildCols   = `id, tenant_id, app_id, repo_id, trigger, commit, branch, message, status, image_id, log, started_at, finished_at`
 	imageCols   = `id, tenant_id, app_id, registry, tag, digest, source, branch, build_run_id, built_at, status`
 	releaseCols = `id, tenant_id, app_id, env_id, image_id, image_digest, strategy, status, workload_id, previous_image_id, is_rollback, created_at, created_by`
@@ -96,7 +107,8 @@ func (s *Store) ListRepos(ctx context.Context, appID string) ([]devops.CodeRepo,
 	for rows.Next() {
 		var r devops.CodeRepo
 		if err = rows.Scan(&r.ID, &r.TenantID, &r.AppID, &r.GitURL, &r.Branch,
-			&r.Dockerfile, &r.BuildContext, &r.Status, &r.CreatedAt); err != nil {
+			&r.Dockerfile, &r.BuildContext, &r.Status, &r.CreatedAt,
+			&r.Source, &r.GiteaOwner, &r.GiteaRepo, &r.CloneURL); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -114,7 +126,8 @@ func (s *Store) GetRepo(ctx context.Context, id string) (devops.CodeRepo, error)
 		`SELECT `+repoCols+` FROM code_repos WHERE id=$1 AND tenant_id=$2`, id, tid)
 	var r devops.CodeRepo
 	if err = row.Scan(&r.ID, &r.TenantID, &r.AppID, &r.GitURL, &r.Branch,
-		&r.Dockerfile, &r.BuildContext, &r.Status, &r.CreatedAt); err != nil {
+		&r.Dockerfile, &r.BuildContext, &r.Status, &r.CreatedAt,
+		&r.Source, &r.GiteaOwner, &r.GiteaRepo, &r.CloneURL); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return devops.CodeRepo{}, fmt.Errorf("仓库不存在: %s", id)
 		}
@@ -150,9 +163,13 @@ func (s *Store) CreateRepo(ctx context.Context, r devops.CodeRepo) error {
 	if r.CreatedAt.IsZero() {
 		r.CreatedAt = time.Now()
 	}
+	if r.Source == "" {
+		r.Source = devops.RepoSourceExternal
+	}
 	_, err = s.db.Pool().Exec(ctx,
-		`INSERT INTO code_repos (`+repoCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		r.ID, r.TenantID, r.AppID, r.GitURL, r.Branch, r.Dockerfile, r.BuildContext, r.Status, r.CreatedAt)
+		`INSERT INTO code_repos (`+repoCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		r.ID, r.TenantID, r.AppID, r.GitURL, r.Branch, r.Dockerfile, r.BuildContext, r.Status, r.CreatedAt,
+		r.Source, r.GiteaOwner, r.GiteaRepo, r.CloneURL)
 	if pg.IsUniqueViolation(err) {
 		return fmt.Errorf("仓库已存在: %s", r.ID)
 	}
@@ -207,6 +224,25 @@ func (s *Store) ListBuildRuns(ctx context.Context, appID string) ([]devops.Build
 	return out, rows.Err()
 }
 
+// ListAllBuildRuns 跨租户列出全部构建（admin 平台总览，不过滤 tenant；按 tenant_id, started_at DESC 排序）。
+func (s *Store) ListAllBuildRuns(ctx context.Context) ([]devops.BuildRun, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+buildCols+` FROM build_runs ORDER BY tenant_id, started_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]devops.BuildRun, 0)
+	for rows.Next() {
+		var b devops.BuildRun
+		if err = scanBuild(rows, &b); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
 // GetBuildRun 取单个构建；跨租户访问返回 not found（不泄漏）。
 func (s *Store) GetBuildRun(ctx context.Context, id string) (devops.BuildRun, error) {
 	tid, err := pg.TenantOrErr(ctx)
@@ -244,7 +280,8 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) error {
 	row := s.db.Pool().QueryRow(ctx,
 		`SELECT `+repoCols+` FROM code_repos WHERE id=$1 AND tenant_id=$2`, b.RepoID, tid)
 	if err = row.Scan(&repo.ID, &repo.TenantID, &repo.AppID, &repo.GitURL, &repo.Branch,
-		&repo.Dockerfile, &repo.BuildContext, &repo.Status, &repo.CreatedAt); err != nil {
+		&repo.Dockerfile, &repo.BuildContext, &repo.Status, &repo.CreatedAt,
+		&repo.Source, &repo.GiteaOwner, &repo.GiteaRepo, &repo.CloneURL); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("仓库不存在或不属于本应用: %s", b.RepoID)
 		}
@@ -278,9 +315,14 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) error {
 
 	// CI runner：pending -> running -> success/failed（产出 Image）。
 	// goroutine 持 *Store 引用 + 派生 baseCtx（进程级，不持请求 ctx；进程退出 cancel 构建中断）。
+	// internal 仓库用 CloneURL（含 Gitea basic auth）；external 用 GitURL（+ injectToken 注 PAAS_GIT_TOKEN）。
+	gitURL := repo.CloneURL
+	if gitURL == "" {
+		gitURL = repo.GitURL
+	}
 	go s.runBuild(s.baseCtxOrBg(), builder.Params{
 		TenantID: tid, AppID: b.AppID, BuildID: b.ID, Commit: b.Commit, Branch: b.Branch,
-		GitURL: repo.GitURL, Dockerfile: repo.Dockerfile, BuildContext: repo.BuildContext,
+		GitURL: gitURL, Dockerfile: repo.Dockerfile, BuildContext: repo.BuildContext,
 	}) //nolint:gosec // G118 误报：后台构建任务须脱离请求生命周期，不持 request ctx 是有意为之
 	return nil
 }
@@ -296,9 +338,11 @@ func (s *Store) runBuild(ctx context.Context, p builder.Params) {
 	}
 	defer func() {
 		if rec := recover(); rec != nil {
+			// panic 栈可能含 cloneURL=https://<PAAS_GIT_TOKEN>@...，统一 MaskToken 脱敏（与正常错误路径一致），
+			// 防 build:read 权限者经 GET /api/buildruns/{id} 读到平台 Git 凭证。
 			_, _ = s.db.Pool().Exec(ctx,
 				`UPDATE build_runs SET status=$2, finished_at=$3, log=$4 WHERE id=$1`,
-				p.BuildID, devops.BuildFailed, time.Now(), fmt.Sprintf("构建异常: %v", rec))
+				p.BuildID, devops.BuildFailed, time.Now(), builder.MaskToken(fmt.Sprintf("构建异常: %v", rec)))
 		}
 	}()
 	// pending -> running
@@ -401,6 +445,25 @@ func (s *Store) ListImages(ctx context.Context, appID string) ([]devops.Image, e
 	return out, rows.Err()
 }
 
+// ListAllImages 跨租户列出全部镜像（admin 平台总览，不过滤 tenant；按 tenant_id, built_at DESC 排序）。
+func (s *Store) ListAllImages(ctx context.Context) ([]devops.Image, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+imageCols+` FROM images ORDER BY tenant_id, built_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]devops.Image, 0)
+	for rows.Next() {
+		var im devops.Image
+		if err = scanImage(rows, &im); err != nil {
+			return nil, err
+		}
+		out = append(out, im)
+	}
+	return out, rows.Err()
+}
+
 // GetImage 取单个镜像；跨租户访问返回 not found（不泄漏）。
 func (s *Store) GetImage(ctx context.Context, id string) (devops.Image, error) {
 	tid, err := pg.TenantOrErr(ctx)
@@ -468,6 +531,25 @@ func (s *Store) ListReleases(ctx context.Context, appID string) ([]devops.Releas
 	return out, rows.Err()
 }
 
+// ListAllReleases 跨租户列出全部发布（admin 平台总览，不过滤 tenant；按 tenant_id, created_at DESC 排序）。
+func (s *Store) ListAllReleases(ctx context.Context) ([]devops.Release, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+releaseCols+` FROM releases ORDER BY tenant_id, created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]devops.Release, 0)
+	for rows.Next() {
+		var r devops.Release
+		if err = scanRelease(rows, &r); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // GetRelease 取单个发布；跨租户访问返回 not found（不泄漏）。
 func (s *Store) GetRelease(ctx context.Context, id string) (devops.Release, error) {
 	tid, err := pg.TenantOrErr(ctx)
@@ -499,6 +581,19 @@ func scanRelease(r pg.RowScanner, rel *devops.Release) error {
 func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (devops.Release, error) {
 	tid, err := pg.TenantOrErr(ctx)
 	if err != nil {
+		return devops.Release{}, err
+	}
+
+	// per-(app,env) 串行化：advisory xact lock 防并发发布丢失更新。
+	// 复现：两并发发布同 app/env 各 List 读到相同 previousImageID，后写覆盖 -> 回滚指针链断裂。
+	// lockTx 仅持锁，defer Rollback 在函数返回时（xact 结束）释放，覆盖整个发布临界区（List→UpdateImage→INSERT）。
+	lockTx, err := s.db.Pool().Begin(ctx)
+	if err != nil {
+		return devops.Release{}, err
+	}
+	defer func() { _ = lockTx.Rollback(ctx) }()
+	if _, err := lockTx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtext($1))`, input.AppID+"|"+input.EnvID); err != nil {
 		return devops.Release{}, err
 	}
 
@@ -581,10 +676,17 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 	if err != nil {
 		// 补偿事务：workload 已切新镜像但 release 记录未落库 -> 回滚 workload 到发布前状态，
 		// 防丢失 PreviousImageID 回滚指针（best-effort，补偿失败不掩盖主错误）。
+		// WithoutCancel 派生 ctx：客户端断连（ctx canceled）不阻断补偿，
+		// 否则 workload 已切新镜像但 release 未落库 -> 回滚指针永久丢失；补偿失败打 error 日志。
+		cctx := context.WithoutCancel(ctx)
 		if len(wls) > 0 {
-			_, _ = s.workload.UpdateImage(ctx, wl.ID, wl.Image, wl.ImageRef) // 恢复原 display+digest
+			if _, cerr := s.workload.UpdateImage(cctx, wl.ID, wl.Image, wl.ImageRef); cerr != nil {
+				log.Printf("[devops] CreateRelease 补偿失败（恢复原镜像）: release=%s workload=%s: %v", rel.ID, wl.ID, cerr)
+			}
 		} else {
-			_ = s.workload.Delete(ctx, wl.ID) // 无基线时新建的 workload，删除
+			if derr := s.workload.Delete(cctx, wl.ID); derr != nil { // 无基线时新建的 workload，删除
+				log.Printf("[devops] CreateRelease 补偿失败（删除新 workload）: release=%s workload=%s: %v", rel.ID, wl.ID, derr)
+			}
 		}
 		return devops.Release{}, err
 	}
@@ -661,8 +763,12 @@ func (s *Store) RollbackRelease(ctx context.Context, releaseID string) (devops.R
 	defer func() {
 		_ = tx.Rollback(ctx) // 已提交或失败均无害
 		if !committed && origDisplay != "" {
-			// tx 失败：workload 已回退到 prevImg 但 release 未记录 -> 补偿恢复到原镜像（best-effort）
-			_, _ = s.workload.UpdateImage(ctx, orig.WorkloadID, origDisplay, orig.ImageDigest)
+			// tx 失败：workload 已回退到 prevImg 但 release 未记录 -> 补偿恢复到原镜像（best-effort）。
+			// WithoutCancel 派生 ctx：客户端断连不阻断补偿；补偿失败打 error 日志（原静默吞错）。
+			cctx := context.WithoutCancel(ctx)
+			if _, cerr := s.workload.UpdateImage(cctx, orig.WorkloadID, origDisplay, orig.ImageDigest); cerr != nil {
+				log.Printf("[devops] RollbackRelease 补偿失败（恢复原镜像）: release=%s workload=%s: %v", releaseID, orig.WorkloadID, cerr)
+			}
 		}
 	}()
 	if _, err = tx.Exec(ctx,

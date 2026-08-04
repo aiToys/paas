@@ -65,6 +65,8 @@ async function loadDetail() {
     if (ir.ok) items.value = (await ir.json()).data ?? []
     if (pr.ok) publishes.value = (await pr.json()).data ?? []
     if (drr.ok) published.value = await drr.json()
+  } catch (e) {
+    ElMessage.error('加载命名空间详情失败：' + (e as Error).message)
   } finally {
     loading.value = false
   }
@@ -139,6 +141,24 @@ async function saveItem() {
     ElMessage.error('保存失败：' + (e as Error).message)
   } finally {
     itemSubmitting.value = false
+  }
+}
+
+// 删除命名空间（级联清 item+publish，高危：输入命名空间名确认）。
+async function deleteNamespace(row: Namespace) {
+  const ok = await confirmDangerous({ action: '删除命名空间', target: row.name, requireNameConfirm: true })
+  if (!ok) return
+  try {
+    const resp = await fetchAuth(`/api/configcenter/namespaces/${row.id}`, { method: 'DELETE' })
+    if (resp.ok) {
+      ElMessage.success('已删除命名空间')
+      loadNamespaces()
+    } else {
+      const err = await resp.json().catch(() => ({}))
+      ElMessage.error(err.error || '删除失败')
+    }
+  } catch (e) {
+    ElMessage.error('删除失败：' + (e as Error).message)
   }
 }
 
@@ -220,9 +240,10 @@ watch(() => route.params.nsId, load)
         <el-table-column label="更新时间" width="180">
           <template #default="{ row }">{{ new Date(row.updatedAt).toLocaleString() }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="100">
+        <el-table-column label="操作" width="140">
           <template #default="{ row }">
             <el-button text type="primary" size="small" @click="openNamespace(row.id)">进入</el-button>
+            <el-button text type="danger" size="small" @click="deleteNamespace(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>

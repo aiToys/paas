@@ -1,24 +1,9 @@
 <!DOCTYPE html>
 <html lang="zh-CN" class="dark">
   <head>
-    <script>
-      // 防 FOUC：首帧即按持久化偏好应用主题，避免默认深色闪一下。
-      // 默认深色（html class="dark"）；用户偏好 light 时立即切回。
-      try {
-        if (localStorage.getItem('paas.theme') === 'light') {
-          document.documentElement.classList.remove('dark')
-          document.documentElement.classList.add('light')
-        }
-      } catch (e) {}
-    </script>
+    <script src="/console/theme-init.js"></script>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
-      rel="stylesheet"
-    />
     <title>PaaS 控制台</title>
   </head>
   <body>

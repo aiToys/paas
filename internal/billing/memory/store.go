@@ -95,6 +95,19 @@ func (s *Store) SetQuota(ctx context.Context, q billing.ResourceQuota) (billing.
 	return q, nil
 }
 
+// ListAllQuotas 跨租户列出全部配额（admin 平台总览，不过滤 tenant；按 TenantID 升序，Limits 深拷贝）。
+func (s *Store) ListAllQuotas(ctx context.Context) ([]billing.ResourceQuota, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]billing.ResourceQuota, 0, len(s.quotas))
+	for _, q := range s.quotas {
+		q.Limits = cloneIntMap(q.Limits) // 返回前深拷贝，与 store 独立
+		out = append(out, q)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].TenantID < out[j].TenantID })
+	return out, nil
+}
+
 // —— Usage ——
 
 func (s *Store) GetUsage(ctx context.Context) (billing.ResourceUsage, error) {
@@ -186,6 +199,23 @@ func (s *Store) ListBills(ctx context.Context) ([]billing.BillingRecord, error) 
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}
+
+// ListAllBills 跨租户列出全部账单（admin 平台总览，不过滤 tenant；按 TenantID 升序再 CreatedAt 倒序，Items 深拷贝）。
+func (s *Store) ListAllBills(ctx context.Context) ([]billing.BillingRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]billing.BillingRecord, 0, len(s.bills))
+	for _, b := range s.bills {
+		out = append(out, cloneBill(b))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TenantID != out[j].TenantID {
+			return out[i].TenantID < out[j].TenantID
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
 	return out, nil
 }
 

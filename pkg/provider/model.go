@@ -26,6 +26,10 @@ type Channel struct {
 	// 第三方供应商通道配置（mock/echo 通道为零值）。
 	UpstreamModel string   `json:"upstreamModel,omitempty"` // 供应商侧模型名（deepseek-chat / qwen-plus / gpt-4o）
 	CredentialRef string   `json:"credentialRef,omitempty"` // 凭证引用（security 平台级 Secret ID）
+	// VendorID 关联预设供应商（Vendor.ID）：非空时由 handler 从 Vendor 解析 BaseURL/CredentialRef/Vendor
+	// 回填到本通道字段（「选供应商自动带入」，免去每次创建通道手填 BaseURL+凭证）。
+	// 为空时通道仍可用自身的 Endpoint/CredentialRef 直填（向后兼容）。
+	VendorID      string   `json:"vendorId,omitempty"`
 	impl          Provider `json:"-"`                       // 实际执行者
 }
 
@@ -41,6 +45,18 @@ const (
 	StatusDegraded = "degraded"
 	StatusOffline  = "offline"
 )
+
+// Vendor 是预设供应商（平台级，全租户共享）：把 BaseURL + 凭证 + Type 抽成可复用实体。
+// 创建通道时选 Vendor（VendorID）即自动带入 BaseURL/CredentialRef/Vendor 展示名，
+// 免去每个通道手填。Vendor 不是路由实体（不进 gateway），仅是通道配置源。
+type Vendor struct {
+	ID            string `json:"id"`            // 如 "airouter"
+	Name          string `json:"name"`          // 展示名（如 "airouter 网关"）
+	Type          string `json:"type"`          // openai-compatible（Channel.Type 同源）
+	BaseURL       string `json:"baseUrl"`       // 供应商 BaseURL（如 https://airouter.ddmc-inc.com/api/v1）
+	CredentialRef string `json:"credentialRef"` // 凭证引用（security 平台级 Secret ID）
+	Description   string `json:"description,omitempty"`
+}
 
 // HealthyChannels 返回非 offline 的通道（按优先级升序）。
 // 路由时取首个；degraded 仍可降级服务，故纳入候选。

@@ -7,11 +7,12 @@ import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 
+type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
+
 interface BuildRun {
   id: string; appId: string; commit: string; branch: string; message: string
   status: string; imageId?: string; startedAt: string; finishedAt?: string
 }
-interface Image { id: string; appId: string; tag: string; digest: string; source: string; builtAt: string }
 interface Release {
   id: string; appId: string; envId: string; imageDigest: string
   strategy: string; status: string; isRollback: boolean; createdAt: string; createdBy: string
@@ -20,32 +21,53 @@ interface Release {
 const envStore = useEnvStore()
 const tab = ref('builds')
 const builds = ref<BuildRun[]>([])
-const images = ref<Image[]>([])
+// 镜像库实时视图：registry v2 catalog（hub.wang.dd 真实镜像），展开行按需加载 tag + digest
+const registryRepos = ref<{ name: string }[]>([])
+const expandedTags = ref<Record<string, { tag: string; digest: string }[]>>({})
 const releases = ref<Release[]>([])
 const loading = ref(false)
 
-const BUILD_STATUS: Record<string, { label: string; type: string }> = {
+const BUILD_STATUS: Record<string, { label: string; type: TagType }> = {
   pending: { label: '排队', type: 'info' },
   running: { label: '构建中', type: 'warning' },
   success: { label: '成功', type: 'success' },
   failed: { label: '失败', type: 'danger' },
 }
-const RELEASE_STATUS: Record<string, { label: string; type: string }> = {
+const RELEASE_STATUS: Record<string, { label: string; type: TagType }> = {
   succeeded: { label: '已生效', type: 'success' },
   'rolled-back': { label: '已回滚', type: 'info' },
   deploying: { label: '部署中', type: 'warning' },
 }
 
-const appName = (id: string) => id // 跨应用总览用 appId 直展示（应用名需额外查询，本期用 id）
+// 应用名映射：onMounted 时一次拉取应用列表建 Map，跨应用总览用应用名而非裸 ID 展示。
+const appNames = ref<Record<string, string>>({})
+const appName = (id: string) => appNames.value[id] ?? id
 const envName = (id: string) => envStore.envs.find((e) => e.id === id)?.name ?? id
+
+async function loadAppNames() {
+  const resp = await fetchAuth('/api/applications')
+  if (resp.ok) {
+    const list = (await resp.json()).data ?? []
+    appNames.value = Object.fromEntries(list.map((a: { id: string; name: string }) => [a.id, a.name]))
+  }
+}
 
 async function loadBuilds() {
   const resp = await fetchAuth('/api/buildruns')
   if (resp.ok) builds.value = (await resp.json()).data ?? []
 }
-async function loadImages() {
-  const resp = await fetchAuth('/api/images')
-  if (resp.ok) images.value = (await resp.json()).data ?? []
+async function loadRegistry() {
+  const resp = await fetchAuth('/api/registry/repositories')
+  if (resp.ok) registryRepos.value = (await resp.json()).data ?? []
+}
+async function loadTags(repo: string) {
+  const resp = await fetchAuth(`/api/registry/tags?repository=${encodeURIComponent(repo)}`)
+  if (resp.ok) expandedTags.value[repo] = (await resp.json()).data ?? []
+}
+// 展开行按需加载 tag（首次展开才请求，避免全量 N+1）
+async function onExpand(row: { name: string }, expanded: readonly { name: string }[]) {
+  const isOpen = expanded.some((r) => r.name === row.name)
+  if (isOpen && !expandedTags.value[row.name]) await loadTags(row.name)
 }
 async function loadReleases() {
   const resp = await fetchAuth('/api/releases')
@@ -55,7 +77,7 @@ async function loadReleases() {
 async function load() {
   loading.value = true
   try {
-    await Promise.all([loadBuilds(), loadImages(), loadReleases()])
+    await Promise.all([loadBuilds(), loadRegistry(), loadReleases(), loadAppNames()])
   } finally {
     loading.value = false
   }
@@ -109,7 +131,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
           </el-table-column>
           <el-table-column label="状态" width="100">
             <template #default="{ row }">
-              <el-tag :type="(BUILD_STATUS[row.status]?.type as any) || 'info'" size="small">
+              <el-tag :type="(BUILD_STATUS[row.status]?.type) || 'info'" size="small">
                 {{ BUILD_STATUS[row.status]?.label || row.status }}
               </el-tag>
             </template>
@@ -127,23 +149,24 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
         </el-table>
       </el-tab-pane>
 
-      <!-- 镜像 -->
-      <el-tab-pane label="镜像" name="images">
-        <el-table :data="images" size="small" empty-text="暂无镜像">
-          <el-table-column label="应用" width="140">
-            <template #default="{ row }"><span class="mono">{{ appName(row.appId) }}</span></template>
+      <!-- 镜像库（registry v2 实时视图） -->
+      <el-tab-pane label="镜像库" name="images">
+        <p class="tab-hint">镜像仓库实时列表（hub.wang.dd:5000），展开行查看 tag 与 digest</p>
+        <el-table :data="registryRepos" size="small" empty-text="镜像库为空或未启用" @expand-change="onExpand">
+          <el-table-column type="expand">
+            <template #default="{ row }">
+              <div class="tag-list">
+                <div v-for="t in expandedTags[row.name] || []" :key="t.tag" class="tag-row">
+                  <span class="mono tag-name">{{ t.tag }}</span>
+                  <span class="mono faint digest">{{ t.digest }}</span>
+                </div>
+                <span v-if="row.name && !expandedTags[row.name]" class="faint">加载中…</span>
+                <span v-else-if="!expandedTags[row.name]?.length" class="faint">无 tag</span>
+              </div>
+            </template>
           </el-table-column>
-          <el-table-column label="Tag" min-width="160">
-            <template #default="{ row }"><span class="mono">{{ row.tag }}</span></template>
-          </el-table-column>
-          <el-table-column label="Digest（不可变）" min-width="200">
-            <template #default="{ row }"><span class="mono">{{ shortDigest(row.digest) }}</span></template>
-          </el-table-column>
-          <el-table-column label="来源" width="100">
-            <template #default="{ row }">{{ row.source }}</template>
-          </el-table-column>
-          <el-table-column label="构建时间" width="170">
-            <template #default="{ row }">{{ new Date(row.builtAt).toLocaleString() }}</template>
+          <el-table-column label="镜像仓库" min-width="300">
+            <template #default="{ row }"><span class="mono">{{ row.name }}</span></template>
           </el-table-column>
         </el-table>
       </el-tab-pane>
@@ -165,7 +188,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
           </el-table-column>
           <el-table-column label="状态" width="110">
             <template #default="{ row }">
-              <el-tag :type="(RELEASE_STATUS[row.status]?.type as any) || 'info'" size="small">
+              <el-tag :type="(RELEASE_STATUS[row.status]?.type) || 'info'" size="small">
                 {{ RELEASE_STATUS[row.status]?.label || row.status }}
               </el-tag>
               <el-tag v-if="row.isRollback" type="warning" size="small" style="margin-left:4px">回滚</el-tag>
@@ -193,4 +216,11 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
 .sub { margin: 0; font-size: 12.5px; color: var(--text-dim); }
 .devops-tabs { margin-top: 4px; }
 .text-faint { color: var(--text-faint); }
+.tab-hint { font-size: 12.5px; color: var(--text-dim); margin: 0 0 10px; }
+.tag-list { padding: 4px 12px; display: flex; flex-direction: column; gap: 6px; }
+.tag-row { display: flex; align-items: center; gap: 12px; font-size: 12.5px; }
+.tag-name { min-width: 120px; color: var(--text); }
+.digest { word-break: break-all; }
+.faint { color: var(--text-faint); }
+.mono { font-family: var(--mono, ui-monospace, monospace); }
 </style>

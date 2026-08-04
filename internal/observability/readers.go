@@ -22,4 +22,6 @@ type RuleStore interface {
 	ListAlertRules(ctx context.Context) ([]AlertRule, error)
 	CreateAlertRule(ctx context.Context, rule AlertRule) (AlertRule, error)
 	DeleteAlertRule(ctx context.Context, id string) error
+	// ListAllAlertRules 跨租户列出全部告警规则（admin 平台总览，不过滤 tenant）。
+	ListAllAlertRules(ctx context.Context) ([]AlertRule, error)
 }

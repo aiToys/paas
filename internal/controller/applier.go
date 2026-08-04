@@ -13,9 +13,9 @@ import (
 	"github.com/aitoys/paas/internal/workload"
 )
 
-// clampReplicas 把领域 int 副本数安全收敛到 K8s int32（防负值/溢出，gosec G115）。
-// 领域 Validate 已约束范围，此处作数据面边界防御性兜底。
-func clampReplicas(n int) int32 {
+// clampInt32 把领域 int 安全收敛到 K8s int32（防负值/溢出，gosec G115）。
+// 领域 Validate 已约束范围，此处作数据面边界防御性兜底。通用：副本数/端口均经此。
+func clampInt32(n int) int32 {
 	switch {
 	case n < 0:
 		return 0
@@ -54,9 +54,9 @@ func (a *K8sApplier) Apply(ctx context.Context, w workload.Workload) error {
 			Name:          w.Name,
 			Image:         w.Image,
 			ImageRef:      w.ImageRef,
-			Replicas:      clampReplicas(w.Replicas),
-			Port:          clampReplicas(w.Port),          // 端口投影，驱动 reconciler 建 Service + readiness probe
-			ContainerPort: clampReplicas(w.ContainerPort), // 0 时不建 Service（向后兼容）
+			Replicas:      clampInt32(w.Replicas),
+			Port:          clampInt32(w.Port),          // 端口投影，驱动 reconciler 建 Service + readiness probe
+			ContainerPort: clampInt32(w.ContainerPort), // 0 时不建 Service（向后兼容）
 			Schedule:      w.Schedule,
 			Command:       w.Command,
 		}

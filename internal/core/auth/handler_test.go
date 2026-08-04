@@ -131,6 +131,27 @@ func TestMeDeveloperScoped(t *testing.T) {
 	assert.NotContains(t, p.Permissions, "*")
 }
 
+// TestMeFromCookie 覆盖浏览器会话路径：access cookie（无 Authorization header）也能取到 profile。
+// 回归防护：原 Me 只读 header，cookie 会话 401。
+func TestMeFromCookie(t *testing.T) {
+	h := newAuthHandler(t)
+	tok, _ := Sign(Claims{
+		Sub: "u-admin", Tenant: "t-acme", Roles: []string{"tenant-admin"},
+		Typ: TokenAccess, Exp: 9999999999,
+	}, hSecret)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/auth/users/me", nil)
+	req.AddCookie(&http.Cookie{Name: AccessCookieName, Value: tok})
+	rec := httptest.NewRecorder()
+	h.Me(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var p UserProfile
+	decodeData(t, rec.Body.Bytes(), &p)
+	assert.Equal(t, "admin", p.Username)
+	assert.Contains(t, p.Roles, "super_admin")
+}
+
 func TestRefresh(t *testing.T) {
 	h := newAuthHandler(t)
 	// Sub 必须是真实用户 ID（GetUser 按查；旧实现误用 GetUserByName 导致 fallback 跳过状态校验）。

@@ -75,10 +75,21 @@ func TestResolveJWTSecret_DevAllowsRandom(t *testing.T) {
 }
 
 func TestResolveJWTSecret_UsesEnvIfSet(t *testing.T) {
-	t.Setenv("PAAS_JWT_SECRET", "my-explicit-secret")
+	// 生产模式显式 secret 需 ≥32 字节（防弱串暴破）。
+	t.Setenv("PAAS_JWT_SECRET", "0123456789abcdef0123456789abcdef0123456789abcdef")
 	t.Setenv("PAAS_PROD", "true") // 生产模式但有显式 secret，应通过
 
 	s, err := resolveJWTSecretOrErr()
 	require.NoError(t, err)
-	assert.Equal(t, "my-explicit-secret", s)
+	assert.Equal(t, "0123456789abcdef0123456789abcdef0123456789abcdef", s)
+}
+
+func TestResolveJWTSecret_ProductionRejectsShort(t *testing.T) {
+	// 生产模式 secret <32 字节拒启（防弱串暴破）。
+	t.Setenv("PAAS_JWT_SECRET", "my-explicit-secret")
+	t.Setenv("PAAS_PROD", "true")
+
+	_, err := resolveJWTSecretOrErr()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "过短")
 }

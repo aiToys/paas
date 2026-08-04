@@ -178,8 +178,13 @@ func resolveDigest(ctx context.Context, dockerBin, ref string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// injectToken 把 token 注入 HTTPS git URL（https://token@host/...）。非 HTTPS 原样返回。
+// injectToken 把 token 注入 HTTPS git URL（https://token@host/...）。
+// 已含凭证（URL 含 @，如内置 Gitea 的 http://paas-bot:pass@... CloneURL）原样返回；
+// 非 HTTPS（含 Gitea 内网 http）原样返回--git 用 URL 内 basic auth clone。
 func injectToken(url, token string) string {
+	if strings.Contains(url, "@") {
+		return url // 已含凭证（internal Gitea CloneURL 或用户填的含凭证 URL）
+	}
 	if !strings.HasPrefix(url, "https://") {
 		return url
 	}

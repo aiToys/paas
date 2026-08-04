@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/internal/observability"
 	"github.com/aitoys/paas/pkg/tenant"
 )
@@ -21,7 +22,7 @@ type TracesStore struct {
 
 // NewTracesStore 创建 Tempo 适配。tempoURL 为 Tempo 根地址（如 http://tempo:3200）。
 func NewTracesStore(tempoURL string) *TracesStore {
-	return &TracesStore{tempoURL: tempoURL, client: &http.Client{Timeout: 10 * time.Second}}
+	return &TracesStore{tempoURL: tempoURL, client: httputil.NewClient(10 * time.Second)}
 }
 
 // tempoSearchResponse 是 Tempo /api/search 响应的最小子集。

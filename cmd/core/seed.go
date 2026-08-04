@@ -2,13 +2,24 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"time"
 
 	"github.com/aitoys/paas/internal/core/auth"
 	"github.com/aitoys/paas/internal/core/identity"
+	"github.com/aitoys/paas/internal/storage/pg"
 )
+
+// seedSilent 已存在错误视为预期（重部署补齐时已存在实体），不刷日志噪音。
+// PG 路径每次启动都调 seedIdentity，租户/Key 重复触发 ErrAlreadyExists 属正常。
+func seedSilent(err error) {
+	if err == nil || errors.Is(err, pg.ErrAlreadyExists) {
+		return
+	}
+	log.Printf("[seed] %v", err)
+}
 
 // seedIdentity 注入演示用租户与 API Key。
 //
@@ -30,7 +41,7 @@ func seedIdentity(idb identity.Repository, extraKey string) {
 		{ID: "t-globex", Name: "Globex", CreatedAt: now},
 	} {
 		if err := idb.CreateTenant(ctx, t); err != nil {
-			log.Printf("[seed] %v", err)
+			seedSilent(err)
 		}
 	}
 
@@ -87,7 +98,7 @@ func seedIdentity(idb identity.Repository, extraKey string) {
 	}
 	for _, k := range keys {
 		if err := idb.CreateAPIKey(ctx, k); err != nil {
-			log.Printf("[seed] %v", err)
+			seedSilent(err)
 		}
 	}
 }

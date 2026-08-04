@@ -133,7 +133,7 @@ func (h *Handler) serveSecretCollection(w http.ResponseWriter, r *http.Request) 
 		}
 		saved, err := h.repo.CreateSecret(r.Context(), sec)
 		if err != nil {
-			httputil.WriteError(w, http.StatusBadRequest, err.Error())
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
 		// 记审计（创建成功）
@@ -161,7 +161,7 @@ func (h *Handler) serveSecretItem(w http.ResponseWriter, r *http.Request) {
 	// 先取（确认存在 + 拿 name 记审计）；跨租户/不存在走 not found 不泄漏
 	sec, err := h.repo.GetSecret(r.Context(), id)
 	if err != nil {
-		httputil.WriteError(w, http.StatusNotFound, err.Error())
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
 	// 平台级 Secret 仅平台管理员可删。
@@ -169,7 +169,7 @@ func (h *Handler) serveSecretItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.repo.DeleteSecret(r.Context(), id); err != nil {
-		httputil.WriteError(w, http.StatusNotFound, err.Error())
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
 	h.record(r.Context(), ActionDelete, id, "删除密钥 "+sec.Name)

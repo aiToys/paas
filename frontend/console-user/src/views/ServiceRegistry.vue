@@ -8,6 +8,8 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
+
+type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 
 const router = useRouter()
@@ -61,7 +63,7 @@ const strategyOpts = [
   { value: 'error_rate', label: '错误率（5xx/异常）' },
   { value: 'slow_call', label: '慢调用率' },
 ]
-const stateMeta: Record<string, { label: string; type: string }> = {
+const stateMeta: Record<string, { label: string; type: TagType }> = {
   closed: { label: '放行', type: 'success' },
   open: { label: '熔断', type: 'danger' },
   'half-open': { label: '半开', type: 'warning' },
@@ -251,10 +253,14 @@ async function create() {
 }
 
 async function remove(row: Service) {
+  // 按服务自身 envId 判定生产（非顶栏 scope），防顶栏与资源环境不一致时防护削弱。
+  const rowEnv = envs.value.find((e) => e.id === row.envId)
+  const isProd = rowEnv?.type === 'prod'
   const ok = await confirmDangerous({
     action: '注销服务',
     target: row.name,
-    requireNameConfirm: envStore.isProd,
+    requireNameConfirm: isProd,
+    isProd,
   })
   if (!ok) return
   const resp = await fetchAuth(`/api/services/${row.id}`, { method: 'DELETE' })
@@ -422,7 +428,7 @@ watch(() => envStore.currentEnvId, load)
           <template #default="{ row }">
             <el-tag
               v-if="row.enabled"
-              :type="(stateMeta[row.state]?.type as any) || 'info'"
+              :type="(stateMeta[row.state]?.type) || 'info'"
               size="small"
             >{{ stateMeta[row.state]?.label || row.state }}</el-tag>
             <el-tag v-else type="info" size="small">停用</el-tag>

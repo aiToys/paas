@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# 部署 PaaS 到本地 K8s 集群（参考 aiem 模式：hub.wang.dd:5000 + hermes ingress + paas.k8s.dd）。
+# 部署 PaaS 到本地 K8s 集群（集群内自建 registry + hermes ingress + paas.k8s.dd）。
 #
-# 流程：docker build（amd64 交叉编译 + 前端 embed）→ push 私有 registry → helm upgrade --install
+# 流程：检测 worker nodeIP → docker build（amd64 交叉编译 + 前端 embed）
+#       → push 集群内 registry（NodePort 30050）→ envsubst values → helm upgrade --install
 #
 # 用法：
 #   ./scripts/deploy-k8s.sh              # 默认 TAG=0.1.0
@@ -10,36 +11,62 @@
 #   ARCH=arm64 ./scripts/deploy-k8s.sh   # arm64 集群（默认 amd64）
 #
 # 前置：
+#   - 集群内 registry 已部署：kubectl apply -f deploy/k8s/registry.yaml（见 docs/deploy/dependencies.md）
 #   - docker（colima 或 Docker Desktop）+ buildkit
-#   - hub.wang.dd:5000 可达（从 docker daemon；若 dockerd push 超时，脚本自动 fallback crane 直推）
+#   - Mac/colima docker daemon 已配 insecure-registries: ["<nodeIP>:30050"]（HTTP registry 无 TLS）
 #   - crane（go-containerregistry）在 PATH 时用于 push fallback：`go install github.com/google/go-containerregistry/cmd/crane@latest`
-#   - kubectl/helm 已配置集群访问
+#   - envsubst（gettext）+ kubectl/helm 已配置集群访问
 #
 # 镜像架构：Dockerfile builder 用本地架构 Go 交叉编译到 amd64（ARG GOARCH，默认 amd64），
 # runtime 用 linux/amd64 distroless。arm64 集群用 ARCH=arm64（需改 Dockerfile runtime --platform）。
 set -euo pipefail
 
-REG="${REG:-hub.wang.dd:5000/paas}"
 TAG="${TAG:-0.1.0}"
 NS="${NS:-paas}"
 RELEASE="${RELEASE:-paas}"
-IMAGE="$REG/paas-core:$TAG"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+# 检测 worker 节点 InternalIP（registry NodePort 30050 在所有节点可达，取首个 worker）。
+# kubelet/CRI 在节点拉镜像无法解析 svc.cluster.local，故 Pod 镜像也用 IP:NodePort。
+NODE_IP="${NODE_IP:-$(kubectl get nodes -o wide | awk '!/master|ROLES/{print $6; exit}' | grep -E '^[0-9.]+$' || true)}"
+if [[ -z "$NODE_IP" ]]; then
+  # 兜底：取第一个非 control-plane 节点
+  NODE_IP=$(kubectl get nodes -o jsonpath='{range .items[*]}{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}{end}' | head -1)
+fi
+if [[ -z "$NODE_IP" ]]; then
+  echo "✗ 无法检测 worker 节点 IP。手动指定：NODE_IP=x.x.x.x ./scripts/deploy-k8s.sh"
+  exit 1
+fi
+REG="${REG:-${NODE_IP}:30050/paas}"
+IMAGE="$REG/paas-core:$TAG"
+
 echo "╔══════════════════════════════════════════════╗"
 echo "║  PaaS K8s 部署（${IMAGE}）"
 echo "╚══════════════════════════════════════════════╝"
+echo "  worker nodeIP: $NODE_IP  （registry NodePort 30050）"
+
+# 前置检查：Mac docker daemon 是否配了 <NODE_IP>:30050 insecure registry。
+if ! docker info 2>/dev/null | grep -q "$NODE_IP:30050"; then
+  echo "⚠ Mac docker daemon 未检测到 insecure registry \"$NODE_IP:30050\"。"
+  echo "  请在 ~/.colima/default/docker.sock 或 Docker Desktop 配 insecure-registries 后重启 daemon，"
+  echo "  否则 docker push 将因 HTTP registry 被拒。详见 docs/deploy/dependencies.md。"
+fi
+
+if ! command -v envsubst >/dev/null 2>&1; then
+  echo "✗ envsubst 未安装（gettext）。macOS: brew install gettext && brew link --force gettext"
+  exit 1
+fi
 
 echo ""
-echo "▶ 1/3 构建镜像（多阶段：前端 build + Go 交叉编译 amd64 + alpine runtime）..."
+echo "▶ 1/4 构建镜像（多阶段：前端 build + Go 交叉编译 amd64 + alpine runtime）..."
 # DOCKER_BUILDKIT=0 走 legacy builder：base 镜像用本地（node/golang/alpine 经 daocloud 中转
 # retag 到本地同名），不查 remote registry metadata（避免 docker.io/gcr 拉取超时）。
 DOCKER_BUILDKIT=0 docker build -t "$IMAGE" -f Dockerfile .
 
 push_image() {
-  # 优先 docker push；dockerd 到 registry 网络不通（如 colima VM 路由问题）时 fallback crane 直推。
+  # 优先 docker push（daemon 已配 insecure registry）；失败 fallback crane 直推（不经 dockerd）。
   if docker push "$IMAGE" 2>&1; then
     return 0
   fi
@@ -60,23 +87,27 @@ if [[ "${SKIP_PUSH:-0}" == "1" ]]; then
   echo "  SKIP_PUSH=1，跳过推送"
 else
   echo ""
-  echo "▶ 2/3 推送到私有 registry $REG ..."
+  echo "▶ 2/4 推送到集群内 registry $REG ..."
   push_image
 fi
 
 echo ""
-echo "▶ 3/3 helm upgrade --install（CRD + RBAC + core + ingress）..."
+echo "▶ 3/4 envsubst values（注入 NODE_IP=${NODE_IP}）→ helm upgrade --install..."
+VALUES_TMP="$(mktemp -t paas-values.XXXXXX.yaml)"
+export NODE_IP
+envsubst < deploy/charts/paas/values-paas-k8s.yaml > "$VALUES_TMP"
 helm upgrade --install "$RELEASE" deploy/charts/paas \
   -n "$NS" --create-namespace \
-  -f deploy/charts/paas/values-paas-k8s.yaml \
+  -f "$VALUES_TMP" \
   --set image.tag="$TAG" \
   --set maas.airouterApiKey="${PAAS_AIROUTER_API_KEY:-}"
+rm -f "$VALUES_TMP"
 
 # image.tag 不变时 helm upgrade 不改 deployment spec，不触发 rollout ——
 # 会造成「部署成功但 Pod 跑旧镜像 digest」的假象。强制 rollout restart，
 # 配合 pullPolicy: Always 确保每次部署拉取最新 push 的 digest。
 echo ""
-echo "🔄 强制 rollout restart（拉取最新镜像 digest）..."
+echo "▶ 4/4 强制 rollout restart（拉取最新镜像 digest）..."
 kubectl -n "$NS" rollout restart deploy/"${RELEASE}-core"
 
 echo ""
@@ -95,3 +126,4 @@ echo "   - 用户控制台: http://paas.k8s.dd/console/"
 echo "   - 后台管理:   http://paas.k8s.dd/admin/"
 echo "   - API 探针:   curl http://paas.k8s.dd/livez"
 echo "   - 模型列表:   curl -H 'Authorization: Bearer sk-acme-admin' http://paas.k8s.dd/v1/models"
+echo "   - registry:   curl http://${NODE_IP}:30050/v2/_catalog"

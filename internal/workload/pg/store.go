@@ -73,6 +73,27 @@ func (s *Store) List(ctx context.Context, envID, appID, wtype string) ([]workloa
 	return out, rows.Err()
 }
 
+// ListAll 跨租户返回全部工作负载（admin 视图，不过滤 tenant，返回对象带 TenantID）。
+// 不做 env/app/type 过滤；按 TenantID 升序、再 ID 升序排序。SELECT 列含 tenant_id（wlCols 已含）。
+// 与 List 共享 wlCols/scanWL，避免列漂移；查询逻辑独立（无 WHERE tenant_id）保持清晰。
+func (s *Store) ListAll(ctx context.Context) ([]workload.Workload, error) {
+	q := `SELECT ` + wlCols + ` FROM workloads ORDER BY tenant_id, id`
+	rows, err := s.db.Pool().Query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]workload.Workload, 0)
+	for rows.Next() {
+		var w workload.Workload
+		if err = scanWL(rows, &w); err != nil {
+			return nil, err
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
 // Get 取单个工作负载。跨租户访问返回 not found（不泄漏）。
 func (s *Store) Get(ctx context.Context, id string) (workload.Workload, error) {
 	tid, err := pg.TenantOrErr(ctx)

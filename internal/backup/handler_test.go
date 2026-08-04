@@ -29,6 +29,13 @@ func (f *fakeRepo) List(_ context.Context, tid, res string) ([]Backup, error) {
 	}
 	return out, nil
 }
+func (f *fakeRepo) ListAll(_ context.Context) ([]Backup, error) {
+	out := make([]Backup, 0, len(f.items))
+	for _, b := range f.items {
+		out = append(out, b)
+	}
+	return out, nil
+}
 func (f *fakeRepo) Get(_ context.Context, tid, id string) (Backup, error) {
 	b, ok := f.items[id]
 	if !ok || b.TenantID != tid {

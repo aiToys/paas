@@ -12,4 +12,6 @@ type Repository interface {
 	// EnvType 返回指定环境的生产/测试类型，供生产写权限校验（prod:write）。
 	// 环境不存在返回错误。
 	EnvType(ctx context.Context, id string) (string, error)
+	// ListAll 跨租户列出全部环境（admin 平台总览，不过滤 tenant，返回对象带 TenantID）。
+	ListAll(ctx context.Context) ([]Environment, error)
 }

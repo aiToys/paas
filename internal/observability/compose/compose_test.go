@@ -38,6 +38,9 @@ func (f *fakeRules) DeleteAlertRule(ctx context.Context, id string) error {
 	}
 	return nil
 }
+func (f *fakeRules) ListAllAlertRules(ctx context.Context) ([]observability.AlertRule, error) {
+	return f.rules, nil
+}
 
 func TestListAlertsEvaluatesAgainstMetrics(t *testing.T) {
 	rules := &fakeRules{rules: []observability.AlertRule{

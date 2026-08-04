@@ -63,7 +63,7 @@ const mapRole = (r: CoreRole): RoleInfo => ({
 
 // 获取角色列表（对接 core GET /api/roles；内置角色只读，假分页适配 admin 期望）。
 export const fetchRoleList = async (params: RoleSearchRequest): Promise<RoleSearchResponse> => {
-  const list = await api.get<CoreRole[]>('/api/roles')
+  const list = await api.get<CoreRole[]>('/api/admin/roles')
   let mapped = (list ?? []).map(mapRole)
   if (params.keyword) {
     const kw = params.keyword.toLowerCase()
@@ -76,7 +76,7 @@ export const fetchRoleList = async (params: RoleSearchRequest): Promise<RoleSear
 
 // 获取角色详情（本地从列表派生，core 无单角色端点）。
 export const fetchRoleDetail = async (id: string): Promise<RoleInfo> => {
-  const list = await api.get<CoreRole[]>('/api/roles')
+  const list = await api.get<CoreRole[]>('/api/admin/roles')
   const r = (list ?? []).find((x) => x.name === id)
   if (!r) throw new Error('角色不存在')
   return mapRole(r)
@@ -92,7 +92,7 @@ export const batchDeleteRoles = (_ids: string[]) => unsupported('批量删除')
 
 // 导出角色列表（CSV 本地生成）。
 export const exportRoles = async (): Promise<string> => {
-  const list = await api.get<CoreRole[]>('/api/roles')
+  const list = await api.get<CoreRole[]>('/api/admin/roles')
   const rows = (list ?? []).map((r) => mapRole(r))
   const header = 'id,name,code,description,status'
   const lines = rows.map((r) => [r.id, r.name, r.code, `"${r.description}"`, r.status].join(','))
@@ -101,7 +101,7 @@ export const exportRoles = async (): Promise<string> => {
 
 // 获取角色权限（从列表派生）。
 export const fetchRolePermissions = async (roleId: string): Promise<string[]> => {
-  const list = await api.get<CoreRole[]>('/api/roles')
+  const list = await api.get<CoreRole[]>('/api/admin/roles')
   return (list ?? []).find((x) => x.name === roleId)?.permissions ?? []
 }
 

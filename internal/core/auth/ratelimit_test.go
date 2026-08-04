@@ -62,10 +62,22 @@ func TestLoginLimiter_LockExpires(t *testing.T) {
 }
 
 func TestClientIP_XForwardedFor(t *testing.T) {
+	// 多段 XFF：首段（9.9.9.9）可能是客户端伪造，最右段（10.0.0.1）是 ingress 追加的真实 IP。
+	// 取最右防攻击者伪造首段绕过 per-IP 限流。
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("X-Forwarded-For", "9.9.9.9, 10.0.0.1")
-	if got := clientIP(req); got != "9.9.9.9" {
-		t.Errorf("XFF 首段，got %s", got)
+	if got := clientIP(req); got != "10.0.0.1" {
+		t.Errorf("应取 XFF 最右段（ingress 追加），got %s", got)
+	}
+}
+
+func TestClientIP_XRealIP(t *testing.T) {
+	// X-Real-IP（ingress 注入，覆盖客户端伪造）优先于 XFF。
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Real-IP", "7.7.7.7")
+	req.Header.Set("X-Forwarded-For", "9.9.9.9, 10.0.0.1")
+	if got := clientIP(req); got != "7.7.7.7" {
+		t.Errorf("X-Real-IP 应优先，got %s", got)
 	}
 }
 

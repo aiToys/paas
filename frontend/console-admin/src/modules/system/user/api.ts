@@ -146,7 +146,22 @@ export const updateUser = async (id: string, data: Partial<UserCreateRequest>): 
     password: data.password
   }
   await api.put(`/api/admin/users/${id}`, body)
-  return { ...mapUser({ id, tenantId: '', name: data.username ?? '', isAdmin: false, roles: [] }), ...data } as UserInfo
+  // 显式构造返回对象，避免 data.status 联合类型覆盖 / password 泄到返回对象。
+  // UserInfo 无 isAdmin 字段（仅 CoreUserCreate body 用），不回写；更新不返这些展示字段。
+  return {
+    id,
+    username: data.username ?? '',
+    tenantId: '',
+    realName: data.username ?? '',
+    email: data.email ?? '',
+    phone: '',
+    avatar: '',
+    roles: data.roles ?? [],
+    status: data.status ?? 'active',
+    createTime: '',
+    lastLoginTime: '',
+    loginCount: 0
+  }
 }
 
 // 删除用户（对接 core DELETE /api/admin/users/{id}）。
@@ -171,19 +186,3 @@ export const exportUsers = async (params: UserSearchRequest): Promise<string> =>
   return [header, ...lines].join('\n')
 }
 
-// 合并自 src/apis/user/info.ts：菜单接口
-export interface MenusRequest {
-  userId: string
-}
-
-export interface menuItemData {
-  name: string
-  path: string
-  component?: string
-  meta?: Map<string, string> | undefined
-  children?: menuItemData[]
-}
-
-// 获取当前用户菜单
-export const fetchMenus = (req: MenusRequest) =>
-  api.get<menuItemData[]>('/api/system/menus', { params: req })

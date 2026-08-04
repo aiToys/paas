@@ -142,7 +142,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	b.SizeMB = deterministicSize(b.ResourceID + b.Type)
 	b.CreatedAt = time.Now()
 	if err := h.repo.Create(r.Context(), b); err != nil {
-		httputil.WriteError(w, http.StatusConflict, err.Error())
+		httputil.WriteServiceError(w, http.StatusConflict, err)
 		return
 	}
 	httputil.WriteData(w, b)
@@ -161,14 +161,14 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 	// 删除前先查备份归属资源，校验其环境的生产写权限。
 	b, err := h.repo.Get(r.Context(), tid, id)
 	if err != nil {
-		httputil.WriteError(w, http.StatusNotFound, err.Error())
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
 	if !h.allowProdResource(w, r, b.ResourceID) {
 		return
 	}
 	if err := h.repo.Delete(r.Context(), tid, id); err != nil {
-		httputil.WriteError(w, http.StatusNotFound, err.Error())
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

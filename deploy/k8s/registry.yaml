@@ -1,0 +1,103 @@
+# 集群内自建 Docker Registry（去除 hub.wang.dd 外部依赖）。
+#
+# 设计：PaaS 一站式——所有镜像依赖（paas-core/postgres/gitea/docker:git/observability/
+# 数据服务引擎/local-path）统一来自集群自建 registry，一处管理、可文档化排查。
+# 参考 aiem/gitea 模式：Deployment + Service + PVC，与 paas ns 同栈。
+#
+# 暴露：Service type=NodePort（nodePort 30050）。
+#   - 节点 docker daemon（builder DooD push + 节点拉镜像）经 <nodeIP>:30050
+#   - Mac（初始镜像导入 + 持续推送 paas-core）经 <nodeIP>:30050
+#   - core Pod registry client（镜像库 UI catalog/tags）经 Pod 网络 → <nodeIP>:30050（NodePort 可达）
+#   不依赖 ClusterIP DNS 名——kubelet/CRI 在节点拉镜像无法解析 svc.cluster.local，统一用 IP:NodePort。
+#
+# 存储：local-path PVC 20Gi（与 postgres/gitea 同 SC；dev/demo 轻量，生产规模到时迁共享存储）。
+# 只读：未启 REGISTRY_STORAGE_DELETE_ENABLED（镜像库 UI 仅 catalog/tags，删除+GC 留后续）。
+#
+# 部署：kubectl apply -f deploy/k8s/registry.yaml
+# 首次前提：节点能拉 registry:2（从 hub.wang.dd:5000/library/registry:2 或 daocloud 中转）。
+# 节点配置：docker daemon insecure-registries 追加 "<nodeIP>:30050"（HTTP 无 TLS）。
+# 镜像导入：见 docs/deploy/dependencies.md + scripts/sync-images.sh。
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: paas-registry-data
+  namespace: paas
+  labels:
+    app.kubernetes.io/name: paas-registry
+    app.kubernetes.io/part-of: paas
+spec:
+  storageClassName: local-path
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests: { storage: 20Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: paas-registry
+  namespace: paas
+  labels:
+    app.kubernetes.io/name: paas-registry
+    app.kubernetes.io/part-of: paas
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: paas-registry
+  ports:
+    - name: registry
+      port: 5000
+      targetPort: 5000
+      nodePort: 30050
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: paas-registry
+  namespace: paas
+  labels:
+    app.kubernetes.io/name: paas-registry
+    app.kubernetes.io/part-of: paas
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: paas-registry
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: paas-registry
+    spec:
+      # 限定 worker：kb1 master 未配 insecure registry，拉镜像失败（业务 Pod 全在 worker）。
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/worker
+                    operator: Exists
+      containers:
+        - name: registry
+          image: hub.wang.dd:5000/library/registry:2
+          # Always：registry 镜像 bootstrap 推送后 tag 指向新 digest，强制拉新避节点缓存旧架构镜像。
+          imagePullPolicy: Always
+          env:
+            # 明确关闭 delete API（镜像库 UI 仅 catalog/tags 只读；删除 + GC 留后续）
+            - { name: REGISTRY_STORAGE_DELETE_ENABLED, value: "false" }
+          ports:
+            - { name: registry, containerPort: 5000 }
+          # readinessProbe：registry v2 根端点返 {} 即就绪
+          readinessProbe:
+            httpGet: { path: /v2/, port: 5000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /v2/, port: 5000 }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/registry }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: paas-registry-data

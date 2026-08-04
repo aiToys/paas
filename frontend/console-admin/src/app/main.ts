@@ -56,8 +56,10 @@ watch(
 )
 
 async function bootstrap() {
-  // MSW 仅在显式 VITE_ENABLE_MOCK=true 时启用；默认走真实后端（PaaS core）。
-  const enableMock = import.meta.env.VITE_ENABLE_MOCK === 'true'
+  // MSW 双重门控：import.meta.env.DEV（生产构建编译期为 false，tree-shake 消除整段 mock 分支）
+  // && VITE_ENABLE_MOCK=true。防 .env.production 误配 mock=true 导致 admin/123456 演示凭证在生产可登录。
+  // 默认走真实后端（PaaS core）。
+  const enableMock = import.meta.env.DEV && import.meta.env.VITE_ENABLE_MOCK === 'true'
   if (enableMock) {
     const { worker } = await import('@/mock/browser')
     await worker.start({

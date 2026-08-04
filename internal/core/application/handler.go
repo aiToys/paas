@@ -41,6 +41,9 @@ type Handler struct {
 	QuotaCheck func(ctx context.Context, delta int) error
 	// Binder 绑定/解绑副作用注入器（可选）；nil 跳过。由 cmd/core 桥接 dataservice+appconfig。
 	Binder BindingInjector
+	// CascadeDelete 跨 store 关联资源级联清理（可选）；nil 跳过。由 cmd/core 桥接
+	// workload/appconfig/devops 等 store，删应用前清该 appID 下孤儿资源（best-effort，失败仅记日志不阻断）。
+	CascadeDelete func(ctx context.Context, appID string) error
 	// stats 工作负载聚合统计（可选）；注入后 List 派生真实 Replicas/Status（覆盖 seed 假值）。
 	// nil 透传 seed 原值（降级：无 workload repo 可查）。
 	stats WorkloadStats
@@ -118,7 +121,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// 横切配额拦截：创建前检查应用数配额，超限回 429（不创建）。
 		if h.QuotaCheck != nil {
 			if err := h.QuotaCheck(r.Context(), 1); err != nil {
-				httputil.WriteError(w, StatusQuotaExceeded, err.Error())
+				httputil.WriteServiceError(w, StatusQuotaExceeded, err)
 				return
 			}
 		}
@@ -127,7 +130,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if h.QuotaCheck != nil {
 				_ = h.QuotaCheck(r.Context(), -1)
 			}
-			httputil.WriteError(w, http.StatusConflict, err.Error())
+			httputil.WriteServiceError(w, http.StatusConflict, err)
 			return
 		}
 		w.WriteHeader(http.StatusCreated)
@@ -145,10 +148,39 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		a, err := h.repo.Get(r.Context(), id)
 		if err != nil {
-			httputil.WriteError(w, http.StatusNotFound, err.Error())
+			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
 		httputil.WriteData(w, a)
+		return
+	}
+
+	// DELETE /api/applications/{id} —— 删除应用（含跨 store 关联资源级联清理）。
+	if r.Method == http.MethodDelete && len(parts) == 1 {
+		if !h.allow(w, r, PermApplicationWrite) {
+			return
+		}
+		// 先校验存在性 + 归属（跨租户 not found 不泄漏）。
+		if _, err := h.repo.Get(r.Context(), id); err != nil {
+			httputil.WriteServiceError(w, http.StatusNotFound, err)
+			return
+		}
+		// 级联清理关联资源（工作负载/配置/DevOps，best-effort；失败记日志不阻断删除）。
+		if h.CascadeDelete != nil {
+			if err := h.CascadeDelete(r.Context(), id); err != nil {
+				log.Printf("应用级联清理失败（best-effort，继续删应用）: app=%s: %v", id, err) //nolint:gosec // G706 误报：日志格式化输出
+			}
+		}
+		if err := h.repo.Delete(r.Context(), id); err != nil {
+			httputil.WriteInternalError(w, err)
+			return
+		}
+		// 配额回收：删除成功后递减应用数用量（best-effort，同 workload Delete）。
+		// 缺失会导致配额只增不减——删除应用后用量仍占用，最终无法再创建（429 锁死）。
+		if h.QuotaCheck != nil {
+			_ = h.QuotaCheck(r.Context(), -1)
+		}
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
@@ -167,7 +199,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		a, err := h.repo.BindResource(r.Context(), id, body.Type, body.Name)
 		if err != nil {
-			httputil.WriteError(w, http.StatusBadRequest, err.Error())
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
 		// 绑定资源后触发副作用注入（Binder 内部按 type 过滤，非 dataservice kind 无副作用；best-effort）。
@@ -188,7 +220,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		a, err := h.repo.Unbind(r.Context(), id, parts[2], parts[3])
 		if err != nil {
-			httputil.WriteError(w, http.StatusNotFound, err.Error())
+			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
 		// 解绑资源时清理已注入的 appconfig 连接条目（Binder 内部按 type 过滤；best-effort）。

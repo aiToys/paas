@@ -17,6 +17,8 @@ type QuotaStore interface {
 	GetQuota(ctx context.Context) (ResourceQuota, error)
 	// SetQuota 覆盖更新配额（admin）。
 	SetQuota(ctx context.Context, q ResourceQuota) (ResourceQuota, error)
+	// ListAllQuotas 跨租户列出全部配额（admin 平台总览，不过滤 tenant，返回对象带 TenantID）。
+	ListAllQuotas(ctx context.Context) ([]ResourceQuota, error)
 }
 
 // UsageStore 用量仓储。
@@ -41,4 +43,6 @@ type BillStore interface {
 	GetBill(ctx context.Context, id string) (BillingRecord, error)
 	// PayBill 支付账单（unpaid -> paid）；已支付或不存在报错。
 	PayBill(ctx context.Context, id string) (BillingRecord, error)
+	// ListAllBills 跨租户列出全部账单（admin 平台总览，不过滤 tenant，返回对象带 TenantID）。
+	ListAllBills(ctx context.Context) ([]BillingRecord, error)
 }

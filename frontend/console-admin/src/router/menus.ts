@@ -14,16 +14,6 @@ const menus: RouteRecordRaw[] = [
     }
   },
   {
-    path: '/crud',
-    name: 'crud',
-    component: () => import('@/modules/crud/views/List.vue'),
-    meta: {
-      title: '增删改查',
-      icon: 'Document',
-      showMenu: true
-    }
-  },
-  {
     path: '/profile',
     name: 'profile',
     component: () => import('@/modules/profile/views/Profile.vue'),

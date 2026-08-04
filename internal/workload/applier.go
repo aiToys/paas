@@ -1,6 +1,9 @@
 package workload
 
-import "context"
+import (
+	"context"
+	"log"
+)
 
 // Applier 把期望状态投影到数据面（K8s 启用时写 Workload CRD；nil 时 ApplyRepo 不调用）。
 // 解耦控制面（PG/memory）与数据面（K8s CRD）：PG 作 API 查询源，CRD 作 reconcile 源。
@@ -12,7 +15,8 @@ type Applier interface {
 }
 
 // ApplyRepo 装饰 Repository：Create/Update/UpdateImage/Delete 成功后投影数据面。
-// 数据面投影失败不阻塞控制面写（仅忽略错误，日志告警归后续）——控制面真源优先。
+// 数据面投影失败不阻塞控制面写（控制面真源优先），但记日志留可观测痕迹，
+// 避免「控制面显示创建成功但 K8s 未建」的静默不一致。
 type ApplyRepo struct {
 	Repository
 	applier Applier
@@ -23,12 +27,19 @@ func NewApplyRepo(inner Repository, a Applier) *ApplyRepo {
 	return &ApplyRepo{Repository: inner, applier: a}
 }
 
+// applyLog 数据面投影失败时记日志（不阻断控制面写）。applier 为 nil 时透传。
+func (r *ApplyRepo) applyLog(op, id string, err error) {
+	if err != nil {
+		log.Printf("[workload-applier] 数据面投影失败 id=%s op=%s err=%v", id, op, err)
+	}
+}
+
 func (r *ApplyRepo) Create(ctx context.Context, w Workload) error {
 	if err := r.Repository.Create(ctx, w); err != nil {
 		return err
 	}
 	if r.applier != nil {
-		_ = r.applier.Apply(ctx, w)
+		r.applyLog("create", w.ID, r.applier.Apply(ctx, w))
 	}
 	return nil
 }
@@ -39,7 +50,7 @@ func (r *ApplyRepo) Update(ctx context.Context, id string, replicas int, status 
 		return saved, err
 	}
 	if r.applier != nil {
-		_ = r.applier.Apply(ctx, saved)
+		r.applyLog("update", saved.ID, r.applier.Apply(ctx, saved))
 	}
 	return saved, nil
 }
@@ -50,7 +61,7 @@ func (r *ApplyRepo) UpdateImage(ctx context.Context, id, image, imageRef string)
 		return saved, err
 	}
 	if r.applier != nil {
-		_ = r.applier.Apply(ctx, saved)
+		r.applyLog("update-image", saved.ID, r.applier.Apply(ctx, saved))
 	}
 	return saved, nil
 }
@@ -60,7 +71,9 @@ func (r *ApplyRepo) Delete(ctx context.Context, id string) error {
 		return err
 	}
 	if r.applier != nil {
-		_ = r.applier.Delete(ctx, id)
+		if err := r.applier.Delete(ctx, id); err != nil {
+			log.Printf("[workload-applier] 数据面删除投影失败 id=%s op=delete err=%v", id, err)
+		}
 	}
 	return nil
 }

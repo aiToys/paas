@@ -17,6 +17,7 @@ type stubRepo struct {
 }
 
 func (s *stubRepo) List(context.Context) ([]Application, error) { return s.apps, nil }
+func (s *stubRepo) ListAll(context.Context) ([]Application, error) { return s.apps, nil }
 func (s *stubRepo) Get(_ context.Context, id string) (Application, error) {
 	for _, a := range s.apps {
 		if a.ID == id {
@@ -28,6 +29,15 @@ func (s *stubRepo) Get(_ context.Context, id string) (Application, error) {
 func (s *stubRepo) Create(_ context.Context, a Application) error {
 	s.apps = append(s.apps, a)
 	return nil
+}
+func (s *stubRepo) Delete(_ context.Context, id string) error {
+	for i, a := range s.apps {
+		if a.ID == id {
+			s.apps = append(s.apps[:i], s.apps[i+1:]...)
+			return nil
+		}
+	}
+	return assertNotFoundErr
 }
 func (s *stubRepo) BindResource(_ context.Context, id, t, name string) (Application, error) {
 	for i, a := range s.apps {
@@ -136,4 +146,26 @@ type failCreateRepo struct{ stubRepo }
 
 func (f *failCreateRepo) Create(_ context.Context, _ Application) error {
 	return assertNotFoundErr
+}
+
+// TestDeleteHandler 验证删除应用闭环 + 跨租户不泄漏（404）。
+func TestDeleteHandler(t *testing.T) {
+	repo := &stubRepo{apps: []Application{{ID: "a1", Name: "A"}}}
+	var cascaded string
+	h := NewHandler(repo)
+	h.CascadeDelete = func(_ context.Context, appID string) error {
+		cascaded = appID
+		return nil
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/api/applications/a1", nil))
+
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "a1", cascaded, "应先触发级联清理")
+	assert.Empty(t, repo.apps, "应用应已删除")
+
+	// 跨租户/不存在统一 404 不泄漏。
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, httptest.NewRequest(http.MethodDelete, "/api/applications/ghost", nil))
+	require.Equal(t, http.StatusNotFound, rec2.Code)
 }

@@ -50,7 +50,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "dp/register" && r.Method == http.MethodDelete:
 		h.deregister(w, r)
 	case path == "dp/heartbeat" && r.Method == http.MethodPut:
-		_ = json.NewEncoder(w).Encode(map[string]string{"ok": "true"})
+		httputil.WriteJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 	default:
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
@@ -68,7 +68,7 @@ func (h *Handler) listServices(w http.ResponseWriter, r *http.Request) {
 		for _, s := range svcs {
 			out = append(out, ServiceInfo{Name: s.Name, Protocol: s.Protocol})
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"services": out})
+		httputil.WriteJSON(w, http.StatusOK, map[string]any{"services": out})
 		return
 	}
 	svcs, err := h.reader.Services(r.Context(), h.ns)
@@ -76,7 +76,7 @@ func (h *Handler) listServices(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteInternalError(w, err)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{"services": svcs})
+	httputil.WriteJSON(w, http.StatusOK, map[string]any{"services": svcs})
 }
 
 func (h *Handler) listInstances(w http.ResponseWriter, r *http.Request) {
@@ -95,7 +95,7 @@ func (h *Handler) listInstances(w http.ResponseWriter, r *http.Request) {
 			insts = is
 		}
 	}
-	_ = json.NewEncoder(w).Encode(map[string]any{
+	httputil.WriteJSON(w, http.StatusOK, map[string]any{
 		"service":   name,
 		"instances": insts,
 		"signature": signature(insts),
@@ -110,11 +110,10 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	}
 	created, err := h.services.CreateService(r.Context(), s)
 	if err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, err.Error())
+		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}
-	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(created)
+	httputil.WriteJSON(w, http.StatusCreated, created)
 }
 
 func (h *Handler) deregister(w http.ResponseWriter, r *http.Request) {
@@ -124,10 +123,10 @@ func (h *Handler) deregister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.services.DeleteService(r.Context(), id); err != nil {
-		httputil.WriteError(w, http.StatusNotFound, err.Error())
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]string{"deleted": id})
+	httputil.WriteJSON(w, http.StatusOK, map[string]string{"deleted": id})
 }
 
 // signature 对实例集做确定性签名（供 zeus Watcher 对比变化触发重发现）。

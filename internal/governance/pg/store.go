@@ -161,6 +161,25 @@ func (s *Store) ListServices(ctx context.Context, envID, appID string) ([]govern
 	return out, rows.Err()
 }
 
+// ListAllServices 跨租户列出全部服务（admin 平台总览，不过滤 tenant；按 tenant_id, name 排序）。
+func (s *Store) ListAllServices(ctx context.Context) ([]governance.Service, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+svcCols+` FROM gov_services ORDER BY tenant_id, name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]governance.Service, 0)
+	for rows.Next() {
+		var sv governance.Service
+		if err = scanService(rows, &sv); err != nil {
+			return nil, err
+		}
+		out = append(out, sv)
+	}
+	return out, rows.Err()
+}
+
 // GetService 取单个服务；跨租户访问返回 not found（不泄漏）。
 func (s *Store) GetService(ctx context.Context, id string) (governance.Service, error) {
 	tid, err := storagepg.TenantOrErr(ctx)

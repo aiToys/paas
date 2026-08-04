@@ -45,6 +45,10 @@ func (s *fakeSvcStore) CreateService(_ context.Context, sv governance.Service) (
 }
 func (s *fakeSvcStore) DeleteService(_ context.Context, id string) error { return nil }
 
+func (s *fakeSvcStore) ListAllServices(ctx context.Context) ([]governance.Service, error) {
+	return s.list, nil
+}
+
 func TestListInstances(t *testing.T) {
 	h := NewHandler(fakeReader{insts: []Instance{{ID: "a", IP: "10.0.0.1", Port: 8080}}}, "paas", &fakeSvcStore{})
 	req := httptest.NewRequest(http.MethodGet, "/dp/instances?service=user-svc", nil)

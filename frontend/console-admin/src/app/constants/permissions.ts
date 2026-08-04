@@ -16,17 +16,6 @@ export const Permissions = {
   USER_WRITE: 'user:write',
   ROLE_READ: 'role:read',
   ROLE_WRITE: 'role:write',
-  PERMISSION_READ: 'permission:read',
-  PERMISSION_WRITE: 'permission:write',
-  MENU_READ: 'menu:read',
-  MENU_WRITE: 'menu:write',
-  DICT_READ: 'dict:read',
-  DICT_WRITE: 'dict:write',
-  DEPT_READ: 'dept:read',
-  DEPT_WRITE: 'dept:write',
-  NOTICE_READ: 'notice:read',
-  NOTICE_WRITE: 'notice:write',
-  LOG_READ: 'log:read',
 } as const
 
 // 超级管理员通配符

@@ -80,7 +80,7 @@ func TestCreateValidateAndTenant(t *testing.T) {
 
 	// 合法创建：TenantID 取自 ctx
 	err = s.Create(acmeCtx(), workload.Workload{
-		ID: "wl-new", AppID: "app-cs", Type: workload.TypeService, Name: "new", Image: "img",
+		ID: "wl-new", AppID: "app-cs", EnvID: "env-acme-test", Type: workload.TypeService, Name: "new", Image: "img",
 		Replicas: 1, Status: workload.StatusPending,
 	})
 	require.NoError(t, err)

@@ -1,7 +1,7 @@
 import type { AuthProvider } from './AuthProvider'
 import type { TokenStorage } from './TokenStorage'
 import type { LoginRequest, AuthResult, UserProfile } from './types'
-import { setTokenReader } from '@/lib/http/token'
+import { setTokenReader, setRefreshHandler } from '@/lib/http/token'
 import { jwtAuthProvider } from './JwtAuthProvider'
 import { getTokenStorage } from './TokenStorage'
 
@@ -20,7 +20,7 @@ export function createAuthService(
     getAccessToken: () => storage.getAccessToken()
   })
 
-  return {
+  const service = {
     async login(req: LoginRequest): Promise<AuthResult> {
       const result = await provider.login(req)
       storage.setTokens(result.accessToken, result.refreshToken)
@@ -68,6 +68,13 @@ export function createAuthService(
       return !!storage.getAccessToken()
     }
   }
+
+  // SIDE EFFECT: 把 refresh 注册到 http 拦截器层（401 自动续期，与 setTokenReader 同模式解耦）。
+  // refresh 内已有 refreshPromise 并发保护；refresh 失败已 storage.clear()（清 token），
+  // 拦截器据此走 401 原错误路径，前端守卫下次导航跳登录。
+  setRefreshHandler({ refresh: () => service.refresh() })
+
+  return service
 }
 
 // 默认单例（生产环境用）

@@ -97,19 +97,23 @@ func scanDS(r storagepg.RowScanner, d *dataservice.DataService) error {
 	return nil
 }
 
-// List 按 kind 过滤（kind 空表示全部），按 created_at 倒序（与内存实现一致）。
-func (s *Store) List(ctx context.Context, kind string) ([]dataservice.DataService, error) {
-	tid, err := storagepg.TenantOrErr(ctx)
-	if err != nil {
-		return nil, err
+// queryAll 是 List/ListAll 共用的查询 helper：拼 SELECT + 可选 kind 过滤 + 排序，扫描后返回切片。
+// whereArgs 为 WHERE 子句位置参数（不含 tenant 过滤时为空），orderCol 指定排序列。
+func (s *Store) queryAll(ctx context.Context, whereArgs []any, kind string, orderCol string) ([]dataservice.DataService, error) {
+	q := `SELECT ` + dsCols + ` FROM data_services`
+	if len(whereArgs) > 0 {
+		q += " WHERE tenant_id=$1"
 	}
-	q := `SELECT ` + dsCols + ` FROM data_services WHERE tenant_id=$1`
-	args := []any{tid}
+	args := append([]any{}, whereArgs...)
 	if kind != "" {
 		args = append(args, kind)
-		q += fmt.Sprintf(" AND kind=$%d", len(args))
+		if len(whereArgs) > 0 {
+			q += fmt.Sprintf(" AND kind=$%d", len(args))
+		} else {
+			q += fmt.Sprintf(" WHERE kind=$%d", len(args))
+		}
 	}
-	q += " ORDER BY created_at DESC"
+	q += " ORDER BY " + orderCol
 	rows, err := s.db.Pool().Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -124,6 +128,21 @@ func (s *Store) List(ctx context.Context, kind string) ([]dataservice.DataServic
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+// List 按 kind 过滤（kind 空表示全部），按 created_at 倒序（与内存实现一致）。
+func (s *Store) List(ctx context.Context, kind string) ([]dataservice.DataService, error) {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return s.queryAll(ctx, []any{tid}, kind, "created_at DESC")
+}
+
+// ListAll 跨租户返回全部数据服务（admin 后台用），按 tenant_id 升序、created_at 倒序。
+// 不经 tenant 过滤；SELECT 含 tenant_id 且 scanDS 已填充 DataService.TenantID。
+func (s *Store) ListAll(ctx context.Context) ([]dataservice.DataService, error) {
+	return s.queryAll(ctx, nil, "", "tenant_id, created_at DESC")
 }
 
 // Get 读取单条。跨租户访问返回 not found（不泄漏存在性）。

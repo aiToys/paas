@@ -17,6 +17,8 @@ type NamespaceStore interface {
 	GetNamespace(ctx context.Context, id string) (Namespace, error)
 	CreateNamespace(ctx context.Context, n Namespace) (Namespace, error)
 	DeleteNamespace(ctx context.Context, id string) error
+	// ListAllNamespaces 跨租户列出全部命名空间（admin 平台总览，不过滤 tenant，返回对象带 TenantID）。
+	ListAllNamespaces(ctx context.Context) ([]Namespace, error)
 }
 
 // ItemStore 配置项仓储（draft）。

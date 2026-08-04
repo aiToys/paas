@@ -156,7 +156,13 @@ CREATE TABLE IF NOT EXISTS code_repos (
     dockerfile    TEXT NOT NULL DEFAULT '',
     build_context TEXT NOT NULL DEFAULT '',
     status        TEXT NOT NULL,
-    created_at    TIMESTAMPTZ NOT NULL
+    created_at    TIMESTAMPTZ NOT NULL,
+    -- 一站式 DevOps：source 区分内置 Gitea / 外部；internal 时 gitea_owner/gitea_repo/clone_url 填充。
+    -- clone_url 含 basic auth（paas-bot:pass@），仅 builder 内部用（API 不序列化，json:"-"）。
+    source        TEXT NOT NULL DEFAULT 'external',
+    gitea_owner   TEXT NOT NULL DEFAULT '',
+    gitea_repo    TEXT NOT NULL DEFAULT '',
+    clone_url     TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_repos_app ON code_repos(tenant_id, app_id);
 
@@ -382,9 +388,20 @@ CREATE TABLE IF NOT EXISTS maas_channels (
     endpoint       TEXT NOT NULL DEFAULT '',
     vendor         TEXT NOT NULL DEFAULT '',
     upstream_model TEXT NOT NULL DEFAULT '',
-    credential_ref TEXT NOT NULL DEFAULT ''
+    credential_ref TEXT NOT NULL DEFAULT '',
+    vendor_id      TEXT NOT NULL DEFAULT ''                -- 关联 maas_vendors(id)，选供应商带入（NULL=直填）
 );
 CREATE INDEX IF NOT EXISTS idx_maas_ch_model ON maas_channels(model_id);
+
+-- 预设供应商（平台级）：BaseURL + 凭证 + Type 抽成可复用实体，创建通道选供应商即带入。
+CREATE TABLE IF NOT EXISTS maas_vendors (
+    id             TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    type           TEXT NOT NULL DEFAULT 'openai-compatible',
+    base_url       TEXT NOT NULL DEFAULT '',
+    credential_ref TEXT NOT NULL DEFAULT '',
+    "desc"         TEXT NOT NULL DEFAULT ''
+);
 
 -- ===== 行级安全（RLS）：第二道防线（查询层仍强制 tenant 过滤） =====
 -- POLICY 语义：tenant_id = current_setting('app.tenant_id', true)

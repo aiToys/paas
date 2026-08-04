@@ -71,6 +71,23 @@ func (s *Store) ListServices(ctx context.Context, envID, appID string) ([]govern
 	return out, nil
 }
 
+// ListAllServices 跨租户列出全部服务（admin 平台总览，不过滤 tenant；按 TenantID 升序再 Name 升序）。
+func (s *Store) ListAllServices(ctx context.Context) ([]governance.Service, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]governance.Service, 0, len(s.services))
+	for _, sv := range s.services {
+		out = append(out, sv)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TenantID != out[j].TenantID {
+			return out[i].TenantID < out[j].TenantID
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
+}
+
 func (s *Store) GetService(ctx context.Context, id string) (governance.Service, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {

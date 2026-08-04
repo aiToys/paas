@@ -146,6 +146,158 @@ function switchType(key: string) {
   load()
 }
 
+// —— 工作负载详情（运行实例 + 日志）——
+// GET /api/workloads/{id} 返回 {workload, instances}；Job/CronJob 的每次执行对应一个 Pod（实例），
+// 点「详情」查看实例列表（状态/重启/节点），每行可查运行日志（GET /api/workloads/{id}/logs?pod=）。
+interface Instance {
+  name: string
+  status: string
+  ready?: string
+  restarts: number
+  node?: string
+  ip?: string
+  startedAt?: string
+  message?: string
+}
+interface WorkloadDetail {
+  workload: Workload
+  instances: Instance[]
+}
+const showDetail = ref(false)
+const detailLoading = ref(false)
+const detail = ref<WorkloadDetail | null>(null)
+
+// 日志查看（按实例/Pod）
+const showLogs = ref(false)
+const logsLoading = ref(false)
+const logsPod = ref('')
+const logsText = ref('')
+const logsPrevious = ref(false)
+
+const POD_STATUS_META: Record<string, { label: string; cls: string }> = {
+  Running: { label: '运行中', cls: 'ok' },
+  Pending: { label: '等待', cls: 'warn' },
+  Failed: { label: '失败', cls: 'err' },
+  Succeeded: { label: '成功', cls: 'done' },
+  Unknown: { label: '未知', cls: 'idle' },
+}
+function podStatusOf(s: string): { label: string; cls: string } {
+  return POD_STATUS_META[s] ?? { label: s || '未知', cls: 'idle' }
+}
+function fmtTime(t?: string): string {
+  if (!t) return '-'
+  const d = new Date(t)
+  return Number.isNaN(d.getTime()) ? '-' : d.toLocaleString()
+}
+
+async function openDetail(w: Workload) {
+  showDetail.value = true
+  detailLoading.value = true
+  detail.value = null
+  try {
+    const resp = await fetchAuth(`/api/workloads/${w.id}`)
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    const json = await resp.json()
+    detail.value = json.data as WorkloadDetail
+  } catch (e) {
+    ElMessage.error('加载详情失败：' + (e as Error).message)
+  } finally {
+    detailLoading.value = false
+  }
+}
+
+async function viewLogs(pod: string) {
+  showLogs.value = true
+  logsLoading.value = true
+  logsPod.value = pod
+  logsText.value = ''
+  try {
+    const params = new URLSearchParams({ pod, tail: '1000' })
+    if (logsPrevious.value) params.set('previous', 'true')
+    const resp = await fetchAuth(`/api/workloads/${detail.value?.workload.id ?? ''}/logs?${params}`)
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    logsText.value = await resp.text()
+    if (!logsText.value) logsText.value = '（暂无日志输出）'
+  } catch (e) {
+    logsText.value = '日志加载失败：' + (e as Error).message + '\n（非集群部署或 Pod 已清理时不可用）'
+  } finally {
+    logsLoading.value = false
+  }
+}
+
+async function togglePrevious() {
+  logsPrevious.value = !logsPrevious.value
+  if (logsPod.value) await viewLogs(logsPod.value)
+}
+
+// 创建工作负载：跨应用视图需选应用 + 环境；提交 POST /api/applications/{appId}/workloads。
+interface App { id: string; name: string }
+const apps = ref<App[]>([])
+const showCreate = ref(false)
+const submitting = ref(false)
+const createForm = ref({
+  appId: '',
+  name: '',
+  image: '',
+  replicas: 1,
+  port: 0,
+  schedule: '',
+})
+
+async function loadApps() {
+  const resp = await fetchAuth('/api/applications')
+  if (resp.ok) apps.value = (await resp.json()).data ?? []
+}
+
+function openCreate() {
+  createForm.value = {
+    appId: apps.value[0]?.id ?? '',
+    name: '',
+    image: 'nginx:stable',
+    replicas: activeType.value === 'service' ? 1 : 1,
+    port: activeType.value === 'service' ? 80 : 0,
+    schedule: activeType.value === 'cronjob' ? '*/5 * * * *' : '',
+  }
+  showCreate.value = true
+}
+
+async function submitCreate() {
+  const f = createForm.value
+  if (!f.appId) { ElMessage.warning('请选择归属应用'); return }
+  if (!f.name.trim()) { ElMessage.warning('请输入工作负载名称'); return }
+  if (!f.image.trim()) { ElMessage.warning('请输入镜像'); return }
+  if (activeType.value === 'cronjob' && !f.schedule.trim()) {
+    ElMessage.warning('请输入 Cron 调度表达式'); return
+  }
+  const body: Record<string, unknown> = {
+    name: f.name.trim(),
+    type: activeType.value,
+    image: f.image.trim(),
+    replicas: Number(f.replicas) || 1,
+    port: Number(f.port) || 0,
+    envId: activeEnv.value || '',
+  }
+  if (activeType.value === 'cronjob') body.schedule = f.schedule.trim()
+  submitting.value = true
+  try {
+    const resp = await fetchAuth(`/api/applications/${f.appId}/workloads`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}))
+      throw new Error(err.error || `HTTP ${resp.status}`)
+    }
+    ElMessage.success('已创建工作负载')
+    showCreate.value = false
+    await load()
+  } catch (e) {
+    ElMessage.error('创建失败：' + (e as Error).message)
+  } finally {
+    submitting.value = false
+  }
+}
+
 function onKeyChanged() {
   envStore.loadEnvs()
   load()
@@ -162,8 +314,14 @@ onMounted(async () => {
   // 环境视图跳转携带 ?env= 预选环境
   const q = route.query.env as string
   if (q) {
-    await envStore.switchEnv(envStore.envs.find((e) => e.id === q) ?? null)
+    const found = envStore.envs.find((e) => e.id === q)
+    if (found) {
+      await envStore.switchEnv(found)
+    } else {
+      ElMessage.warning(`指定的环境「${q}」不存在`)
+    }
   }
+  loadApps()
   load()
   window.addEventListener('paas:key-changed', onKeyChanged)
   window.addEventListener('paas:env-changed', onEnvChanged)
@@ -176,6 +334,13 @@ onUnmounted(() => {
 
 <template>
   <div class="page">
+    <div class="page-head">
+      <div class="head-titles">
+        <h2>{{ tabs.find((t) => t.key === activeType)?.label }}工作负载</h2>
+        <p class="sub">{{ tabs.find((t) => t.key === activeType)?.desc }}</p>
+      </div>
+      <button class="create-btn" @click="openCreate">+ 部署工作负载</button>
+    </div>
     <div class="tabs">
       <button
         v-for="t in tabs"
@@ -238,6 +403,7 @@ onUnmounted(() => {
               </span>
             </td>
             <td class="col-act">
+              <button class="act" @click="openDetail(w)">详情</button>
               <button class="act" :disabled="scaling === w.id || activeType === 'cronjob'" @click="scale(w)">
                 扩缩容
               </button>
@@ -247,6 +413,109 @@ onUnmounted(() => {
         </tbody>
       </table>
     </div>
+
+    <!-- 创建工作负载对话框 -->
+    <el-dialog v-model="showCreate" :title="`部署${tabs.find((t) => t.key === activeType)?.label}工作负载`" width="520px">
+      <el-form label-width="92px">
+        <el-form-item label="归属应用" required>
+          <el-select v-model="createForm.appId" placeholder="选择应用" style="width: 100%">
+            <el-option v-for="a in apps" :key="a.id" :label="a.name" :value="a.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="名称" required>
+          <el-input v-model="createForm.name" placeholder="如 rec-svc" />
+        </el-form-item>
+        <el-form-item label="镜像" required>
+          <el-input v-model="createForm.image" placeholder="如 nginx:stable" />
+        </el-form-item>
+        <el-form-item v-if="activeType === 'service'" label="副本数">
+          <el-input-number v-model="createForm.replicas" :min="1" :max="20" />
+        </el-form-item>
+        <el-form-item v-if="activeType === 'service'" label="端口">
+          <el-input-number v-model="createForm.port" :min="0" :max="65535" />
+          <span class="hint">0 = 不建 Service</span>
+        </el-form-item>
+        <el-form-item v-if="activeType === 'cronjob'" label="调度" required>
+          <el-input v-model="createForm.schedule" placeholder="*/5 * * * *" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showCreate = false">取消</el-button>
+        <el-button type="primary" :loading="submitting" @click="submitCreate">创建</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 工作负载详情：期望态 + 运行实例（Pod 级）+ 实例日志 -->
+    <el-drawer v-model="showDetail" title="工作负载详情" size="640px" direction="rtl">
+      <div v-loading="detailLoading">
+        <template v-if="detail">
+          <div class="detail-info">
+            <div class="info-row"><span class="k">名称</span><span class="v">{{ detail.workload.name }}</span></div>
+            <div class="info-row"><span class="k">ID</span><span class="v mono">{{ detail.workload.id }}</span></div>
+            <div class="info-row"><span class="k">镜像</span><span class="v mono">{{ detail.workload.image }}</span></div>
+            <div class="info-row">
+              <span class="k">副本</span>
+              <span class="v mono">{{ detail.workload.ready }}/{{ detail.workload.replicas }}</span>
+            </div>
+            <div class="info-row"><span class="k">状态</span>
+              <span class="status" :class="statusOf(detail.workload.status).cls">{{ statusOf(detail.workload.status).label }}</span>
+            </div>
+          </div>
+
+          <div class="section-title">运行实例（{{ detail.instances.length }}）</div>
+          <div v-if="detail.instances.length === 0" class="empty-hint">
+            暂无运行实例（非集群部署或 Pod 未就绪）
+          </div>
+          <table v-else class="instances-table">
+            <thead>
+              <tr>
+                <th>实例（Pod）</th>
+                <th>状态</th>
+                <th>就绪</th>
+                <th>重启</th>
+                <th>节点</th>
+                <th>启动时间</th>
+                <th class="col-act"></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="ins in detail.instances" :key="ins.name">
+                <td>
+                  <div class="name-cell">
+                    <span class="name mono">{{ ins.name }}</span>
+                    <span v-if="ins.message" class="msg">{{ ins.message }}</span>
+                  </div>
+                </td>
+                <td>
+                  <span class="status" :class="podStatusOf(ins.status).cls">{{ podStatusOf(ins.status).label }}</span>
+                </td>
+                <td class="mono">{{ ins.ready || '-' }}</td>
+                <td class="mono" :class="{ err: ins.restarts > 0 }">{{ ins.restarts }}</td>
+                <td class="mono">{{ ins.node || '-' }}</td>
+                <td class="mono small">{{ fmtTime(ins.startedAt) }}</td>
+                <td class="col-act">
+                  <button class="act" @click="viewLogs(ins.name)">日志</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </template>
+      </div>
+    </el-drawer>
+
+    <!-- 实例日志 -->
+    <el-dialog v-model="showLogs" :title="`日志：${logsPod}`" width="780px" top="6vh">
+      <div class="logs-toolbar">
+        <span class="pod-name mono">{{ logsPod }}</span>
+        <el-button size="small" :type="logsPrevious ? 'warning' : 'default'" @click="togglePrevious">
+          {{ logsPrevious ? '查看当前日志' : '查看上次终止日志' }}
+        </el-button>
+        <span v-if="logsPrevious" class="prev-hint">（已退出/重启容器的上次日志，排查崩溃关键）</span>
+      </div>
+      <div v-loading="logsLoading" class="logs-body">
+        <pre>{{ logsText }}</pre>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -254,6 +523,44 @@ onUnmounted(() => {
 .page {
   max-width: 1200px;
   margin: 0 auto;
+}
+.page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.page-head h2 {
+  margin: 0 0 2px;
+  font-size: 18px;
+  color: var(--text);
+}
+.page-head .sub {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.create-btn {
+  padding: 8px 16px;
+  border: 1px solid var(--brand);
+  border-radius: var(--radius);
+  background: var(--brand);
+  color: #fff;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.12s;
+  white-space: nowrap;
+}
+.create-btn:hover {
+  opacity: 0.9;
+}
+.hint {
+  margin-left: 10px;
+  font-size: 11px;
+  color: var(--text-faint);
 }
 .env-bar {
   display: flex;
@@ -495,5 +802,109 @@ onUnmounted(() => {
 .empty p {
   margin: 0;
   font-size: 13px;
+}
+
+/* 详情抽屉 */
+.detail-info {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 0 16px;
+  border-bottom: 1px solid var(--border);
+}
+.info-row {
+  display: flex;
+  gap: 12px;
+  font-size: 13px;
+  align-items: center;
+}
+.info-row .k {
+  width: 48px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+.info-row .v {
+  color: var(--text);
+  word-break: break-all;
+}
+.section-title {
+  margin: 18px 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.empty-hint {
+  padding: 24px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-faint);
+  background: var(--surface);
+  border-radius: var(--radius);
+}
+.instances-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.instances-table th {
+  text-align: left;
+  padding: 8px 8px;
+  color: var(--text-faint);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.instances-table td {
+  padding: 8px 8px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+  color: var(--text);
+}
+.instances-table .msg {
+  display: block;
+  font-size: 11px;
+  color: var(--danger, #f43f5e);
+  margin-top: 2px;
+  word-break: break-all;
+}
+.instances-table .err {
+  color: var(--danger, #f43f5e);
+}
+.mono.small {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+/* 日志对话框 */
+.logs-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.logs-toolbar .pod-name {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.logs-toolbar .prev-hint {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+.logs-body {
+  max-height: 60vh;
+  overflow: auto;
+  background: var(--surface);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+.logs-body pre {
+  margin: 0;
+  padding: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 </style>

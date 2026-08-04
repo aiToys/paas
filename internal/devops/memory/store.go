@@ -162,6 +162,23 @@ func (s *Store) ListBuildRuns(ctx context.Context, appID string) ([]devops.Build
 	return out, nil
 }
 
+// ListAllBuildRuns 跨租户列出全部构建（admin 平台总览，不过滤 tenant；按 TenantID 升序再 StartedAt 倒序）。
+func (s *Store) ListAllBuildRuns(ctx context.Context) ([]devops.BuildRun, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]devops.BuildRun, 0, len(s.buildruns))
+	for _, b := range s.buildruns {
+		out = append(out, b)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TenantID != out[j].TenantID {
+			return out[i].TenantID < out[j].TenantID
+		}
+		return out[i].StartedAt.After(out[j].StartedAt)
+	})
+	return out, nil
+}
+
 func (s *Store) GetBuildRun(ctx context.Context, id string) (devops.BuildRun, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {
@@ -209,9 +226,14 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) error {
 	// 脱离请求 ctx（后台构建不应因请求取消而中断）；pipeline 决定 mock/real。
 	// CI runner：pending -> running -> success/failed（产出 Image）。
 	// baseCtx 派生自进程级 ctx（cmd/core 注入）：进程退出时 cancel → 构建中断，避免卡 running。
+	// internal 仓库用 CloneURL（含 Gitea basic auth）；external 用 GitURL（+ injectToken 注 PAAS_GIT_TOKEN）。
+	gitURL := repo.CloneURL
+	if gitURL == "" {
+		gitURL = repo.GitURL
+	}
 	go s.runBuild(s.baseCtxOrBg(), builder.Params{
 		TenantID: tid, AppID: b.AppID, BuildID: b.ID, Commit: b.Commit, Branch: b.Branch,
-		GitURL: repo.GitURL, Dockerfile: repo.Dockerfile, BuildContext: repo.BuildContext,
+		GitURL: gitURL, Dockerfile: repo.Dockerfile, BuildContext: repo.BuildContext,
 	}) //nolint:gosec // G118 误报：后台构建须脱离请求生命周期，不持 request ctx 是有意为之
 	return nil
 }
@@ -249,7 +271,9 @@ func (s *Store) runBuild(ctx context.Context, p builder.Params) {
 			b := s.buildruns[p.BuildID]
 			b.Status = devops.BuildFailed
 			b.FinishedAt = time.Now()
-			b.Log = fmt.Sprintf("构建异常: %v", rec)
+			// panic 栈可能含 cloneURL=https://<PAAS_GIT_TOKEN>@...，统一 MaskToken 脱敏（与正常错误路径一致），
+			// 防 build:read 权限者经 GET /api/buildruns/{id} 读到平台 Git 凭证。
+			b.Log = builder.MaskToken(fmt.Sprintf("构建异常: %v", rec))
 			s.buildruns[p.BuildID] = b
 			s.mu.Unlock()
 		}
@@ -320,6 +344,23 @@ func (s *Store) ListImages(ctx context.Context, appID string) ([]devops.Image, e
 	return out, nil
 }
 
+// ListAllImages 跨租户列出全部镜像（admin 平台总览，不过滤 tenant；按 TenantID 升序再 BuiltAt 倒序）。
+func (s *Store) ListAllImages(ctx context.Context) ([]devops.Image, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]devops.Image, 0, len(s.images))
+	for _, im := range s.images {
+		out = append(out, im)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TenantID != out[j].TenantID {
+			return out[i].TenantID < out[j].TenantID
+		}
+		return out[i].BuiltAt.After(out[j].BuiltAt)
+	})
+	return out, nil
+}
+
 func (s *Store) GetImage(ctx context.Context, id string) (devops.Image, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {
@@ -335,9 +376,8 @@ func (s *Store) GetImage(ctx context.Context, id string) (devops.Image, error) {
 }
 
 // findImageIDByDigest 在本租户镜像中按 digest 反查 ID（Release 编排取回滚指针用）。
+// 对外不加锁版本：调用方已持 s.mu（CreateRelease 临界区内调用，否则自死锁——Go mutex 不可重入）。
 func (s *Store) findImageIDByDigest(tid, digest string) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	for _, im := range s.images {
 		if im.TenantID == tid && im.Digest == digest {
 			return im.ID
@@ -366,6 +406,23 @@ func (s *Store) ListReleases(ctx context.Context, appID string) ([]devops.Releas
 		out = append(out, r)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}
+
+// ListAllReleases 跨租户列出全部发布（admin 平台总览，不过滤 tenant；按 TenantID 升序再 CreatedAt 倒序）。
+func (s *Store) ListAllReleases(ctx context.Context) ([]devops.Release, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]devops.Release, 0, len(s.releases))
+	for _, r := range s.releases {
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TenantID != out[j].TenantID {
+			return out[i].TenantID < out[j].TenantID
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
 	return out, nil
 }
 
@@ -402,7 +459,12 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 
 	display := img.Registry + ":" + img.Tag
 
-	// 2. 找目标环境基线 Workload（锁外调 workload 仓储，避免跨仓储持锁）
+	// 2-3. 持 s.mu 覆盖 List→UpdateImage→存 release 临界区，防并发发布丢失更新（回滚指针链断裂）。
+	// 跨仓储嵌套 devops.mu → workload.mu 单向（workload 不调 devops），无死锁；CreateRelease 低频可接受串行化。
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// 2. 找目标环境基线 Workload
 	wls, err := s.workload.List(ctx, input.EnvID, input.AppID, workload.TypeService)
 	if err != nil {
 		return devops.Release{}, err
@@ -457,9 +519,7 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 		CreatedBy:       input.CreatedBy,
 		CreatedAt:       time.Now(),
 	}
-	s.mu.Lock()
-	s.releases[rel.ID] = rel
-	s.mu.Unlock()
+	s.releases[rel.ID] = rel // 已在 s.mu 临界区内（step2-3 持锁）
 	return rel, nil
 }
 

@@ -23,6 +23,20 @@ func newHandler() *configcenter.Handler {
 func acmeCtx() context.Context   { return tenant.WithTenant(context.Background(), "t-acme") }
 func globexCtx() context.Context { return tenant.WithTenant(context.Background(), "t-globex") }
 
+// decodeData 解包 {data:T} 信封后反序列化到 v（单资源响应，handler 统一 WriteData 契约）。
+func decodeData(t *testing.T, body []byte, v interface{}) {
+	t.Helper()
+	var env struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("解码信封失败: %v (body=%s)", err, string(body))
+	}
+	if err := json.Unmarshal(env.Data, v); err != nil {
+		t.Fatalf("解码 data 失败: %v (data=%s)", err, string(env.Data))
+	}
+}
+
 func req(ctx context.Context, method, path string, body interface{}) *http.Request {
 	var r io.Reader
 	if body != nil {
@@ -42,9 +56,7 @@ func createNsViaHTTP(t *testing.T, h *configcenter.Handler, ctx context.Context,
 		t.Fatalf("创建命名空间 %s 应 201，got %d: %s", name, w.Code, w.Body.String())
 	}
 	var n configcenter.Namespace
-	if err := json.Unmarshal(w.Body.Bytes(), &n); err != nil {
-		t.Fatalf("解析命名空间响应失败: %v", err)
-	}
+	decodeData(t, w.Body.Bytes(), &n)
 	return n.ID
 }
 
@@ -57,9 +69,7 @@ func publishViaHTTP(t *testing.T, h *configcenter.Handler, ctx context.Context, 
 		t.Fatalf("发布应 201，got %d: %s", w.Code, w.Body.String())
 	}
 	var pub configcenter.Publish
-	if err := json.Unmarshal(w.Body.Bytes(), &pub); err != nil {
-		t.Fatalf("解析发布响应失败: %v", err)
-	}
+	decodeData(t, w.Body.Bytes(), &pub)
 	return pub
 }
 
@@ -198,9 +208,7 @@ func TestHandlerItemDeleteCrossTenantHidden(t *testing.T) {
 		t.Fatalf("建 item 应 201，got %d: %s", w.Code, w.Body.String())
 	}
 	var created configcenter.ConfigItem
-	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
-		t.Fatalf("解析建 item 响应失败: %v", err)
-	}
+	decodeData(t, w.Body.Bytes(), &created)
 	// globex 尝试删 acme 的 item：ListItems(nsID) 在 globex ctx 下为空 → 404。
 	r := req(globexCtx(), "DELETE", "/api/configcenter/namespaces/"+nsID+"/items/"+created.ID, nil)
 	w = httptest.NewRecorder()

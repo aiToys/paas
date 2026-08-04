@@ -75,7 +75,7 @@ async function saveQuota() {
 
 async function loadUsage() {
   const resp = await fetchAuth('/api/billing/usage')
-  if (resp.ok) view.value = await resp.json()
+  if (resp.ok) view.value = (await resp.json()).data
 }
 
 async function loadBills() {

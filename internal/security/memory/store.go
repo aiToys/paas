@@ -56,6 +56,24 @@ func (s *Store) ListSecrets(ctx context.Context) ([]security.Secret, error) {
 	return out, nil
 }
 
+// ListAllSecrets 跨租户列出全部密钥（admin 平台总览，掩码返回；含平台级+各租户级）。
+// 按 TenantID 升序（平台级 TenantID 为空排最前）再 Name 升序。
+func (s *Store) ListAllSecrets(ctx context.Context) ([]security.Secret, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]security.Secret, 0, len(s.secrets))
+	for _, sec := range s.secrets {
+		out = append(out, sec.Masked())
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TenantID != out[j].TenantID {
+			return out[i].TenantID < out[j].TenantID
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
+}
+
 func (s *Store) GetSecret(ctx context.Context, id string) (security.Secret, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {
@@ -156,6 +174,23 @@ func (s *Store) ListAuditLogs(ctx context.Context, resourceType, action string) 
 	}
 	// 倒序（最新在前）
 	sort.Slice(out, func(i, j int) bool { return out[i].At.After(out[j].At) })
+	return out, nil
+}
+
+// ListAllAuditLogs 跨租户列出全部审计日志（admin 平台总览，不过滤 tenant；按 TenantID 升序再 At 倒序）。
+func (s *Store) ListAllAuditLogs(ctx context.Context) ([]security.AuditLog, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]security.AuditLog, 0, len(s.audits))
+	for _, l := range s.audits {
+		out = append(out, l)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TenantID != out[j].TenantID {
+			return out[i].TenantID < out[j].TenantID
+		}
+		return out[i].At.After(out[j].At)
+	})
 	return out, nil
 }
 

@@ -51,6 +51,23 @@ func (s *Store) List(ctx context.Context) ([]environment.Environment, error) {
 	return out, nil
 }
 
+// ListAll 跨租户列出全部环境（admin 平台总览，不过滤 tenant；按 TenantID 升序再 ID 升序）。
+func (s *Store) ListAll(ctx context.Context) ([]environment.Environment, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]environment.Environment, 0, len(s.envs))
+	for _, e := range s.envs {
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TenantID != out[j].TenantID {
+			return out[i].TenantID < out[j].TenantID
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
+
 func (s *Store) Get(ctx context.Context, id string) (environment.Environment, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {

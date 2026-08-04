@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -84,12 +85,17 @@ func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) boo
 }
 
 // allowProd 校验目标环境的生产写权限。
-// 未注入 envResolver 或 envID 为空时跳过（兼容旧测试）；
+// 未注入 envResolver 时跳过（兼容旧测试/未启用 prod 防护）；
+// envID 为空时 fail-closed（无法判定环境类型，保守按生产处理，要求 prod:write）——
+// 防 developer 提交无 EnvID 的工作负载绕过 prod:write（正常路径 Validate 已强制 EnvID 必填，此处为纵深防御）；
 // 否则查询环境类型：生产或查不到（不存在/跨租户）均要求 prod:write（fail-closed，
 // developer 被拦 -> 生产只读）；非生产放行。
 func (h *Handler) allowProd(w http.ResponseWriter, r *http.Request, envID string) bool {
-	if h.envResolver == nil || envID == "" {
+	if h.envResolver == nil {
 		return true
+	}
+	if envID == "" {
+		return h.allow(w, r, PermProdWrite)
 	}
 	etype, err := h.envResolver.EnvType(r.Context(), envID)
 	// fail-closed：环境查不到（不存在/跨租户）保守按生产处理，需 prod:write。
@@ -105,6 +111,27 @@ func (h *Handler) fillStatus(ctx context.Context, list []Workload) {
 	if h.statusReader != nil {
 		_ = h.statusReader.FillStatus(ctx, list)
 	}
+}
+
+// instances 加载工作负载运行实例（Pod 级）。降级：无 statusReader 或查询失败返空切片
+// （详情页仍可展示期望态，实例区空提示「无运行实例/非集群部署」）。
+func (h *Handler) instances(ctx context.Context, id string) []Instance {
+	if h.statusReader == nil {
+		return []Instance{}
+	}
+	ins, err := h.statusReader.Instances(ctx, id)
+	if err != nil {
+		return []Instance{}
+	}
+	return ins
+}
+
+// podLogs 取实例日志流。降级：无 statusReader 返友好错误（handler 映射 404 提示）。
+func (h *Handler) podLogs(ctx context.Context, workloadID, podName string, tail int64, previous bool) (io.ReadCloser, error) {
+	if h.statusReader == nil {
+		return nil, fmt.Errorf("日志不可用（非集群部署）")
+	}
+	return h.statusReader.PodLogs(ctx, workloadID, podName, tail, previous)
 }
 
 // ServeHTTP 按路径前缀分发到应用子路由或跨应用工作负载路由。
@@ -141,7 +168,7 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.fillStatus(r.Context(), list)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
+		httputil.WriteData(w, list)
 		return
 	}
 
@@ -156,7 +183,7 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 		}
 		w0.AppID = appID // 以路径为准
 		if err := w0.Validate(); err != nil {
-			httputil.WriteError(w, http.StatusBadRequest, err.Error())
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
 		// 生产环境创建工作负载需 prod:write（developer 被拦，生产只读）
@@ -166,7 +193,7 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 		// 横切配额拦截：创建前检查工作负载数配额，超限回 429（不创建）。
 		if h.QuotaCheck != nil {
 			if err := h.QuotaCheck(r.Context(), 1); err != nil {
-				httputil.WriteError(w, http.StatusTooManyRequests, err.Error())
+				httputil.WriteServiceError(w, http.StatusTooManyRequests, err)
 				return
 			}
 		}
@@ -181,11 +208,11 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 			if h.QuotaCheck != nil {
 				_ = h.QuotaCheck(r.Context(), -1) // Create 失败回滚已递增的配额
 			}
-			httputil.WriteError(w, http.StatusBadRequest, err.Error())
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(w0)
+		// 统一 {data:T} 契约（与其他端点一致；原裸对象致 fetchJSON 解包失败）。
+		httputil.WriteDataCreated(w, w0)
 		return
 	}
 
@@ -210,11 +237,60 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.fillStatus(r.Context(), list)
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
+		httputil.WriteData(w, list)
 		return
 	}
 
 	id := strings.Split(rest, "/")[0]
+	parts := strings.Split(rest, "/")
+
+	// GET /api/workloads/{id}/logs?pod=&tail=&previous= 实例（Pod）日志。
+	if r.Method == http.MethodGet && len(parts) == 2 && parts[1] == "logs" && id != "" {
+		if !h.allow(w, r, PermWorkloadRead) {
+			return
+		}
+		podName := r.URL.Query().Get("pod")
+		if podName == "" {
+			httputil.WriteError(w, http.StatusBadRequest, "pod 参数必填")
+			return
+		}
+		var tail int64
+		if t := r.URL.Query().Get("tail"); t != "" {
+			fmt.Sscanf(t, "%d", &tail)
+		}
+		if tail <= 0 {
+			tail = 1000 // 默认最近 1000 行，避免全量拉爆内存
+		}
+		previous := r.URL.Query().Get("previous") == "true"
+		rc, err := h.podLogs(r.Context(), id, podName, tail, previous)
+		if err != nil {
+			httputil.WriteServiceError(w, http.StatusNotFound, err)
+			return
+		}
+		defer rc.Close()
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		// 禁缓冲：日志可能较大，边读边写。
+		w.Header().Set("X-Accel-Buffering", "no")
+		_, _ = io.Copy(w, rc)
+		return
+	}
+
+	// GET /api/workloads/{id} 详情：期望态 + 实际运行实例（Pod 级）。
+	if r.Method == http.MethodGet && id != "" {
+		if !h.allow(w, r, PermWorkloadRead) {
+			return
+		}
+		wl, err := h.repo.Get(r.Context(), id)
+		if err != nil {
+			httputil.WriteServiceError(w, http.StatusNotFound, err)
+			return
+		}
+		// 回填真实 Ready/Status（与 List 一致），并加载运行实例。
+		h.fillStatus(r.Context(), []Workload{wl})
+		instances := h.instances(r.Context(), id)
+		httputil.WriteData(w, Detail{Workload: wl, Instances: instances})
+		return
+	}
 
 	if r.Method == http.MethodPut && id != "" {
 		if !h.allow(w, r, PermWorkloadWrite) {
@@ -223,7 +299,7 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 		// 生产环境扩缩容需 prod:write（先查 workload 所属环境；Get 失败直接 404，不跳过校验）
 		existing, err := h.repo.Get(r.Context(), id)
 		if err != nil {
-			httputil.WriteError(w, http.StatusNotFound, err.Error())
+			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
 		if !h.allowProd(w, r, existing.EnvID) {
@@ -239,10 +315,10 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 		}
 		w0, err := h.repo.Update(r.Context(), id, body.Replicas, body.Status)
 		if err != nil {
-			httputil.WriteError(w, http.StatusNotFound, err.Error())
+			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(w0)
+		httputil.WriteData(w, w0)
 		return
 	}
 
@@ -253,21 +329,21 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 		// 生产环境删除需 prod:write（先查 workload 所属环境；Get 失败直接 404，不跳过校验）
 		existing, err := h.repo.Get(r.Context(), id)
 		if err != nil {
-			httputil.WriteError(w, http.StatusNotFound, err.Error())
+			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
 		if !h.allowProd(w, r, existing.EnvID) {
 			return
 		}
 		if err := h.repo.Delete(r.Context(), id); err != nil {
-			httputil.WriteError(w, http.StatusNotFound, err.Error())
+			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
 		// 删除成功回滚配额用量（与 Create 失败回滚对称；否则用量只增不减，永久消耗触发误拦截）。
 		if h.QuotaCheck != nil {
 			_ = h.QuotaCheck(r.Context(), -1)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]string{"deleted": id})
+		httputil.WriteData(w, map[string]string{"deleted": id})
 		return
 	}
 

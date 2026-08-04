@@ -120,6 +120,25 @@ func (s *Store) ListNamespaces(ctx context.Context) ([]configcenter.Namespace, e
 	return out, rows.Err()
 }
 
+// ListAllNamespaces 跨租户列出全部命名空间（admin 平台总览，不过滤 tenant；按 tenant_id, name 排序）。
+func (s *Store) ListAllNamespaces(ctx context.Context) ([]configcenter.Namespace, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+nsCols+` FROM cc_namespaces ORDER BY tenant_id, name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]configcenter.Namespace, 0)
+	for rows.Next() {
+		var n configcenter.Namespace
+		if err = scanNamespace(rows, &n); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
 // GetNamespace 取单个命名空间；跨租户访问返回 not found（不泄漏存在性）。
 func (s *Store) GetNamespace(ctx context.Context, id string) (configcenter.Namespace, error) {
 	tid, err := storagepg.TenantOrErr(ctx)

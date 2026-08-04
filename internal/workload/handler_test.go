@@ -3,6 +3,7 @@ package workload
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,6 +26,7 @@ type stubRepo struct {
 func (s *stubRepo) List(context.Context, string, string, string) ([]Workload, error) {
 	return s.list, nil
 }
+func (s *stubRepo) ListAll(context.Context) ([]Workload, error) { return s.list, nil }
 func (s *stubRepo) Get(_ context.Context, id string) (Workload, error) {
 	for _, w := range s.list {
 		if w.ID == id {
@@ -93,10 +95,73 @@ func TestListCrossAppWithType(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 }
 
+// stubStatusReader 注入测试用运行实例 + 日志（验证详情端点聚合 + 日志透传）。
+type stubStatusReader struct {
+	instances []Instance
+	logs      string
+	logsErr   error
+}
+
+func (s stubStatusReader) FillStatus(context.Context, []Workload) error { return nil }
+func (s stubStatusReader) Instances(context.Context, string) ([]Instance, error) {
+	return s.instances, nil
+}
+func (s stubStatusReader) PodLogs(context.Context, string, string, int64, bool) (io.ReadCloser, error) {
+	if s.logsErr != nil {
+		return nil, s.logsErr
+	}
+	return io.NopCloser(strings.NewReader(s.logs)), nil
+}
+
+func TestGetDetail(t *testing.T) {
+	repo := &stubRepo{list: []Workload{{ID: "wl-1", Type: TypeService, Name: "cs-api", Replicas: 2, Ready: 2}}}
+	h := newHandler(repo)
+	h.statusReader = stubStatusReader{instances: []Instance{
+		{Name: "wl-1-aaa", Status: "Running", Ready: "1/1", Restarts: 0, Node: "kb2"},
+	}}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, acmeReq(http.MethodGet, "/api/workloads/wl-1", ""))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out map[string]Detail
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&out))
+	d := out["data"]
+	assert.Equal(t, "wl-1", d.Workload.ID)
+	require.Len(t, d.Instances, 1)
+	assert.Equal(t, "wl-1-aaa", d.Instances[0].Name)
+	assert.Equal(t, "Running", d.Instances[0].Status)
+}
+
+func TestGetDetailNotFound(t *testing.T) {
+	repo := &stubRepo{list: nil}
+	h := newHandler(repo)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, acmeReq(http.MethodGet, "/api/workloads/missing", ""))
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+func TestPodLogs(t *testing.T) {
+	repo := &stubRepo{list: []Workload{{ID: "wl-1", Type: TypeService, Name: "cs-api"}}}
+	h := newHandler(repo)
+	h.statusReader = stubStatusReader{logs: "line1\nline2\n"}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, acmeReq(http.MethodGet, "/api/workloads/wl-1/logs?pod=wl-1-aaa&tail=50", ""))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "text/plain; charset=utf-8", rec.Header().Get("Content-Type"))
+	assert.Contains(t, rec.Body.String(), "line1")
+}
+
+func TestPodLogsMissingPod(t *testing.T) {
+	repo := &stubRepo{list: []Workload{{ID: "wl-1", Type: TypeService}}}
+	h := newHandler(repo)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, acmeReq(http.MethodGet, "/api/workloads/wl-1/logs?tail=50", ""))
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
 func TestCreateHandler(t *testing.T) {
 	repo := &stubRepo{}
 	h := newHandler(repo)
-	body := `{"id":"wl-x","type":"service","name":"n","image":"img","replicas":2}`
+	body := `{"id":"wl-x","envId":"env-test","type":"service","name":"n","image":"img","replicas":2}`
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, acmeReq(http.MethodPost, "/api/applications/app-cs/workloads", body))
 	require.Equal(t, http.StatusCreated, rec.Code)

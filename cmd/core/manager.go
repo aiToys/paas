@@ -59,7 +59,7 @@ func startManager() (k8sAppliers, context.CancelFunc) {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 	// 设 controller-runtime logger（否则 reconcile 错误被吞，无法排查）。
-	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
+	ctrl.SetLogger(zap.New(zap.UseDevMode(os.Getenv("PAAS_PROD") != "true")))
 	// controller-runtime 默认 metrics server 占 :8080，与 core HTTP 服务冲突；
 	// 改到 PAAS_METRICS_ADDR（默认 :8081），空则禁用。
 	metricsAddr := os.Getenv("PAAS_METRICS_ADDR")

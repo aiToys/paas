@@ -25,8 +25,9 @@ type ChatRequest struct {
 
 // Chunk 是流式推理的一个增量块。
 type Chunk struct {
-	Role    string // 首块填 role，后续为空
-	Content string
+	Role      string // 首块填 role，后续为空
+	Content   string
+	Reasoning string // 推理模型的思考过程增量（OpenAI 兼容 delta.reasoning_content），无则空
 }
 
 // Provider 是推理提供者抽象（echo / mock / OpenAICompatibleProvider 等均实现它）。

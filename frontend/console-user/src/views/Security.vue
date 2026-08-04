@@ -8,6 +8,8 @@ import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 
+type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
+
 const envStore = useEnvStore()
 
 interface Secret {
@@ -107,7 +109,7 @@ async function remove(row: Secret) {
 }
 
 const actionLabel: Record<string, string> = { create: '创建', delete: '删除', update: '更新' }
-const actionType: Record<string, string> = {
+const actionType: Record<string, TagType> = {
   create: 'success', delete: 'danger', update: 'warning',
 }
 
@@ -173,7 +175,7 @@ onMounted(load)
         </el-table-column>
         <el-table-column label="动作" width="90">
           <template #default="{ row }">
-            <el-tag :type="(actionType[row.action] as any) || 'info'" size="small">
+            <el-tag :type="(actionType[row.action]) || 'info'" size="small">
               {{ actionLabel[row.action] || row.action }}
             </el-tag>
           </template>

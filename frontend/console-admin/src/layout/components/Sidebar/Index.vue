@@ -14,7 +14,7 @@
           <IconLogo />
         </el-icon>
         <span v-if="!sidebarStore.collapsed && layoutStore.showLogo">
-          后台管理系统
+          PaaS 管理后台
         </span>
       </div>
       <template v-if="permissionStore.menusLoaded">

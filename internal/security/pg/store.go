@@ -76,6 +76,26 @@ func (s *Store) ListSecrets(ctx context.Context) ([]security.Secret, error) {
 
 // GetSecret 按 ID 取（掩码）；租户级跨租户访问 RowsAffected==0 → not found 不泄漏，
 // 平台级跨租户可读（与内存一致）。
+// ListAllSecrets 跨租户列出全部密钥（admin 平台总览，掩码返回；含平台级+各租户级）。
+// 按 tenant_id（NULLS FIRST 平台级排最前）, name 升序。
+func (s *Store) ListAllSecrets(ctx context.Context) ([]security.Secret, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+secCols+` FROM secrets ORDER BY tenant_id NULLS FIRST, name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]security.Secret, 0)
+	for rows.Next() {
+		var sec security.Secret
+		if err = scanSec(rows, &sec); err != nil {
+			return nil, err
+		}
+		out = append(out, sec.Masked())
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) GetSecret(ctx context.Context, id string) (security.Secret, error) {
 	tid, err := storagepg.TenantOrErr(ctx)
 	if err != nil {
@@ -196,8 +216,27 @@ func (s *Store) ListAuditLogs(ctx context.Context, resourceType, action string) 
 		args = append(args, action)
 		q += fmt.Sprintf(" AND action = $%d", len(args))
 	}
-	q += " ORDER BY at DESC"
+	q += " ORDER BY at DESC LIMIT 1000"
 	rows, err := s.db.Pool().Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]security.AuditLog, 0)
+	for rows.Next() {
+		var l security.AuditLog
+		if err = scanAudit(rows, &l); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+// ListAllAuditLogs 跨租户列出全部审计日志（admin 平台总览，不过滤 tenant；按 tenant_id, at DESC 排序）。
+func (s *Store) ListAllAuditLogs(ctx context.Context) ([]security.AuditLog, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+auditCols+` FROM audit_logs ORDER BY tenant_id, at DESC LIMIT 1000`)
 	if err != nil {
 		return nil, err
 	}

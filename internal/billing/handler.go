@@ -81,7 +81,7 @@ func (h *Handler) serveQuota(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteInternalError(w, err)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(q)
+		httputil.WriteData(w, q)
 	case http.MethodPut:
 		if !h.allow(w, r, PermBillingWrite) {
 			return
@@ -96,7 +96,7 @@ func (h *Handler) serveQuota(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteInternalError(w, err)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(saved)
+		httputil.WriteData(w, saved)
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -120,7 +120,7 @@ func (h *Handler) serveUsage(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteInternalError(w, err)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(BuildUsageView(q, u))
+	httputil.WriteData(w, BuildUsageView(q, u))
 }
 
 func (h *Handler) serveRecords(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +136,7 @@ func (h *Handler) serveRecords(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteInternalError(w, err)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
+	httputil.WriteData(w, list)
 }
 
 func (h *Handler) serveGenerate(w http.ResponseWriter, r *http.Request) {
@@ -153,11 +153,10 @@ func (h *Handler) serveGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	rec, err := h.repo.GenerateBill(r.Context(), period)
 	if err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, err.Error())
+		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}
-	w.WriteHeader(http.StatusCreated)
-	_ = json.NewEncoder(w).Encode(rec)
+	httputil.WriteDataCreated(w, rec)
 }
 
 func (h *Handler) servePay(w http.ResponseWriter, r *http.Request) {
@@ -177,10 +176,10 @@ func (h *Handler) servePay(w http.ResponseWriter, r *http.Request) {
 	}
 	rec, err := h.repo.PayBill(r.Context(), id)
 	if err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, err.Error())
+		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(rec)
+	httputil.WriteData(w, rec)
 }
 
 // currentPeriod 返回当前 YYYY-MM。

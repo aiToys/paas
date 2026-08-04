@@ -1,20 +1,15 @@
 import { http } from 'msw'
 import { ok } from './_utils'
 
-// 全部菜单（带权限元信息）
-// 原从 src/mock/apis/menu.ts 移植，现由本文件统一定义并导出
+// 全部菜单（mock 演示用；生产由后端 auth/menus.go 下发）。
+// 保留基座最小演示结构（首页 + 访问控制下的用户/角色）；
+// 其余基座演示模块（部门/字典/权限/菜单/公告/日志）已随开源打磨清理移除。
 export const ALL_MENUS = [
   {
     path: '/',
     name: 'home',
     component: 'dashboard/views/Home',
     meta: { title: '首页', icon: 'HomeFilled', showMenu: true }
-  },
-  {
-    path: '/crud',
-    name: 'crud',
-    component: 'crud/views/List',
-    meta: { title: '增删改查', icon: 'Document', showMenu: true }
   },
   {
     path: '/system',
@@ -50,106 +45,6 @@ export const ALL_MENUS = [
               icon: 'Avatar',
               showMenu: true,
               permissions: { any: ['role:read', '*'] }
-            }
-          },
-          {
-            path: '/system/dept',
-            name: 'systemDept',
-            component: 'system/dept/views/List',
-            meta: {
-              title: '部门管理',
-              icon: 'OfficeBuilding',
-              showMenu: true,
-              permissions: { any: ['dept:read', '*'] }
-            }
-          },
-          {
-            path: '/system/permission',
-            name: 'systemPermission',
-            component: 'system/permission/views/List',
-            meta: {
-              title: '权限管理',
-              icon: 'Lock',
-              showMenu: true,
-              permissions: { any: ['permission:read', '*'] }
-            }
-          },
-          {
-            path: '/system/menu',
-            name: 'systemMenu',
-            component: 'system/menu/views/List',
-            meta: {
-              title: '菜单管理',
-              icon: 'Menu',
-              showMenu: true,
-              permissions: { any: ['menu:read', '*'] }
-            }
-          }
-        ]
-      },
-      {
-        path: '/system/config',
-        name: 'systemConfig',
-        meta: {
-          title: '系统配置',
-          icon: 'Tools',
-          showMenu: true
-        },
-        children: [
-          {
-            path: '/system/dict',
-            name: 'systemDict',
-            component: 'system/dict/views/List',
-            meta: {
-              title: '字典管理',
-              icon: 'DataBoard',
-              showMenu: true,
-              permissions: { any: ['dict:read', '*'] }
-            }
-          },
-          {
-            path: '/system/notice',
-            name: 'systemNotice',
-            component: 'system/notice/views/List',
-            meta: {
-              title: '公告管理',
-              icon: 'Bell',
-              showMenu: true,
-              permissions: { any: ['notice:read', '*'] }
-            }
-          }
-        ]
-      },
-      {
-        path: '/system/log',
-        name: 'systemLog',
-        meta: {
-          title: '日志管理',
-          icon: 'Tickets',
-          showMenu: true,
-          permissions: { any: ['log:read', '*'] }
-        },
-        children: [
-          {
-            path: '/system/log/login',
-            name: 'systemLogLogin',
-            component: 'system/log/views/LoginLogList',
-            meta: {
-              title: '登录日志',
-              icon: 'Key',
-              showMenu: true,
-              permissions: { any: ['log:read', '*'] }
-            }
-          },
-          {
-            path: '/system/log/operation',
-            name: 'systemLogOperation',
-            component: 'system/log/views/OperationLogList',
-            meta: {
-              title: '操作日志',
-              icon: 'Operation',
-              showMenu: true,
-              permissions: { any: ['log:read', '*'] }
             }
           }
         ]

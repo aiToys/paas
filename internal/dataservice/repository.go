@@ -7,6 +7,8 @@ import "context"
 type Repository interface {
 	// List 按 kind 过滤（kind 空表示全部），按 CreatedAt 倒序。
 	List(ctx context.Context, kind string) ([]DataService, error)
+	// ListAll 跨租户列出全部数据服务（admin 平台总览，不过滤 tenant；返回对象带 TenantID）。
+	ListAll(ctx context.Context) ([]DataService, error)
 	// Get 读取单条（跨租户 not found）。
 	Get(ctx context.Context, id string) (DataService, error)
 	// Create 创建（status 空时补 running）；返回创建后的实例。

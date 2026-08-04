@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/pkg/provider"
 )
 
@@ -24,11 +25,15 @@ type openaiReq struct {
 }
 
 // openaiDelta 是流式增量响应（仅取 choices[0].delta）。
+// ReasoningContent 是推理模型（DeepSeek-R1/GLM/QwQ/Doubao 等）的思考过程增量，
+// 与 Content 正交：思考阶段 content=null + reasoning_content=...，答案阶段反之。
+// 不解析则思考过程被丢弃，前端长时间空白「不像流式」。
 type openaiDelta struct {
 	Choices []struct {
 		Delta struct {
-			Role    string `json:"role"`
-			Content string `json:"content"`
+			Role             string `json:"role"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
 		} `json:"delta"`
 	} `json:"choices"`
 }
@@ -54,7 +59,10 @@ type OpenAICompatibleProvider struct {
 // NewOpenAICompatibleProvider 构造一个第三方供应商通道。httpClient 为 nil 时用默认（120s 超时）。
 func NewOpenAICompatibleProvider(vendor, baseURL, upstreamModel, credentialRef string, resolver provider.CredentialResolver, httpClient *http.Client) *OpenAICompatibleProvider {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 120 * time.Second}
+		// 不跟随重定向（httputil.NewClient 内置 CheckRedirect=ErrUseLastResponse）：
+		// 防 baseURL 被配为攻击者主机返 302→metadata，或供应商端点被劫持重定向时，
+		// 平台 airouter Key（Authorization 头）被外发。
+		httpClient = httputil.NewClient(120 * time.Second)
 	}
 	return &OpenAICompatibleProvider{
 		vendor:        vendor,
@@ -133,13 +141,13 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req provider.ChatRe
 				continue
 			}
 			delta := d.Choices[0].Delta
-			if delta.Role == "" && delta.Content == "" {
+			if delta.Role == "" && delta.Content == "" && delta.ReasoningContent == "" {
 				continue
 			}
 			select {
 			case <-ctx.Done():
 				return // 客户端断连，立即停止解析（不计费、不泄漏 goroutine）
-			case ch <- provider.Chunk{Role: delta.Role, Content: delta.Content}:
+			case ch <- provider.Chunk{Role: delta.Role, Content: delta.Content, Reasoning: delta.ReasoningContent}:
 			}
 		}
 	}()

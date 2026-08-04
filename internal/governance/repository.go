@@ -18,6 +18,8 @@ type ServiceStore interface {
 	GetService(ctx context.Context, id string) (Service, error)
 	CreateService(ctx context.Context, s Service) (Service, error)
 	DeleteService(ctx context.Context, id string) error
+	// ListAllServices 跨租户列出全部服务（admin 平台总览，不过滤 tenant，返回对象带 TenantID）。
+	ListAllServices(ctx context.Context) ([]Service, error)
 }
 
 // InstanceStore 服务实例仓储。

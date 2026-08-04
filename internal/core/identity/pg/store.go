@@ -112,12 +112,17 @@ func (s *Store) UsersByTenant(ctx context.Context, tenantID string) ([]identity.
 	if err = rows.Err(); err != nil {
 		return nil, err
 	}
-	// 聚合每个用户的角色。
+	// 批量聚合角色（消除 N+1：一次查询加载全部用户角色，而非逐用户查询）。
+	ids := make([]string, len(out))
 	for i := range out {
-		out[i].Roles, err = s.userRoles(ctx, out[i].ID)
-		if err != nil {
-			return nil, err
-		}
+		ids[i] = out[i].ID
+	}
+	rolesMap, err := s.usersRolesBatch(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Roles = rolesMap[out[i].ID]
 	}
 	return out, nil
 }
@@ -172,6 +177,29 @@ func (s *Store) userRoles(ctx context.Context, userID string) ([]string, error) 
 		roles = append(roles, r)
 	}
 	return roles, rows.Err()
+}
+
+// usersRolesBatch 一次性加载多个用户的角色（消除 N+1：List 列表场景下避免每用户一次查询）。
+// 返回 userID -> roles 映射；不存在的用户对应 nil 切片。
+func (s *Store) usersRolesBatch(ctx context.Context, userIDs []string) (map[string][]string, error) {
+	out := make(map[string][]string, len(userIDs))
+	if len(userIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT user_id, role FROM user_roles WHERE user_id = ANY($1) ORDER BY user_id, role`, userIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var uid, r string
+		if err := rows.Scan(&uid, &r); err != nil {
+			return nil, err
+		}
+		out[uid] = append(out[uid], r)
+	}
+	return out, rows.Err()
 }
 
 // —— APIKey ——
@@ -238,6 +266,28 @@ func (s *Store) apiKeyRoles(ctx context.Context, apiKeyID string) ([]string, err
 	return roles, rows.Err()
 }
 
+// apiKeysRolesBatch 一次性加载多个 API Key 的角色（消除 N+1：List 列表场景）。
+func (s *Store) apiKeysRolesBatch(ctx context.Context, keyIDs []string) (map[string][]string, error) {
+	out := make(map[string][]string, len(keyIDs))
+	if len(keyIDs) == 0 {
+		return out, nil
+	}
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT api_key_id, role FROM api_key_roles WHERE api_key_id = ANY($1) ORDER BY api_key_id, role`, keyIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var kid, r string
+		if err := rows.Scan(&kid, &r); err != nil {
+			return nil, err
+		}
+		out[kid] = append(out[kid], r)
+	}
+	return out, rows.Err()
+}
+
 // TenantsCount 返回租户总数，供 seed 判空（表空才灌，幂等）。
 func (s *Store) TenantsCount(ctx context.Context) (int, error) {
 	var n int
@@ -265,22 +315,34 @@ func (s *Store) ListTenants(ctx context.Context) ([]identity.Tenant, error) {
 }
 
 func (s *Store) DeleteTenant(ctx context.Context, id string) error {
+	// 单事务 + FOR UPDATE 锁 tenants 行：使「检查非空 + 删除」原子。
+	// 并发 CreateUser 的 INSERT users 会对 tenants 行加 FK KEY SHARE 锁，与本事务的 FOR UPDATE 冲突
+	// -> 并发建用户等待删除提交后 FK 校验失败（而非"成功后被 CASCADE 静默删"）。
+	tx, err := s.db.Pool().Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT true FROM tenants WHERE id=$1 FOR UPDATE`, id).Scan(&exists); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("租户不存在: %s", id)
+		}
+		return err
+	}
 	// 非空保护：有用户拒绝，引导先清用户（防孤儿 + 防误删）
 	var n int
-	if err := s.db.Pool().QueryRow(ctx, `SELECT count(*) FROM users WHERE tenant_id=$1`, id).Scan(&n); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM users WHERE tenant_id=$1`, id).Scan(&n); err != nil {
 		return err
 	}
 	if n > 0 {
 		return fmt.Errorf("%w: %s", identity.ErrTenantNotEmpty, id)
 	}
-	ct, err := s.db.Pool().Exec(ctx, `DELETE FROM tenants WHERE id=$1`, id)
-	if err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM tenants WHERE id=$1`, id); err != nil {
 		return err
 	}
-	if ct.RowsAffected() == 0 {
-		return fmt.Errorf("租户不存在: %s", id)
-	}
-	return nil // api_keys FK CASCADE 自动清
+	return tx.Commit(ctx) // api_keys FK CASCADE 自动清
 }
 
 // ListUsers tenantID 空则全租户。
@@ -308,10 +370,17 @@ func (s *Store) ListUsers(ctx context.Context, tenantID string) ([]identity.User
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	// 批量聚合角色（消除 N+1）。
+	ids := make([]string, len(out))
 	for i := range out {
-		if out[i].Roles, err = s.userRoles(ctx, out[i].ID); err != nil {
-			return nil, err
-		}
+		ids[i] = out[i].ID
+	}
+	rolesMap, err := s.usersRolesBatch(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Roles = rolesMap[out[i].ID]
 	}
 	return out, nil
 }
@@ -399,10 +468,17 @@ func (s *Store) ListAPIKeys(ctx context.Context, tenantID string) ([]identity.AP
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	// 批量聚合角色（消除 N+1）。
+	ids := make([]string, len(out))
 	for i := range out {
-		if out[i].Roles, err = s.apiKeyRoles(ctx, out[i].ID); err != nil {
-			return nil, err
-		}
+		ids[i] = out[i].ID
+	}
+	rolesMap, err := s.apiKeysRolesBatch(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Roles = rolesMap[out[i].ID]
 	}
 	return out, nil
 }

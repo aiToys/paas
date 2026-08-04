@@ -12,6 +12,13 @@ spec:
       labels: {{- include "paas.coreSelector" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "paas.fullname" . }}
+      {{- /* hostNetwork：早期为让 core Pod 访问外部 hub.wang.dd registry 的 hack。
+        现已自建集群内 registry（deploy/k8s/registry.yaml，NodePort 30050），
+        core Pod 经 Pod 网络 → <nodeIP>:30050 可达，hostNetwork 退役。保留开关供特殊场景。 */ -}}
+      {{- if .Values.core.hostNetwork }}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
       containers:
         - name: core
           image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -52,9 +59,11 @@ spec:
               value: {{ .Values.devops.builder | default "" | quote }}
             - name: PAAS_BUILDER_IMAGE
               value: {{ .Values.devops.builderImage | default "docker:git" | quote }}
+            # 集群内自建 registry（NodePort 30050）：builder push 目标 + core registry client（镜像库 UI）+ 引擎镜像 registry。
+            # core Pod 经 Pod 网络 → <nodeIP>:30050 可达（NodePort）；builder 经节点 daemon 直连。
             - name: PAAS_REGISTRY
               value: {{ .Values.devops.registry | default "" | quote }}
-            # 数据服务引擎镜像 registry（节点拉不到 docker.io 时，引擎镜像推 <registry>/library/）。
+            # 数据服务引擎镜像 registry（reconciler 拼 image 字符串用，kubelet pull IP:port 直连）。
             - name: PAAS_IMAGE_REGISTRY
               value: {{ .Values.devops.registry | default "" | quote }}
             # MaaS airouter 网关 API Key（统一真实推理入口；启动 seed 到 sec-platform-airouter）。
@@ -67,6 +76,14 @@ spec:
               value: {{ .Values.devops.registryUser | default "" | quote }}
             - name: PAAS_REGISTRY_PASS
               value: {{ .Values.devops.registryPass | default "" | quote }}
+            # 内置 Git 后端（Gitea 无头，ClusterIP）：一站式代码托管。空则内置仓库创建/浏览降级（不影响外部仓库构建）。
+            # PAAS_GITEA_URL 是 Gitea API 根地址（http://gitea.paas.svc.cluster.local:3000）。
+            - name: PAAS_GITEA_URL
+              value: {{ .Values.devops.gitea.url | default "" | quote }}
+            - name: PAAS_GITEA_USER
+              value: {{ .Values.devops.gitea.username | default "" | quote }}
+            - name: PAAS_GITEA_PASSWORD
+              value: {{ .Values.devops.gitea.password | default "" | quote }}
             # 可观测三支柱 + 控制面自身 OTel 链路（指向 observability namespace 的真实后端）。
             # 任一为空则该支柱降级为 memory 惰性 mock（三支柱独立可混用）。
             # Tempo OTLP/HTTP endpoint 不含 scheme（otlptracehttp + WithInsecure）。

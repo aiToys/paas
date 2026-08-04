@@ -20,12 +20,16 @@ type BuildRunRepository interface {
 	ListBuildRuns(ctx context.Context, appID string) ([]BuildRun, error)
 	GetBuildRun(ctx context.Context, id string) (BuildRun, error)
 	CreateBuildRun(ctx context.Context, b BuildRun) error
+	// ListAllBuildRuns 跨租户列出全部构建（admin 平台总览，不过滤 tenant，返回对象带 TenantID）。
+	ListAllBuildRuns(ctx context.Context) ([]BuildRun, error)
 }
 
 // ImageRepository 是构建产物持久化抽象。
 type ImageRepository interface {
 	ListImages(ctx context.Context, appID string) ([]Image, error)
 	GetImage(ctx context.Context, id string) (Image, error)
+	// ListAllImages 跨租户列出全部镜像（admin 平台总览，不过滤 tenant，返回对象带 TenantID）。
+	ListAllImages(ctx context.Context) ([]Image, error)
 }
 
 // ReleaseRepository 是发布持久化 + 编排抽象。
@@ -38,4 +42,6 @@ type ReleaseRepository interface {
 	CreateRelease(ctx context.Context, input ReleaseInput) (Release, error)
 	// RollbackRelease 回滚到上一镜像，返回新建的回滚 Release。
 	RollbackRelease(ctx context.Context, releaseID string) (Release, error)
+	// ListAllReleases 跨租户列出全部发布（admin 平台总览，不过滤 tenant，返回对象带 TenantID）。
+	ListAllReleases(ctx context.Context) ([]Release, error)
 }

@@ -68,8 +68,13 @@ func podSpec(w *v1alpha1.Workload) corev1.PodSpec {
 	}
 	// 端口声明 + readiness probe（TCP，对应用零侵入：容器 listen 即 ready）。
 	// readiness 驱动 K8s Endpoints 维护 ready 集合，是数据面服务发现（/dp/instances）的真源。
-	if w.Spec.ContainerPort > 0 {
-		cport := w.Spec.ContainerPort
+	// ContainerPort 缺省（0）时取 Port：applyService 在 Port>0 即建 Service，podSpec 必须同步
+	// 声明端口 + probe，否则 Pod 无 readiness probe → kubelet 默认 Ready=True → 进程未 listen 即被路由。
+	cport := w.Spec.ContainerPort
+	if cport <= 0 {
+		cport = w.Spec.Port
+	}
+	if cport > 0 {
 		container.Ports = []corev1.ContainerPort{{ContainerPort: cport}}
 		container.ReadinessProbe = &corev1.Probe{
 			ProbeHandler:  corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(cport)}},
@@ -207,12 +212,21 @@ func (r *WorkloadReconciler) applyJob(ctx context.Context, w *v1alpha1.Workload)
 		job.Spec.Parallelism = ptrInt32(w.Spec.Replicas)
 		// Job 完成后 1 天自动清理（与 devops builder.K8sJob 一致），减少 etcd 存储 + list/watch 噪音。
 		job.Spec.TTLSecondsAfterFinished = ptrInt32(86400)
+		// 失败不重试（与 devops builder.K8sJob 对齐）：BackoffLimit=0 让 Job 失败一次即终止，
+		// 这样 status 回写「Failed>0→failed」与 K8s 实际状态一致（默认 6 次重试期间会误判）。
+		if job.CreationTimestamp.IsZero() {
+			job.Spec.BackoffLimit = ptrInt32(0)
+		}
 		// Job 的 PodTemplate 创建后不可变：仅创建时设置；更新期改 image 需删旧建新（本期不处理）。
 		if job.CreationTimestamp.IsZero() {
 			job.Spec.Template = corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec:       podSpec(w),
 			}
+			// Job/CronJob 的 Pod template 必须显式设 restartPolicy（仅 OnFailure/Never 合法，
+			// 默认 Always 会被 apiserver 拒绝 -> "Required value" 报错致 Job 永远创建失败）。
+			// 与 BackoffLimit=0 语义一致：失败即终止不重启，status 回写与 K8s 实际状态对齐。
+			job.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyNever
 		}
 		// OwnerReference：CR 删除时 GC 清理 Job（同 Deployment）。
 		return controllerutil.SetControllerReference(w, job, r.Scheme)
@@ -248,6 +262,8 @@ func (r *WorkloadReconciler) applyCronJob(ctx context.Context, w *v1alpha1.Workl
 				Spec:       podSpec(w),
 			}},
 		}
+		// 同 applyJob：CronJob 衍生的 Job Pod 必须显式 restartPolicy（Never），否则 apiserver 拒绝。
+		cj.Spec.JobTemplate.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyNever
 		// OwnerReference：CR 删除时 GC 清理 CronJob（同 Deployment）。
 		return controllerutil.SetControllerReference(w, cj, r.Scheme)
 	})

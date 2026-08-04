@@ -26,9 +26,11 @@ var (
 	ErrModelExists     = errors.New("模型已存在")
 	ErrChannelNotFound = errors.New("通道不存在")
 	ErrChannelExists   = errors.New("通道已存在")
+	ErrVendorNotFound  = errors.New("供应商不存在")
+	ErrVendorExists    = errors.New("供应商已存在")
 )
 
-// Repository 是 Model/Channel 的平台级仓储。
+// Repository 是 Model/Channel/Vendor 的平台级仓储。
 // 模型目录全租户共享（CLAUDE.md 已定），故不带 tenant ctx（与租户 Repository 模式不同）；
 // 仍带 context.Context 以传播请求取消/超时（与其他模块一致）。
 // Channel 作为 Model 的子资源管理（内嵌 model.Channels，与 provider.Model 结构同源）。
@@ -45,18 +47,30 @@ type Repository interface {
 	CreateChannel(ctx context.Context, modelID string, c *provider.Channel) error
 	UpdateChannel(ctx context.Context, modelID string, c *provider.Channel) error // 仅更新标量，impl 不在此重建
 	DeleteChannel(ctx context.Context, modelID, channelID string) error
+
+	// Vendor CRUD（平台级预设供应商：BaseURL+凭证+Type，供创建通道时选供应商带入）。
+	ListVendors(ctx context.Context) ([]*provider.Vendor, error)
+	GetVendor(ctx context.Context, id string) (*provider.Vendor, error) // not found 返 ErrVendorNotFound
+	CreateVendor(ctx context.Context, v *provider.Vendor) error
+	UpdateVendor(ctx context.Context, v *provider.Vendor) error // 仅更新标量
+	DeleteVendor(ctx context.Context, id string) error
+	VendorsCount(ctx context.Context) (int, error) // 供 seed 判空（表空才灌，幂等）
 }
 
 // memoryStore 是 Repository 的进程内实现，cmd/core 内存路径注入。
 // 所有读方法返回深拷贝（Clone），隔离调用方与内部状态，避免锁外读 Channel.Status 竞态。
 type memoryStore struct {
-	mu     sync.Mutex
-	models map[string]*provider.Model
+	mu      sync.Mutex
+	models  map[string]*provider.Model
+	vendors map[string]*provider.Vendor
 }
 
 // NewMemoryStore 返回空内存仓储（不 seed；demo 灌入由 plugin/cmd 层门控）。
 func NewMemoryStore() Repository {
-	return &memoryStore{models: map[string]*provider.Model{}}
+	return &memoryStore{
+		models:  map[string]*provider.Model{},
+		vendors: map[string]*provider.Vendor{},
+	}
 }
 
 func (s *memoryStore) ListModels(ctx context.Context) ([]*provider.Model, error) {
@@ -180,6 +194,7 @@ func (s *memoryStore) UpdateChannel(ctx context.Context, modelID string, c *prov
 			ex.Vendor = c.Vendor
 			ex.UpstreamModel = c.UpstreamModel
 			ex.CredentialRef = c.CredentialRef
+			ex.VendorID = c.VendorID
 			return nil
 		}
 	}
@@ -200,6 +215,82 @@ func (s *memoryStore) DeleteChannel(ctx context.Context, modelID, channelID stri
 		}
 	}
 	return fmt.Errorf("%w: %s/%s", ErrChannelNotFound, modelID, channelID)
+}
+
+// vendorClone 返回 Vendor 的深拷贝（全标量字段，值复制即可）。
+func vendorClone(v *provider.Vendor) *provider.Vendor {
+	if v == nil {
+		return nil
+	}
+	cp := *v
+	return &cp
+}
+
+func (s *memoryStore) ListVendors(ctx context.Context) ([]*provider.Vendor, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]*provider.Vendor, 0, len(s.vendors))
+	for _, v := range s.vendors {
+		out = append(out, vendorClone(v))
+	}
+	return out, ctx.Err()
+}
+
+func (s *memoryStore) GetVendor(ctx context.Context, id string) (*provider.Vendor, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	v, ok := s.vendors[id]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrVendorNotFound, id)
+	}
+	return vendorClone(v), nil
+}
+
+func (s *memoryStore) CreateVendor(ctx context.Context, v *provider.Vendor) error {
+	if v == nil || v.ID == "" {
+		return fmt.Errorf("%w: vendor 与 ID 不能为空", ErrVendorExists)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.vendors[v.ID]; exists {
+		return fmt.Errorf("%w: %s", ErrVendorExists, v.ID)
+	}
+	s.vendors[v.ID] = vendorClone(v)
+	return nil
+}
+
+func (s *memoryStore) UpdateVendor(ctx context.Context, v *provider.Vendor) error {
+	if v == nil || v.ID == "" {
+		return ErrVendorNotFound
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	existing, ok := s.vendors[v.ID]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrVendorNotFound, v.ID)
+	}
+	existing.Name = v.Name
+	existing.Type = v.Type
+	existing.BaseURL = v.BaseURL
+	existing.CredentialRef = v.CredentialRef
+	existing.Description = v.Description
+	return nil
+}
+
+func (s *memoryStore) DeleteVendor(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.vendors[id]; !ok {
+		return fmt.Errorf("%w: %s", ErrVendorNotFound, id)
+	}
+	delete(s.vendors, id)
+	return nil
+}
+
+func (s *memoryStore) VendorsCount(ctx context.Context) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.vendors), ctx.Err()
 }
 
 // BuildProvider 按 Channel.Type 构造运行时 Provider。

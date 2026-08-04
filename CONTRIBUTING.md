@@ -4,9 +4,10 @@
 
 ## 开发环境
 
-- Go >= 1.22
+- Go >= 1.26
+- Node.js >= 22.13 + pnpm（前端）
 - GNU make
-- （可选）golangci-lint、Docker、Kind（用于本地 K8s 集成测试）
+- （可选）golangci-lint、Docker（镜像构建与本地 K8s 部署）
 
 ## 开发流程
 

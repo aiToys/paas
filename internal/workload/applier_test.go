@@ -16,6 +16,7 @@ type fakeRepo struct {
 func (f *fakeRepo) List(ctx context.Context, envID, appID, wtype string) ([]Workload, error) {
 	return nil, nil
 }
+func (f *fakeRepo) ListAll(ctx context.Context) ([]Workload, error) { return nil, nil }
 func (f *fakeRepo) Get(ctx context.Context, id string) (Workload, error) { return Workload{}, nil }
 func (f *fakeRepo) Create(ctx context.Context, w Workload) error {
 	if f.createErr != nil {

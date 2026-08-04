@@ -15,6 +15,7 @@ type fakeRepo struct {
 }
 
 func (f *fakeRepo) List(_ context.Context, _ string) ([]DataService, error) { return nil, nil }
+func (f *fakeRepo) ListAll(_ context.Context) ([]DataService, error) { return nil, nil }
 func (f *fakeRepo) Get(_ context.Context, _ string) (DataService, error)    { return DataService{}, nil }
 func (f *fakeRepo) Create(_ context.Context, d DataService) (DataService, error) {
 	f.saved = d

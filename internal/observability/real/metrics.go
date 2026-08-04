@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/internal/observability"
 	"github.com/aitoys/paas/pkg/tenant"
 )
@@ -32,7 +33,7 @@ type MetricsStore struct {
 
 // NewMetricsStore 创建 Prometheus 适配。promURL 为 Prometheus 根地址（如 http://prom:9090）。
 func NewMetricsStore(promURL string) *MetricsStore {
-	return &MetricsStore{promURL: promURL, client: &http.Client{Timeout: 10 * time.Second}}
+	return &MetricsStore{promURL: promURL, client: httputil.NewClient(10 * time.Second)}
 }
 
 // promResponse 是 Prometheus /api/v1/query_range 响应的最小子集。

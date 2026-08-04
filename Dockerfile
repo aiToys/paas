@@ -12,11 +12,15 @@
 # runtime 基础镜像（全局 ARG，供第 3 阶段 FROM；legacy builder 需 ARG 在首个 FROM 前）。
 # 国内默认 alpine:3.20（gcr distroless 不在 daocloud 白名单拉不到）；海外可
 # --build-arg RUNTIME_IMAGE=gcr.io/distroless/static-debian12:nonroot 回 distroless（需同步去 apk add/USER 行）。
-ARG RUNTIME_IMAGE=alpine:3.20
+ARG RUNTIME_IMAGE=docker.m.daocloud.io/alpine:3.20
+
+# 基础镜像 registry（全局 ARG）：国内默认走 daocloud 中转，避免 docker.io/gcr 直拉超时。
+# 海外构建可 --build-arg BASE_REGISTRY=docker.io 回官方源。
+ARG BASE_REGISTRY=docker.m.daocloud.io
 
 # ---------- 1. 前端构建阶段 ----------
 # node:22-alpine：console-admin preinstall 要求 Node >= 22.13.0。
-FROM node:22-alpine AS frontend
+FROM ${BASE_REGISTRY}/node:22-alpine AS frontend
 # 国内 npm 镜像（外网受限环境必需）；海外构建可 --build-arg NPM_REGISTRY=https://registry.npmjs.org 覆盖。
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 WORKDIR /fe
@@ -37,7 +41,7 @@ RUN pnpm --filter ./console-user build && \
     pnpm --filter ./landing build
 
 # ---------- 2. Go 构建阶段 ----------
-FROM golang:1.26-alpine AS builder
+FROM ${BASE_REGISTRY}/golang:1.26-alpine AS builder
 # 国内 Go 代理（外网受限环境必需）；海外构建可 --build-arg GOPROXY=https://proxy.golang.org,direct 覆盖。
 ARG GOPROXY=https://goproxy.cn,direct
 ENV GOPROXY=${GOPROXY}
@@ -58,13 +62,13 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=${GOARCH} go build -trimpath -ldflags="-s -w
 # ---------- 3. 运行阶段 ----------
 # alpine runtime（Go 静态二进制 CGO_ENABLED=0 不依赖 glibc/musl，alpine 可跑）。
 # 装 ca-certificates 供 HTTPS（airouter 网关 / OpenAI/DeepSeek 等供应商 API）。
-# 国内构建：base 镜像经 daocloud 中转 retag 到本地同名（docker.io/gcr 直拉超时），
-# 配合 DOCKER_BUILDKIT=0 走本地镜像不查 remote metadata（scripts/deploy-k8s.sh）。
-# 海外构建可 --build-arg RUNTIME_IMAGE=gcr.io/distroless/static-debian12:nonroot 回 distroless
+# RUNTINE_IMAGE 用全局 ARG 默认（daocloud alpine:3.20）；海外可
+# --build-arg RUNTIME_IMAGE=gcr.io/distroless/static-debian12:nonroot 回 distroless
 # （需同步去掉 apk add/USER 行，distroless 内置 nonroot）。
-ARG RUNTIME_IMAGE=alpine:3.20
 FROM ${RUNTIME_IMAGE}
-RUN apk add --no-cache ca-certificates && update-ca-certificates
+# apk 切国内镜像源（dl-cdn.alpinelinux.org 在国内网络常超时）；海外构建可去掉此 sed。
+RUN sed -i 's|dl-cdn.alpinelinux.org|mirrors.aliyun.com|g' /etc/apk/repositories && \
+    apk add --no-cache ca-certificates && update-ca-certificates
 WORKDIR /
 COPY --from=builder /out/core /core
 # 非 root 运行（最小权限，与 distroless nonroot 同 uid=65532）

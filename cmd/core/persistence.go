@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"strings"
@@ -290,12 +291,12 @@ func seedPGAllIfEmpty(
 	devopsRepo *devopspg.Store, govRepo *govpg.Store, ccRepo *ccpg.Store,
 	billingRepo *billingpg.Store, secRepo *secpg.Store,
 ) {
-	// identity：表空才灌，幂等。
-	if n, err := idb.TenantsCount(ctx); err != nil {
-		log.Printf("[seed] 统计租户失败: %v", err)
-	} else if n == 0 {
-		seedIdentity(idb, resolveAPIKey())
-	}
+	// identity：始终调 seedIdentity（逐实体幂等：租户/Key 走 ON CONFLICT，
+	// 密码登录用户前置 GetUserByName 检查）。这样重部署到已有 PG 能自动补齐缺失的
+	// 演示登录账号（acme-admin/acme-dev/globex-admin），与内存路径行为一致。
+	// 原「TenantsCount==0 才灌」全有或全无策略，导致历史 DB（已有租户但缺演示用户）
+	// 永不补齐 → console-user 演示账号快切登录失败。
+	seedIdentity(idb, resolveAPIKey())
 	// application：以 seed.TenantID 建 ctx，PG Create 以 ctx 为准。
 	if n, err := appRepo.AppsCount(ctx); err != nil {
 		log.Printf("[seed] 统计应用失败: %v", err)
@@ -395,6 +396,17 @@ func seedGovernance(ctx context.Context, repo governance.Repository) {
 func seedMaasCatalog(ctx context.Context, repo maas.Repository, secStore security.SecretStore) {
 	if os.Getenv("PAAS_DISABLE_DEMO_SEED") == "true" {
 		return
+	}
+	// 清理已废弃的旧 seed 模型（直连供应商占位 + mock/echo 演示），CASCADE 自动清通道。
+	// 幂等：不存在的返 ErrModelNotFound 忽略；保证模型市场仅留 airouter 真实模型 + admin 手动配置。
+	for _, id := range maas.DeprecatedSeedModelIDs {
+		if err := repo.DeleteModel(ctx, id); err != nil && !errors.Is(err, maas.ErrModelNotFound) {
+			log.Printf("[seed] 清理废弃模型 %s 失败: %v", id, err)
+		}
+	}
+	// ensure airouter 预置供应商（不被 ModelsCount 跳过；admin 可见可改，创建通道选它即带入）。
+	if err := repo.CreateVendor(ctx, maas.AirouterVendor()); err != nil && !errors.Is(err, maas.ErrVendorExists) {
+		log.Printf("[seed] airouter vendor 失败: %v", err)
 	}
 	// PG store 暴露 ModelsCount，表非空跳过（避免重启重复尝试 insert 全部模型）。
 	if counter, ok := repo.(interface {

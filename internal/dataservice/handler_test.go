@@ -51,7 +51,7 @@ func createDS(t *testing.T, h *dataservice.Handler, tid, kind, name, env, specJS
 		t.Fatalf("创建 %s 应 201，got %d body=%s", name, w.Code, w.Body.String())
 	}
 	var d dataservice.DataService
-	decode(t, w, &d)
+	decodeData(t, w, &d)
 	return d
 }
 
@@ -59,6 +59,20 @@ func decode(t *testing.T, w *httptest.ResponseRecorder, v interface{}) {
 	t.Helper()
 	if err := json.Unmarshal(w.Body.Bytes(), v); err != nil {
 		t.Fatalf("解码失败: %v (body=%s)", err, w.Body.String())
+	}
+}
+
+// decodeData 解包 {data:T} 信封后反序列化到 v（单资源响应，handler 统一 WriteData 契约）。
+func decodeData(t *testing.T, w *httptest.ResponseRecorder, v interface{}) {
+	t.Helper()
+	var env struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("解码信封失败: %v (body=%s)", err, w.Body.String())
+	}
+	if err := json.Unmarshal(env.Data, v); err != nil {
+		t.Fatalf("解码 data 失败: %v (data=%s)", err, string(env.Data))
 	}
 }
 
@@ -112,7 +126,7 @@ func TestCreateAndDelete(t *testing.T) {
 		t.Fatalf("创建应 201，got %d body=%s", w.Code, w.Body.String())
 	}
 	var d dataservice.DataService
-	decode(t, w, &d)
+	decodeData(t, w, &d)
 	if d.Status != dataservice.StatusRunning {
 		t.Fatalf("应默认 running，got %s", d.Status)
 	}
@@ -217,7 +231,7 @@ func TestDetailMasksSecret(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, r)
 	var created dataservice.DataService
-	decode(t, w, &created)
+	decodeData(t, w, &created)
 	// POST 返掩码（write 权限者也只见掩码，明文仅内部绑定注入用）
 	if created.Connection["password"] != dataservice.SecretMask {
 		t.Fatalf("创建返回 password 应掩码，got %q", created.Connection["password"])
@@ -228,7 +242,7 @@ func TestDetailMasksSecret(t *testing.T) {
 	w2 := httptest.NewRecorder()
 	h.ServeHTTP(w2, r2)
 	var detail dataservice.DataService
-	decode(t, w2, &detail)
+	decodeData(t, w2, &detail)
 	if detail.Connection["password"] != dataservice.SecretMask {
 		t.Fatalf("详情 password 应掩码，got %q", detail.Connection["password"])
 	}

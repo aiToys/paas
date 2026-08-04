@@ -85,6 +85,13 @@ type Instance struct {
 	UpdatedAt time.Time         `json:"updatedAt"`
 }
 
+// ServiceDetail 是 GET /api/services/{id} 的聚合响应：服务本身 + 其全部实例。
+// 用于服务详情页一次性加载（避免 list+detail 两次往返）。
+type ServiceDetail struct {
+	Service   Service    `json:"service"`
+	Instances []Instance `json:"instances"`
+}
+
 // Validate 校验实例：serviceID/addr/status 合法。
 func (i Instance) Validate() error {
 	if i.ServiceID == "" {

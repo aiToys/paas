@@ -1,0 +1,166 @@
+# 内置 Git 后端（Gitea 无头模式）。
+#
+# 设计：PaaS 一站式——用户不跳出平台。Gitea 作为无头后端，仅 ClusterIP 暴露给 core/builder，
+# 不建 ingress（不暴露自己的 Web UI）。代码仓库的创建/浏览/提交管理 UI 全在 console-user。
+#
+# 部署：kubectl apply -f deploy/devops/gitea.yaml（namespace paas，与 core/postgres 同栈）
+# 鉴权：initContainer 幂等创建 paas-bot admin 用户（password 来自 Secret paas-gitea），
+#       PaaS 后端用 basic auth（paas-bot:<password>）调 Gitea API，无需 token 生成。
+# 存储：SQLite + local-path PVC（dev/demo 轻量；生产规模到时迁共享 PG）。
+# 构建：builder Job clone 改走内网 https://gitea.paas.svc.cluster.local:3000/<owner>/<repo>.git
+#       + injectToken 注入 paas-bot basic auth（CLONE_URL=https://paas-bot:<pass>@gitea...）。
+#
+# 镜像内网化（部署前执行）：
+#   crane copy --platform linux/amd64 docker.m.daocloud.io/gitea/gitea:1.22.6 \
+#     hub.wang.dd:5000/devtools/gitea:1.22.6 --insecure
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: paas-gitea
+  namespace: paas
+  labels:
+    app.kubernetes.io/name: gitea
+    app.kubernetes.io/part-of: paas
+type: Opaque
+# dev 默认密码；生产用 kubectl create secret override 或 sealed-secret。
+stringData:
+  bot-username: paas-bot
+  bot-password: paas-gitea-bot-2026
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitea
+  namespace: paas
+  labels:
+    app.kubernetes.io/name: gitea
+    app.kubernetes.io/part-of: paas
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: gitea
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: gitea
+  namespace: paas
+  labels:
+    app.kubernetes.io/name: gitea
+    app.kubernetes.io/part-of: paas
+spec:
+  serviceName: gitea
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: gitea
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: gitea
+    spec:
+      # 限定 worker：kb1 master 未配 hub.wang.dd:5000 insecure registry，拉镜像失败。
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node-role.kubernetes.io/worker
+                    operator: Exists
+      initContainers:
+        # 幂等创建 paas-bot admin。Gitea CLI migrate/admin 命令调 MustInstalled 要求完整 app.ini，
+        # 手写最小 app.ini 缺必需字段会被拒。改让 `gitea web` 后台首次自动生成完整 app.ini + 初始化 DB，
+        # 等 API 就绪后建用户，再 kill web（主容器复用已初始化数据）。
+        - name: bootstrap-admin
+          image: hub.wang.dd:5000/devtools/gitea:1.22.6
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              mkdir -p /data/gitea/conf
+              # 手写 app.ini（INSTALL_LOCK=true）：web 读取后跳过安装页直接 serve + 自动 migrate。
+              # migrate/admin CLI 命令调 MustInstalled 会拒最小 app.ini，但 web 只 LoadConfig 容忍缺字段。
+              if [ ! -s /data/gitea/conf/app.ini ]; then
+                printf '%s\n' '[database]' 'DB_TYPE  = sqlite3' 'PATH     = /data/gitea/gitea.db' '[security]' 'INSTALL_LOCK = true' '[server]' 'DOMAIN  = gitea.paas.svc.cluster.local' 'ROOT_URL = http://gitea.paas.svc.cluster.local:3000/' 'HTTP_PORT = 3000' '[service]' 'DISABLE_REGISTRATION = true' > /data/gitea/conf/app.ini
+                echo "[bootstrap] wrote minimal app.ini"
+              fi
+              chown -R git:git /data
+              echo "[bootstrap] starting gitea web in background (skip install page via INSTALL_LOCK)..."
+              # web 输出不重定向，直接进 initContainer stdout 便于诊断启动状态
+              su-exec git gitea web &
+              WEB_PID=$!
+              ready=0
+              for i in $(seq 1 90); do
+                if curl -sf -o /dev/null http://localhost:3000/api/v1/version 2>/dev/null; then
+                  echo "[bootstrap] gitea web ready after $((i*2))s"
+                  ready=1; break
+                fi
+                kill -0 $WEB_PID 2>/dev/null || { echo "[bootstrap] gitea web exited unexpectedly"; exit 1; }
+                sleep 2
+              done
+              if [ "$ready" != "1" ]; then echo "[bootstrap] timeout waiting for gitea web (180s)"; exit 1; fi
+              echo "[bootstrap] creating paas-bot admin user..."
+              su-exec git gitea admin user create \
+                --username paas-bot --password "$BOT_PASS" \
+                --email paas-bot@paas.local --admin --must-change-password=false \
+                2>/tmp/err || {
+                  grep -qi "already exists\|user already" /tmp/err && echo "[bootstrap] user exists, skip" || { cat /tmp/err; }
+                }
+              kill $WEB_PID 2>/dev/null || true
+              wait $WEB_PID 2>/dev/null || true
+              echo "[bootstrap] done"
+          env:
+            - { name: BOT_PASS, valueFrom: { secretKeyRef: { name: paas-gitea, key: bot-password } } }
+            - { name: GITEA__database__DB_TYPE, value: sqlite3 }
+            - { name: GITEA__database__PATH, value: /data/gitea/gitea.db }
+            - { name: GITEA__server__DOMAIN, value: gitea.paas.svc.cluster.local }
+            - { name: GITEA__server__ROOT_URL, value: http://gitea.paas.svc.cluster.local:3000/ }
+            - { name: GITEA__security__INSTALL_LOCK, value: "true" }
+            - { name: GITEA__service__DISABLE_REGISTRATION, value: "true" }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      containers:
+        - name: gitea
+          image: hub.wang.dd:5000/devtools/gitea:1.22.6
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: GITEA__database__DB_TYPE, value: sqlite3 }
+            - { name: GITEA__database__PATH, value: /data/gitea/gitea.db }
+            - { name: GITEA__server__HTTP_PORT, value: "3000" }
+            - { name: GITEA__server__DOMAIN, value: gitea.paas.svc.cluster.local }
+            - { name: GITEA__server__ROOT_URL, value: http://gitea.paas.svc.cluster.local:3000/ }
+            # 安装锁：跳过首次安装向导（paas-bot 已由 initContainer 创建）
+            - { name: GITEA__security__INSTALL_LOCK, value: "true" }
+            # 关闭自助注册（用户只能由 PaaS 通过 paas-bot API 创建，统一鉴权）
+            - { name: GITEA__service__DISABLE_REGISTRATION, value: "true" }
+            - { name: GITEA__service__REQUIRE_SIGNIN_VIEW, value: "false" }
+            # 关闭自带 OAuth2/OAuth provider（无头模式不需要）
+            - { name: GITEA__oauth2__ENABLE, value: "false" }
+            # 日志降噪（运维日志走 core 聚合）
+            - { name: GITEA__log__LEVEL, value: Warn }
+          ports:
+            - { name: http, containerPort: 3000 }
+          # readinessProbe：Gitea 公开 API 端点，200 = web 就绪
+          readinessProbe:
+            httpGet: { path: /api/v1/version, port: 3000 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /api/v1/version, port: 3000 }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          volumeMounts:
+            - { name: data, mountPath: /data }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        storageClassName: local-path
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests: { storage: 10Gi }

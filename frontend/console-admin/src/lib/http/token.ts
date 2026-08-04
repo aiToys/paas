@@ -19,3 +19,25 @@ export function setTokenReader(r: TokenReader): void {
 export function getAccessToken(): string | null {
   return activeTokenReader.getAccessToken()
 }
+
+// Token 刷新接口（http ↔ auth 解耦，与 setTokenReader 同模式）
+// authService 在启动时注入 refresh 实现，http 拦截器 401 时调用以透明续期。
+export interface RefreshHandler {
+  refresh(): Promise<unknown>
+}
+
+// 运行时持有的 RefreshHandler（由 auth 模块在启动时设置）
+let activeRefreshHandler: RefreshHandler | null = null
+
+export function setRefreshHandler(h: RefreshHandler): void {
+  activeRefreshHandler = h
+}
+
+// refreshAccessToken 触发注入的 refresh 实现（并发保护由 authService.refresh 内 refreshPromise 承担）。
+// 未注入或 refresh 失败（如无 refresh token、已登出）抛错，调用方走 401 原错误路径。
+export async function refreshAccessToken(): Promise<unknown> {
+  if (!activeRefreshHandler) {
+    throw new Error('no refresh handler registered')
+  }
+  return activeRefreshHandler.refresh()
+}

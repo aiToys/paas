@@ -31,7 +31,10 @@ func NewStore(db *storagepg.DB) *Store {
 const modelCols = `id, name, vendor, context_window, capabilities, input_price, output_price, "desc"`
 
 // chCols 与 provider.Channel 字段顺序对齐；model_id 不映射到 Channel（关联由调用方上下文携带）。
-const chCols = `id, model_id, type, priority, status, endpoint, vendor, upstream_model, credential_ref`
+const chCols = `id, model_id, type, priority, status, endpoint, vendor, upstream_model, credential_ref, vendor_id`
+
+// vendorCols 与 provider.Vendor 字段顺序对齐。
+const vendorCols = `id, name, type, base_url, credential_ref, "desc"`
 
 // marshalCaps 把 []string 序列化为 JSONB 字节（nil -> '[]'，与 DEFAULT 一致）。
 func marshalCaps(caps []string) ([]byte, error) {
@@ -103,7 +106,7 @@ func (s *Store) ListModels(ctx context.Context) ([]*provider.Model, error) {
 	for chRows.Next() {
 		var modelID string
 		var c provider.Channel
-		if err = chRows.Scan(&c.ID, &modelID, &c.Type, &c.Priority, &c.Status, &c.Endpoint, &c.Vendor, &c.UpstreamModel, &c.CredentialRef); err != nil {
+		if err = chRows.Scan(&c.ID, &modelID, &c.Type, &c.Priority, &c.Status, &c.Endpoint, &c.Vendor, &c.UpstreamModel, &c.CredentialRef, &c.VendorID); err != nil {
 			chRows.Close()
 			return nil, err
 		}
@@ -208,7 +211,7 @@ func (s *Store) ListChannels(ctx context.Context, modelID string) ([]*provider.C
 	for rows.Next() {
 		var modelID2 string
 		var c provider.Channel
-		if err = rows.Scan(&c.ID, &modelID2, &c.Type, &c.Priority, &c.Status, &c.Endpoint, &c.Vendor, &c.UpstreamModel, &c.CredentialRef); err != nil {
+		if err = rows.Scan(&c.ID, &modelID2, &c.Type, &c.Priority, &c.Status, &c.Endpoint, &c.Vendor, &c.UpstreamModel, &c.CredentialRef, &c.VendorID); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -231,9 +234,9 @@ func (s *Store) CreateChannel(ctx context.Context, modelID string, c *provider.C
 		return fmt.Errorf("%w: %s", maas.ErrModelNotFound, modelID)
 	}
 	_, err = s.db.Pool().Exec(ctx, `
-INSERT INTO maas_channels (id, model_id, type, priority, status, endpoint, vendor, upstream_model, credential_ref)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		c.ID, modelID, c.Type, c.Priority, c.Status, c.Endpoint, c.Vendor, c.UpstreamModel, c.CredentialRef)
+INSERT INTO maas_channels (id, model_id, type, priority, status, endpoint, vendor, upstream_model, credential_ref, vendor_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		c.ID, modelID, c.Type, c.Priority, c.Status, c.Endpoint, c.Vendor, c.UpstreamModel, c.CredentialRef, c.VendorID)
 	if err != nil {
 		if storagepg.IsUniqueViolation(err) {
 			return fmt.Errorf("%w: %s", maas.ErrChannelExists, c.ID)
@@ -256,9 +259,9 @@ func (s *Store) UpdateChannel(ctx context.Context, modelID string, c *provider.C
 		return fmt.Errorf("%w: %s", maas.ErrModelNotFound, modelID)
 	}
 	tag, err := s.db.Pool().Exec(ctx, `
-UPDATE maas_channels SET type=$1, priority=$2, status=$3, endpoint=$4, vendor=$5, upstream_model=$6, credential_ref=$7
-WHERE id=$8 AND model_id=$9`,
-		c.Type, c.Priority, c.Status, c.Endpoint, c.Vendor, c.UpstreamModel, c.CredentialRef, c.ID, modelID)
+UPDATE maas_channels SET type=$1, priority=$2, status=$3, endpoint=$4, vendor=$5, upstream_model=$6, credential_ref=$7, vendor_id=$8
+WHERE id=$9 AND model_id=$10`,
+		c.Type, c.Priority, c.Status, c.Endpoint, c.Vendor, c.UpstreamModel, c.CredentialRef, c.VendorID, c.ID, modelID)
 	if err != nil {
 		return err
 	}
@@ -291,5 +294,96 @@ func (s *Store) DeleteChannel(ctx context.Context, modelID, channelID string) er
 func (s *Store) ModelsCount(ctx context.Context) (int, error) {
 	var n int
 	err := s.db.Pool().QueryRow(ctx, `SELECT COUNT(*) FROM maas_models`).Scan(&n)
+	return n, err
+}
+
+func scanVendor(r storagepg.RowScanner, v *provider.Vendor) error {
+	return r.Scan(&v.ID, &v.Name, &v.Type, &v.BaseURL, &v.CredentialRef, &v.Description)
+}
+
+// ListVendors 返回全部预设供应商（按 id）。
+func (s *Store) ListVendors(ctx context.Context) ([]*provider.Vendor, error) {
+	rows, err := s.db.Pool().Query(ctx, `SELECT `+vendorCols+` FROM maas_vendors ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*provider.Vendor, 0)
+	for rows.Next() {
+		var v provider.Vendor
+		if err = scanVendor(rows, &v); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, &v)
+	}
+	rows.Close()
+	return out, rows.Err()
+}
+
+// GetVendor 返回单供应商。not found 返 ErrVendorNotFound。
+func (s *Store) GetVendor(ctx context.Context, id string) (*provider.Vendor, error) {
+	row := s.db.Pool().QueryRow(ctx, `SELECT `+vendorCols+` FROM maas_vendors WHERE id=$1`, id)
+	var v provider.Vendor
+	if err := scanVendor(row, &v); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("%w: %s", maas.ErrVendorNotFound, id)
+		}
+		return nil, err
+	}
+	return &v, nil
+}
+
+// CreateVendor 写入供应商。主键冲突 -> ErrVendorExists。
+func (s *Store) CreateVendor(ctx context.Context, v *provider.Vendor) error {
+	if v == nil || v.ID == "" {
+		return fmt.Errorf("%w: vendor 与 ID 不能为空", maas.ErrVendorExists)
+	}
+	_, err := s.db.Pool().Exec(ctx, `
+INSERT INTO maas_vendors (id, name, type, base_url, credential_ref, "desc")
+VALUES ($1, $2, $3, $4, $5, $6)`,
+		v.ID, v.Name, v.Type, v.BaseURL, v.CredentialRef, v.Description)
+	if err != nil {
+		if storagepg.IsUniqueViolation(err) {
+			return fmt.Errorf("%w: %s", maas.ErrVendorExists, v.ID)
+		}
+		return err
+	}
+	return nil
+}
+
+// UpdateVendor 仅更新标量。not found 返 ErrVendorNotFound。
+func (s *Store) UpdateVendor(ctx context.Context, v *provider.Vendor) error {
+	if v == nil || v.ID == "" {
+		return maas.ErrVendorNotFound
+	}
+	tag, err := s.db.Pool().Exec(ctx, `
+UPDATE maas_vendors SET name=$1, type=$2, base_url=$3, credential_ref=$4, "desc"=$5
+WHERE id=$6`,
+		v.Name, v.Type, v.BaseURL, v.CredentialRef, v.Description, v.ID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: %s", maas.ErrVendorNotFound, v.ID)
+	}
+	return nil
+}
+
+// DeleteVendor 删除供应商（不级联清通道——通道 vendor_id 仅是引用，vendor 删后通道仍可用自身 Endpoint/CredentialRef）。
+func (s *Store) DeleteVendor(ctx context.Context, id string) error {
+	tag, err := s.db.Pool().Exec(ctx, `DELETE FROM maas_vendors WHERE id=$1`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: %s", maas.ErrVendorNotFound, id)
+	}
+	return nil
+}
+
+// VendorsCount 返回供应商总数，供 seed 判空（幂等）。
+func (s *Store) VendorsCount(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.Pool().QueryRow(ctx, `SELECT COUNT(*) FROM maas_vendors`).Scan(&n)
 	return n, err
 }

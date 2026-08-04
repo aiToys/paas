@@ -115,6 +115,11 @@ func TestReconcileCronJob(t *testing.T) {
 	if cj.Spec.Schedule != "*/5 * * * *" {
 		t.Fatalf("schedule 不符: %s", cj.Spec.Schedule)
 	}
+	// CronJob 衍生 Job 的 Pod template 必须显式 restartPolicy=Never
+	//（默认 Always 会被 apiserver 拒绝，致 CronJob 永远无法调度 Job）。
+	if rp := cj.Spec.JobTemplate.Spec.Template.Spec.RestartPolicy; rp != corev1.RestartPolicyNever {
+		t.Fatalf("CronJob Pod restartPolicy 应为 Never，实际 %s", rp)
+	}
 }
 
 // TestReconcileServiceCreatesService 验证 service 类型 + Port>0 时建 K8s Service（多微服务 DNS 互调前提）。
@@ -194,5 +199,13 @@ func TestReconcileJobNoService(t *testing.T) {
 	var svc corev1.Service
 	if err := cl.Get(context.Background(), types.NamespacedName{Name: "wl-job", Namespace: "default"}, &svc); err == nil {
 		t.Fatalf("job 类型不应建 Service")
+	}
+	// Job Pod template 必须显式 restartPolicy=Never（默认 Always 被 apiserver 拒绝）。
+	var jb batchv1.Job
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "wl-job", Namespace: "default"}, &jb); err != nil {
+		t.Fatalf("应创建 Job: %v", err)
+	}
+	if rp := jb.Spec.Template.Spec.RestartPolicy; rp != corev1.RestartPolicyNever {
+		t.Fatalf("Job Pod restartPolicy 应为 Never，实际 %s", rp)
 	}
 }

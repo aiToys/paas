@@ -1,6 +1,6 @@
 <template>
   <el-footer>
-    <div>©{{ new Date().getFullYear() }} vue-admin</div>
+    <div>©{{ new Date().getFullYear() }} PaaS · 一站式平台工程</div>
   </el-footer>
 </template>
 

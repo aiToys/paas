@@ -55,7 +55,9 @@ type Workload struct {
 const LaneDefault = "default"
 
 // Validate 校验工作负载字段。
-// 规则：type 合法、name/image 非空、cronjob 须有 schedule。
+// 规则：type 合法、name/image/envId 非空、cronjob 须有 schedule。
+// EnvID 必填：工作负载必须归属某环境（与 dataservice/governance 一致），
+// 否则 allowProd 无法判定环境类型 → developer 可绕过 prod:write 创建无环境归属的生产负载。
 func (w Workload) Validate() error {
 	if _, ok := validTypes[w.Type]; !ok {
 		return errInvalid("type")
@@ -65,6 +67,9 @@ func (w Workload) Validate() error {
 	}
 	if w.Image == "" {
 		return errInvalid("image")
+	}
+	if w.EnvID == "" {
+		return errInvalid("envId")
 	}
 	if w.Type == TypeCronJob && w.Schedule == "" {
 		return errInvalid("schedule")
@@ -77,3 +82,23 @@ type fieldErr struct{ field string }
 func (e fieldErr) Error() string { return "字段非法或缺失: " + e.field }
 
 func errInvalid(field string) error { return fieldErr{field: field} }
+
+// Instance 是工作负载的一个运行实例（Pod 级），用于详情页展示真实运行态。
+// 数据面（K8s）为真源：StatusReader.Instances 查 Pod label paas.aitoys/workload=<id> 回填。
+// 非集群部署（无 clientset）返空切片（降级，与 List 状态回填同构）。
+type Instance struct {
+	Name      string    `json:"name"`               // Pod 名
+	Status    string    `json:"status"`             // Pending/Running/Succeeded/Failed/Unknown
+	Ready     string    `json:"ready,omitempty"`    // "1/1" 就绪/总数容器
+	Restarts  int       `json:"restarts"`           // 重启次数（ Containers 重启次数合计）
+	Node      string    `json:"node,omitempty"`     // 调度到的节点
+	IP        string    `json:"ip,omitempty"`       // Pod IP
+	StartedAt time.Time `json:"startedAt,omitempty"` // 启动时间
+	Message   string    `json:"message,omitempty"`  // 状态原因/事件（Pending/Failed 时有意义）
+}
+
+// Detail 是工作负载详情（GET /api/workloads/{id}）：期望态 + 实际运行实例聚合。
+type Detail struct {
+	Workload  Workload   `json:"workload"`
+	Instances []Instance `json:"instances"`
+}

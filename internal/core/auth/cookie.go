@@ -50,3 +50,13 @@ func refreshFromCookie(r *http.Request) (string, error) {
 	}
 	return c.Value, nil
 }
+
+// accessFromCookie 从请求读 access cookie；无则返错误。
+// 供 Me 端点复用 BearerAuth 已校验过的 cookie 会话（浏览器路径无 Authorization header）。
+func accessFromCookie(r *http.Request) (string, error) {
+	c, err := r.Cookie(AccessCookieName)
+	if err != nil || c.Value == "" {
+		return "", errors.New("missing access cookie")
+	}
+	return c.Value, nil
+}

@@ -79,6 +79,24 @@ func (s *Store) List(ctx context.Context) ([]application.Application, error) {
 	return out, nil
 }
 
+// ListAll 跨租户列出全部应用（admin 平台总览，不过滤 tenant；按 TenantID 升序再 ID 升序）。
+func (s *Store) ListAll(ctx context.Context) ([]application.Application, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]application.Application, 0, len(s.apps))
+	for _, a := range s.apps {
+		a.Bindings = cloneBindings(a.Bindings)
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TenantID != out[j].TenantID {
+			return out[i].TenantID < out[j].TenantID
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
+
 func (s *Store) Get(ctx context.Context, id string) (application.Application, error) {
 	tid, ok := tenant.TenantFrom(ctx)
 	if !ok {
@@ -173,6 +191,22 @@ func (s *Store) Unbind(ctx context.Context, id, resourceType, name string) (appl
 	s.apps[id] = a
 	a.Bindings = cloneBindings(a.Bindings) // 返回前深拷贝，与 store 独立
 	return a, nil
+}
+
+// Delete 删除应用（租户隔离：跨租户 ID 不泄漏存在性，统一 not found）。
+func (s *Store) Delete(ctx context.Context, id string) error {
+	tid, ok := tenant.TenantFrom(ctx)
+	if !ok {
+		return fmt.Errorf("missing tenant context")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, hit := s.apps[id]
+	if !hit || a.TenantID != tid {
+		return fmt.Errorf("应用不存在: %s", id)
+	}
+	delete(s.apps, id)
+	return nil
 }
 
 // SeedApps 返回平台预置示例应用，供内存仓储自灌与 PG 仓储迁移后 seed 复用同一真源。

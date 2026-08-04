@@ -3,7 +3,8 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
-import { fetchJSON } from '@/api'
+import { fetchAuth, fetchJSON } from '@/api'
+import { confirmDangerous } from '@/composables/useDangerConfirm'
 import AppRepositories from './app-tabs/AppRepositories.vue'
 import AppBuilds from './app-tabs/AppBuilds.vue'
 import AppImages from './app-tabs/AppImages.vue'
@@ -190,22 +191,20 @@ async function submitBind() {
 
 async function unbind(b: Binding) {
   if (!app.value) return
-  try {
-    await ElMessageBox.confirm(
-      `确定解绑「${b.name}」吗？该资源将从应用移除。`,
-      '解绑资源',
-      { type: 'warning', confirmButtonText: '解绑', cancelButtonText: '取消' },
-    )
-  } catch {
-    return // 用户取消
-  }
+  // 解绑属高危操作（数据服务解绑会清除 DATABASE_URL/REDIS_URL 等连接注入，影响线上 Pod）：
+  // 统一走 confirmDangerous，生产环境要求输入绑定名称确认（与其他资源删除一致）。
+  const isDsUnbind = DS_KINDS.includes(b.type as TypeKey)
+  const ok = await confirmDangerous({
+    action: '解绑',
+    target: b.name,
+    requireNameConfirm: true,
+  })
+  if (!ok) return
   try {
     app.value = await fetchJSON<App>(
       `/api/applications/${app.value.id}/bindings/${b.type}/${encodeURIComponent(b.name)}`,
       { method: 'DELETE' },
     )
-    // 数据服务解绑时后端 best-effort 清除注入的连接信息（与绑定时对称）。
-    const isDsUnbind = DS_KINDS.includes(b.type as TypeKey)
     ElMessage.success(`已解绑：${b.name}` + (isDsUnbind ? '（连接信息将同步清除）' : ''))
   } catch (e) {
     ElMessage.error('解绑失败：' + (e as Error).message)
@@ -213,7 +212,7 @@ async function unbind(b: Binding) {
 }
 
 const tabs = ['概览', '资源绑定', '部署', '代码仓库', '构建', '镜像', '发布', '配置'] as const
-const activeTab = ref<(typeof tabs)[number]>('资源绑定')
+const activeTab = ref<(typeof tabs)[number]>('概览')
 
 // 镜像 tab 点「发布」-> 切到发布 tab 并预选镜像（pickedImageId 变化触发 AppReleases 打开创建弹窗）
 const pickedImageId = ref('')
@@ -224,13 +223,33 @@ async function pickImage(img: { id: string }) {
   activeTab.value = '发布'
 }
 
-// 头部「设置/部署」按钮：本期未开放独立入口，点击给明确反馈而非静默。
-// 「部署」引导用户切到「部署」tab（已存在工作负载视图），「设置」属应用配置未开放。
+// 头部「部署」按钮：切到「部署」tab（应用工作负载视图）。
 function goDeploy() {
   activeTab.value = '部署'
 }
-function settingsNotReady() {
-  ElMessage.info('应用级设置面板尚未开放；可在「配置」tab 管理工作负载级 env/Secret')
+
+// 删除应用（级联清工作负载+配置）：高危，统一走 confirmDangerous（输入应用名确认）。
+// 删除后返回应用列表。
+async function deleteApp() {
+  if (!app.value) return
+  const ok = await confirmDangerous({
+    action: '删除应用',
+    target: app.value.name,
+    requireNameConfirm: true,
+  })
+  if (!ok) return
+  try {
+    const resp = await fetchAuth(`/api/applications/${app.value!.id}`, { method: 'DELETE' })
+    if (!resp.ok) {
+      const e = await resp.json().catch(() => ({}))
+      ElMessage.error('删除失败：' + (e.error || resp.statusText))
+      return
+    }
+    ElMessage.success('应用已删除')
+    router.push('/applications')
+  } catch (e) {
+    ElMessage.error('删除失败：' + (e as Error).message)
+  }
 }
 </script>
 
@@ -253,8 +272,8 @@ function settingsNotReady() {
           <p class="desc">{{ app.desc }}</p>
         </div>
         <div class="head-actions">
-          <button class="ghost" @click="settingsNotReady">设置</button>
           <button class="primary" @click="goDeploy">部署</button>
+          <button class="danger" @click="deleteApp">删除应用</button>
         </div>
       </header>
 
@@ -530,7 +549,8 @@ function settingsNotReady() {
   gap: 8px;
 }
 .ghost,
-.primary {
+.primary,
+.danger {
   padding: 8px 16px;
   border-radius: var(--radius);
   font-family: inherit;
@@ -557,6 +577,14 @@ function settingsNotReady() {
   opacity: 0.6;
   cursor: not-allowed;
   box-shadow: none;
+}
+.danger {
+  border: 1px solid var(--danger, #ef4444);
+  background: transparent;
+  color: var(--danger, #ef4444);
+}
+.danger:hover {
+  background: rgba(239, 68, 68, 0.1);
 }
 
 .tabs {

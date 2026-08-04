@@ -21,11 +21,12 @@ import { ElMessage } from 'element-plus'
 import {
   createChannel,
   updateChannel,
-  fetchPlatformSecrets,
+  fetchVendorList,
   CHANNEL_TYPES,
   CHANNEL_STATUS,
   type ModelChannel,
-  type ChannelCreateRequest
+  type ChannelCreateRequest,
+  type Vendor
 } from '../api'
 
 const props = defineProps<{
@@ -43,7 +44,7 @@ const emit = defineEmits<{
 const visible = ref(props.modelValue)
 const submitting = ref(false)
 const formDrawerRef = ref<InstanceType<typeof FormDrawer>>()
-const secretOptions = ref<{ id: string; name: string }[]>([])
+const vendorOptions = ref<Vendor[]>([])
 
 watch(() => props.modelValue, (v) => {
   visible.value = v
@@ -59,7 +60,8 @@ const formData = reactive<ChannelCreateRequest>({
   endpoint: '',
   vendor: '',
   upstreamModel: '',
-  credentialRef: ''
+  credentialRef: '',
+  vendorId: ''
 })
 
 const drawerTitle = computed(() => {
@@ -78,39 +80,26 @@ const fields = computed<FormField[]>(() => [
     type: 'input',
     span: 12,
     disabled: props.mode !== 'add',
-    placeholder: '如 gpt-4o#openai'
+    placeholder: '如 glm-5.2#airouter'
   },
   { prop: 'type', label: '类型', type: 'select', span: 12, options: CHANNEL_TYPES },
   { prop: 'priority', label: '优先级', type: 'number', span: 12, placeholder: '数字越小越优先' },
   { prop: 'status', label: '状态', type: 'select', span: 12, options: CHANNEL_STATUS },
   {
-    prop: 'endpoint',
-    label: 'BaseURL',
-    type: 'input',
-    span: 24,
-    placeholder: 'https://api.openai.com/v1',
-    dependencies: [{ trigger: 'type', show: (v) => isReal(v) }]
-  },
-  {
-    prop: 'vendor',
+    prop: 'vendorId',
     label: '供应商',
-    type: 'input',
-    span: 12,
+    type: 'select',
+    span: 24,
+    options: vendorOptions.value.map((v) => ({ label: `${v.name} (${v.id})`, value: v.id })),
+    placeholder: '选供应商自动带入 BaseURL/凭证（免手填）',
     dependencies: [{ trigger: 'type', show: (v) => isReal(v) }]
   },
   {
     prop: 'upstreamModel',
     label: '上游模型',
     type: 'input',
-    span: 12,
-    dependencies: [{ trigger: 'type', show: (v) => isReal(v) }]
-  },
-  {
-    prop: 'credentialRef',
-    label: '凭证',
-    type: 'select',
     span: 24,
-    options: secretOptions.value.map((s) => ({ label: `${s.name} (${s.id})`, value: s.id })),
+    placeholder: '供应商侧模型名（如 glm-5.2 / qwen-plus）',
     dependencies: [{ trigger: 'type', show: (v) => isReal(v) }]
   }
 ])
@@ -129,7 +118,8 @@ const initForm = () => {
     endpoint: '',
     vendor: '',
     upstreamModel: '',
-    credentialRef: ''
+    credentialRef: '',
+    vendorId: ''
   }
   if ((props.mode === 'edit' || props.mode === 'view') && props.data) {
     Object.assign(formData, props.data)
@@ -160,9 +150,9 @@ const handleSubmit = async (data: Record<string, unknown>) => {
 
 onMounted(async () => {
   try {
-    secretOptions.value = await fetchPlatformSecrets()
+    vendorOptions.value = await fetchVendorList()
   } catch {
-    // 加载失败静默（下拉为空，可手填或不配）
+    // 加载失败静默（下拉为空，可先去供应商管理创建）
   }
 })
 </script>

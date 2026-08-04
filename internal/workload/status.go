@@ -1,6 +1,9 @@
 package workload
 
-import "context"
+import (
+	"context"
+	"io"
+)
 
 // StatusReader 从数据面（K8s）回填工作负载的实际运行状态（Ready/Status）。
 //
@@ -16,4 +19,12 @@ type StatusReader interface {
 	// FillStatus 批量回填 Ready/Status：按工作负载 ID 匹配 K8s 资源实际状态原地修改。
 	// 无 K8s / 无租户上下文 / 无匹配资源时保持原值（不报错，降级）。
 	FillStatus(ctx context.Context, wls []Workload) error
+	// Instances 返回某工作负载的运行实例（Pod 级，按 paas.aitoys/workload=<id> label 查）。
+	// 用于详情页：service=Deployment Pod、job=Job Pod、cronjob=CronJob 当前活跃 Job 的 Pod。
+	// 无 K8s / 无租户上下文 / 无匹配 Pod 返空切片（降级，不报错）。
+	Instances(ctx context.Context, workloadID string) ([]Instance, error)
+	// PodLogs 返回某实例（Pod）的日志流。tailLines>0 只取最近 N 行（避免全量拉爆）；
+	// previous=true 取上次终止容器日志（用于排查已退出/重启的失败 Pod，Job 排查关键）。
+	// 调用方负责 Close 返回的 ReadCloser。无 K8s / 无租户上下文 返 error，handler 映射降级提示。
+	PodLogs(ctx context.Context, workloadID, podName string, tailLines int64, previous bool) (io.ReadCloser, error)
 }

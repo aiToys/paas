@@ -28,9 +28,12 @@ const stats = [
           SaaS 与私有化双模交付。
         </p>
         <div class="cta">
-          <a class="btn primary" href="#quickstart">
-            快速开始
+          <a class="btn primary" href="/console/">
+            立即体验控制台
             <span class="arrow">→</span>
+          </a>
+          <a class="btn ghost" href="#quickstart">
+            快速开始
           </a>
           <a class="btn ghost" href="https://github.com/aitoys/paas">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">

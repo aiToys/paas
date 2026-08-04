@@ -15,3 +15,12 @@ func HashPassword(plain string) (string, error) {
 func CheckPassword(hash, plain string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(plain)) == nil
 }
+
+// dummyHash 是启动时生成的一次性 bcrypt 哈希，专用于登录时序侧信道防护：
+// 用户不存在时也执行一次 dummy 比对，使响应时间与「密码错」路径一致（cost=10 ~50-100ms），
+// 防攻击者通过响应延迟差异枚举用户名是否存在。
+var dummyHash = func() string {
+	b, _ := bcrypt.GenerateFromPassword([]byte("paas-timing-attack-dummy"), 10)
+	return string(b)
+}()
+

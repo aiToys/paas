@@ -49,6 +49,11 @@ func (r *Repo) DeleteAlertRule(ctx context.Context, id string) error {
 	return r.rules.DeleteAlertRule(ctx, id)
 }
 
+// ListAllAlertRules 跨租户列出全部告警规则（admin 平台总览，委托 rules store）。
+func (r *Repo) ListAllAlertRules(ctx context.Context) ([]observability.AlertRule, error) {
+	return r.rules.ListAllAlertRules(ctx)
+}
+
 // ListAlerts 即时评估：遍历 rules，对每 enabled 规则调 metrics reader 取匹配 series 当前值评估。
 // real 模式 metrics 来自 Prometheus，memory 模式来自 mock seed——统一在此评估。
 func (r *Repo) ListAlerts(ctx context.Context) ([]observability.Alert, error) {

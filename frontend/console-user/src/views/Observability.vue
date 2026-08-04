@@ -7,6 +7,8 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 
+type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
+
 interface App { id: string; name: string }
 interface MetricPoint { ts: string; value: number }
 interface MetricSeries {
@@ -46,12 +48,12 @@ const traceStatus = ref('')
 const loading = ref(false)
 
 const traceStatusLabel: Record<string, string> = { success: '成功', error: '错误' }
-const traceStatusType: Record<string, string> = { success: 'success', error: 'danger' }
+const traceStatusType: Record<string, TagType> = { success: 'success', error: 'danger' }
 
 const metricOrder = ['cpu', 'mem', 'rps', 'latency']
 const metricLabel: Record<string, string> = { cpu: 'CPU', mem: '内存', rps: '请求/秒', latency: 'P95 延迟' }
 const logLevelLabel: Record<string, string> = { info: '信息', warn: '警告', error: '错误' }
-const logLevelType: Record<string, string> = { info: 'info', warn: 'warning', error: 'danger' }
+const logLevelType: Record<string, TagType> = { info: 'info', warn: 'warning', error: 'danger' }
 
 const cards = computed(() =>
   metricOrder
@@ -329,7 +331,7 @@ onUnmounted(() => {
         </el-table-column>
         <el-table-column label="级别" width="80">
           <template #default="{ row }">
-            <el-tag :type="(logLevelType[row.level] as any) || 'info'" size="small">
+            <el-tag :type="(logLevelType[row.level]) || 'info'" size="small">
               {{ logLevelLabel[row.level] || row.level }}
             </el-tag>
           </template>
@@ -387,7 +389,7 @@ onUnmounted(() => {
         </el-table-column>
         <el-table-column label="状态" width="80">
           <template #default="{ row }">
-            <el-tag :type="(traceStatusType[row.status] as any) || 'info'" size="small">
+            <el-tag :type="(traceStatusType[row.status]) || 'info'" size="small">
               {{ traceStatusLabel[row.status] || row.status }}
             </el-tag>
           </template>

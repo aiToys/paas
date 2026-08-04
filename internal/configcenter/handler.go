@@ -88,10 +88,10 @@ func (h *Handler) serveNamespaceCollection(w http.ResponseWriter, r *http.Reques
 		}
 		saved, err := h.repo.CreateNamespace(r.Context(), n)
 		if err != nil {
-			httputil.WriteError(w, http.StatusBadRequest, err.Error())
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
-		httputil.WriteJSON(w, http.StatusCreated, saved)
+		httputil.WriteDataCreated(w, saved)
 		return
 	}
 	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -141,10 +141,10 @@ func (h *Handler) serveNamespaceGetDelete(w http.ResponseWriter, r *http.Request
 		}
 		n, err := h.repo.GetNamespace(r.Context(), nsID)
 		if err != nil {
-			httputil.WriteError(w, http.StatusNotFound, err.Error())
+			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
-		httputil.WriteJSON(w, http.StatusOK, n)
+		httputil.WriteData(w, n)
 		return
 	}
 	if r.Method == http.MethodDelete {
@@ -152,10 +152,10 @@ func (h *Handler) serveNamespaceGetDelete(w http.ResponseWriter, r *http.Request
 			return
 		}
 		if err := h.repo.DeleteNamespace(r.Context(), nsID); err != nil {
-			httputil.WriteError(w, http.StatusNotFound, err.Error())
+			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
-		httputil.WriteJSON(w, http.StatusOK, map[string]string{"deleted": nsID})
+		httputil.WriteData(w, map[string]string{"deleted": nsID})
 		return
 	}
 	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -187,10 +187,10 @@ func (h *Handler) serveItemCollection(w http.ResponseWriter, r *http.Request, ns
 		item.NamespaceID = nsID
 		saved, err := h.repo.UpsertItem(r.Context(), item)
 		if err != nil {
-			httputil.WriteError(w, http.StatusBadRequest, err.Error())
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
-		httputil.WriteJSON(w, http.StatusCreated, saved)
+		httputil.WriteDataCreated(w, saved)
 		return
 	}
 	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -222,10 +222,10 @@ func (h *Handler) serveItemDelete(w http.ResponseWriter, r *http.Request, nsID, 
 		return
 	}
 	if err := h.repo.DeleteItem(r.Context(), itemID); err != nil {
-		httputil.WriteError(w, http.StatusNotFound, err.Error())
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
-	httputil.WriteJSON(w, http.StatusOK, map[string]string{"deleted": itemID})
+	httputil.WriteData(w, map[string]string{"deleted": itemID})
 }
 
 // servePublish POST 发布（生成版本快照）。
@@ -239,10 +239,10 @@ func (h *Handler) servePublish(w http.ResponseWriter, r *http.Request, nsID stri
 	}
 	pub, err := h.repo.CreatePublish(r.Context(), nsID)
 	if err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, err.Error())
+		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}
-	httputil.WriteJSON(w, http.StatusCreated, pub)
+	httputil.WriteDataCreated(w, pub)
 }
 
 // servePublishHistory GET 发布历史。
@@ -259,7 +259,7 @@ func (h *Handler) servePublishHistory(w http.ResponseWriter, r *http.Request, ns
 		httputil.WriteInternalError(w, err)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
+	httputil.WriteData(w, list)
 }
 
 // servePublished GET 客户端发现（active 快照 + version）。
@@ -307,8 +307,8 @@ func (h *Handler) servePublishAction(w http.ResponseWriter, r *http.Request) {
 	}
 	rb, err := h.repo.RollbackPublish(r.Context(), parts[0])
 	if err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, err.Error())
+		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}
-	httputil.WriteJSON(w, http.StatusOK, rb)
+	httputil.WriteData(w, rb)
 }

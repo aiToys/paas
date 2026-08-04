@@ -78,6 +78,10 @@ func (m *MaaSPlugin) Run(_ context.Context) error { return nil }
 // demo 模式（PAAS_DISABLE_DEMO_SEED != true）由 cmd/core 调用；生产空目录由 admin 手动配。
 // resolver 仅用于 catalog() 构造真实通道 Provider（impl 不入库，加载时 BuildProvider 重建）。
 func SeedCatalog(ctx context.Context, repo Repository, resolver provider.CredentialResolver) error {
+	// ensure airouter 预置供应商（admin 可见可改；CreateVendor exists 忽略，幂等）。
+	if err := repo.CreateVendor(ctx, AirouterVendor()); err != nil && !errors.Is(err, ErrVendorExists) {
+		return fmt.Errorf("seed airouter vendor 失败: %w", err)
+	}
 	for _, m := range catalog(resolver) {
 		if err := repo.CreateModel(ctx, m); err != nil && !errors.Is(err, ErrModelExists) {
 			return fmt.Errorf("seed 模型 %s 失败: %w", m.ID, err)

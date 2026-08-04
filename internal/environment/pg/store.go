@@ -53,6 +53,25 @@ func (s *Store) List(ctx context.Context) ([]environment.Environment, error) {
 	return out, rows.Err()
 }
 
+// ListAll 跨租户列出全部环境（admin 平台总览，不过滤 tenant；按 tenant_id, id 排序）。
+func (s *Store) ListAll(ctx context.Context) ([]environment.Environment, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+envCols+` FROM environments ORDER BY tenant_id, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []environment.Environment
+	for rows.Next() {
+		var e environment.Environment
+		if err = scanEnv(rows, &e); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
 // Get 取单个环境。跨租户访问返回 not found（不泄漏存在性）。
 func (s *Store) Get(ctx context.Context, id string) (environment.Environment, error) {
 	tid, err := storagepg.TenantOrErr(ctx)

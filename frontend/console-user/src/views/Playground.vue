@@ -12,6 +12,8 @@ import { fetchAuth } from '@/api'
 interface Msg {
   role: 'user' | 'assistant'
   content: string
+  reasoning?: string // 推理模型思考过程（reasoning_content），无则空
+  reasoningCollapsed?: boolean // 思考区块折叠态（per-msg）
 }
 interface ModelOpt {
   id: string
@@ -72,8 +74,10 @@ async function send() {
   hist.push({ role: 'user', content: text })
   messages.value.push({ role: 'user', content: text })
   input.value = ''
-  const assistant: Msg = { role: 'assistant', content: '' }
-  messages.value.push(assistant)
+  messages.value.push({ role: 'assistant', content: '', reasoning: '' })
+  // 必须取 messages.value 的元素（reactive proxy）而非 push 前的原始对象引用：
+  // 直接改原始对象不触发 Vue trigger，导致流式 token 累积但视图不刷新（一次性出现，失去打字机效果）。
+  const assistant = messages.value[messages.value.length - 1]
   await scrollToBottom()
 
   try {
@@ -84,9 +88,12 @@ async function send() {
     }
     if (temperature.value !== null) body.temperature = temperature.value
     if (maxTokens.value !== null) body.max_tokens = maxTokens.value
+    // Accept: text/event-stream 声明 SSE——hermes ingress 据此走流式转发（handleSSE），
+    // 缺失则落普通 HTTP 代理被全量缓冲（客户端收到一次性大块，失去打字机效果）。
     const resp = await fetchAuth('/v1/chat/completions', {
       method: 'POST',
       signal: ctrl.signal,
+      headers: { Accept: 'text/event-stream' },
       body: JSON.stringify(body),
     })
 
@@ -121,11 +128,19 @@ async function send() {
           return
         }
         try {
-          const delta = JSON.parse(data).choices?.[0]?.delta?.content
+          const delta = JSON.parse(data).choices?.[0]?.delta
           if (delta) {
-            assistant.content += delta
-            tokens += [...delta].length
-            await scrollToBottom()
+            // 推理模型：思考过程（reasoning_content）先于答案到达，实时拼接渲染。
+            if (delta.reasoning_content) {
+              assistant.reasoning = (assistant.reasoning ?? '') + delta.reasoning_content
+              tokens += [...delta.reasoning_content].length
+              await scrollToBottom()
+            }
+            if (delta.content) {
+              assistant.content += delta.content
+              tokens += [...delta.content].length
+              await scrollToBottom()
+            }
           }
         } catch {
           /* 流式分片，忽略不完整 JSON */
@@ -163,6 +178,16 @@ function clearChat() {
   if (activeCtrl) activeCtrl.abort()
   messages.value = []
   lastTokens.value = 0
+}
+
+// 当前消息是否正在流式接收思考过程（推理阶段：reasoning 还在增长、content 尚未开始）。
+// 用于在思考区块头部显示「思考中…」实时状态，强化 SSE 流式观感。
+function streamingReasoning(m: Msg, i: number): boolean {
+  return loading.value && i === messages.value.length - 1 && !!m.reasoning && !m.content
+}
+// 当前消息是否正在流式接收正文（回答阶段：content 还在增长）。
+function streamingContent(m: Msg, i: number): boolean {
+  return loading.value && i === messages.value.length - 1 && !!m.content
 }
 </script>
 
@@ -214,10 +239,30 @@ function clearChat() {
       </div>
       <div v-for="(m, i) in messages" :key="i" class="msg" :class="m.role">
         <div class="bubble">
-          <span v-if="m.role === 'assistant' && m.content === '' && loading" class="typing">
-            <i /><i /><i />
-          </span>
-          <template v-else>{{ m.content }}<span v-if="m.role === 'assistant' && loading && i === messages.length - 1" class="cursor">▋</span></template>
+          <template v-if="m.role === 'assistant'">
+            <!-- 推理模型思考过程（先于答案到达，可折叠） -->
+            <div v-if="m.reasoning" class="reasoning">
+              <div class="reasoning-head" @click="m.reasoningCollapsed = !m.reasoningCollapsed">
+                <span class="reasoning-label">
+                  💭 思考过程
+                  <span v-if="streamingReasoning(m, i)" class="reasoning-status">思考中…</span>
+                </span>
+                <span class="reasoning-toggle">{{ m.reasoningCollapsed ? '展开' : '收起' }}</span>
+              </div>
+              <div v-show="!m.reasoningCollapsed" class="reasoning-body">
+                {{ m.reasoning }}<span v-if="streamingReasoning(m, i)" class="cursor">▋</span>
+              </div>
+            </div>
+            <span v-if="m.content === '' && !m.reasoning && loading" class="typing">
+              <i /><i /><i />
+            </span>
+            <template v-else>
+              {{ m.content
+              }}<span v-if="streamingContent(m, i)" class="cursor">▋</span>
+              <span v-else-if="streamingReasoning(m, i)" class="phase-hint">（思考完成后再生成回答）</span>
+            </template>
+          </template>
+          <template v-else>{{ m.content }}</template>
         </div>
       </div>
     </div>
@@ -335,6 +380,66 @@ function clearChat() {
   font-family: var(--font-mono);
   border-bottom-left-radius: 4px;
 }
+/* 推理模型思考过程（可折叠区块，浅色弱化区别于正式回复） */
+.reasoning {
+  margin: -2px -4px 10px;
+  border-left: 2px solid var(--brand);
+  border-radius: 0 8px 8px 0;
+  background: var(--bg-soft, rgba(128, 128, 128, 0.08));
+  overflow: hidden;
+}
+.reasoning-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+}
+.reasoning-head:hover {
+  color: var(--text);
+}
+.reasoning-label {
+  font-weight: 500;
+}
+.reasoning-toggle {
+  font-size: 11px;
+  opacity: 0.7;
+}
+.reasoning-body {
+  padding: 8px 12px;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.reasoning-status {
+  margin-left: 6px;
+  padding: 1px 7px;
+  font-size: 11px;
+  color: var(--brand);
+  background: var(--brand-soft, rgba(64, 158, 255, 0.12));
+  border-radius: 8px;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+.phase-hint {
+  margin-left: 6px;
+  font-size: 12px;
+  color: var(--text-faint);
+  font-style: italic;
+}
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
 .cursor {
   display: inline-block;
   margin-left: 2px;
@@ -378,7 +483,8 @@ function clearChat() {
 }
 @media (prefers-reduced-motion: reduce) {
   .cursor,
-  .typing i {
+  .typing i,
+  .reasoning-status {
     animation: none;
   }
 }

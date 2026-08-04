@@ -36,6 +36,20 @@ func decode(t *testing.T, w *httptest.ResponseRecorder, v interface{}) {
 	}
 }
 
+// decodeData 解包 {data:T} 信封后反序列化到 v（单资源响应，handler 统一 WriteData 契约）。
+func decodeData(t *testing.T, w *httptest.ResponseRecorder, v interface{}) {
+	t.Helper()
+	var env struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("解码信封失败: %v (body=%s)", err, w.Body.String())
+	}
+	if err := json.Unmarshal(env.Data, v); err != nil {
+		t.Fatalf("解码 data 失败: %v (data=%s)", err, string(env.Data))
+	}
+}
+
 // TestHandlerUsageView 验证用量视图含超限标记（自建 gpu 配额 4 + 用量 6 超限）。
 func TestHandlerUsageView(t *testing.T) {
 	s := billingmemory.NewStore()
@@ -54,7 +68,7 @@ func TestHandlerUsageView(t *testing.T) {
 		t.Fatalf("usage 应 200，got %d", w.Code)
 	}
 	var view billing.UsageView
-	decode(t, w, &view)
+	decodeData(t, w, &view)
 	foundOver := false
 	for _, l := range view.Items {
 		if l.Resource == billing.ResGPU && l.Over {
@@ -77,7 +91,7 @@ func TestHandlerQuotaUpdate(t *testing.T) {
 		t.Fatalf("配额更新应 200，got %d body=%s", w.Code, w.Body.String())
 	}
 	var q billing.ResourceQuota
-	decode(t, w, &q)
+	decodeData(t, w, &q)
 	if q.Limits[billing.ResGPU] != 16 {
 		t.Fatalf("GPU 上限应 16，got %v", q.Limits[billing.ResGPU])
 	}
@@ -103,7 +117,7 @@ func TestHandlerGenerateAndPay(t *testing.T) {
 		t.Fatalf("生成账单应 201，got %d body=%s", w.Code, w.Body.String())
 	}
 	var rec billing.BillingRecord
-	decode(t, w, &rec)
+	decodeData(t, w, &rec)
 	if rec.Status != billing.StatusUnpaid || rec.Total <= 0 {
 		t.Fatalf("新账单 unpaid 且 total>0，got %+v", rec)
 	}
@@ -116,7 +130,7 @@ func TestHandlerGenerateAndPay(t *testing.T) {
 		t.Fatalf("支付应 200，got %d body=%s", w2.Code, w2.Body.String())
 	}
 	var paid billing.BillingRecord
-	decode(t, w2, &paid)
+	decodeData(t, w2, &paid)
 	if paid.Status != billing.StatusPaid || paid.PaidAt == nil {
 		t.Fatalf("应已支付，got %+v", paid)
 	}

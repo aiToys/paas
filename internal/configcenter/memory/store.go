@@ -60,6 +60,23 @@ func (s *Store) ListNamespaces(ctx context.Context) ([]configcenter.Namespace, e
 	return out, nil
 }
 
+// ListAllNamespaces 跨租户列出全部命名空间（admin 平台总览，不过滤 tenant；按 TenantID 升序再 Name 升序）。
+func (s *Store) ListAllNamespaces(ctx context.Context) ([]configcenter.Namespace, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]configcenter.Namespace, 0, len(s.namespaces))
+	for _, n := range s.namespaces {
+		out = append(out, n)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TenantID != out[j].TenantID {
+			return out[i].TenantID < out[j].TenantID
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
+}
+
 func (s *Store) GetNamespace(ctx context.Context, id string) (configcenter.Namespace, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {

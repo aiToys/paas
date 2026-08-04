@@ -37,6 +37,20 @@ func newHandler(prodWrite bool, stores ...*govmemory.Store) *governance.Handler 
 
 func acmeCtx() context.Context { return tenant.WithTenant(context.Background(), "t-acme") }
 
+// decodeData 解包 {data:T} 信封后反序列化到 v（单资源响应，handler 统一 WriteData 契约）。
+func decodeData(t *testing.T, body []byte, v interface{}) {
+	t.Helper()
+	var env struct {
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("解码信封失败: %v (body=%s)", err, string(body))
+	}
+	if err := json.Unmarshal(env.Data, v); err != nil {
+		t.Fatalf("解码 data 失败: %v (data=%s)", err, string(env.Data))
+	}
+}
+
 func req(ctx context.Context, method, path string, body interface{}) *http.Request {
 	var r io.Reader
 	if body != nil {
@@ -84,9 +98,7 @@ func TestHandlerProdGuard(t *testing.T) {
 		t.Fatalf("admin 建生产服务应 201，got %d: %s", w.Code, w.Body.String())
 	}
 	var prodSvc governance.Service
-	if err := json.Unmarshal(w.Body.Bytes(), &prodSvc); err != nil {
-		t.Fatalf("解析生产服务失败: %v", err)
-	}
+	decodeData(t, w.Body.Bytes(), &prodSvc)
 
 	hDev := newHandler(false, store)
 	// dev 注册生产服务 -> 403
@@ -135,9 +147,7 @@ func TestHandlerInstanceOps(t *testing.T) {
 		t.Fatalf("建测试服务应 201，got %d: %s", w.Code, w.Body.String())
 	}
 	var svc governance.Service
-	if err := json.Unmarshal(w.Body.Bytes(), &svc); err != nil {
-		t.Fatalf("解析服务失败: %v", err)
-	}
+	decodeData(t, w.Body.Bytes(), &svc)
 	// 注册实例
 	r = req(acmeCtx(), "POST", "/api/services/"+svc.ID+"/instances", governance.Instance{
 		Addr: "10.0.1.200:8080",
@@ -148,19 +158,13 @@ func TestHandlerInstanceOps(t *testing.T) {
 		t.Fatalf("注册实例应 201，got %d: %s", w.Code, w.Body.String())
 	}
 	var created governance.Instance
-	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
-		t.Fatalf("解析实例失败: %v", err)
-	}
+	decodeData(t, w.Body.Bytes(), &created)
 	// 服务详情应包含新实例
 	r = req(acmeCtx(), "GET", "/api/services/"+svc.ID, nil)
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, r)
-	var detail struct {
-		Instances []governance.Instance `json:"instances"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
-		t.Fatalf("解析详情失败: %v", err)
-	}
+	var detail governance.ServiceDetail
+	decodeData(t, w.Body.Bytes(), &detail)
 	found := false
 	for _, x := range detail.Instances {
 		if x.ID == created.ID {

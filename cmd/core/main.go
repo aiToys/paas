@@ -32,6 +32,8 @@ import (
 	"github.com/aitoys/paas/internal/dataplane"
 	"github.com/aitoys/paas/internal/dataservice"
 	"github.com/aitoys/paas/internal/devops"
+	"github.com/aitoys/paas/internal/devops/gitea"
+	"github.com/aitoys/paas/internal/devops/registry"
 	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/governance"
 	"github.com/aitoys/paas/internal/httputil"
@@ -97,6 +99,15 @@ func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter) error {
 	// K8sJob 子 ctx随之 cancel），避免 SIGTERM 后 in-flight 构建永久卡 running。
 	if ds, ok := stores.DevOpsBuilds.(interface{ SetBaseCtx(context.Context) }); ok {
 		ds.SetBaseCtx(ctx)
+	}
+	// 崩溃恢复：把上次进程重启中断的构建（pending/running）标记 failed，防永久卡死
+	// （正常 SIGTERM 有 baseCtx cancel 兜底，kill -9/Pod 强删不覆盖，启动 sweep 兜底）。
+	if ds, ok := stores.DevOpsBuilds.(interface {
+		SweepInterrupted(context.Context) error
+	}); ok {
+		if err := ds.SweepInterrupted(ctx); err != nil {
+			log.Printf("[devops] 崩溃恢复 sweep 失败（继续启动）: %v", err)
+		}
 	}
 	srv := serveHTTP(gw, meter, stores, appliers)
 	ran, err := bootstrapCore(ctx, plugins, deps)
@@ -194,6 +205,10 @@ func resolveAPIKey() string {
 // 偏离 plan 的 PAAS_DEV：改用正向 PAAS_PROD 标识生产，本地 ./bin/core 不设 env 仍可随机启动（不破坏现状）。
 func resolveJWTSecretOrErr() (string, error) {
 	if s := os.Getenv("PAAS_JWT_SECRET"); s != "" {
+		// 生产强制 ≥32 字节：防运维误配弱串（"paas" 等）被 hashcat 暴破伪造 token。
+		if os.Getenv("PAAS_PROD") == "true" && len(s) < 32 {
+			return "", fmt.Errorf("PAAS_JWT_SECRET 过短：生产环境（PAAS_PROD=true）要求 ≥32 字节（当前 %d）", len(s))
+		}
 		return s, nil
 	}
 	if os.Getenv("PAAS_PROD") == "true" {
@@ -238,7 +253,13 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	mux := http.NewServeMux()
 	// BearerAuth 双通道：JWT（admin 浏览器登录）/ API Key（程序化调用）共存，下游零改动。
 	auth := gateway.BearerAuth(stores.Identity, jwtSecret)
-	authHandler := authPkg.NewHandler(stores.Identity, jwtSecret, os.Getenv("PAAS_COOKIE_SECURE") == "true")
+	// 生产强制 Secure cookie：PAAS_PROD=true 且未显式开 PAAS_COOKIE_SECURE=true 时拒启，
+	// 防生产误用 HTTP 致 access(15min)+refresh(7d) cookie 被嗅探（应配 TLS 后 cookieSecure=true）。
+	cookieSecure := os.Getenv("PAAS_COOKIE_SECURE") == "true"
+	if os.Getenv("PAAS_PROD") == "true" && !cookieSecure {
+		log.Fatalf("[auth] PAAS_PROD=true 时必须开启 PAAS_COOKIE_SECURE=true（配 TLS 后启用），防 cookie 嗅探")
+	}
+	authHandler := authPkg.NewHandler(stores.Identity, jwtSecret, cookieSecure)
 	// 注入审计记录器：登录/登出/失败记 security.AuditLog（adapter 桥接 + 注入 ctx tenant）。
 	authHandler = authHandler.WithAudit(&authAuditAdapter{store: stores.Security})
 	// identity 管理 API（/api/admin/tenants、/api/admin/users、/api/admin/api-keys、/api/admin/roles）：平台运维域，需 super_admin。
@@ -305,6 +326,29 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	}
 	// 绑定数据服务时自动注入连接信息到 appconfig（DATABASE_URL/REDIS_URL/...），工作负载重启即生效。
 	appHandler.Binder = &dsBindingInjector{dsRepo: stores.DataService, cfgRepo: stores.AppConfig, appRepo: stores.Application}
+	// 删除应用时级联清理关联资源（best-effort）：工作负载（含 K8s Deployment/Job）+ 应用配置（env/Secret）。
+	// devops 历史记录（仓库/构建/镜像/发布）保留作历史归档，不随应用删除。
+	appHandler.CascadeDelete = func(ctx context.Context, appID string) error {
+		wls, lErr := stores.Workload.List(ctx, "", appID, "")
+		if lErr != nil {
+			return lErr
+		}
+		for _, w := range wls {
+			if err := stores.Workload.Delete(ctx, w.ID); err != nil {
+				log.Printf("级联删工作负载失败（best-effort）: app=%s wl=%s: %v", appID, w.ID, err) //nolint:gosec // G706 误报
+			}
+		}
+		cfgs, cErr := stores.AppConfig.List(ctx, appID, "")
+		if cErr != nil {
+			return cErr
+		}
+		for _, c := range cfgs {
+			if err := stores.AppConfig.Delete(ctx, c.ID); err != nil {
+				log.Printf("级联删应用配置失败（best-effort）: app=%s cfg=%s: %v", appID, c.ID, err) //nolint:gosec // G706 误报
+			}
+		}
+		return nil
+	}
 
 	// 环境（物理隔离单元 prod|test）：方法级权限 environment:read/write + prod 写校验。
 	// 同时作 EnvTypeResolver 横切注入到 workload/devops/appconfig/governance/dataservice。
@@ -330,9 +374,22 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 
 	// DevOps（代码->构建->镜像->发布->回滚）：注入 environment store（prod 写校验）+ UserIDFrom（填发布人）。
 	// stores.DevOps* 四子接口由同一 store 实现（内存/PG 同构）；Release 编排经 workload 仓储接口透明。
+	// Gitea/Registry client（一站式：内置 Git 后端 + 镜像库实时视图），env 未配则 nil（功能降级）。
+	var giteaClient *gitea.Client
+	if u := os.Getenv("PAAS_GITEA_URL"); u != "" {
+		giteaClient = gitea.New(u, os.Getenv("PAAS_GITEA_USER"), os.Getenv("PAAS_GITEA_PASSWORD"))
+		log.Printf("[devops] gitea client: %s", u)
+	}
+	var registryClient *registry.Client
+	if u := os.Getenv("PAAS_REGISTRY"); u != "" {
+		registryClient = registry.New(u)
+		log.Printf("[devops] registry client: %s", u)
+	}
 	devopsHandler := devops.NewHandler(stores.DevOpsRepos, stores.DevOpsBuilds, stores.DevOpsImages, stores.DevOpsReleases,
 		devops.WithEnvResolver(stores.Environment),
 		devops.WithUserIDFrom(gateway.UserIDFrom),
+		devops.WithGiteaClient(giteaClient),
+		devops.WithRegistryClient(registryClient),
 	)
 	devopsHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
@@ -362,13 +419,16 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 
 	// 可观测（指标监控 + 告警规则，平台能力横切）。
 	// 惰性时序模拟采集，即时评估告警；不接 prod:write，独立于物理环境。
-	obsHandler := observability.NewHandler(buildObservabilityStore())
+	obsRepo := buildObservabilityStore()
+	obsHandler := observability.NewHandler(obsRepo)
 	obsHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
 	// 安全（密钥/证书 + 审计日志，平台能力横切）。
 	// 注入 UserIDFrom 填审计 actor；Secret 明文存储/掩码返回，写操作自动记审计。
-	// 平台级 Secret（如第三方供应商凭证）仅 tenant-admin 可写。stores.Security 同时桥接为 CredentialResolver。
-	secHandler := security.NewHandler(stores.Security, security.WithUserIDFrom(gateway.UserIDFrom), security.WithIsAdmin(gateway.IsAdmin))
+	// 平台级 Secret（scope=platform，如 sec-platform-airouter 全租户推理凭证）写操作需 super_admin：
+	// 用 IsPlatformAdmin 而非 IsAdmin——后者校验 tenant:admin，每个租户的 admin 都持有，
+	// 会导致任意 tenant-admin 可删除/伪造全平台共享凭证（越权）。stores.Security 同时桥接为 CredentialResolver。
+	secHandler := security.NewHandler(stores.Security, security.WithUserIDFrom(gateway.UserIDFrom), security.WithIsAdmin(gateway.IsPlatformAdmin))
 	secHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
 	// 配额计费（租户级资源配额 + 用量 + 账单，多租户商业化根基）。
@@ -414,6 +474,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	mux.Handle("/api/images/", auth(devopsHandler))
 	mux.Handle("/api/releases", auth(devopsHandler))
 	mux.Handle("/api/releases/", auth(devopsHandler))
+	// 镜像库实时视图（registry v2 catalog/tags），复用 devops handler 分发 + image:read 权限。
+	mux.Handle("/api/registry", auth(devopsHandler))
+	mux.Handle("/api/registry/", auth(devopsHandler))
 	// 服务治理（注册中心）
 	mux.Handle("/api/services", auth(govHandler))
 	mux.Handle("/api/services/", auth(govHandler))
@@ -465,6 +528,15 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("PUT", "/api/admin/models/{id}/channels/{cid}", apiroute.Tags("模型管理"), apiroute.Summary("更新通道"), apiroute.Perm("super_admin"), apiroute.WithReqBody(provider.Channel{}), apiroute.WithResp(provider.Channel{}))
 	reg.Operation("DELETE", "/api/admin/models/{id}/channels/{cid}", apiroute.Tags("模型管理"), apiroute.Summary("删除通道"), apiroute.Perm("super_admin"))
 
+	// 供应商管理（Vendor：预设 BaseURL+凭证+Type，创建通道选供应商即带入，免去手填）。
+	mux.Handle("/api/admin/providers", adminGuard(maasHandler))
+	mux.Handle("/api/admin/providers/", adminGuard(maasHandler))
+	reg.Operation("GET", "/api/admin/providers", apiroute.Tags("供应商管理"), apiroute.Summary("供应商列表"), apiroute.Perm("super_admin"), apiroute.WithResp([]provider.Vendor{}))
+	reg.Operation("POST", "/api/admin/providers", apiroute.Tags("供应商管理"), apiroute.Summary("创建供应商"), apiroute.Perm("super_admin"), apiroute.WithReqBody(provider.Vendor{}), apiroute.WithResp(provider.Vendor{}))
+	reg.Operation("GET", "/api/admin/providers/{id}", apiroute.Tags("供应商管理"), apiroute.Summary("供应商详情"), apiroute.Perm("super_admin"), apiroute.WithResp(provider.Vendor{}))
+	reg.Operation("PUT", "/api/admin/providers/{id}", apiroute.Tags("供应商管理"), apiroute.Summary("更新供应商"), apiroute.Perm("super_admin"), apiroute.WithReqBody(provider.Vendor{}), apiroute.WithResp(provider.Vendor{}))
+	reg.Operation("DELETE", "/api/admin/providers/{id}", apiroute.Tags("供应商管理"), apiroute.Summary("删除供应商"), apiroute.Perm("super_admin"))
+
 	mux.Handle("/livez", health.NewHandler())
 
 	// —— OpenAPI 元数据声明（Operation：spec-only，mux 注册见上方各 mux.Handle）——
@@ -478,6 +550,8 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/applications/{id}",
 		apiroute.Tags("应用"), apiroute.Summary("应用详情"), apiroute.Perm("application:read"),
 		apiroute.WithResp(application.Application{}))
+	reg.Operation("DELETE", "/api/applications/{id}",
+		apiroute.Tags("应用"), apiroute.Summary("删除应用（级联清工作负载+配置）"), apiroute.Perm("application:write"))
 	reg.Operation("POST", "/api/applications/{id}/bindings",
 		apiroute.Tags("应用"), apiroute.Summary("绑定资源到应用"), apiroute.Perm("binding:write"),
 		apiroute.WithReqBody(struct {
@@ -529,6 +603,8 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/applications/{id}/workloads", apiroute.Tags("工作负载"), apiroute.Summary("应用下工作负载"), apiroute.Perm("workload:read"), apiroute.WithResp([]workload.Workload{}))
 	reg.Operation("POST", "/api/applications/{id}/workloads", apiroute.Tags("工作负载"), apiroute.Summary("创建工作负载"), apiroute.Perm("workload:write"), apiroute.WithReqBody(workload.Workload{}), apiroute.WithResp(workload.Workload{}))
 	reg.Operation("GET", "/api/workloads", apiroute.Tags("工作负载"), apiroute.Summary("跨应用工作负载列表"), apiroute.Perm("workload:read"), apiroute.WithResp([]workload.Workload{}))
+	reg.Operation("GET", "/api/workloads/{id}", apiroute.Tags("工作负载"), apiroute.Summary("工作负载详情（含运行实例）"), apiroute.Perm("workload:read"), apiroute.WithResp(workload.Detail{}))
+	reg.Operation("GET", "/api/workloads/{id}/logs", apiroute.Tags("工作负载"), apiroute.Summary("实例（Pod）运行日志"), apiroute.Perm("workload:read"))
 	reg.Operation("PUT", "/api/workloads/{id}", apiroute.Tags("工作负载"), apiroute.Summary("扩缩容/更新状态"), apiroute.Perm("workload:write"), apiroute.WithReqBody(struct {
 		Replicas int    `json:"replicas"`
 		Status   string `json:"status"`
@@ -543,9 +619,17 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("POST", "/api/applications/{id}/buildruns", apiroute.Tags("DevOps"), apiroute.Summary("触发构建"), apiroute.Perm("build:write"), apiroute.WithReqBody(devops.BuildRun{}), apiroute.WithResp(devops.BuildRun{}))
 	reg.Operation("POST", "/api/applications/{id}/releases", apiroute.Tags("DevOps"), apiroute.Summary("创建发布（编排基线 Workload + 更新镜像）"), apiroute.Perm("release:write"), apiroute.WithReqBody(devops.ReleaseInput{}), apiroute.WithResp(devops.Release{}))
 	reg.Operation("GET", "/api/buildruns", apiroute.Tags("DevOps"), apiroute.Summary("跨应用构建列表"), apiroute.Perm("build:read"), apiroute.WithResp([]devops.BuildRun{}))
+	reg.Operation("GET", "/api/buildruns/{id}", apiroute.Tags("DevOps"), apiroute.Summary("构建详情（含日志）"), apiroute.Perm("build:read"), apiroute.WithResp(devops.BuildRun{}))
 	reg.Operation("GET", "/api/images", apiroute.Tags("DevOps"), apiroute.Summary("跨应用镜像列表"), apiroute.Perm("image:read"), apiroute.WithResp([]devops.Image{}))
+	reg.Operation("GET", "/api/images/{id}", apiroute.Tags("DevOps"), apiroute.Summary("镜像详情"), apiroute.Perm("image:read"), apiroute.WithResp(devops.Image{}))
+	reg.Operation("GET", "/api/applications/{id}/repositories/{rid}/tree", apiroute.Tags("DevOps"), apiroute.Summary("内置仓库文件树（Gitea）"), apiroute.Perm("repository:read"), apiroute.WithResp([]gitea.TreeNode{}))
+	reg.Operation("GET", "/api/applications/{id}/repositories/{rid}/commits", apiroute.Tags("DevOps"), apiroute.Summary("内置仓库提交历史（Gitea）"), apiroute.Perm("repository:read"), apiroute.WithResp([]gitea.Commit{}))
+	reg.Operation("GET", "/api/applications/{id}/repositories/{rid}/file", apiroute.Tags("DevOps"), apiroute.Summary("内置仓库文件内容（?path=）"), apiroute.Perm("repository:read"))
 	reg.Operation("GET", "/api/releases", apiroute.Tags("DevOps"), apiroute.Summary("跨应用发布列表"), apiroute.Perm("release:read"), apiroute.WithResp([]devops.Release{}))
 	reg.Operation("POST", "/api/releases/{id}/rollback", apiroute.Tags("DevOps"), apiroute.Summary("回滚发布"), apiroute.Perm("release:write"), apiroute.WithResp(devops.Release{}))
+	// 镜像库实时视图（registry v2）
+	reg.Operation("GET", "/api/registry/repositories", apiroute.Tags("DevOps"), apiroute.Summary("镜像仓库 catalog（registry v2 实时）"), apiroute.Perm("image:read"), apiroute.WithResp([]string{}))
+	reg.Operation("GET", "/api/registry/tags", apiroute.Tags("DevOps"), apiroute.Summary("镜像 tag+digest（?repository=）"), apiroute.Perm("image:read"))
 	// 应用配置
 	reg.Operation("GET", "/api/applications/{id}/configs", apiroute.Tags("应用配置"), apiroute.Summary("应用配置项（掩码）"), apiroute.Perm("config:read"), apiroute.WithResp([]appconfig.ConfigItem{}))
 	reg.Operation("POST", "/api/applications/{id}/configs", apiroute.Tags("应用配置"), apiroute.Summary("新增/更新配置项"), apiroute.Perm("config:write"), apiroute.WithReqBody(appconfig.ConfigItem{}), apiroute.WithResp(appconfig.ConfigItem{}))
@@ -553,7 +637,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// 服务治理（注册中心 + API 网关路由 + 熔断）
 	reg.Operation("GET", "/api/services", apiroute.Tags("服务治理"), apiroute.Summary("服务列表"), apiroute.Perm("governance:read"), apiroute.WithResp([]governance.Service{}))
 	reg.Operation("POST", "/api/services", apiroute.Tags("服务治理"), apiroute.Summary("注册服务"), apiroute.Perm("governance:write"), apiroute.WithReqBody(governance.Service{}), apiroute.WithResp(governance.Service{}))
-	reg.Operation("GET", "/api/services/{id}", apiroute.Tags("服务治理"), apiroute.Summary("服务详情"), apiroute.Perm("governance:read"), apiroute.WithResp(governance.Service{}))
+	reg.Operation("GET", "/api/services/{id}", apiroute.Tags("服务治理"), apiroute.Summary("服务详情"), apiroute.Perm("governance:read"), apiroute.WithResp(governance.ServiceDetail{}))
 	reg.Operation("DELETE", "/api/services/{id}", apiroute.Tags("服务治理"), apiroute.Summary("注销服务"), apiroute.Perm("governance:write"))
 	reg.Operation("POST", "/api/services/{id}/instances", apiroute.Tags("服务治理"), apiroute.Summary("注册实例"), apiroute.Perm("governance:write"), apiroute.WithReqBody(governance.Instance{}), apiroute.WithResp(governance.Instance{}))
 	reg.Operation("DELETE", "/api/services/{id}/instances/{iid}", apiroute.Tags("服务治理"), apiroute.Summary("注销实例"), apiroute.Perm("governance:write"))
@@ -632,6 +716,98 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Register("GET", "/api/admin/dashboard/activities", adminGuard(http.HandlerFunc(dashHandler.Activities)),
 		apiroute.Tags("平台总览"), apiroute.Summary("动态"), apiroute.WithResp([]dashboard.Activity{}))
 
+	// 跨租户资源总览（super_admin）：列出全部租户的应用/工作负载/数据服务，供 console-admin 资源总览消费。
+	// 仅读：跨租户写越权风险高，资源运维仍在 console-user 租户内进行（admin 总览用于观测/排查）。
+	renderList := func(w http.ResponseWriter, list any, err error) {
+		if err != nil {
+			httputil.WriteInternalError(w, err)
+			return
+		}
+		httputil.WriteData(w, list)
+	}
+	reg.Register("GET", "/api/admin/applications", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		list, err := stores.Application.ListAll(r.Context())
+		renderList(w, list, err)
+	})),
+		apiroute.Tags("资源总览"), apiroute.Summary("应用列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]application.Application{}))
+	reg.Register("GET", "/api/admin/workloads", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		list, err := stores.Workload.ListAll(r.Context())
+		renderList(w, list, err)
+	})),
+		apiroute.Tags("资源总览"), apiroute.Summary("工作负载列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]workload.Workload{}))
+	reg.Register("GET", "/api/admin/dataservices", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		list, err := stores.DataService.ListAll(r.Context())
+		if err != nil {
+			httputil.WriteInternalError(w, err)
+			return
+		}
+		// 跨租户总览同样掩码 Connection（password/secretKey/token/uri），与 list/detail 同源；
+		// 明文仅内部应用绑定注入用（repo.Get），任何对外端点一律掩码。
+		for i := range list {
+			list[i].Connection = dataservice.MaskConnection(list[i].Connection)
+		}
+		renderList(w, list, nil)
+	})),
+		apiroute.Tags("资源总览"), apiroute.Summary("数据服务列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]dataservice.DataService{}))
+
+	// 跨租户资源总览扩展（super_admin）：环境/DevOps/配置中心/治理/可观测/安全/计费。
+	// 仅读：跨租户写越权风险高，资源运维仍在 console-user 租户内进行（admin 总览用于观测/排查）。
+	reg.Register("GET", "/api/admin/environments", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		list, err := stores.Environment.ListAll(r.Context())
+		renderList(w, list, err)
+	})),
+		apiroute.Tags("资源总览"), apiroute.Summary("环境列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]environment.Environment{}))
+	reg.Register("GET", "/api/admin/buildruns", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		list, err := stores.DevOpsBuilds.ListAllBuildRuns(r.Context())
+		renderList(w, list, err)
+	})),
+		apiroute.Tags("资源总览"), apiroute.Summary("构建列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]devops.BuildRun{}))
+	reg.Register("GET", "/api/admin/images", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		list, err := stores.DevOpsImages.ListAllImages(r.Context())
+		renderList(w, list, err)
+	})),
+		apiroute.Tags("资源总览"), apiroute.Summary("镜像列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]devops.Image{}))
+	reg.Register("GET", "/api/admin/releases", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		list, err := stores.DevOpsReleases.ListAllReleases(r.Context())
+		renderList(w, list, err)
+	})),
+		apiroute.Tags("资源总览"), apiroute.Summary("发布列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]devops.Release{}))
+	reg.Register("GET", "/api/admin/namespaces", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		list, err := stores.ConfigCenter.ListAllNamespaces(r.Context())
+		renderList(w, list, err)
+	})),
+		apiroute.Tags("资源总览"), apiroute.Summary("配置命名空间列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]configcenter.Namespace{}))
+	reg.Register("GET", "/api/admin/services", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		list, err := stores.Governance.ListAllServices(r.Context())
+		renderList(w, list, err)
+	})),
+		apiroute.Tags("资源总览"), apiroute.Summary("服务列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]governance.Service{}))
+	reg.Register("GET", "/api/admin/alert-rules", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		list, err := obsRepo.ListAllAlertRules(r.Context())
+		renderList(w, list, err)
+	})),
+		apiroute.Tags("资源总览"), apiroute.Summary("告警规则列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]observability.AlertRule{}))
+	reg.Register("GET", "/api/admin/secrets", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		list, err := stores.Security.ListAllSecrets(r.Context())
+		renderList(w, list, err)
+	})),
+		apiroute.Tags("资源总览"), apiroute.Summary("密钥列表（跨租户，掩码）"), apiroute.Perm("super_admin"), apiroute.WithResp([]security.Secret{}))
+	reg.Register("GET", "/api/admin/audit-logs", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		list, err := stores.Security.ListAllAuditLogs(r.Context())
+		renderList(w, list, err)
+	})),
+		apiroute.Tags("资源总览"), apiroute.Summary("审计日志列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]security.AuditLog{}))
+	reg.Register("GET", "/api/admin/quotas", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		list, err := stores.Billing.ListAllQuotas(r.Context())
+		renderList(w, list, err)
+	})),
+		apiroute.Tags("资源总览"), apiroute.Summary("配额列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]billing.ResourceQuota{}))
+	reg.Register("GET", "/api/admin/bills", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		list, err := stores.Billing.ListAllBills(r.Context())
+		renderList(w, list, err)
+	})),
+		apiroute.Tags("资源总览"), apiroute.Summary("账单列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]billing.BillingRecord{}))
+
 	// messaging（MQ topic/消费组 CRUD，租户隔离，方法级 dataservice 权限）。
 	mux.Handle("/api/mq-topics", auth(msgHandler))
 	mux.Handle("/api/mq-topics/", auth(msgHandler))
@@ -654,7 +830,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// 数据面 SDK 接入（/dp/，zeus paas-registry 插件消费；mux 见 mux.Handle("/dp/")，BearerAuth 鉴权）。
 	reg.Operation("GET", "/dp/services", apiroute.Tags("数据面"), apiroute.Summary("列服务（Discovery）"), apiroute.Perm("dp:read"))
 	reg.Operation("GET", "/dp/instances", apiroute.Tags("数据面"), apiroute.Summary("列实例（?service=，从 K8s Endpoints 读）"), apiroute.Perm("dp:read"))
-	reg.Operation("POST", "/dp/register", apiroute.Tags("数据面"), apiroute.Summary("声明服务元信息（幂等）"), apiroute.Perm("dp:write"))
+	reg.Operation("POST", "/dp/register", apiroute.Tags("数据面"), apiroute.Summary("声明服务元信息（幂等）"), apiroute.Perm("dp:write"), apiroute.WithReqBody(dataplane.ServiceInfo{}))
 	reg.Operation("DELETE", "/dp/register", apiroute.Tags("数据面"), apiroute.Summary("反注册服务（?id=）"), apiroute.Perm("dp:write"))
 	reg.Operation("PUT", "/dp/heartbeat", apiroute.Tags("数据面"), apiroute.Summary("心跳（兼容保留，K8s readiness 是真源）"), apiroute.Perm("dp:write"))
 
@@ -668,7 +844,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Register("GET", "/api/admin/users", adminGuard(http.HandlerFunc(idmHandler.ListUsers)),
 		apiroute.Tags("身份管理"), apiroute.Summary("用户列表（?tenantId= 过滤）"), apiroute.WithResp([]identity.User{}))
 	reg.Register("POST", "/api/admin/users", adminGuard(http.HandlerFunc(idmHandler.CreateUser)),
-		apiroute.Tags("身份管理"), apiroute.Summary("创建用户（含密码）"), apiroute.WithResp(identity.User{}))
+		apiroute.Tags("身份管理"), apiroute.Summary("创建用户（含密码）"), apiroute.WithReqBody(identity.User{}), apiroute.WithResp(identity.User{}))
 	reg.Register("PUT", "/api/admin/users/{id}", adminGuard(http.HandlerFunc(idmHandler.UpdateUser)),
 		apiroute.Tags("身份管理"), apiroute.Summary("更新用户（roles/status/密码可选）"), apiroute.WithResp(identity.User{}))
 	reg.Register("DELETE", "/api/admin/users/{id}", adminGuard(http.HandlerFunc(idmHandler.DeleteUser)),
@@ -676,7 +852,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Register("GET", "/api/admin/api-keys", adminGuard(http.HandlerFunc(idmHandler.ListAPIKeys)),
 		apiroute.Tags("身份管理"), apiroute.Summary("API Key 列表（掩码，?tenantId= 过滤）"), apiroute.WithResp([]identity.APIKey{}))
 	reg.Register("POST", "/api/admin/api-keys", adminGuard(http.HandlerFunc(idmHandler.CreateAPIKey)),
-		apiroute.Tags("身份管理"), apiroute.Summary("创建 API Key（返明文一次）"), apiroute.WithResp(identity.APIKey{}))
+		apiroute.Tags("身份管理"), apiroute.Summary("创建 API Key（返明文一次）"), apiroute.WithReqBody(identity.APIKey{}), apiroute.WithResp(identity.APIKey{}))
 	reg.Register("DELETE", "/api/admin/api-keys/{id}", adminGuard(http.HandlerFunc(idmHandler.DeleteAPIKey)),
 		apiroute.Tags("身份管理"), apiroute.Summary("删除 API Key"))
 	reg.Register("GET", "/api/admin/roles", adminGuard(http.HandlerFunc(idmHandler.ListRoles)),
@@ -695,8 +871,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	srv := &http.Server{
 		Addr: ":8080",
 		// recovery 中间件包 mux 最内层（捕获 handler panic，防单请求挂掉进程，SSE 流式也保护）；
+		// csrf 在其外（写操作 Origin/Referer 同源校验，cookie 会话防 CSRF 纵深）；
 		// otelhttp 再包外层（自动建 span，过滤探针/契约/文档端点避免噪音）。
-		Handler: securityHeadersMiddleware(otelhttp.NewHandler(recoveryMiddleware(mux), "http.server",
+		Handler: securityHeadersMiddleware(otelhttp.NewHandler(recoveryMiddleware(csrfMiddleware(mux)), "http.server",
 			otelhttp.WithFilter(skipTelemetryPaths))),
 		ReadHeaderTimeout: 10 * time.Second, // 防 Slowloris 慢速头部攻击
 	}

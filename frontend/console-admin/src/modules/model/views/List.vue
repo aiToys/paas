@@ -31,11 +31,17 @@
 
     <template #col-actions="{ row }">
       <el-button link type="primary" size="small" @click="openChannels(row)">通道</el-button>
+      <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
       <el-button link type="danger" size="small" @click="handleDelete(row)">删除</el-button>
     </template>
   </SearchTable>
 
-  <ModelFormDrawer v-model="drawerVisible" mode="add" :data="null" @success="onFormSuccess" />
+  <ModelFormDrawer
+    v-model="drawerVisible"
+    :mode="drawerMode"
+    :data="editingRow"
+    @success="onFormSuccess"
+  />
 </template>
 
 <script lang="ts" setup>
@@ -86,7 +92,17 @@ const columns = computed<ColumnDef[]>(() => [
 ])
 
 const drawerVisible = ref(false)
+const drawerMode = ref<'add' | 'edit'>('add')
+const editingRow = ref<ModelInfo | null>(null)
 const openDrawer = () => {
+  drawerMode.value = 'add'
+  editingRow.value = null
+  drawerVisible.value = true
+}
+// 编辑模型标量（name/vendor/contextWindow/价格/描述）；通道在详情页管理。
+const openEdit = (row: Record<string, unknown>) => {
+  drawerMode.value = 'edit'
+  editingRow.value = row as unknown as ModelInfo
   drawerVisible.value = true
 }
 const onFormSuccess = () => {

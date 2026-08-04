@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/aitoys/paas/internal/core/identity"
+	"github.com/aitoys/paas/internal/httputil"
 )
 
 // LoginRequest 是 POST /api/auth/sessions 的请求体。
@@ -70,21 +71,24 @@ func NewHandler(idb identity.Repository, secret string, cookieSecure bool) *Hand
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	var req LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeAuthErr(w, http.StatusBadRequest, "请求体格式错误")
+		httputil.WriteError(w, http.StatusBadRequest, "请求体格式错误")
 		return
 	}
 	if req.Username == "" || req.Password == "" {
-		writeAuthErr(w, http.StatusBadRequest, "用户名与密码必填")
+		httputil.WriteError(w, http.StatusBadRequest, "用户名与密码必填")
 		return
 	}
 	ip := clientIP(r)
 	if ok, retry := h.limiter.allow(ip, req.Username); !ok {
-		writeAuthErr(w, http.StatusTooManyRequests,
+		httputil.WriteError(w, http.StatusTooManyRequests,
 			fmt.Sprintf("登录尝试过多，请 %d 秒后再试", int(retry.Seconds())+1))
 		return
 	}
 	u, err := h.idb.GetUserByName(r.Context(), req.Username)
 	if err != nil {
+		// 时序侧信道防护：用户不存在也执行一次 bcrypt 比对（dummy），使响应时间与「密码错」路径一致，
+		// 防攻击者通过响应延迟枚举用户名是否存在（统一走 loginFailed 返 401）。
+		_ = CheckPassword(dummyHash, req.Password)
 		h.loginFailed(w, r, ip, req.Username)
 		return
 	}
@@ -95,7 +99,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if u.Status != identity.StatusActive {
-		writeAuthErr(w, http.StatusForbidden, "账号已禁用")
+		httputil.WriteError(w, http.StatusForbidden, "账号已禁用")
 		return
 	}
 	h.limiter.recordSuccess(ip, req.Username)
@@ -104,11 +108,11 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := h.issueTokens(u)
 	if err != nil {
-		writeAuthErr(w, http.StatusInternalServerError, "签发 token 失败")
+		httputil.WriteError(w, http.StatusInternalServerError, "签发 token 失败")
 		return
 	}
 	setSessionCookies(w, res.AccessToken, res.RefreshToken, h.cookieSecure)
-	writeAuthData(w, res)
+	httputil.WriteData(w, res)
 }
 
 // Refresh: POST /api/auth/tokens/refresh —— 凭 refresh token 换新 token 对。
@@ -122,12 +126,12 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if refreshToken == "" {
-		writeAuthErr(w, http.StatusUnauthorized, "missing refresh token")
+		httputil.WriteError(w, http.StatusUnauthorized, "missing refresh token")
 		return
 	}
 	c, err := ParseType(refreshToken, h.secret, TokenRefresh)
 	if err != nil {
-		writeAuthErr(w, http.StatusUnauthorized, "refresh token 无效")
+		httputil.WriteError(w, http.StatusUnauthorized, "refresh token 无效")
 		return
 	}
 	// c.Sub 是 userID：按 ID 查实时用户，校验存在性 + 启用状态。
@@ -135,20 +139,20 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 	// （旧实现误用 GetUserByName(userID) 必查失败、fallback 跳过状态校验，导致被封禁账号可无限续期）。
 	u, err := h.idb.GetUser(r.Context(), c.Tenant, c.Sub)
 	if err != nil {
-		writeAuthErr(w, http.StatusUnauthorized, "用户不存在或已被移除")
+		httputil.WriteError(w, http.StatusUnauthorized, "用户不存在或已被移除")
 		return
 	}
 	if u.Status != identity.StatusActive {
-		writeAuthErr(w, http.StatusForbidden, "账号已禁用")
+		httputil.WriteError(w, http.StatusForbidden, "账号已禁用")
 		return
 	}
 	res, err := h.issueTokens(u)
 	if err != nil {
-		writeAuthErr(w, http.StatusInternalServerError, "签发 token 失败")
+		httputil.WriteError(w, http.StatusInternalServerError, "签发 token 失败")
 		return
 	}
 	setSessionCookies(w, res.AccessToken, res.RefreshToken, h.cookieSecure)
-	writeAuthData(w, res)
+	httputil.WriteData(w, res)
 }
 
 // Logout: DELETE /api/auth/sessions —— 无状态 JWT，仅返回成功（前端清 token）。
@@ -158,7 +162,7 @@ func (h *Handler) loginFailed(w http.ResponseWriter, r *http.Request, ip, userna
 	if h.audit != nil {
 		_ = h.audit.Record(r.Context(), "", username, "login_failed", "ip="+ip)
 	}
-	writeAuthErr(w, http.StatusUnauthorized, "用户名或密码错误")
+	httputil.WriteError(w, http.StatusUnauthorized, "用户名或密码错误")
 }
 
 func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
@@ -172,19 +176,26 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = h.audit.Record(r.Context(), tenant, actor, "logout", "ip="+clientIP(r))
 	}
-	writeAuthData(w, map[string]any{})
+	httputil.WriteData(w, map[string]any{})
 }
 
 // Me: GET /api/auth/users/me —— 当前用户信息（IsAdmin 映射为 super_admin 触发前端超管短路）。
+// token 来源与 gateway.BearerAuth 三通道一致：access cookie（浏览器会话，优先）退化到
+// Authorization header（JWT 或 API Key 转 JWT 场景）。原实现只读 header，导致 cookie 会话
+// （console-admin 浏览器登录）拿不到 profile → 登录后引导失败。
 func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
-	tok, err := BearerToken(r)
-	if err != nil {
-		writeAuthErr(w, http.StatusUnauthorized, "missing bearer token")
-		return
+	tok, _ := accessFromCookie(r)
+	if tok == "" {
+		var err error
+		tok, err = BearerToken(r)
+		if err != nil {
+			httputil.WriteError(w, http.StatusUnauthorized, "missing bearer token")
+			return
+		}
 	}
 	c, err := ParseType(tok, h.secret, TokenAccess)
 	if err != nil {
-		writeAuthErr(w, http.StatusUnauthorized, "invalid token")
+		httputil.WriteError(w, http.StatusUnauthorized, "invalid token")
 		return
 	}
 	profile := UserProfile{
@@ -207,13 +218,13 @@ func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 	} else {
 		profile.Permissions = expandPermissions(profile.Roles)
 	}
-	writeAuthData(w, profile)
+	httputil.WriteData(w, profile)
 }
 
 // Menus: GET /api/system/menus —— 初期静态菜单（对齐 admin 已有视图）。
 // P0-3 再做按角色过滤 + PaaS 业务页菜单。
 func (h *Handler) Menus(w http.ResponseWriter, _ *http.Request) {
-	writeAuthData(w, staticMenus())
+	httputil.WriteData(w, staticMenus())
 }
 
 // issueTokens 签发 access + refresh。
@@ -284,15 +295,4 @@ func expandPermissions(roles []string) []string {
 	return out
 }
 
-// —— 响应辅助（core 契约 {data:T}/{error:msg}）——
-
-func writeAuthData(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"data": v})
-}
-
-func writeAuthErr(w http.ResponseWriter, code int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(map[string]any{"error": msg})
-}
+// 响应辅助统一用 internal/httputil（WriteData/WriteError），core 契约 {data:T}/{error:msg}。

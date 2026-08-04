@@ -1,21 +1,32 @@
 # 本地 K8s 集群部署覆盖（参考 aiem 模式）。
-# 用法：helm upgrade --install paas deploy/charts/paas -n paas --create-namespace -f deploy/charts/paas/values-paas-k8s.yaml
+# 用法：./scripts/deploy-k8s.sh（自动 envsubst ${NODE_IP} 后 helm upgrade）
+#   或手动：NODE_IP=$(kubectl get nodes -o wide | awk '!/master/{print $6; exit}') \
+#          envsubst < deploy/charts/paas/values-paas-k8s.yaml | helm upgrade --install paas deploy/charts/paas -n paas --create-namespace -f -
 #
-# 集群特征：hermes ingress class + hub.wang.dd:5000 私有 registry + 域名 paas.k8s.dd。
+# 集群特征：自建集群内 registry（deploy/k8s/registry.yaml，NodePort 30050）+ hermes ingress + 域名 paas.k8s.dd。
 # core 单镜像同域 serve 前端 + API；前端写死同源 /api /v1，无 CORS。
+#
+# ${NODE_IP} 占位由 deploy-k8s.sh envsubst 注入（worker 节点 InternalIP）。
+# 所有镜像地址统一 <NODE_IP>:30050——kubelet/CRI 在节点拉镜像无法解析 svc.cluster.local，
+# 故 Pod 镜像也用 IP:NodePort（builder daemon push / core Pod registry client / Mac 导入同址）。
 
 image:
-  registry: hub.wang.dd:5000/paas   # 内网私有 registry（同 aiem），需先 docker push 镜像
+  registry: "${NODE_IP}:30050/paas"   # 集群内自建 registry（NodePort 30050）
   repository: paas-core
   tag: "0.1.0"
   pullPolicy: Always                 # Always：便于 retag 后滚动更新拉新镜像
 
+# core Pod 不用 hostNetwork：registry 已自建集群内（core Pod 经 Pod 网络→NodePort 可达）。
+# hostNetwork 是早期为访问外部 hub.wang.dd 的 hack，自建 registry 后退役。
+core:
+  hostNetwork: false
+
 # 数据库：local-path-provisioner（deploy/k8s/local-path.yaml，先 apply）提供 SC，
-# 内置 postgres PVC 自动绑定到节点本地路径。镜像用内网 registry（节点拉不到 docker.io）。
+# 内置 postgres PVC 自动绑定到节点本地路径。镜像来自集群内 registry。
 db:
   enabled: true
 postgres:
-  image: hub.wang.dd:5000/library/postgres:16-alpine
+  image: "${NODE_IP}:30050/library/postgres:16-alpine"
   storageClassName: local-path
   storageSize: "5Gi"
 
@@ -25,16 +36,20 @@ ingress:
   host: paas.k8s.dd                  # 访问域名（需 DNS/hosts 解析到集群入口）
 
 # DevOps 真实构建：K8s Job 模式（DooD，挂节点 docker.sock）。
-# builder 镜像需先推到内网 registry（amd64）：
-#   docker pull docker:git && docker tag docker:git hub.wang.dd:5000/library/docker:git
-#   crane push --insecure ...（或 docker push）
+# builder 镜像需先推到集群内 registry（amd64）：
+#   docker pull docker:git && docker tag docker:git ${NODE_IP}:30050/library/docker:git && docker push ...
 devops:
   builder: k8s
-  builderImage: hub.wang.dd:5000/library/docker:git
-  registry: hub.wang.dd:5000         # 构建产物推送目标（同 image.registry 前缀）
-  registryUser: ""                   # hub.wang.dd:5000 无认证则留空
+  builderImage: "${NODE_IP}:30050/library/docker:git"
+  registry: "${NODE_IP}:30050"        # 构建产物推送目标 + core registry client（镜像库 UI）+ 引擎镜像 registry
+  registryUser: ""                    # 集群内 registry 无认证则留空
   registryPass: ""
-  gitToken: ""                       # 构建公开仓库留空；私有仓库填 HTTPS token
+  gitToken: ""                        # 构建公开仓库留空；私有仓库填 HTTPS token
+  # 内置 Git 后端（Gitea 无头，kubectl apply -f deploy/devops/gitea.yaml 部署）
+  gitea:
+    url: "http://gitea.paas.svc.cluster.local:3000"
+    username: "paas-bot"
+    password: "paas-gitea-bot-2026"  # 与 deploy/devops/gitea.yaml Secret bot-password 一致
 
 # MaaS 真实推理（airouter 网关）；key 不入库，部署时 --set maas.airouterApiKey=<key> 注入
 maas:

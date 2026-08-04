@@ -181,6 +181,25 @@ RETURNING `+quotaCols,
 	return saved, nil
 }
 
+// ListAllQuotas 跨租户列出全部配额（admin 平台总览，不过滤 tenant；按 tenant_id 排序）。
+func (s *Store) ListAllQuotas(ctx context.Context) ([]billing.ResourceQuota, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+quotaCols+` FROM billing_quotas ORDER BY tenant_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]billing.ResourceQuota, 0)
+	for rows.Next() {
+		var q billing.ResourceQuota
+		if err = scanQuota(rows, &q); err != nil {
+			return nil, err
+		}
+		out = append(out, q)
+	}
+	return out, rows.Err()
+}
+
 // ---------- UsageStore ----------
 
 // GetUsage 读取用量；无行返回空 Counts（非错误，与内存版一致）。
@@ -356,6 +375,25 @@ func (s *Store) ListBills(ctx context.Context) ([]billing.BillingRecord, error) 
 	}
 	rows, err := s.db.Pool().Query(ctx,
 		`SELECT `+recordCols+` FROM billing_records WHERE tenant_id=$1 ORDER BY created_at DESC`, tid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]billing.BillingRecord, 0)
+	for rows.Next() {
+		var b billing.BillingRecord
+		if err = scanRecord(rows, &b); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// ListAllBills 跨租户列出全部账单（admin 平台总览，不过滤 tenant；按 tenant_id, created_at DESC 排序）。
+func (s *Store) ListAllBills(ctx context.Context) ([]billing.BillingRecord, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+recordCols+` FROM billing_records ORDER BY tenant_id, created_at DESC`)
 	if err != nil {
 		return nil, err
 	}

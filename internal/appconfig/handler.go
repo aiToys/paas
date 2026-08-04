@@ -127,7 +127,7 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request, appID 
 		}
 		saved, err := h.repo.Upsert(r.Context(), item)
 		if err != nil {
-			httputil.WriteError(w, http.StatusBadRequest, err.Error())
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
 		httputil.WriteJSON(w, http.StatusCreated, saved)
@@ -166,7 +166,7 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request, appID, cfgID
 		return
 	}
 	if err := h.repo.Delete(r.Context(), cfgID); err != nil {
-		httputil.WriteError(w, http.StatusNotFound, err.Error())
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
 	httputil.WriteJSON(w, http.StatusOK, map[string]string{"deleted": cfgID})

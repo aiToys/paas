@@ -216,7 +216,10 @@ func buildJobSpec(builderImage string, p Params, jobName, ref, cloneURL string) 
 	}
 }
 
-var digestRe = regexp.MustCompile(`(?m)^PAAS_DIGEST=(sha256:[0-9a-f]+)$`)
+// 不锚定行尾 $：Pod 日志采集常把 docker 输出紧跟在 PAAS_DIGEST 行后（换行丢失/拼接），
+// 行尾 $ 会失配致 digest 漏解析、BuildRun 误标 failed。靠 PAAS_DIGEST= 前缀 + hex 字符集
+// 自然终止（sha256 后 64 位 hex，遇非 hex 字符如 docker RepoDigest 行的 'h' 自动停）。
+var digestRe = regexp.MustCompile(`PAAS_DIGEST=(sha256:[0-9a-f]{6,})`)
 
 // parseDigest 从 Pod 日志提取 PAAS_DIGEST 行的 sha256。无匹配返错（BuildRun 记 failed）。
 func parseDigest(logs string) (string, error) {

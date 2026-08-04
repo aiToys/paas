@@ -101,6 +101,23 @@ func (s *Store) ListAlertRules(ctx context.Context) ([]observability.AlertRule, 
 	return out, nil
 }
 
+// ListAllAlertRules 跨租户列出全部告警规则（admin 平台总览，不过滤 tenant；按 TenantID 升序再 Name 升序）。
+func (s *Store) ListAllAlertRules(ctx context.Context) ([]observability.AlertRule, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]observability.AlertRule, 0, len(s.rules))
+	for _, r := range s.rules {
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TenantID != out[j].TenantID {
+			return out[i].TenantID < out[j].TenantID
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
+}
+
 func (s *Store) CreateAlertRule(ctx context.Context, rule observability.AlertRule) (observability.AlertRule, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {

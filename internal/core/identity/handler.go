@@ -141,7 +141,7 @@ func (h *Handler) CreateTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.repo.CreateTenant(r.Context(), Tenant{ID: in.ID, Name: in.Name, CreatedAt: time.Now()}); err != nil {
-		httputil.WriteError(w, http.StatusConflict, err.Error())
+		httputil.WriteServiceError(w, http.StatusConflict, err)
 		return
 	}
 	httputil.WriteData(w, Tenant{ID: in.ID, Name: in.Name})
@@ -162,7 +162,7 @@ func (h *Handler) DeleteTenant(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteError(w, http.StatusConflict, "租户下仍有用户，请先删除或转移用户后再删除租户")
 			return
 		}
-		httputil.WriteError(w, http.StatusNotFound, err.Error())
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -224,7 +224,7 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 	if in.Password != "" && h.hashPassword != nil {
 		if h.passwordValidator != nil {
 			if err := h.passwordValidator(in.Password); err != nil {
-				httputil.WriteError(w, http.StatusBadRequest, err.Error())
+				httputil.WriteServiceError(w, http.StatusBadRequest, err)
 				return
 			}
 		}
@@ -236,7 +236,7 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		u.PasswordHash = hash
 	}
 	if err := h.repo.CreateUser(r.Context(), u); err != nil {
-		httputil.WriteError(w, http.StatusConflict, err.Error())
+		httputil.WriteServiceError(w, http.StatusConflict, err)
 		return
 	}
 	u.PasswordHash = ""
@@ -270,7 +270,7 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	if in.Password != "" && h.hashPassword != nil {
 		if h.passwordValidator != nil {
 			if err := h.passwordValidator(in.Password); err != nil {
-				httputil.WriteError(w, http.StatusBadRequest, err.Error())
+				httputil.WriteServiceError(w, http.StatusBadRequest, err)
 				return
 			}
 		}
@@ -282,7 +282,7 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		u.PasswordHash = hash
 	}
 	if err := h.repo.UpdateUser(r.Context(), u); err != nil {
-		httputil.WriteError(w, http.StatusNotFound, err.Error())
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
 	httputil.WriteData(w, map[string]any{"id": id})
@@ -303,7 +303,7 @@ func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		tenantID = callerTenant(r)
 	}
 	if err := h.repo.DeleteUser(r.Context(), tenantID, id); err != nil {
-		httputil.WriteError(w, http.StatusNotFound, err.Error())
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -377,7 +377,7 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		Roles: in.Roles, Key: key, CreatedAt: time.Now(),
 	}
 	if err := h.repo.CreateAPIKey(r.Context(), k); err != nil {
-		httputil.WriteError(w, http.StatusConflict, err.Error())
+		httputil.WriteServiceError(w, http.StatusConflict, err)
 		return
 	}
 	httputil.WriteData(w, k) // 创建时返明文一次
@@ -395,7 +395,7 @@ func (h *Handler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.repo.DeleteAPIKey(r.Context(), id); err != nil {
-		httputil.WriteError(w, http.StatusNotFound, err.Error())
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

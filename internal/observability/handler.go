@@ -84,10 +84,10 @@ func (h *Handler) serveTraces(w http.ResponseWriter, r *http.Request) {
 	}
 	traces, err := h.repo.ListTraces(r.Context(), q.Get("appId"), q.Get("status"), limit)
 	if err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, err.Error())
+		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": traces})
+	httputil.WriteData(w, traces)
 }
 
 // serveLogs 处理 GET /api/observability/logs?appId=&level=&q=&limit=（惰性补点）。
@@ -108,10 +108,10 @@ func (h *Handler) serveLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	logs, err := h.repo.ListLogs(r.Context(), q.Get("appId"), q.Get("level"), q.Get("q"), limit)
 	if err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, err.Error())
+		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": logs})
+	httputil.WriteData(w, logs)
 }
 
 func (h *Handler) serveMetrics(w http.ResponseWriter, r *http.Request) {
@@ -128,7 +128,7 @@ func (h *Handler) serveMetrics(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteInternalError(w, err)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
+	httputil.WriteData(w, list)
 }
 
 func (h *Handler) serveRuleCollection(w http.ResponseWriter, r *http.Request) {
@@ -151,7 +151,7 @@ func (h *Handler) serveRuleCollection(w http.ResponseWriter, r *http.Request) {
 			}
 			list = filtered
 		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
+		httputil.WriteData(w, list)
 		return
 	}
 	if r.Method == http.MethodPost {
@@ -165,11 +165,10 @@ func (h *Handler) serveRuleCollection(w http.ResponseWriter, r *http.Request) {
 		}
 		saved, err := h.repo.CreateAlertRule(r.Context(), rule)
 		if err != nil {
-			httputil.WriteError(w, http.StatusBadRequest, err.Error())
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(saved)
+		httputil.WriteDataCreated(w, saved)
 		return
 	}
 	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -190,10 +189,10 @@ func (h *Handler) serveRuleItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.repo.DeleteAlertRule(r.Context(), id); err != nil {
-		httputil.WriteError(w, http.StatusNotFound, err.Error())
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]string{"deleted": id})
+	httputil.WriteData(w, map[string]string{"deleted": id})
 }
 
 func (h *Handler) serveAlerts(w http.ResponseWriter, r *http.Request) {
@@ -209,5 +208,5 @@ func (h *Handler) serveAlerts(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteInternalError(w, err)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": alerts})
+	httputil.WriteData(w, alerts)
 }

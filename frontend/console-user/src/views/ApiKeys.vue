@@ -119,7 +119,7 @@ onMounted(load)
         </div>
         <div class="key-meta">
           <div>归属 <span class="mono">{{ k.userId }}</span></div>
-          <div>创建 <span class="mono">{{ k.createdAt ?? '—' }}</span></div>
+          <div>创建 <span class="mono">{{ k.createdAt ? new Date(k.createdAt).toLocaleString() : '—' }}</span></div>
         </div>
         <div class="key-actions">
           <button class="act danger" @click="revoke(k)">吊销</button>

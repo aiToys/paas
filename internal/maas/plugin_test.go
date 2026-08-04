@@ -39,13 +39,15 @@ func TestMaaSPluginRegistersCatalog(t *testing.T) {
 	assert.Equal(t, "maas", p.Manifest().Name)
 	require.Len(t, reg.registered, len(catalog(nil)), "应注册 catalog 全部模型")
 
-	// 抽查：qwen2.5-7b 含主备两通道，且通道均已绑定 Provider
-	m := reg.registered["qwen2.5-7b"]
-	require.NotNil(t, m)
-	require.Len(t, m.Channels, 2, "qwen2.5-7b 应挂主备两通道")
-	for _, c := range m.Channels {
-		assert.NotNil(t, c.Impl(), "通道 %s 必须绑定 Provider", c.ID)
+	// 抽查：catalog 仅含 airouter 真实模型，废弃 ID 不应出现
+	for _, id := range DeprecatedSeedModelIDs {
+		assert.Nil(t, reg.registered[id], "废弃模型 %s 不应注册", id)
 	}
+	// 抽查：glm-5.2 挂单 airouter 通道且已绑定 Provider
+	m := reg.registered["glm-5.2"]
+	require.NotNil(t, m)
+	require.Len(t, m.Channels, 1, "airouter 模型应挂单通道")
+	assert.NotNil(t, m.Channels[0].Impl(), "通道必须绑定 Provider")
 }
 
 func TestMaaSPluginInitFailsWithoutGateway(t *testing.T) {

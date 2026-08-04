@@ -12,11 +12,10 @@ import { useEnvStore } from '@/stores/env'
 // 新建应用弹窗：POST /api/applications（name+env+desc，ID 后端生成 + ApplyDefaults 补展示）。
 const createVisible = ref(false)
 const creating = ref(false)
-const createForm = reactive({ name: '', env: '开发', desc: '' })
+const createForm = reactive({ name: '', desc: '' })
 
 function openCreate() {
   createForm.name = ''
-  createForm.env = '开发'
   createForm.desc = ''
   createVisible.value = true
 }
@@ -28,12 +27,13 @@ async function createApp() {
   }
   creating.value = true
   try {
+    // 应用是跨环境的逻辑实体（应用×环境多对多），创建时不绑定单一环境；
+    // 环境归属由工作负载/绑定的 envId 决定（见环境模型）。
     const resp = await fetchAuth('/api/applications', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name: createForm.name.trim(),
-        env: createForm.env,
         desc: createForm.desc.trim(),
       }),
     })
@@ -225,13 +225,6 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
       <el-form label-position="top">
         <el-form-item label="应用名称" required>
           <el-input v-model="createForm.name" placeholder="如 智能客服" maxlength="32" show-word-limit />
-        </el-form-item>
-        <el-form-item label="环境">
-          <el-select v-model="createForm.env" style="width: 100%">
-            <el-option label="开发" value="开发" />
-            <el-option label="预发" value="预发" />
-            <el-option label="生产" value="生产" />
-          </el-select>
         </el-form-item>
         <el-form-item label="描述">
           <el-input v-model="createForm.desc" type="textarea" :rows="3" placeholder="应用用途简述" maxlength="200" show-word-limit />

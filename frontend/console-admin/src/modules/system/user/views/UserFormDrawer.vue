@@ -178,10 +178,7 @@ const rules = computed(() => ({
     { required: true, message: t('user.validation.emailRequired'), trigger: 'blur' },
     { type: 'email', message: t('user.validation.emailInvalid'), trigger: ['blur', 'change'] },
   ],
-  phone: [
-    { required: true, message: t('user.validation.phoneRequired'), trigger: 'blur' },
-    { pattern: /^1[3-9]\d{9}$/, message: t('user.validation.phoneInvalid'), trigger: ['blur', 'change'] },
-  ],
+  phone: [], // 后端 User 无 phone 字段，仅前端展示用，不做校验（避免阻断编辑提交）
   roles: [
     { required: true, message: t('user.validation.rolesRequired'), trigger: 'change' },
     {

@@ -3,9 +3,13 @@ package devops
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
+	"github.com/aitoys/paas/internal/devops/gitea"
+	"github.com/aitoys/paas/internal/devops/registry"
 	"github.com/aitoys/paas/internal/httputil"
 )
 
@@ -49,6 +53,10 @@ type Handler struct {
 	images      ImageRepository
 	releases    ReleaseRepository
 	envResolver EnvTypeResolver
+	// giteaClient 内置 Git 后端客户端；nil 时 internal 来源建仓/浏览不可用（降级 503）。
+	giteaClient *gitea.Client
+	// registryClient 镜像库 v2 客户端；nil 时 registry 实时视图不可用（降级 503）。
+	registryClient *registry.Client
 	// Authorize 校验当前请求是否持有权限；nil 跳过（测试场景）。
 	Authorize func(r *http.Request, perm string) bool
 	// UserIDFrom 从身份 ctx 取用户 ID（填 Release.CreatedBy）；nil 则空。
@@ -75,6 +83,16 @@ func WithEnvResolver(r EnvTypeResolver) HandlerOpt {
 // WithUserIDFrom 注入用户 ID 解析器，填充 Release.CreatedBy。
 func WithUserIDFrom(f func(context.Context) string) HandlerOpt {
 	return func(h *Handler) { h.UserIDFrom = f }
+}
+
+// WithGiteaClient 注入内置 Git 后端客户端，启用 internal 来源建仓 + 仓库浏览。
+func WithGiteaClient(c *gitea.Client) HandlerOpt {
+	return func(h *Handler) { h.giteaClient = c }
+}
+
+// WithRegistryClient 注入镜像库 v2 客户端，启用 registry 实时视图（catalog/tags）。
+func WithRegistryClient(c *registry.Client) HandlerOpt {
+	return func(h *Handler) { h.registryClient = c }
 }
 
 func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) bool {
@@ -126,6 +144,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveReleases(w, r, "")
 	case strings.HasSuffix(path, "/rollback"):
 		h.serveReleaseAction(w, r)
+	case path == "/api/registry/repositories":
+		// registry 实时视图：列 hub.wang.dd 所有镜像仓库名（catalog）
+		h.serveRegistryCatalog(w, r)
+	case path == "/api/registry/tags":
+		// registry 实时视图：某仓库的 tag + digest（?repository=paas/paas-core）
+		h.serveRegistryTags(w, r)
 	default:
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
@@ -147,6 +171,9 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 			h.serveRepos(w, r, appID)
 		case 3:
 			h.serveRepoDelete(w, r, parts[2])
+		case 4:
+			// /repositories/{rid}/{tree|commits} 仓库内容浏览（仅 internal）
+			h.serveRepoBrowse(w, r, parts[2], parts[3])
 		default:
 			httputil.WriteError(w, http.StatusNotFound, "not found")
 		}
@@ -198,14 +225,65 @@ func (h *Handler) serveRepos(w http.ResponseWriter, r *http.Request, appID strin
 			return
 		}
 		repo.AppID = appID
-		if err := h.repos.CreateRepo(r.Context(), repo); err != nil {
-			httputil.WriteError(w, http.StatusBadRequest, err.Error())
+		if repo.Source == "" {
+			repo.Source = RepoSourceExternal
+		}
+		// 内置仓库：调 Gitea 建仓 + 回填 clone URL（含/不含凭证分离）。
+		if repo.Source == RepoSourceInternal {
+			if h.giteaClient == nil {
+				httputil.WriteError(w, http.StatusServiceUnavailable, "内置 Git 后端未启用")
+				return
+			}
+			if repo.GiteaRepo == "" {
+				httputil.WriteError(w, http.StatusBadRequest, "字段非法或缺失: giteaRepo")
+				return
+			}
+			gRepo, err := h.giteaClient.CreateRepo(r.Context(), gitea.CreateRepoInput{
+				Name:          repo.GiteaRepo,
+				DefaultBranch: repo.Branch,
+				Private:       true,
+				AutoInit:      true, // 初始化 README 使默认分支存在，clone/浏览可用
+			})
+			if err != nil {
+				h.writeGiteaErr(w, err)
+				return
+			}
+			repo.GiteaOwner = h.giteaClient.Username()
+			repo.GitURL = gRepo.CloneURL         // 展示用（不含凭证）
+			repo.CloneURL = h.giteaClient.CloneURLWithAuth(repo.GiteaOwner, repo.GiteaRepo) // builder clone 用（含凭证）
+			if repo.Branch == "" {
+				repo.Branch = gRepo.DefaultBranch
+			}
+		}
+		if err := repo.Validate(); err != nil {
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
-		httputil.WriteJSON(w, http.StatusCreated, repo)
+		if repo.Status == "" {
+			repo.Status = RepoStatusActive
+		}
+		if err := h.repos.CreateRepo(r.Context(), repo); err != nil {
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
+			return
+		}
+		httputil.WriteDataCreated(w, repo)
 		return
 	}
 	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+}
+
+// writeGiteaErr 把 Gitea client 错误映射到 HTTP 状态（参考 maas provider 模式）。
+func (h *Handler) writeGiteaErr(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, gitea.ErrRepoExists):
+		httputil.WriteError(w, http.StatusConflict, "仓库已存在")
+	case errors.Is(err, gitea.ErrGiteaUnavailable):
+		httputil.WriteError(w, http.StatusServiceUnavailable, "Git 后端不可达")
+	case errors.Is(err, gitea.ErrUnauthorized):
+		httputil.WriteError(w, http.StatusServiceUnavailable, "Git 后端鉴权失败")
+	default:
+		httputil.WriteServiceError(w, http.StatusBadRequest, err)
+	}
 }
 
 func (h *Handler) serveRepoDelete(w http.ResponseWriter, r *http.Request, repoID string) {
@@ -217,10 +295,132 @@ func (h *Handler) serveRepoDelete(w http.ResponseWriter, r *http.Request, repoID
 		return
 	}
 	if err := h.repos.DeleteRepo(r.Context(), repoID); err != nil {
-		httputil.WriteError(w, http.StatusNotFound, err.Error())
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
 	httputil.WriteJSON(w, http.StatusOK, map[string]string{"deleted": repoID})
+}
+
+// serveRepoBrowse 处理 /api/applications/{id}/repositories/{rid}/{action}。
+// action: tree（文件树）/ commits（提交历史）/ file（单文件内容，?path=）。仅 internal 仓库支持（external 返 405）。
+func (h *Handler) serveRepoBrowse(w http.ResponseWriter, r *http.Request, repoID, action string) {
+	if r.Method != http.MethodGet {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.allow(w, r, PermRepoRead) {
+		return
+	}
+	if h.giteaClient == nil {
+		httputil.WriteError(w, http.StatusServiceUnavailable, "内置 Git 后端未启用")
+		return
+	}
+	repo, err := h.repos.GetRepo(r.Context(), repoID)
+	if err != nil {
+		httputil.WriteError(w, http.StatusNotFound, "仓库不存在")
+		return
+	}
+	if repo.Source != RepoSourceInternal {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "外部仓库不支持平台内浏览，请到外部 Git 平台查看")
+		return
+	}
+	owner := repo.GiteaOwner
+	if owner == "" {
+		owner = h.giteaClient.Username()
+	}
+	name := repo.GiteaRepo
+	ref := r.URL.Query().Get("ref")
+	switch action {
+	case "tree":
+		tree, err := h.giteaClient.GetTree(r.Context(), owner, name, ref)
+		if err != nil {
+			h.writeGiteaErr(w, err)
+			return
+		}
+		httputil.WriteData(w, tree)
+	case "commits":
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		commits, err := h.giteaClient.ListCommits(r.Context(), owner, name, limit)
+		if err != nil {
+			h.writeGiteaErr(w, err)
+			return
+		}
+		httputil.WriteData(w, commits)
+	case "file":
+		// 单文件内容（base64 解码为字符串）：点击文件树节点查看代码，避免「文件打不开」。
+		path := r.URL.Query().Get("path")
+		if path == "" {
+			httputil.WriteError(w, http.StatusBadRequest, "path 参数不能为空")
+			return
+		}
+		content, fc, err := h.giteaClient.GetFileContent(r.Context(), owner, name, path, ref)
+		if err != nil {
+			h.writeGiteaErr(w, err)
+			return
+		}
+		httputil.WriteData(w, map[string]any{"path": fc.Path, "name": fc.Name, "size": fc.Size, "content": content})
+	default:
+		httputil.WriteError(w, http.StatusNotFound, "not found")
+	}
+}
+
+// ---------- 镜像库实时视图（registry v2）----------
+
+// serveRegistryCatalog 列 registry 所有镜像仓库名（GET /api/registry/repositories）。
+// 复用 image:read 权限。registry 不可达返 503（降级，不 panic）。
+func (h *Handler) serveRegistryCatalog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.allow(w, r, PermImageRead) {
+		return
+	}
+	if h.registryClient == nil {
+		httputil.WriteError(w, http.StatusServiceUnavailable, "镜像库实时视图未启用")
+		return
+	}
+	names, err := h.registryClient.Catalog(r.Context())
+	if err != nil {
+		httputil.WriteError(w, http.StatusServiceUnavailable, "镜像库不可达")
+		return
+	}
+	// 转为对象数组（前端统一 .data 解包），便于未来加 tag 数/最新推送等聚合字段
+	out := make([]map[string]any, 0, len(names))
+	for _, n := range names {
+		out = append(out, map[string]any{"name": n})
+	}
+	httputil.WriteData(w, out)
+}
+
+// serveRegistryTags 列某仓库的 tag + digest（GET /api/registry/tags?repository=paas/paas-core）。
+func (h *Handler) serveRegistryTags(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.allow(w, r, PermImageRead) {
+		return
+	}
+	if h.registryClient == nil {
+		httputil.WriteError(w, http.StatusServiceUnavailable, "镜像库实时视图未启用")
+		return
+	}
+	repo := r.URL.Query().Get("repository")
+	if repo == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "字段非法或缺失: repository")
+		return
+	}
+	tags, err := h.registryClient.Tags(r.Context(), repo)
+	if err != nil {
+		if errors.Is(err, registry.ErrRepoNotFound) {
+			httputil.WriteError(w, http.StatusNotFound, "镜像仓库不存在")
+			return
+		}
+		httputil.WriteError(w, http.StatusServiceUnavailable, "镜像库不可达")
+		return
+	}
+	httputil.WriteData(w, tags)
 }
 
 // ---------- 构建 ----------
@@ -252,8 +452,25 @@ func (h *Handler) serveBuildRuns(w http.ResponseWriter, r *http.Request, appID s
 			httputil.WriteError(w, http.StatusBadRequest, "repoId 不能为空")
 			return
 		}
+		// internal 仓库：从 Gitea 拿最新 commit sha + message 填入（替代 store 的 mock），
+		// 使构建记录的 commit/tag/message 真实（builder script COMMIT 非空则不 rev-parse，直接用此 sha 生成 tag）。
+		// external 仓库或 Gitea 不可达时回退 store mock（保持原行为）。
+		if b.Commit == "" && h.giteaClient != nil {
+			if repo, rerr := h.repos.GetRepo(r.Context(), b.RepoID); rerr == nil && repo.Source == RepoSourceInternal {
+				owner := repo.GiteaOwner
+				if owner == "" {
+					owner = h.giteaClient.Username()
+				}
+				if cs, gerr := h.giteaClient.ListCommits(r.Context(), owner, repo.GiteaRepo, 1); gerr == nil && len(cs) > 0 {
+					b.Commit = cs[0].SHA
+					if b.Message == "" {
+						b.Message = cs[0].Message
+					}
+				}
+			}
+		}
 		if err := h.builds.CreateBuildRun(r.Context(), b); err != nil {
-			httputil.WriteError(w, http.StatusBadRequest, err.Error())
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
 		httputil.WriteJSON(w, http.StatusCreated, map[string]string{"status": "triggered"})
@@ -278,7 +495,7 @@ func (h *Handler) serveBuildDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	b, err := h.builds.GetBuildRun(r.Context(), id)
 	if err != nil {
-		httputil.WriteError(w, http.StatusNotFound, err.Error())
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
 	httputil.WriteJSON(w, http.StatusOK, b)
@@ -299,7 +516,7 @@ func (h *Handler) serveImages(w http.ResponseWriter, r *http.Request, appID stri
 		httputil.WriteInternalError(w, err)
 		return
 	}
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": list})
+	httputil.WriteData(w, list)
 }
 
 // serveImageDetail 处理 /api/images/{id}。
@@ -318,7 +535,7 @@ func (h *Handler) serveImageDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	im, err := h.images.GetImage(r.Context(), id)
 	if err != nil {
-		httputil.WriteError(w, http.StatusNotFound, err.Error())
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
 	httputil.WriteJSON(w, http.StatusOK, im)
@@ -356,7 +573,7 @@ func (h *Handler) serveReleases(w http.ResponseWriter, r *http.Request, appID st
 		}
 		rel, err := h.releases.CreateRelease(r.Context(), input)
 		if err != nil {
-			httputil.WriteError(w, http.StatusBadRequest, err.Error())
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
 		httputil.WriteJSON(w, http.StatusCreated, rel)
@@ -384,7 +601,7 @@ func (h *Handler) serveReleaseAction(w http.ResponseWriter, r *http.Request) {
 	// 生产环境回滚需 prod:write：先取发布单的环境类型再校验
 	orig, err := h.releases.GetRelease(r.Context(), releaseID)
 	if err != nil {
-		httputil.WriteError(w, http.StatusNotFound, err.Error())
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
 	if !h.allowProd(w, r, orig.EnvID) {
@@ -392,7 +609,7 @@ func (h *Handler) serveReleaseAction(w http.ResponseWriter, r *http.Request) {
 	}
 	rb, err := h.releases.RollbackRelease(r.Context(), releaseID)
 	if err != nil {
-		httputil.WriteError(w, http.StatusBadRequest, err.Error())
+		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}
 	httputil.WriteJSON(w, http.StatusOK, rb)

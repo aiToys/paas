@@ -1,7 +1,20 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { fetchNoticeList } from '@/modules/system/notice/api'
-import type { NoticeInfo } from '@/modules/system/notice/api'
+
+/** 公告信息（vue-admin 基座 notice 模块遗留类型；UI 壳保留，数据已短路为空）。 */
+export interface NoticeInfo {
+  id: string
+  title: string
+  content: string
+  type: 'announcement' | 'notice' | 'todo'
+  status: 'published' | 'draft' | 'expired'
+  priority: 'high' | 'medium' | 'low'
+  publishTime?: string
+  expireTime?: string
+  publisher: string
+  createTime: string
+  updateTime: string
+}
 
 export const useNoticeStore = defineStore('notice', () => {
   // 公告列表
@@ -22,23 +35,10 @@ export const useNoticeStore = defineStore('notice', () => {
 
   // 加载公告列表
   async function loadNotices() {
-    if (loading.value) return
-    loading.value = true
-    try {
-      const res = await fetchNoticeList({
-        keyword: '',
-        type: '',
-        status: 'published',
-        page: 1,
-        size: 50,
-      })
-      // 后端公告端点可能缺失（返 404/空）；防御非数组响应，避免下游 .filter 崩溃。
-      notices.value = Array.isArray(res?.records) ? res.records : []
-    } catch (e) {
-      console.error('加载公告失败', e)
-    } finally {
-      loading.value = false
-    }
+    // PaaS 控制面无公告端点（notice 是 vue-admin 基座自带模块，非 PaaS 业务）。
+    // 短路避免每次布局挂载都打 /api/system/notice → 404 噪音（浏览器网络层错误无法 JS catch）。
+    // UI 壳保留（Header 通知铃铛 + dashboard 横幅），公告接入后端时移除此短路即可。
+    notices.value = []
   }
 
   // 标记已读

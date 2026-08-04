@@ -13,7 +13,7 @@ import { ElNotification } from 'element-plus'
 import { useNoticeStore } from '@/app/stores/notice'
 import { priorityLabel } from '@/app/constants/enums'
 import { t } from '@/lib/i18n'
-import type { NoticeInfo } from '@/modules/system/notice/api'
+import type { NoticeInfo } from '@/app/stores/notice'
 
 const noticeStore = useNoticeStore()
 const router = useRouter()

@@ -4,6 +4,12 @@
 ---
 loki:
   enabled: true
+  # 镜像走本地 registry（节点拉不到 docker.io，曾致 ImagePullBackOff）。
+  # loki subchart 渲染 image 为 {repository}:{tag}（不加 registry 前缀），故 repository 含完整路径。
+  # 注意：promtail subchart 反而会拼 docker.io 前缀，故 promtail 用 registry/repository 分写。
+  image:
+    repository: hub.wang.dd:5000/observability/loki
+    tag: "2.6.1"
   # single binary，dev 不做高可用
   persistence:
     enabled: true
@@ -19,13 +25,43 @@ loki:
 
 promtail:
   enabled: true
+  # 镜像走本地 registry（同 loki，registry/repository 分写）。
+  image:
+    registry: hub.wang.dd:5000
+    repository: observability/promtail
+    tag: "3.5.1"
   # 抓所有 namespace Pod 日志（含 paas namespace）
   config:
     clients:
       - url: http://loki:3100/loki/api/v1/push
+  # 内存 64Mi → 256Mi：节点 pod 多时 promtail tail 大量文件，64Mi 易 OOMKilled
+  # （exit 137 CrashLoopBackOff，实测 kb3 OOM 重启 270 次）。256Mi 稳定。
   resources:
-    requests: { cpu: 50m, memory: 32Mi }
-    limits: { cpu: 200m, memory: 64Mi }
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { cpu: 500m, memory: 256Mi }
+  # 集群 docker data-root=/data/docker（非默认 /var/lib/docker），kubelet 的
+  # /var/log/pods/<pod>/<c>/0.log 是软链 → /data/docker/containers/<id>/<id>-json.log。
+  # 默认只挂 /var/log + /var/lib/docker/containers，follow 软链 stat 目标失败。
+  # 必须额外挂 /data/docker（readOnly），软链目标可解析。
+  extraVolumes:
+    - name: data-docker
+      hostPath:
+        path: /data/docker
+        type: DirectoryOrCreate
+  extraVolumeMounts:
+    - name: data-docker
+      mountPath: /data/docker
+      readOnly: true
+  # 只调度到 worker 节点：kb1 是 master，未配 hub.wang.dd:5000 insecure registry，
+  # 拉镜像 ImagePullBackOff；master 无业务 pod，放弃采集以保持 DaemonSet 干净。
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: node-role.kubernetes.io/worker
+                operator: Exists
+
 
 # 关 pushgateway 等（不需要）
 fluent-bit:

@@ -10,6 +10,8 @@ import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
 
+type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
+
 interface SpecField { key: string; label: string; type: string; options?: string[]; default: string }
 interface KindMeta { kind: string; label: string; icon: string; fields: SpecField[] }
 interface DataService {
@@ -45,7 +47,7 @@ const loading = ref(false)
 const errorMsg = ref('') // 加载失败提示（404/网络错误），避免静默空状态
 
 const STATUS_LABEL: Record<string, string> = { running: '运行中', stopped: '已停止', creating: '创建中' }
-const STATUS_TYPE: Record<string, string> = { running: 'success', stopped: 'info', creating: 'warning' }
+const STATUS_TYPE: Record<string, TagType> = { running: 'success', stopped: 'info', creating: 'warning' }
 
 // 按 kind 定义连接字段顺序与标签（敏感字段标记 secret）。
 // 任务约束：host/port 通用；db=user/database/password/uri；cache=password/uri；
@@ -348,7 +350,7 @@ async function deleteRule(r: AlertRule) {
           <span class="mono">{{ ds?.name }}</span>
         </el-descriptions-item>
         <el-descriptions-item label="状态">
-          <el-tag v-if="ds" :type="(STATUS_TYPE[ds.status] as any) || 'info'" size="small">
+          <el-tag v-if="ds" :type="(STATUS_TYPE[ds.status]) || 'info'" size="small">
             {{ STATUS_LABEL[ds?.status] || ds?.status }}
           </el-tag>
         </el-descriptions-item>

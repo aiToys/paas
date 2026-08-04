@@ -126,7 +126,8 @@ type DataService struct {
 	AppID    string            `json:"appId,omitempty"` // 可选预留（Add-on 绑定）
 	// Connection 平台生成（host/port/credentials/uri），Create 时由 FillConnection 填充。
 	// credentials（password/token/secretKey）持久化（重启不变，Secret 引用）；host/port/uri 是纯函数派生。
-	// list/detail 返回掩码（MaskConnection），create/update 返回明文（write 权限者）。
+	// 所有对外端点（list/detail/create/update/跨租户 admin 总览）一律 MaskConnection 掩码返回；
+	// 明文仅内部应用绑定注入用（repo.Get 取原始值），任何 HTTP 响应绝不泄漏明文。
 	Connection map[string]string `json:"connection,omitempty"`
 	CreatedAt  time.Time         `json:"createdAt"`
 	UpdatedAt  time.Time         `json:"updatedAt"`

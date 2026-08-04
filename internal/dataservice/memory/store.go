@@ -88,6 +88,26 @@ func (s *Store) List(ctx context.Context, kind string) ([]dataservice.DataServic
 	return out, nil
 }
 
+// ListAll 跨租户返回全部数据服务（admin 后台用），按 tenant_id 升序、created_at 倒序。
+// 不读取 tenant ctx；返回对象带 TenantID 供归属展示。
+func (s *Store) ListAll(ctx context.Context) ([]dataservice.DataService, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]dataservice.DataService, 0, len(s.services))
+	for _, d := range s.services {
+		d.Spec = cloneStrMap(d.Spec)
+		d.Connection = cloneStrMap(d.Connection)
+		out = append(out, d)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TenantID != out[j].TenantID {
+			return out[i].TenantID < out[j].TenantID
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	return out, nil
+}
+
 func (s *Store) Get(ctx context.Context, id string) (dataservice.DataService, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {

@@ -9,6 +9,8 @@ import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 
+type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
+
 interface SpecField {
   key: string; label: string; type: string; options?: string[]; default: string
 }
@@ -32,7 +34,7 @@ const meta = computed(() => metas.value.find((m) => m.kind === props.kind))
 const envLabel = (id: string) => envStore.envs.find((e) => e.id === id)?.name ?? id
 
 const STATUS_LABEL: Record<string, string> = { running: '运行中', stopped: '已停止', creating: '创建中' }
-const STATUS_TYPE: Record<string, string> = { running: 'success', stopped: 'info', creating: 'warning' }
+const STATUS_TYPE: Record<string, TagType> = { running: 'success', stopped: 'info', creating: 'warning' }
 
 // 创建弹窗
 const showCreate = ref(false)
@@ -179,7 +181,7 @@ onMounted(load)
         </el-table-column>
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
-            <el-tag :type="(STATUS_TYPE[row.status] as any) || 'info'" size="small">
+            <el-tag :type="(STATUS_TYPE[row.status]) || 'info'" size="small">
               {{ STATUS_LABEL[row.status] || row.status }}
             </el-tag>
           </template>
