@@ -41,6 +41,32 @@ func (s *stubRepo) EnvType(_ context.Context, id string) (string, error) {
 	return "", errNotFound
 }
 
+// NextPromoteTarget 简化 stub：返 list 中 PromoteOrder 严格大于当前的最小阶序环境（测试用）。
+func (s *stubRepo) NextPromoteTarget(_ context.Context, envID string) (Environment, error) {
+	var curOrder int
+	have := false
+	for _, e := range s.list {
+		if e.ID == envID {
+			curOrder = e.PromoteOrder
+			have = true
+			break
+		}
+	}
+	if !have {
+		return Environment{}, ErrNoPromoteTarget
+	}
+	var best Environment
+	for _, e := range s.list {
+		if e.PromoteOrder > curOrder && (best.ID == "" || e.PromoteOrder < best.PromoteOrder) {
+			best = e
+		}
+	}
+	if best.ID == "" {
+		return Environment{}, ErrNoPromoteTarget
+	}
+	return best, nil
+}
+
 type notFoundErr struct{}
 
 func (notFoundErr) Error() string { return "not found" }

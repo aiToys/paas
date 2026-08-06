@@ -85,6 +85,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if e.Type == TypeProd && !h.allow(w, r, PermProdWrite) {
 			return
 		}
+		// 阶序未指定（0）时按 type 填默认（test=10/prod=20），保证开箱即用参与发布流水线。
+		if e.PromoteOrder == 0 {
+			e.PromoteOrder = DefaultPromoteOrder(e.Type)
+		}
 		if err := h.repo.Create(r.Context(), e); err != nil {
 			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return

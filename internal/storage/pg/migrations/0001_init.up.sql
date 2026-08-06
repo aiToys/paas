@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS environments (
     cluster    TEXT NOT NULL DEFAULT '',
     "desc"     TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL,
+    promote_order INT NOT NULL DEFAULT 0,
     UNIQUE (tenant_id, name)
 );
 CREATE INDEX IF NOT EXISTS idx_env_tenant ON environments(tenant_id);
@@ -211,7 +212,8 @@ CREATE TABLE IF NOT EXISTS releases (
     previous_image_id TEXT NOT NULL DEFAULT '',
     is_rollback       BOOLEAN NOT NULL DEFAULT FALSE,
     created_at        TIMESTAMPTZ NOT NULL,
-    created_by        TEXT NOT NULL DEFAULT ''
+    created_by        TEXT NOT NULL DEFAULT '',
+    promoted_from     TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_releases_app ON releases(tenant_id, app_id);
 

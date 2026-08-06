@@ -224,6 +224,7 @@ type Release struct {
 	WorkloadID      string    `json:"workloadId"`
 	PreviousImageID string    `json:"previousImageId,omitempty"` // 回滚指针
 	IsRollback      bool      `json:"isRollback"`
+	PromotedFrom    string    `json:"promotedFrom,omitempty"` // 晋升来源 release ID（非空=由 promote 产生）
 	CreatedAt       time.Time `json:"createdAt"`
 	CreatedBy       string    `json:"createdBy"`
 }

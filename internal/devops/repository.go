@@ -42,6 +42,10 @@ type ReleaseRepository interface {
 	CreateRelease(ctx context.Context, input ReleaseInput) (Release, error)
 	// RollbackRelease 回滚到上一镜像，返回新建的回滚 Release。
 	RollbackRelease(ctx context.Context, releaseID string) (Release, error)
+	// PromoteRelease 把源 release 的镜像发布到目标环境（发布流水线逐级提升），
+	// 复用 CreateRelease 编排，新 release 记 PromotedFrom=源 release ID（晋升链可追溯）。
+	// targetEnvID 由调用方（handler）经 environment.NextPromoteTarget 算出并完成 prod:write 校验。
+	PromoteRelease(ctx context.Context, srcReleaseID, targetEnvID string) (Release, error)
 	// ListAllReleases 跨租户列出全部发布（admin 平台总览，不过滤 tenant，返回对象带 TenantID）。
 	ListAllReleases(ctx context.Context) ([]Release, error)
 }

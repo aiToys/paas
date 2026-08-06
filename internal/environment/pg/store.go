@@ -23,11 +23,11 @@ type Store struct {
 func NewStore(db *storagepg.DB) *Store { return &Store{db: db} }
 
 // envCols 与 model.Environment 字段顺序对齐（scan 列顺序必须一致）。
-const envCols = `id, tenant_id, name, type, cluster, "desc", created_at`
+const envCols = `id, tenant_id, name, type, cluster, "desc", created_at, promote_order`
 
 // scanEnv 通过 storagepg.RowScanner 抽象 QueryRow 与 Row 两种 Scan 来源。
 func scanEnv(r storagepg.RowScanner, e *environment.Environment) error {
-	return r.Scan(&e.ID, &e.TenantID, &e.Name, &e.Type, &e.Cluster, &e.Desc, &e.CreatedAt)
+	return r.Scan(&e.ID, &e.TenantID, &e.Name, &e.Type, &e.Cluster, &e.Desc, &e.CreatedAt, &e.PromoteOrder)
 }
 
 // List 列出当前租户的全部环境，按 id 排序。
@@ -99,8 +99,8 @@ func (s *Store) Create(ctx context.Context, e environment.Environment) error {
 	}
 	e.TenantID = tid
 	_, err = s.db.Pool().Exec(ctx,
-		`INSERT INTO environments (`+envCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-		e.ID, e.TenantID, e.Name, e.Type, e.Cluster, e.Desc, e.CreatedAt)
+		`INSERT INTO environments (`+envCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		e.ID, e.TenantID, e.Name, e.Type, e.Cluster, e.Desc, e.CreatedAt, e.PromoteOrder)
 	if storagepg.IsUniqueViolation(err) {
 		return fmt.Errorf("环境已存在: %s", e.ID)
 	}
@@ -138,6 +138,34 @@ func (s *Store) EnvType(ctx context.Context, id string) (string, error) {
 		return "", fmt.Errorf("环境不存在: %s", id)
 	}
 	return t, err
+}
+
+// NextPromoteTarget 返回同租户内 promote_order 严格大于当前环境的最小阶序环境
+// （同 order 取 id 最小，确定性）。当前环境不存在返 not found；已是最高阶序返 ErrNoPromoteTarget。
+func (s *Store) NextPromoteTarget(ctx context.Context, envID string) (environment.Environment, error) {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return environment.Environment{}, err
+	}
+	var curOrder int
+	err = s.db.Pool().QueryRow(ctx,
+		`SELECT promote_order FROM environments WHERE id=$1 AND tenant_id=$2`, envID, tid).Scan(&curOrder)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return environment.Environment{}, environment.ErrNoPromoteTarget
+	}
+	if err != nil {
+		return environment.Environment{}, err
+	}
+	var e environment.Environment
+	err = s.db.Pool().QueryRow(ctx,
+		`SELECT `+envCols+` FROM environments
+		 WHERE tenant_id=$1 AND promote_order>$2 AND promote_order>0
+		 ORDER BY promote_order ASC, id ASC LIMIT 1`, tid, curOrder).Scan(
+		&e.ID, &e.TenantID, &e.Name, &e.Type, &e.Cluster, &e.Desc, &e.CreatedAt, &e.PromoteOrder)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return environment.Environment{}, environment.ErrNoPromoteTarget
+	}
+	return e, err
 }
 
 // EnvsCount 返回全表环境数，供 PG seed 判空（表空才灌，幂等）。

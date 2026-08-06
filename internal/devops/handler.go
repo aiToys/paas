@@ -31,6 +31,10 @@ const (
 // 依赖倒置：devops 不直接 import environment，由 cmd/core 注入实现。
 type EnvTypeResolver = environment.EnvTypeResolver
 
+// EnvPromoter 解析发布流水线下一个晋升目标环境，用于 promote 端点逐级提升。
+// 依赖倒置：cmd/core 注入 environment.Repository 实现。
+type EnvPromoter = environment.EnvPromoter
+
 // Handler 暴露 DevOps REST API。
 //
 // 路由：
@@ -52,6 +56,8 @@ type Handler struct {
 	images      ImageRepository
 	releases    ReleaseRepository
 	envResolver EnvTypeResolver
+	// envPromoter 解析发布流水线下一个晋升目标环境；nil 时 promote 端点返 400（未配置流水线）。
+	envPromoter EnvPromoter
 	// giteaClient 内置 Git 后端客户端；nil 时 internal 来源建仓/浏览不可用（降级 503）。
 	giteaClient *gitea.Client
 	// registryClient 镜像库 v2 客户端；nil 时 registry 实时视图不可用（降级 503）。
@@ -77,6 +83,11 @@ type HandlerOpt func(*Handler)
 // WithEnvResolver 注入环境类型解析器，启用生产写权限校验。
 func WithEnvResolver(r EnvTypeResolver) HandlerOpt {
 	return func(h *Handler) { h.envResolver = r }
+}
+
+// WithEnvPromoter 注入晋升目标解析器，启用发布流水线 promote 端点。
+func WithEnvPromoter(p EnvPromoter) HandlerOpt {
+	return func(h *Handler) { h.envPromoter = p }
 }
 
 // WithUserIDFrom 注入用户 ID 解析器，填充 Release.CreatedBy。
@@ -141,7 +152,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveImageDetail(w, r)
 	case path == "/api/releases":
 		h.serveReleases(w, r, "")
-	case strings.HasSuffix(path, "/rollback"):
+	case strings.HasSuffix(path, "/rollback"), strings.HasSuffix(path, "/promote"):
 		h.serveReleaseAction(w, r)
 	case path == "/api/registry/repositories":
 		// registry 实时视图：列 hub.wang.dd 所有镜像仓库名（catalog）
@@ -592,24 +603,49 @@ func (h *Handler) serveReleaseAction(w http.ResponseWriter, r *http.Request) {
 	}
 	rest := strings.TrimPrefix(r.URL.Path, "/api/releases/")
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
-	if len(parts) != 2 || parts[1] != "rollback" {
+	if len(parts) != 2 {
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
-	releaseID := parts[0]
-	// 生产环境回滚需 prod:write：先取发布单的环境类型再校验
+	releaseID, action := parts[0], parts[1]
 	orig, err := h.releases.GetRelease(r.Context(), releaseID)
 	if err != nil {
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
-	if !h.allowProd(w, r, orig.EnvID) {
-		return
+	switch action {
+	case "rollback":
+		// 生产环境回滚需 prod:write：先取发布单的环境类型再校验
+		if !h.allowProd(w, r, orig.EnvID) {
+			return
+		}
+		rb, err := h.releases.RollbackRelease(r.Context(), releaseID)
+		if err != nil {
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
+			return
+		}
+		httputil.WriteData(w, rb)
+	case "promote":
+		// 发布流水线逐级提升：算下个阶序环境，目标 prod 需 prod:write。
+		if h.envPromoter == nil {
+			httputil.WriteError(w, http.StatusBadRequest, "未配置发布流水线（晋升目标解析器未注入）")
+			return
+		}
+		target, err := h.envPromoter.NextPromoteTarget(r.Context(), orig.EnvID)
+		if err != nil {
+			httputil.WriteError(w, http.StatusBadRequest, "已是最高阶环境，无晋升目标")
+			return
+		}
+		if !h.allowProd(w, r, target.ID) {
+			return
+		}
+		rel, err := h.releases.PromoteRelease(r.Context(), releaseID, target.ID)
+		if err != nil {
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
+			return
+		}
+		httputil.WriteData(w, rel)
+	default:
+		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
-	rb, err := h.releases.RollbackRelease(r.Context(), releaseID)
-	if err != nil {
-		httputil.WriteServiceError(w, http.StatusBadRequest, err)
-		return
-	}
-	httputil.WriteData(w, rb)
 }

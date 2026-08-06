@@ -11,6 +11,7 @@ export interface Env {
   name: string
   type: 'prod' | 'test'
   cluster?: string
+  promoteOrder?: number // 发布流水线阶序（升序），0/缺省=不参与
 }
 
 const PROD_TIMEOUT_MS = 15 * 60 * 1000 // 生产会话 15 分钟超时

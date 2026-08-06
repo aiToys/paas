@@ -127,6 +127,41 @@ func (s *Store) EnvType(ctx context.Context, id string) (string, error) {
 	return e.Type, nil
 }
 
+// NextPromoteTarget 返回同租户内 PromoteOrder 严格大于当前的最小阶序环境（同 order 取 id 最小，确定性）。
+// 当前环境不存在 / 已是最高阶序返 ErrNoPromoteTarget。
+func (s *Store) NextPromoteTarget(ctx context.Context, envID string) (environment.Environment, error) {
+	tid, err := tenantOrErr(ctx)
+	if err != nil {
+		return environment.Environment{}, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cur, ok := s.envs[envID]
+	if !ok || cur.TenantID != tid {
+		return environment.Environment{}, environment.ErrNoPromoteTarget
+	}
+	var best environment.Environment
+	found := false
+	for _, e := range s.envs {
+		if e.TenantID != tid {
+			continue
+		}
+		// 阶序必须严格大于当前；order=0（不参与流水线）跳过
+		if e.PromoteOrder <= cur.PromoteOrder || e.PromoteOrder == 0 {
+			continue
+		}
+		if !found || e.PromoteOrder < best.PromoteOrder ||
+			(e.PromoteOrder == best.PromoteOrder && e.ID < best.ID) {
+			best = e
+			found = true
+		}
+	}
+	if !found {
+		return environment.Environment{}, environment.ErrNoPromoteTarget
+	}
+	return best, nil
+}
+
 // SeedEnvs 返回预置环境数据（PG seed 复用，DRY：内存/PG 同一真源）。
 // acme: env-acme-prod-bj / env-acme-prod-sh / env-acme-test
 // globex: env-globex-prod / env-globex-test
@@ -138,10 +173,10 @@ func SeedEnvs() []environment.Environment {
 func seed() []environment.Environment {
 	t := time.Now()
 	return []environment.Environment{
-		{ID: "env-acme-prod-bj", TenantID: "t-acme", Name: "生产-北京", Type: environment.TypeProd, Cluster: "prod-bj", CreatedAt: t},
-		{ID: "env-acme-prod-sh", TenantID: "t-acme", Name: "生产-上海", Type: environment.TypeProd, Cluster: "prod-sh", CreatedAt: t},
-		{ID: "env-acme-test", TenantID: "t-acme", Name: "测试", Type: environment.TypeTest, CreatedAt: t},
-		{ID: "env-globex-prod", TenantID: "t-globex", Name: "生产", Type: environment.TypeProd, Cluster: "prod-aws", CreatedAt: t},
-		{ID: "env-globex-test", TenantID: "t-globex", Name: "测试", Type: environment.TypeTest, CreatedAt: t},
+		{ID: "env-acme-prod-bj", TenantID: "t-acme", Name: "生产-北京", Type: environment.TypeProd, Cluster: "prod-bj", PromoteOrder: environment.DefaultPromoteOrder(environment.TypeProd), CreatedAt: t},
+		{ID: "env-acme-prod-sh", TenantID: "t-acme", Name: "生产-上海", Type: environment.TypeProd, Cluster: "prod-sh", PromoteOrder: environment.DefaultPromoteOrder(environment.TypeProd), CreatedAt: t},
+		{ID: "env-acme-test", TenantID: "t-acme", Name: "测试", Type: environment.TypeTest, PromoteOrder: environment.DefaultPromoteOrder(environment.TypeTest), CreatedAt: t},
+		{ID: "env-globex-prod", TenantID: "t-globex", Name: "生产", Type: environment.TypeProd, Cluster: "prod-aws", PromoteOrder: environment.DefaultPromoteOrder(environment.TypeProd), CreatedAt: t},
+		{ID: "env-globex-test", TenantID: "t-globex", Name: "测试", Type: environment.TypeTest, PromoteOrder: environment.DefaultPromoteOrder(environment.TypeTest), CreatedAt: t},
 	}
 }

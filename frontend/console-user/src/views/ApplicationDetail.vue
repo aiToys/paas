@@ -433,7 +433,7 @@ async function deleteApp() {
       <!-- 构建 -->
       <div v-else-if="activeTab === '构建'">
         <div class="cross-link"><a @click="goDevOps">查看跨应用构建总览 →</a></div>
-        <AppBuilds :app-id="app.id" />
+        <AppBuilds :app-id="app.id" @pick="pickImage" />
       </div>
 
       <!-- 镜像（构建产物） -->

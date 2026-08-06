@@ -80,7 +80,7 @@ const (
 	repoCols    = `id, tenant_id, app_id, git_url, branch, dockerfile, build_context, status, created_at, source, gitea_owner, gitea_repo, clone_url`
 	buildCols   = `id, tenant_id, app_id, repo_id, trigger, commit, branch, message, status, image_id, log, started_at, finished_at`
 	imageCols   = `id, tenant_id, app_id, registry, tag, digest, source, branch, build_run_id, built_at, status`
-	releaseCols = `id, tenant_id, app_id, env_id, image_id, image_digest, strategy, status, workload_id, previous_image_id, is_rollback, created_at, created_by`
+	releaseCols = `id, tenant_id, app_id, env_id, image_id, image_digest, strategy, status, workload_id, previous_image_id, is_rollback, created_at, created_by, promoted_from`
 )
 
 // ---------- CodeRepoRepository ----------
@@ -576,7 +576,7 @@ func scanRelease(r pg.RowScanner, rel *devops.Release) error {
 	return r.Scan(
 		&rel.ID, &rel.TenantID, &rel.AppID, &rel.EnvID, &rel.ImageID, &rel.ImageDigest,
 		&rel.Strategy, &rel.Status, &rel.WorkloadID, &rel.PreviousImageID, &rel.IsRollback,
-		&rel.CreatedAt, &rel.CreatedBy)
+		&rel.CreatedAt, &rel.CreatedBy, &rel.PromotedFrom)
 }
 
 // CreateRelease 编排发布：取镜像 -> 找/建目标环境基线 Workload -> 更新镜像 -> 记录回滚指针 -> 存发布单。
@@ -673,10 +673,10 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 		CreatedAt:       time.Now(),
 	}
 	_, err = s.db.Pool().Exec(ctx,
-		`INSERT INTO releases (`+releaseCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		`INSERT INTO releases (`+releaseCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
 		rel.ID, rel.TenantID, rel.AppID, rel.EnvID, rel.ImageID, rel.ImageDigest,
 		rel.Strategy, rel.Status, rel.WorkloadID, rel.PreviousImageID, rel.IsRollback,
-		rel.CreatedAt, rel.CreatedBy)
+		rel.CreatedAt, rel.CreatedBy, rel.PromotedFrom)
 	if err != nil {
 		// 补偿事务：workload 已切新镜像但 release 记录未落库 -> 回滚 workload 到发布前状态，
 		// 防丢失 PreviousImageID 回滚指针（best-effort，补偿失败不掩盖主错误）。
@@ -783,7 +783,7 @@ func (s *Store) RollbackRelease(ctx context.Context, releaseID string) (devops.R
 		`INSERT INTO releases (`+releaseCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
 		rb.ID, rb.TenantID, rb.AppID, rb.EnvID, rb.ImageID, rb.ImageDigest,
 		rb.Strategy, rb.Status, rb.WorkloadID, rb.PreviousImageID, rb.IsRollback,
-		rb.CreatedAt, rb.CreatedBy); err != nil {
+		rb.CreatedAt, rb.CreatedBy, rb.PromotedFrom); err != nil {
 		return devops.Release{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {
@@ -791,6 +791,33 @@ func (s *Store) RollbackRelease(ctx context.Context, releaseID string) (devops.R
 	}
 	committed = true
 	return rb, nil
+}
+
+// PromoteRelease 把源 release 镜像发布到 targetEnvID（流水线逐级提升），复用 CreateRelease 编排，
+// 新 release 标 promoted_from=源 ID。targetEnvID 由 handler 经 environment.NextPromoteTarget 算出。
+// GetRelease 已校验租户隔离（跨租户 not found 不泄漏）。promoted_from 标记 best-effort（rel 已建，
+// UPDATE 失败仅丢失来源追溯，不影响编排正确性）。
+func (s *Store) PromoteRelease(ctx context.Context, srcReleaseID, targetEnvID string) (devops.Release, error) {
+	src, err := s.GetRelease(ctx, srcReleaseID)
+	if err != nil {
+		return devops.Release{}, err
+	}
+	rel, err := s.CreateRelease(ctx, devops.ReleaseInput{
+		AppID:     src.AppID,
+		EnvID:     targetEnvID,
+		ImageID:   src.ImageID,
+		Strategy:  src.Strategy,
+		CreatedBy: src.CreatedBy,
+	})
+	if err != nil {
+		return devops.Release{}, err
+	}
+	if _, err = s.db.Pool().Exec(ctx,
+		`UPDATE releases SET promoted_from=$2 WHERE id=$1`, rel.ID, srcReleaseID); err != nil {
+		return rel, err
+	}
+	rel.PromotedFrom = srcReleaseID
+	return rel, nil
 }
 
 // ---------- Count 方法（供 PG seed 判空，表空才灌，幂等；不经租户过滤，仅启动期用） ----------

@@ -6,6 +6,8 @@ import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 
 const props = defineProps<{ appId: string }>()
+// 构建成功 → 一键发布：复用镜像 tab 的 pick 机制，父组件切到发布 tab 并预选产出镜像。
+const emit = defineEmits<{ (e: 'pick', image: { id: string }): void }>()
 
 interface BuildRun {
   id: string
@@ -136,6 +138,17 @@ watch(() => props.appId, async () => {
       <el-table-column prop="message" label="提交信息" min-width="180" />
       <el-table-column label="产出镜像" width="130">
         <template #default="{ row }"><span class="mono">{{ (row.imageId || '').slice(0, 14) || '—' }}</span></template>
+      </el-table-column>
+      <el-table-column label="操作" width="90">
+        <template #default="{ row }">
+          <el-button
+            v-if="row.status === 'success' && row.imageId"
+            size="small"
+            type="primary"
+            @click="emit('pick', { id: row.imageId })"
+          >发布</el-button>
+          <span v-else class="text-faint">—</span>
+        </template>
       </el-table-column>
       <el-table-column label="开始时间" width="160">
         <template #default="{ row }">{{ new Date(row.startedAt).toLocaleString() }}</template>

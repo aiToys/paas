@@ -23,7 +23,7 @@ func newHandler(prodWrite bool) *devops.Handler {
 	wl := wlmemory.NewStore()
 	env := envmemory.NewStore()
 	s := devopsmemory.NewStore(wl)
-	h := devops.NewHandler(s, s, s, s, devops.WithEnvResolver(env))
+	h := devops.NewHandler(s, s, s, s, devops.WithEnvResolver(env), devops.WithEnvPromoter(env))
 	h.Authorize = func(r *http.Request, perm string) bool {
 		if perm == devops.PermProdWrite {
 			return prodWrite
@@ -49,7 +49,7 @@ func newFixture(prodWrite bool) devopsFixture {
 	wl := wlmemory.NewStore()
 	env := envmemory.NewStore()
 	s := devopsmemory.NewStore(wl)
-	h := devops.NewHandler(s, s, s, s, devops.WithEnvResolver(env))
+	h := devops.NewHandler(s, s, s, s, devops.WithEnvResolver(env), devops.WithEnvPromoter(env))
 	h.Authorize = func(r *http.Request, perm string) bool {
 		if perm == devops.PermProdWrite {
 			return prodWrite
@@ -211,6 +211,80 @@ func TestHandlerRollbackProdGuard(t *testing.T) {
 	fDev.h.ServeHTTP(w, r)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("dev 回滚生产应 403，got %d", w.Code)
+	}
+}
+
+// decodeRelease 解包 {data:Release} 响应（WriteData 契约）。
+func decodeRelease(t *testing.T, b []byte) devops.Release {
+	t.Helper()
+	var wrap struct {
+		Data devops.Release `json:"data"`
+	}
+	if err := json.Unmarshal(b, &wrap); err != nil {
+		t.Fatalf("解码发布响应失败: %v body=%s", err, b)
+	}
+	return wrap.Data
+}
+
+// createReleaseOnTest 在 acme test 环境发布，返回 release（供 promote 测试用）。
+func createReleaseOnTest(t *testing.T, f devopsFixture) devops.Release {
+	t.Helper()
+	r := req(acmeCtx(), "POST", "/api/applications/app-cs/releases", devops.ReleaseInput{
+		EnvID: "env-acme-test", ImageID: f.acmeImg.ID,
+	})
+	w := httptest.NewRecorder()
+	f.h.ServeHTTP(w, r)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("建测试发布应 201，got %d: %s", w.Code, w.Body.String())
+	}
+	return decodeRelease(t, w.Body.Bytes())
+}
+
+// TestHandlerPromote 验证发布流水线逐级提升：test release → promote → prod 新 release（PromotedFrom 串链）。
+func TestHandlerPromote(t *testing.T) {
+	f := newFixture(true)
+	relTest := createReleaseOnTest(t, f)
+
+	r := req(acmeCtx(), "POST", "/api/releases/"+relTest.ID+"/promote", nil)
+	w := httptest.NewRecorder()
+	f.h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("admin promote 应 200，got %d: %s", w.Code, w.Body.String())
+	}
+	promoted := decodeRelease(t, w.Body.Bytes())
+	if promoted.EnvID != "env-acme-prod-bj" {
+		t.Fatalf("promote 目标应 env-acme-prod-bj（阶序 20 取 id 最小），got %s", promoted.EnvID)
+	}
+	if promoted.ImageID != relTest.ImageID {
+		t.Fatalf("promote 应复用源镜像，got %s want %s", promoted.ImageID, relTest.ImageID)
+	}
+	if promoted.PromotedFrom != relTest.ID {
+		t.Fatalf("promotedFrom 应指向源 release，got %s want %s", promoted.PromotedFrom, relTest.ID)
+	}
+}
+
+// TestHandlerPromoteDevGuard 验证 promote 到 prod 受 prod:write 守卫：dev promote（目标 prod）403。
+func TestHandlerPromoteDevGuard(t *testing.T) {
+	f := newFixture(false)
+	relTest := createReleaseOnTest(t, f)
+
+	r := req(acmeCtx(), "POST", "/api/releases/"+relTest.ID+"/promote", nil)
+	w := httptest.NewRecorder()
+	f.h.ServeHTTP(w, r)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("dev promote 到生产应 403，got %d", w.Code)
+	}
+}
+
+// TestHandlerPromoteNoTarget 验证最高阶环境 promote 返 400（无晋升目标）。
+func TestHandlerPromoteNoTarget(t *testing.T) {
+	f := newFixture(true)
+	// globexRel 已在 env-globex-prod（最高阶），promote 无目标
+	r := req(globexCtx(), "POST", "/api/releases/"+f.globexRel.ID+"/promote", nil)
+	w := httptest.NewRecorder()
+	f.h.ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("最高阶环境 promote 应 400，got %d: %s", w.Code, w.Body.String())
 	}
 }
 

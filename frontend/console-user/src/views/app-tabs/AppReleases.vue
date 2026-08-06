@@ -2,7 +2,7 @@
 // 应用详情 - 发布 tab：创建发布（选镜像+环境+策略）+ 历史记录 + 回滚。
 // 生产发布/回滚受 prod:write 保护（后端）；前端回滚走 confirmDangerous（生产输入名称确认）。
 // 环境列表自加载；默认环境取全局 env store（顶栏当前环境）。
-import { ref, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
@@ -38,7 +38,8 @@ const images = ref<Image[]>([])
 const envs = ref<Env[]>([])
 const loading = ref(false)
 const showCreate = ref(false)
-const form = ref({ envId: '', imageId: '', strategy: 'rolling' })
+const form = ref({ envIds: [] as string[], imageId: '', strategy: 'rolling' })
+const submitting = ref(false)
 
 const strategies = [
   { value: 'rolling', label: '滚动' },
@@ -65,42 +66,79 @@ async function load() {
 }
 
 function openCreate(imageId?: string) {
+  // 默认填顶栏当前环境（若非「全部」）。
+  const defaults = envStore.currentEnvId ? [envStore.currentEnvId] : []
   form.value = {
-    envId: envStore.currentEnvId || '',
+    envIds: defaults,
     imageId: imageId || '',
     strategy: 'rolling',
   }
   showCreate.value = true
 }
 
+// 选中的 prod 环境名（用于生产发布二次确认提示）。
+const selectedProdNames = computed(() =>
+  form.value.envIds
+    .map((id) => envs.value.find((e) => e.id === id))
+    .filter((e): e is Env => !!e && e.type === 'prod')
+    .map((e) => e.name),
+)
+
 async function create() {
-  if (!form.value.envId || !form.value.imageId) {
+  if (!form.value.envIds.length || !form.value.imageId) {
     ElMessage.warning('请选择环境与镜像')
     return
   }
-  try {
-    const resp = await fetchAuth(`/api/applications/${props.appId}/releases`, {
-      method: 'POST',
-      body: JSON.stringify(form.value),
+  // 勾选含生产环境时显式 isProd 二次确认（按目标 env.type，覆盖顶栏 scope）。
+  if (selectedProdNames.value.length) {
+    const ok = await confirmDangerous({
+      action: '发布',
+      target: selectedProdNames.value.join('、'),
+      requireNameConfirm: true,
+      isProd: true,
     })
-    if (resp.ok) {
-      ElMessage.success('发布成功')
-      showCreate.value = false
-      load()
-    } else {
-      const err = await resp.json().catch(() => ({}))
-      ElMessage.error(err.error || '发布失败')
-    }
-  } catch (e) {
-    ElMessage.error('发布失败：' + (e as Error).message)
+    if (!ok) return
+  }
+  submitting.value = true
+  // 多环境发布：每环境独立 POST（后端每 env 独立基线，部分失败不互斥）。
+  const results = await Promise.allSettled(
+    form.value.envIds.map((envId) =>
+      fetchAuth(`/api/applications/${props.appId}/releases`, {
+        method: 'POST',
+        body: JSON.stringify({ envId, imageId: form.value.imageId, strategy: form.value.strategy }),
+      }).then(async (resp) => {
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}))
+          throw new Error(err.error || `HTTP ${resp.status}`)
+        }
+        return envId
+      }),
+    ),
+  )
+  submitting.value = false
+  const failed = results
+    .map((r, i) => ({ r, envId: form.value.envIds[i] }))
+    .filter((x) => x.r.status === 'rejected')
+  if (failed.length === 0) {
+    ElMessage.success(`已发布到 ${form.value.envIds.length} 个环境`)
+    showCreate.value = false
+    load()
+  } else {
+    const failedNames = failed.map((x) => envName(x.envId)).join('、')
+    const ok = results.length - failed.length
+    ElMessage.error(`${ok}/${results.length} 成功，失败：${failedNames}`)
+    if (ok > 0) load()
   }
 }
 
 async function rollback(r: Release) {
+  // 按资源所在 env.type 显式判定（覆盖顶栏 scope，防顶栏与资源环境不一致）。
+  const isProdEnv = envs.value.find((e) => e.id === r.envId)?.type === 'prod'
   const ok = await confirmDangerous({
     action: '回滚',
     target: r.id.slice(0, 12),
-    requireNameConfirm: envStore.isProd,
+    requireNameConfirm: isProdEnv,
+    isProd: isProdEnv,
   })
   if (!ok) return
   try {
@@ -159,7 +197,7 @@ watch(() => props.pickedImageId, (id) => {
       </el-table-column>
       <el-table-column label="操作" width="80">
         <template #default="{ row }">
-          <el-button v-if="row.previousImageId" text type="warning" size="small" @click="rollback(row)">回滚</el-button>
+          <el-button v-if="row.status === 'succeeded' && row.previousImageId" text type="warning" size="small" @click="rollback(row)">回滚</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -172,9 +210,10 @@ watch(() => props.pickedImageId, (id) => {
           </el-select>
         </el-form-item>
         <el-form-item label="环境">
-          <el-select v-model="form.envId" placeholder="选择目标环境" style="width: 100%">
+          <el-select v-model="form.envIds" multiple placeholder="可多选目标环境" style="width: 100%">
             <el-option v-for="e in envs" :key="e.id" :label="e.name" :value="e.id" />
           </el-select>
+          <div v-if="selectedProdNames.length" class="prod-warn">⚠️ 含生产环境：{{ selectedProdNames.join('、') }}（发布需确认）</div>
         </el-form-item>
         <el-form-item label="策略">
           <el-select v-model="form.strategy" style="width: 100%">
@@ -184,8 +223,19 @@ watch(() => props.pickedImageId, (id) => {
       </el-form>
       <template #footer>
         <el-button @click="showCreate = false">取消</el-button>
-        <el-button type="primary" :disabled="!form.imageId || !form.envId" @click="create">发布</el-button>
+        <el-button type="primary" :disabled="!form.imageId || !form.envIds.length" :loading="submitting" @click="create">
+          发布（{{ form.envIds.length || 0 }} 环境）
+        </el-button>
       </template>
     </el-dialog>
   </div>
 </template>
+
+<style scoped>
+.prod-warn {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--el-color-danger);
+  line-height: 1.4;
+}
+</style>

@@ -574,6 +574,38 @@ func (s *Store) RollbackRelease(ctx context.Context, releaseID string) (devops.R
 	return rb, nil
 }
 
+// PromoteRelease 把源 release 的镜像发布到 targetEnvID（流水线逐级提升）。
+// 复用 CreateRelease 编排（找/建基线 Workload + 回滚指针），新 release 标 PromotedFrom=源 ID。
+// targetEnvID 由 handler 经 environment.NextPromoteTarget 算出（store 不感知 env 阶序）。
+// 不持锁调 CreateRelease（其内部自持 s.mu，Go mutex 不可重入会自死锁），PromotedFrom 标记单独锁内写。
+func (s *Store) PromoteRelease(ctx context.Context, srcReleaseID, targetEnvID string) (devops.Release, error) {
+	tid, err := tenantOrErr(ctx)
+	if err != nil {
+		return devops.Release{}, err
+	}
+	s.mu.Lock()
+	src, ok := s.releases[srcReleaseID]
+	s.mu.Unlock()
+	if !ok || src.TenantID != tid {
+		return devops.Release{}, fmt.Errorf("发布不存在: %s", srcReleaseID)
+	}
+	rel, err := s.CreateRelease(ctx, devops.ReleaseInput{
+		AppID:     src.AppID,
+		EnvID:     targetEnvID,
+		ImageID:   src.ImageID,
+		Strategy:  src.Strategy,
+		CreatedBy: src.CreatedBy,
+	})
+	if err != nil {
+		return devops.Release{}, err
+	}
+	s.mu.Lock()
+	rel.PromotedFrom = srcReleaseID
+	s.releases[rel.ID] = rel
+	s.mu.Unlock()
+	return rel, nil
+}
+
 // ---------- 辅助 ----------
 
 func sha256hex(s string) string {

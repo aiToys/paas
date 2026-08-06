@@ -428,6 +428,19 @@ console-user 弃用 localStorage 明文 API Key 裸奔模式，改走密码登�
 - **构建验证**：`go test ./...` 全绿 + `pnpm build` 三套前端通过。
 - **留后续**：ResolveChannels Clone（handler 锁外读 Status 时）、observability/maas Mutex→RWMutex（读热点）、identity 审计可在 security.AuditLog 加 ResourceType 常量枚举、airsync 循环内 defer fd 回收。
 
+### DevOps 发布体验改造（指挥台 + 发布流水线 + 一键发布，2026-08-06）
+
+DevOps 中心从「只读监控大屏」升级为「CI/CD 指挥台」，补齐发布流水线逐级提升，发布点击数从 6+ 降到 2：
+
+- **Environment 发布流水线阶序**：`Environment.PromoteOrder int`（test=10/prod=20 默认，0=不参与）；`DefaultPromoteOrder(type)`；`Repository.NextPromoteTarget(ctx, envID)` 返同租户内 order 严格大于当前的最小阶序环境（同 order 取 id 最小，确定性），最高阶返 `ErrNoPromoteTarget`。`EnvPromoter` 依赖倒置接口供 devops 注入。migration `0009_env_promote_order`（ADD COLUMN + 存量按 type 回填，幂等）。environment handler Create 在未指定 order 时按 type 填默认（开箱即用）。
+- **Release 晋升链**：`Release.PromotedFrom` 字段（非空=由 promote 产生，追溯晋升链）；`Repository.PromoteRelease(ctx, srcID, targetEnvID)` 复用 CreateRelease 编排（找/建基线 Workload + 回滚指针）+ 标 PromotedFrom；migration `0010_release_promoted_from`。**不引入 Pipeline 实体**（YAGNI，promote = 新环境产生新 Release + 来源标记）。
+- **promote 端点**：`POST /api/releases/{id}/promote`（serveReleaseAction 加 promote 分支；handler 算 target env + 目标 prod 走 `allowProd` prod:write 校验 + 调 store.PromoteRelease）。OpenAPI 登记。
+- **DevOps 中心指挥台化**（`console-user/DevOps.vue` 重写）：① 新增**流水线 tab（默认）**——按 app 分组渲染 env 阶序横向矩阵（`[test:v1.2✓] → [staging:v1.1✓] → [prod:v1.0] 提升→`），每格最新 succeeded release + 「提升」按钮（末列无）；② 构建行加「重新构建」（用原 repoId 调 POST）；③ 发布行加「提升」+ 应用列可点跳详情；④ releases 轮询（10s，原仅 buildruns 5s）；⑤ 回滚/提升按**目标 env.type 显式 isProd**（覆盖顶栏 scope，防不一致削弱防护）。
+- **一键发布 + 多环境勾选**：① `AppBuilds` 构建成功行加「发布」按钮（复用镜像 tab `emit('pick')` 机制，父切发布 tab 预选镜像，构建→发布断链修复）；② `AppReleases` 创建弹窗环境改 `multiple` 多选，`create()` 循环 POST + Promise.allSettled 聚合（部分成功列出失败 env），含 prod 勾选时 `confirmDangerous(isProd:true)`。
+- **统一契约**：回滚按钮统一 `status==='succeeded' && previousImageId`；AppReleases 回滚改显式 isProd；envStore Env 接口加 promoteOrder。
+- **e2e 验证**：环境 promoteOrder 回填（test=10/prod=20）+ promote 端点路由就绪 + OpenAPI 登记 + 核心 200。
+- **留后续**：promote 跨级跳迁（test→prod 直达，现逐级）、蓝绿/金丝雀真实编排（耦合泳道归服务治理）、Pipeline 独立实体 + 审批门禁/自动晋升条件、registry catalog 镜像直接发布（仓库名无 appID 反查）。
+
 
 ### DevOps CI/CD（代码->构建->镜像->发布->回滚）
 

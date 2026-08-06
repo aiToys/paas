@@ -398,6 +398,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	}
 	devopsHandler := devops.NewHandler(stores.DevOpsRepos, stores.DevOpsBuilds, stores.DevOpsImages, stores.DevOpsReleases,
 		devops.WithEnvResolver(stores.Environment),
+		devops.WithEnvPromoter(stores.Environment),
 		devops.WithUserIDFrom(gateway.UserIDFrom),
 		devops.WithGiteaClient(giteaClient),
 		devops.WithRegistryClient(registryClient),
@@ -654,6 +655,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/applications/{id}/repositories/{rid}/file", apiroute.Tags("DevOps"), apiroute.Summary("内置仓库文件内容（?path=）"), apiroute.Perm("repository:read"))
 	reg.Operation("GET", "/api/releases", apiroute.Tags("DevOps"), apiroute.Summary("跨应用发布列表"), apiroute.Perm("release:read"), apiroute.WithResp([]devops.Release{}))
 	reg.Operation("POST", "/api/releases/{id}/rollback", apiroute.Tags("DevOps"), apiroute.Summary("回滚发布"), apiroute.Perm("release:write"), apiroute.WithResp(devops.Release{}))
+	reg.Operation("POST", "/api/releases/{id}/promote", apiroute.Tags("DevOps"), apiroute.Summary("提升到下一阶环境（发布流水线）"), apiroute.Perm("release:write"), apiroute.WithResp(devops.Release{}))
 	// 镜像库实时视图（registry v2）
 	reg.Operation("GET", "/api/registry/repositories", apiroute.Tags("DevOps"), apiroute.Summary("镜像仓库 catalog（registry v2 实时）"), apiroute.Perm("image:read"), apiroute.WithResp([]string{}))
 	reg.Operation("GET", "/api/registry/tags", apiroute.Tags("DevOps"), apiroute.Summary("镜像 tag+digest（?repository=）"), apiroute.Perm("image:read"))
