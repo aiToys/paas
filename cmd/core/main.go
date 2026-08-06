@@ -90,6 +90,12 @@ func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter) error {
 	if closeDB != nil {
 		defer closeDB() // 进程退出释放连接池
 	}
+	// 延迟注入 AppConfigLookup 到 WorkloadReconciler（startManager 先于 stores 构造）。
+	// 让"绑定资源"（数据服务连接 + 模型 LLM 凭证）经 reconciler 真正注入 Pod env 生效。
+	// 启动初期无 CRD 事件，赋值与首条 reconcile 间无实际并发（best-effort + 单 worker）。
+	if appliers.wlReconciler != nil {
+		appliers.wlReconciler.Configs = appConfigLookup{repo: stores.AppConfig}
+	}
 	// CredentialResolver 桥接 security store：注入 MaaS 插件解析平台级凭证。
 	// security.SecretStore 接口含 Resolve（PG/memory 透明）。
 	deps := realCoreDeps{gw: gw, resolver: secretResolver{store: stores.Security.(security.SecretStore)}}
@@ -242,10 +248,12 @@ func resolveJWTSecret() string {
 // 模型目录平台共享（不按租户过滤）；应用/治理/配置等业务模块按租户隔离。
 func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, appliers k8sAppliers) *http.Server {
 	apiKey := resolveAPIKey()
-	// P3-2 计量采集：推理 token 用量回写 billing（meter.OnTokens 钩子，IncUsage 按 tenant 计）。
-	meter.OnTokens = func(tenantID string, tokens int) {
+	// P3-2 计量采集：推理 token 用量回写 billing（meter.OnTokens 钩子）。
+	// appID 来自应用级 Key（强制归因到应用）；user 是 agent 软标签（仅日志，不入 billing 聚合）。
+	meter.OnTokens = func(tenantID, appID, user string, tokens int) {
 		if tenantID != "" {
 			ctx := tenant.WithTenant(context.Background(), tenantID)
+			ctx = gateway.WithApp(ctx, appID)
 			_, _ = stores.Billing.IncUsage(ctx, billing.ResTokens, tokens)
 		}
 	}
@@ -276,6 +284,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		rs, _ := gateway.RolesFrom(r.Context())
 		return rs
 	}
+	// 注入审计记录器：identity 写操作（签发/吊销密钥、增删用户/租户）记 security.AuditLog
+	// （adapter 桥接 + 注入 ctx tenant），与 auth 登录审计同源，满足合规「审计只增不删」。
+	idmHandler = idmHandler.WithAudit(&identityAuditAdapter{store: stores.Security})
 	adminGuard := func(h http.Handler) http.Handler {
 		// 平台级管理（租户/用户/API Key/dashboard 跨租户聚合）需 super_admin 角色，
 		// 防 tenant-admin 越权枚举全部租户与用户。auth 先解析身份注入 roles，再校验超管。
@@ -325,7 +336,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		return err
 	}
 	// 绑定数据服务时自动注入连接信息到 appconfig（DATABASE_URL/REDIS_URL/...），工作负载重启即生效。
-	appHandler.Binder = &dsBindingInjector{dsRepo: stores.DataService, cfgRepo: stores.AppConfig, appRepo: stores.Application}
+	appHandler.Binder = &dsBindingInjector{dsRepo: stores.DataService, cfgRepo: stores.AppConfig, appRepo: stores.Application, idb: stores.Identity}
 	// 删除应用时级联清理关联资源（best-effort）：工作负载（含 K8s Deployment/Job）+ 应用配置（env/Secret）。
 	// devops 历史记录（仓库/构建/镜像/发布）保留作历史归档，不随应用删除。
 	appHandler.CascadeDelete = func(ctx context.Context, appID string) error {
@@ -438,9 +449,21 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	billingHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
 	// 数据服务（资源中心：DB/缓存/MQ/存储/向量/搜索，通用领域 + Kind 区分）。
-	// 注入 environment store（prod 写校验）；权限 dataservice:read/write。
-	dsHandler := dataservice.NewHandler(stores.DataService, dataservice.WithEnvResolver(stores.Environment))
+	// 注入 environment store（prod 写校验）+ K8s restarter（实例滚动重启，集群外 nil 降级）+
+	// 引擎目录（Create 按 engineID 解析）；权限 dataservice:read/write。
+	dsOpts := []dataservice.HandlerOpt{
+		dataservice.WithEnvResolver(stores.Environment),
+		dataservice.WithEngineRepo(stores.Engine),
+	}
+	if appliers.dsRestarter != nil { // typed nil 防御：*DSRestarter(nil) 包成接口后 != nil
+		dsOpts = append(dsOpts, dataservice.WithRestarter(appliers.dsRestarter))
+	}
+	dsHandler := dataservice.NewHandler(stores.DataService, dsOpts...)
 	dsHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+
+	// 引擎目录 handler：/api/engines（用户 enabled 列表）+ /api/admin/engines（super_admin CRUD）。
+	engineHandler := dataservice.NewEngineHandler(stores.Engine)
+	engineHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
 	// composite：按 /api/applications/{id}/{sub} 的 sub 段分发到对应 handler。
 	// workloads -> 工作负载；repositories/buildruns/images/releases -> DevOps；其余（bindings 等）-> 应用。
@@ -509,9 +532,13 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	mux.Handle("/api/billing/usage", auth(billingHandler))
 	mux.Handle("/api/billing/records", auth(billingHandler))
 	mux.Handle("/api/billing/records/", auth(billingHandler))
-	// 数据服务（资源中心 CRUD + meta）
+	// 数据服务（资源中心 CRUD + meta + 实例管理）
 	mux.Handle("/api/dataservices", auth(dsHandler))
 	mux.Handle("/api/dataservices/", auth(dsHandler))
+	// 引擎目录：用户 enabled 列表（创建表单用，auth 即可）+ admin CRUD（adminGuard super_admin）
+	mux.Handle("/api/engines", auth(engineHandler))
+	mux.Handle("/api/admin/engines", adminGuard(engineHandler))
+	mux.Handle("/api/admin/engines/", adminGuard(engineHandler))
 
 	// 模型管理（平台级，super_admin 由 adminGuard 兜底）：模型/通道 CRUD + 写后增量刷新 gateway 路由表。
 	maasHandler := maas.NewHandler(stores.MaaS, gw, secretResolver{store: stores.Security.(security.SecretStore)})
@@ -688,6 +715,17 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/dataservices/{id}", apiroute.Tags("数据服务"), apiroute.Summary("数据服务详情"), apiroute.Perm("dataservice:read"), apiroute.WithResp(dataservice.DataService{}))
 	reg.Operation("PUT", "/api/dataservices/{id}", apiroute.Tags("数据服务"), apiroute.Summary("更新数据服务"), apiroute.Perm("dataservice:write"), apiroute.WithReqBody(dataservice.DataService{}), apiroute.WithResp(dataservice.DataService{}))
 	reg.Operation("DELETE", "/api/dataservices/{id}", apiroute.Tags("数据服务"), apiroute.Summary("删除数据服务"), apiroute.Perm("dataservice:write"))
+	reg.Operation("POST", "/api/dataservices/{id}/start", apiroute.Tags("数据服务"), apiroute.Summary("启动实例（replicas→1）"), apiroute.Perm("dataservice:write"), apiroute.WithResp(dataservice.DataService{}))
+	reg.Operation("POST", "/api/dataservices/{id}/stop", apiroute.Tags("数据服务"), apiroute.Summary("停止实例（replicas→0，省资源）"), apiroute.Perm("dataservice:write"), apiroute.WithResp(dataservice.DataService{}))
+	reg.Operation("POST", "/api/dataservices/{id}/restart", apiroute.Tags("数据服务"), apiroute.Summary("滚动重启实例"), apiroute.Perm("dataservice:write"))
+	reg.Operation("PUT", "/api/dataservices/{id}/scale", apiroute.Tags("数据服务"), apiroute.Summary("扩缩容（replicas/cpu/memory/storageGb）"), apiroute.Perm("dataservice:write"), apiroute.WithResp(dataservice.DataService{}))
+	reg.Operation("PUT", "/api/dataservices/{id}/upgrade", apiroute.Tags("数据服务"), apiroute.Summary("版本升级（image）"), apiroute.Perm("dataservice:write"), apiroute.WithResp(dataservice.DataService{}))
+	// 引擎目录（平台级 admin 配置 + 用户 enabled 列表）
+	reg.Operation("GET", "/api/engines", apiroute.Tags("引擎目录"), apiroute.Summary("enabled 引擎列表（创建表单）"), apiroute.WithResp([]dataservice.Engine{}))
+	reg.Operation("GET", "/api/admin/engines", apiroute.Tags("引擎目录"), apiroute.Summary("全部引擎列表（admin）"), apiroute.Perm("super_admin"), apiroute.WithResp([]dataservice.Engine{}))
+	reg.Operation("POST", "/api/admin/engines", apiroute.Tags("引擎目录"), apiroute.Summary("创建引擎"), apiroute.Perm("super_admin"), apiroute.WithReqBody(dataservice.Engine{}), apiroute.WithResp(dataservice.Engine{}))
+	reg.Operation("PUT", "/api/admin/engines/{id}", apiroute.Tags("引擎目录"), apiroute.Summary("更新引擎"), apiroute.Perm("super_admin"), apiroute.WithReqBody(dataservice.Engine{}), apiroute.WithResp(dataservice.Engine{}))
+	reg.Operation("DELETE", "/api/admin/engines/{id}", apiroute.Tags("引擎目录"), apiroute.Summary("删除引擎"), apiroute.Perm("super_admin"))
 	// 推理（流式）
 	reg.Operation("POST", "/v1/chat/completions", apiroute.Tags("MaaS"), apiroute.Summary("流式推理（OpenAI 兼容 SSE）"), apiroute.Perm("model:infer"), apiroute.WithReqBody(provider.ChatRequest{}))
 

@@ -1,11 +1,11 @@
 package appconfig
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 
+	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/httputil"
 )
 
@@ -19,9 +19,7 @@ const (
 
 // EnvTypeResolver 解析环境类型（prod|test），用于生产写权限校验。
 // 依赖倒置：appconfig 不直接 import environment，由 cmd/core 注入。
-type EnvTypeResolver interface {
-	EnvType(ctx context.Context, envID string) (string, error)
-}
+type EnvTypeResolver = environment.EnvTypeResolver
 
 // Handler 暴露应用配置 REST API。
 //
@@ -130,7 +128,7 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request, appID 
 			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
-		httputil.WriteJSON(w, http.StatusCreated, saved)
+		httputil.WriteDataCreated(w, saved)
 		return
 	}
 	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -169,5 +167,5 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request, appID, cfgID
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
-	httputil.WriteJSON(w, http.StatusOK, map[string]string{"deleted": cfgID})
+	httputil.WriteData(w, map[string]string{"deleted": cfgID})
 }

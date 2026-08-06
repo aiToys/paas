@@ -1,29 +1,25 @@
 {
-  "name": "vue-admin",
+  "name": "paas-console-admin",
   "version": "0.1.0",
-  "description": "Vue 3 + Element Plus 企业级后台管理前端基座，开箱即用的权限/HTTP/路由/菜单基础设施",
+  "description": "PaaS 平台后台管理控制台（基于 Vue 3 + Element Plus）",
   "type": "module",
-  "license": "MIT",
-  "author": "如水 <rushui@qq.com>",
-  "homepage": "https://github.com/vue-admin/vue-admin",
+  "license": "Apache-2.0",
+  "author": "aitoys",
+  "homepage": "https://github.com/aitoys/paas",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vue-admin/vue-admin.git"
+    "url": "git+https://github.com/aitoys/paas.git"
   },
   "bugs": {
-    "url": "https://github.com/vue-admin/vue-admin/issues",
-    "email": "rushui@qq.com"
+    "url": "https://github.com/aitoys/paas/issues"
   },
   "keywords": [
+    "paas",
     "vue3",
     "vite",
     "typescript",
     "element-plus",
     "admin",
-    "admin-dashboard",
-    "rbac",
-    "starter",
-    "boilerplate",
     "pinia",
     "vue-router"
   ],
@@ -49,9 +45,6 @@
     "release:dry": "git-cliff --unreleased --strip header",
     "smoke": "playwright test",
     "smoke:ui": "playwright test --ui",
-    "docs:dev": "vitepress dev docs-site",
-    "docs:build": "vitepress build docs-site",
-    "docs:preview": "vitepress preview docs-site",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "gen:module": "node scripts/gen-module.mjs",
@@ -103,7 +96,6 @@
     "unplugin-auto-import": "^21.0.0",
     "unplugin-vue-components": "^32.1.0",
     "vite": "^7.3.6",
-    "vitepress": "^1.6.4",
     "vitest": "^3.2.6",
     "vue-tsc": "^2.2.12"
   },

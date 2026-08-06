@@ -1,6 +1,10 @@
 package gateway
 
-import "context"
+import (
+	"context"
+
+	"github.com/aitoys/paas/pkg/attribution"
+)
 
 // rolesKey / userIDKey 是 ctx 中身份信息的键。
 // 由 APIKeyAuth 注入，供 Require 与下游 handler 读取。
@@ -27,4 +31,15 @@ func WithUserID(ctx context.Context, id string) context.Context {
 func UserIDFrom(ctx context.Context) string {
 	v, _ := ctx.Value(userIDKey{}).(string)
 	return v
+}
+
+// WithApp 把应用 ID 注入 ctx（应用级 Key 鉴权后调用）。
+// 委托 pkg/attribution 共享实现，供 billing 消费（不破坏领域→基础设施分层）。
+func WithApp(ctx context.Context, appID string) context.Context {
+	return attribution.WithApp(ctx, appID)
+}
+
+// AppFrom 取出应用 ID（空 = 租户级 Key，用量归"未分配"桶）。
+func AppFrom(ctx context.Context) string {
+	return attribution.AppFrom(ctx)
 }

@@ -19,11 +19,17 @@ type MenuMeta struct {
 
 // staticMenus 返回 console-admin 业务菜单，按平台运维职责分组：
 //
-//	工作台 / 身份与权限 / 推理服务 / 资源总览 / 平台运维。
+//	工作台 / 身份与权限 / 推理服务 / 资源总览 / 平台治理 / 计费审计。
 //
-// 设计原则：菜单按「管理域」聚合（非散落顶级）；个人中心不入侧栏（ShowMenu:false），
-// 由右上角用户下拉入口（Header 已内置 router.push('/profile')）。
-// 子菜单 path 保持稳定（不随分组前缀化），前端跳转引用零牵连。
+// 设计原则：
+//   - 菜单按「管理域」聚合（非散落顶级）；同类资源按业务域二级分组避免臃肿。
+//   - 「资源总览」只含租户业务资源（应用运行态 + DevOps 链路）；横切配置归「平台治理」，
+//     财务合规归「计费审计」——三者语义不同，分顶级避免「资源」概念被滥用。
+//   - 图标全局唯一（EP PascalCase），同级同维度不复用，降低视觉歧义。
+//   - 个人中心不入侧栏（ShowMenu:false），由右上角用户下拉入口跳转。
+//   - 子菜单 path 保持稳定（不随分组前缀化），前端跳转引用零牵连。
+//   - 中间分组节点（如「应用运行态」）无 component，dynamic.ts 只注册叶子路由。
+//
 // 按角色过滤留后续（super_admin 可见全部，普通 admin 仅本租户相关）。
 func staticMenus() []Menu {
 	return []Menu{
@@ -55,7 +61,7 @@ func staticMenus() []Menu {
 					Path:      "/system/role",
 					Name:      "systemRole",
 					Component: "system/role/views/List",
-					Meta:      MenuMeta{Title: "角色管理", Icon: "UserFilled", ShowMenu: true},
+					Meta:      MenuMeta{Title: "角色管理", Icon: "Avatar", ShowMenu: true},
 				},
 				{
 					Path:      "/system/apikey",
@@ -75,7 +81,7 @@ func staticMenus() []Menu {
 					Path:      "/model",
 					Name:      "model",
 					Component: "model/views/List",
-					Meta:      MenuMeta{Title: "模型管理", Icon: "Cpu", ShowMenu: true},
+					Meta:      MenuMeta{Title: "模型管理", Icon: "MagicStick", ShowMenu: true},
 				},
 				{
 					// 模型详情（通道管理）：动态段路由，侧栏隐藏，由列表「通道」按钮跳入。
@@ -94,58 +100,84 @@ func staticMenus() []Menu {
 			},
 		},
 		{
-			// 资源总览：跨租户查看所有租户的应用/工作负载/数据服务（平台运维视角，super_admin）。
+			// 资源总览：跨租户查看所有租户的业务资源（super_admin 平台运维视角）。
+			// 只含业务资源（应用运行态 + DevOps 链路）；横切配置归「平台治理」，财务合规归「计费审计」。
 			Path: "/resources",
 			Name: "resources",
 			Meta: MenuMeta{Title: "资源总览", Icon: "Grid", ShowMenu: true},
 			Children: []Menu{
 				{
-					Path:      "/resources/applications",
-					Name:      "resApplications",
-					Component: "resources/views/Applications",
-					Meta:      MenuMeta{Title: "应用", Icon: "Menu", ShowMenu: true},
+					// 应用运行态：应用及其运行形态（工作负载/数据服务/环境）。
+					Path: "/resources/runtime",
+					Name: "resRuntime",
+					Meta: MenuMeta{Title: "应用运行态", Icon: "Menu", ShowMenu: true},
+					Children: []Menu{
+						{
+							Path:      "/resources/applications",
+							Name:      "resApplications",
+							Component: "resources/views/Applications",
+							Meta:      MenuMeta{Title: "应用", Icon: "Files", ShowMenu: true},
+						},
+						{
+							Path:      "/resources/workloads",
+							Name:      "resWorkloads",
+							Component: "resources/views/Workloads",
+							Meta:      MenuMeta{Title: "工作负载", Icon: "Monitor", ShowMenu: true},
+						},
+						{
+							Path:      "/resources/dataservices",
+							Name:      "resDataservices",
+							Component: "resources/views/Dataservices",
+							Meta:      MenuMeta{Title: "数据服务", Icon: "Coin", ShowMenu: true},
+						},
+						{
+							Path:      "/resources/environments",
+							Name:      "resEnvironments",
+							Component: "resources/views/Environments",
+							Meta:      MenuMeta{Title: "环境", Icon: "Location", ShowMenu: true},
+						},
+					},
 				},
 				{
-					Path:      "/resources/workloads",
-					Name:      "resWorkloads",
-					Component: "resources/views/Workloads",
-					Meta:      MenuMeta{Title: "工作负载", Icon: "Odometer", ShowMenu: true},
+					// DevOps 链路：代码到上线的构建/镜像/发布产物。
+					Path: "/resources/cicd",
+					Name: "resCicd",
+					Meta: MenuMeta{Title: "DevOps 链路", Icon: "Ticket", ShowMenu: true},
+					Children: []Menu{
+						{
+							Path:      "/resources/buildruns",
+							Name:      "resBuildRuns",
+							Component: "resources/views/BuildRuns",
+							Meta:      MenuMeta{Title: "构建", Icon: "Tools", ShowMenu: true},
+						},
+						{
+							Path:      "/resources/images",
+							Name:      "resImages",
+							Component: "resources/views/Images",
+							Meta:      MenuMeta{Title: "镜像", Icon: "Box", ShowMenu: true},
+						},
+						{
+							Path:      "/resources/releases",
+							Name:      "resReleases",
+							Component: "resources/views/Releases",
+							Meta:      MenuMeta{Title: "发布", Icon: "Promotion", ShowMenu: true},
+						},
+					},
 				},
-				{
-					Path:      "/resources/dataservices",
-					Name:      "resDataservices",
-					Component: "resources/views/Dataservices",
-					Meta:      MenuMeta{Title: "数据服务", Icon: "Coin", ShowMenu: true},
-				},
-				{
-					Path:      "/resources/environments",
-					Name:      "resEnvironments",
-					Component: "resources/views/Environments",
-					Meta:      MenuMeta{Title: "环境", Icon: "Location", ShowMenu: true},
-				},
-				{
-					Path:      "/resources/buildruns",
-					Name:      "resBuildRuns",
-					Component: "resources/views/BuildRuns",
-					Meta:      MenuMeta{Title: "构建", Icon: "Tools", ShowMenu: true},
-				},
-				{
-					Path:      "/resources/images",
-					Name:      "resImages",
-					Component: "resources/views/Images",
-					Meta:      MenuMeta{Title: "镜像", Icon: "Box", ShowMenu: true},
-				},
-				{
-					Path:      "/resources/releases",
-					Name:      "resReleases",
-					Component: "resources/views/Releases",
-					Meta:      MenuMeta{Title: "发布", Icon: "Promotion", ShowMenu: true},
-				},
+			},
+		},
+		{
+			// 平台治理：横切基础设施配置（配置中心/服务治理/告警/密钥/引擎目录）。
+			// 与「资源总览」平级——这些是平台级配置而非租户业务资源。子菜单 path 保持稳定（前端零牵连）。
+			Path: "/govern",
+			Name: "govern",
+			Meta: MenuMeta{Title: "平台治理", Icon: "SetUp", ShowMenu: true},
+			Children: []Menu{
 				{
 					Path:      "/resources/namespaces",
 					Name:      "resNamespaces",
 					Component: "resources/views/Namespaces",
-					Meta:      MenuMeta{Title: "配置中心", Icon: "Folder", ShowMenu: true},
+					Meta:      MenuMeta{Title: "配置中心", Icon: "FolderOpened", ShowMenu: true},
 				},
 				{
 					Path:      "/resources/services",
@@ -163,14 +195,23 @@ func staticMenus() []Menu {
 					Path:      "/resources/secrets",
 					Name:      "resSecrets",
 					Component: "resources/views/Secrets",
-					Meta:      MenuMeta{Title: "密钥", Icon: "Key", ShowMenu: true},
+					Meta:      MenuMeta{Title: "密钥", Icon: "DocumentCopy", ShowMenu: true},
 				},
 				{
-					Path:      "/resources/audit-logs",
-					Name:      "resAuditLogs",
-					Component: "resources/views/AuditLogs",
-					Meta:      MenuMeta{Title: "审计日志", Icon: "Document", ShowMenu: true},
+					// 引擎目录：admin 配置数据服务引擎（managed/external-shared/dedicated），用户从 enabled 引擎创建实例。
+					Path:      "/resources/engines",
+					Name:      "resEngines",
+					Component: "engine/views/List",
+					Meta:      MenuMeta{Title: "引擎目录", Icon: "Coin", ShowMenu: true},
 				},
+			},
+		},
+		{
+			// 计费审计：配额/账单/审计日志（财务 + 合规）。独立顶级——非业务资源。
+			Path: "/billing",
+			Name: "billing",
+			Meta: MenuMeta{Title: "计费审计", Icon: "Wallet", ShowMenu: true},
+			Children: []Menu{
 				{
 					Path:      "/resources/quotas",
 					Name:      "resQuotas",
@@ -181,7 +222,13 @@ func staticMenus() []Menu {
 					Path:      "/resources/bills",
 					Name:      "resBills",
 					Component: "resources/views/Bills",
-					Meta:      MenuMeta{Title: "账单", Icon: "Wallet", ShowMenu: true},
+					Meta:      MenuMeta{Title: "账单", Icon: "CreditCard", ShowMenu: true},
+				},
+				{
+					Path:      "/resources/audit-logs",
+					Name:      "resAuditLogs",
+					Component: "resources/views/AuditLogs",
+					Meta:      MenuMeta{Title: "审计日志", Icon: "Document", ShowMenu: true},
 				},
 			},
 		},

@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -28,6 +29,9 @@ type Handler struct {
 	repo              Repository
 	hashPassword      HashPasswordFn
 	passwordValidator PasswordValidatorFn
+	// auditRec 审计记录器（依赖倒置，cmd/core 桥接 security.AuditStore）。未注入则不记审计。
+	// identity 写操作（签发/吊销密钥、增删用户/租户）属高敏感操作，必须进审计日志（合规：审计只增不删）。
+	auditRec AuditRecorder
 	// IsPlatformAdmin 判定调用者是否平台超管（main.go 注入 gateway.IsPlatformAdmin）。
 	// 平台超管可跨租户管理；普通 tenant-admin 仅限本租户（防越权）。
 	IsPlatformAdmin func(*http.Request) bool
@@ -38,8 +42,31 @@ type Handler struct {
 	CallerRoles  func(*http.Request) []string
 }
 
+// AuditRecorder 审计记录器（依赖倒置，避免 identity->security 反向依赖）。
+// cmd/core 桥接 security.AuditStore 实现注入；未注入则不记审计。
+type AuditRecorder interface {
+	Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error
+}
+
 // NewHandler 创建 identity 管理 handler。
 func NewHandler(repo Repository) *Handler { return &Handler{repo: repo} }
+
+// WithAudit 注入审计记录器（链式，可选）。
+func (h *Handler) WithAudit(a AuditRecorder) *Handler { h.auditRec = a; return h }
+
+// audit 写操作成功后记审计（best-effort，错误不影响主流程；actor 取调用者 UserID）。
+// tenant 取 ctx（操作上下文 = actor 所属租户）；超管跨租户操作且 ctx 无 tenant 时归 "platform"
+// （audit_logs.tenant_id NOT NULL）。
+func (h *Handler) audit(r *http.Request, action, resourceType, resourceID, detail string) {
+	if h.auditRec == nil {
+		return
+	}
+	tid, _ := tenant.TenantFrom(r.Context())
+	if tid == "" {
+		tid = "platform"
+	}
+	_ = h.auditRec.Record(r.Context(), tid, h.callerUserID(r), action, resourceType, resourceID, detail)
+}
 
 // HashPassword 设置密码哈希函数（main.go 注入 auth.HashPassword）。
 func (h *Handler) HashPassword(fn HashPasswordFn) *Handler { h.hashPassword = fn; return h }
@@ -144,6 +171,7 @@ func (h *Handler) CreateTenant(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteServiceError(w, http.StatusConflict, err)
 		return
 	}
+	h.audit(r, "create", "tenant", in.ID, "创建租户 "+in.Name)
 	httputil.WriteData(w, Tenant{ID: in.ID, Name: in.Name})
 }
 
@@ -165,6 +193,7 @@ func (h *Handler) DeleteTenant(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
+	h.audit(r, "delete", "tenant", id, "删除租户 "+id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -239,6 +268,7 @@ func (h *Handler) CreateUser(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteServiceError(w, http.StatusConflict, err)
 		return
 	}
+	h.audit(r, "create", "user", u.ID, "创建用户 "+u.ID)
 	u.PasswordHash = ""
 	httputil.WriteData(w, u)
 }
@@ -285,6 +315,7 @@ func (h *Handler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
+	h.audit(r, "update", "user", id, "更新用户 "+id)
 	httputil.WriteData(w, map[string]any{"id": id})
 }
 
@@ -306,6 +337,7 @@ func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
+	h.audit(r, "delete", "user", id, "删除用户 "+id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -343,6 +375,7 @@ type apiKeyInput struct {
 	ID       string   `json:"id"`
 	TenantID string   `json:"tenantId"`
 	UserID   string   `json:"userId"`
+	AppID    string   `json:"appId"` // 可选：绑定应用则用量归因到应用（模型推理计费）
 	Roles    []string `json:"roles"`
 }
 
@@ -359,6 +392,9 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		if uid := h.callerUserID(r); uid != "" {
 			in.UserID = uid
 		}
+		// 应用级 Key 只能由模型绑定流程在后端创建（归属天然正确）；
+		// 自助端点忽略前端传入的 appId，防越权绑定他人应用归因。
+		in.AppID = ""
 	}
 	if in.TenantID == "" || in.UserID == "" {
 		httputil.WriteError(w, http.StatusBadRequest, "tenantId/userId 必填")
@@ -374,12 +410,13 @@ func (h *Handler) CreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	key := "sk-" + randHex(20)
 	k := APIKey{
 		ID: in.ID, TenantID: in.TenantID, UserID: in.UserID,
-		Roles: in.Roles, Key: key, CreatedAt: time.Now(),
+		AppID: in.AppID, Roles: in.Roles, Key: key, CreatedAt: time.Now(),
 	}
 	if err := h.repo.CreateAPIKey(r.Context(), k); err != nil {
 		httputil.WriteServiceError(w, http.StatusConflict, err)
 		return
 	}
+	h.audit(r, "create", "api_key", k.ID, "签发 API 密钥 "+k.ID)
 	httputil.WriteData(w, k) // 创建时返明文一次
 }
 
@@ -398,6 +435,7 @@ func (h *Handler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
+	h.audit(r, "delete", "api_key", id, "吊销 API 密钥 "+id)
 	w.WriteHeader(http.StatusNoContent)
 }
 

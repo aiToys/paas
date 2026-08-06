@@ -163,6 +163,71 @@ func TestBuildConnectionDoesNotMutateInput(t *testing.T) {
 	_ = conn
 }
 
+func TestGenerateCredentialsLightEngines(t *testing.T) {
+	// qdrant/meilisearch 轻量引擎凭证（本轮新引擎，H1 替换 milvus/es）。
+	qc := dataservice.GenerateCredentials(dataservice.KindVector, "qdrant")
+	if qc["api_key"] == "" || len(qc["api_key"]) != 24 {
+		t.Fatalf("qdrant api_key 缺失或长度非 24: %v", qc)
+	}
+	mc := dataservice.GenerateCredentials(dataservice.KindSearch, "meilisearch")
+	if mc["master_key"] == "" || len(mc["master_key"]) != 24 {
+		t.Fatalf("meilisearch master_key 缺失或长度非 24: %v", mc)
+	}
+}
+
+func TestEnginePortLightEngines(t *testing.T) {
+	if got := dataservice.EnginePort(dataservice.KindVector, "qdrant"); got != 6333 {
+		t.Fatalf("qdrant port = %d want 6333", got)
+	}
+	if got := dataservice.EnginePort(dataservice.KindSearch, "meilisearch"); got != 7700 {
+		t.Fatalf("meilisearch port = %d want 7700", got)
+	}
+}
+
+func TestBuildConnectionLightEngines(t *testing.T) {
+	// qdrant：uri 不含凭证（客户端用 header），api_key 独立字段。
+	qc := dataservice.GenerateCredentials(dataservice.KindVector, "qdrant")
+	conn := dataservice.BuildConnection("v", dataservice.KindVector, "qdrant", "paas", map[string]string{"engine": "qdrant", "dimension": "1536"}, qc)
+	if conn["uri"] != "http://v.paas.svc.cluster.local:6333" {
+		t.Fatalf("qdrant uri malformed: %s", conn["uri"])
+	}
+	if conn["api_key"] != qc["api_key"] {
+		t.Fatalf("qdrant api_key not propagated")
+	}
+	// meilisearch：uri 不含凭证，master_key 独立字段。
+	mc := dataservice.GenerateCredentials(dataservice.KindSearch, "meilisearch")
+	connM := dataservice.BuildConnection("s", dataservice.KindSearch, "meilisearch", "paas", map[string]string{"engine": "meilisearch"}, mc)
+	if connM["uri"] != "http://s.paas.svc.cluster.local:7700" {
+		t.Fatalf("meilisearch uri malformed: %s", connM["uri"])
+	}
+	if connM["master_key"] != mc["master_key"] {
+		t.Fatalf("meilisearch master_key not propagated")
+	}
+}
+
+func TestMaskConnectionLightEngines(t *testing.T) {
+	// api_key/master_key 应掩码；uri 一律掩码（maskKeys 保守策略，vector/search uri 虽无凭证也掩码，
+	// 用户从独立 host/port 字段拼接即可）。
+	conn := map[string]string{
+		"uri":        "http://v.paas.svc.cluster.local:6333",
+		"api_key":    "ak-secret",
+		"master_key": "mk-secret",
+		"host":       "v.paas.svc.cluster.local",
+		"port":       "6333",
+	}
+	m := dataservice.MaskConnection(conn)
+	if m["api_key"] != dataservice.SecretMask || m["master_key"] != dataservice.SecretMask {
+		t.Fatalf("light engine keys not masked: %v", m)
+	}
+	if m["uri"] != dataservice.SecretMask {
+		t.Fatalf("uri 应一律掩码（保守策略）: %v", m)
+	}
+	// host/port 非敏感，不掩码（用户据此拼接访问地址）
+	if m["host"] != "v.paas.svc.cluster.local" || m["port"] != "6333" {
+		t.Fatalf("host/port 不应掩码: %v", m)
+	}
+}
+
 func TestMaskConnection(t *testing.T) {
 	conn := map[string]string{ //nolint:gosec // G101 误报：测试 mock URL/凭据占位，非真实凭据
 		"host": "h", "port": "3306", "user": "u",

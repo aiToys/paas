@@ -11,6 +11,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/aitoys/paas/internal/workload"
+	"github.com/aitoys/paas/pkg/labels"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
@@ -211,7 +212,7 @@ func (r *K8sStatusReader) PodLogs(ctx context.Context, workloadID, podName strin
 	if err != nil {
 		return nil, fmt.Errorf("Pod 不存在: %s", podName)
 	}
-	if pod.Labels["paas.aitoys/tenant"] != tid || pod.Labels["paas.aitoys/workload"] != workloadID {
+	if pod.Labels[labels.KeyTenant] != tid || pod.Labels[labels.KeyWorkload] != workloadID {
 		return nil, fmt.Errorf("Pod 不存在: %s", podName)
 	}
 	opts := &corev1.PodLogOptions{

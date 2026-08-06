@@ -2,7 +2,7 @@
 // 工作负载视图：跨应用列表，按类型分 Tab（服务/Job/CronJob）。
 // 数据来自 /api/workloads?type=；扩缩容 PUT、删除 DELETE。换 Key（租户）自动重载。
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import EmptyState from '@/components/EmptyState.vue'
@@ -27,7 +27,13 @@ interface Workload {
 const props = defineProps<{ type?: string }>()
 
 const route = useRoute()
+const router = useRouter()
 const envStore = useEnvStore()
+
+// 跳转归属应用详情（工作负载→应用 反向导航）。
+function goApp(appId: string) {
+  if (appId) router.push(`/applications/${appId}`)
+}
 
 const tabs = [
   { key: 'service', label: '服务', icon: 'server', desc: '长驻工作负载（Deployment 语义）' },
@@ -52,6 +58,11 @@ watch(
 const activeEnv = computed(() => envStore.currentEnvId)
 const items = ref<Workload[]>([])
 const loading = ref(true)
+// 应用上下文过滤（从应用详情「部署 tab」跳来带 ?app=）：只显示该应用工作负载，保留上下文。
+const appFilter = computed(() => (route.query.app as string) || '')
+const filteredItems = computed(() =>
+  appFilter.value ? items.value.filter((w) => w.appId === appFilter.value) : items.value,
+)
 const scaling = ref<string>('') // 正在扩缩容的 id
 
 // statusMeta 仅覆盖已知枚举值；后端返回空串/未知状态时必须兜底，否则
@@ -380,14 +391,14 @@ onUnmounted(() => {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="w in items" :key="w.id">
+          <tr v-for="w in filteredItems" :key="w.id">
             <td>
               <div class="name-cell">
                 <span class="name">{{ w.name }}</span>
                 <span class="id mono">{{ w.id }}</span>
               </div>
             </td>
-            <td class="mono app-id">{{ w.appId }}</td>
+            <td class="mono app-id"><a class="link" @click="goApp(w.appId)">{{ w.appId }}</a></td>
             <td class="env-cell">{{ envName(w.envId) }}</td>
             <td class="mono img">{{ w.image }}</td>
             <td v-if="activeType === 'cronjob'" class="mono sched">{{ w.schedule }}</td>
@@ -695,6 +706,13 @@ onUnmounted(() => {
 .app-id,
 .img {
   color: var(--text-dim);
+}
+.app-id .link {
+  color: var(--brand);
+  cursor: pointer;
+}
+.app-id .link:hover {
+  text-decoration: underline;
 }
 .sched {
   color: var(--brand);

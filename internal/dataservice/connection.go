@@ -13,13 +13,15 @@ const SecretMask = "••••••" //nolint:gosec // G101 误报：固定�
 const DefaultNamespace = "paas"
 
 // maskKeys 是连接信息中需要掩码的 key。
-// password/secretKey/token 是凭证；uri 含 user:password@ 整串掩码（list/detail 不泄漏连接串明文）。
+// password/secretKey/token/api_key/master_key 是凭证；uri 含 user:password@ 整串掩码（list/detail 不泄漏连接串明文）。
 // endpoint（http://host:port，无凭证）/host/port/user/database/accessKey 不掩码。
 var maskKeys = map[string]bool{
-	"password":  true,
-	"secretKey": true,
-	"token":     true,
-	"uri":       true,
+	"password":   true,
+	"secretKey":  true,
+	"token":      true,
+	"api_key":    true,
+	"master_key": true,
+	"uri":        true,
 }
 
 const randLen = 24
@@ -69,12 +71,19 @@ func GenerateCredentials(kind, engine string) map[string]string {
 			"accessKey": "minio",
 			"secretKey": randString(randLen),
 		}
+	case KindVector:
+		// Qdrant：API key 鉴权（Pod 启动配 QDRANT__SERVICE_API_KEY），客户端 header x-api-key。
+		return map[string]string{"api_key": randString(randLen)}
+	case KindSearch:
+		// Meilisearch：master key 鉴权（Pod 启动配 MEILI_MASTER_KEY），客户端 header Authorization。
+		return map[string]string{"master_key": randString(randLen)}
 	}
 	return map[string]string{}
 }
 
 // EnginePort 返回 Kind+Engine 对应默认端口（未知返 0）。
 // mysql=3306 / postgres=5432 / redis=6379 / nats=4222 / minio=9000（S3 API；console 9001 仅 Pod 内不暴露）。
+// qdrant=6333（HTTP/REST；gRPC 6334 仅 Pod 内） / meilisearch=7700。
 func EnginePort(kind, engine string) int32 {
 	switch kind {
 	case KindDB:
@@ -88,6 +97,10 @@ func EnginePort(kind, engine string) int32 {
 		return 4222 // nats
 	case KindStorage:
 		return 9000
+	case KindVector:
+		return 6333 // qdrant HTTP/REST（同端口 6333，gRPC 6334 仅 Pod 内）
+	case KindSearch:
+		return 7700 // meilisearch HTTP
 	}
 	return 0
 }
@@ -134,6 +147,12 @@ func BuildConnection(name, kind, engine, namespace string, spec, credentials map
 		conn["uri"] = "nats://" + conn["token"] + "@" + host + ":" + portStr
 	case KindStorage:
 		conn["endpoint"] = "http://" + host + ":" + portStr
+	case KindVector:
+		// Qdrant：uri 不含凭证（客户端用 header x-api-key: <api_key>），api_key 独立字段（mask）。
+		conn["uri"] = "http://" + host + ":" + portStr
+	case KindSearch:
+		// Meilisearch：uri 不含凭证（客户端用 header Authorization: Bearer <master_key>），master_key 独立字段（mask）。
+		conn["uri"] = "http://" + host + ":" + portStr
 	}
 	return conn
 }

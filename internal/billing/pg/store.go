@@ -37,6 +37,7 @@ import (
 	"github.com/aitoys/paas/internal/billing"
 	"github.com/aitoys/paas/internal/billing/memory"
 	storagepg "github.com/aitoys/paas/internal/storage/pg"
+	"github.com/aitoys/paas/pkg/attribution"
 )
 
 // Store 实现 billing.Repository（QuotaStore + UsageStore + BillStore），单 Store 避免重名。
@@ -51,7 +52,7 @@ func NewStore(db *storagepg.DB) *Store { return &Store{db: db} }
 // limits/counts/items 列读取为 []byte，由对应 scan 函数转 nil 安全的 map/slice。
 const (
 	quotaCols  = `tenant_id, limits, updated_at`
-	usageCols  = `tenant_id, counts, updated_at`
+	usageCols  = `tenant_id, counts, by_app, updated_at`
 	recordCols = `id, tenant_id, period, items, total, status, created_at, paid_at`
 )
 
@@ -77,6 +78,29 @@ func unmarshalIntMap(raw []byte) map[string]int {
 	}
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return map[string]int{} // 容错：单行坏数据不阻塞整个 List
+	}
+	return m
+}
+
+// marshalByApp 把应用维度归因 map（appID → resource → 用量）序列化；nil → '{}'。
+func marshalByApp(m map[string]map[string]int) ([]byte, error) {
+	if m == nil {
+		return []byte("{}"), nil
+	}
+	return json.Marshal(m)
+}
+
+// unmarshalByApp 反序列化为两层 map；空/null/无效 → nil（IncUsage 按需创建）。
+func unmarshalByApp(raw []byte) map[string]map[string]int {
+	if len(raw) == 0 || string(raw) == "null" || string(raw) == "{}" {
+		return nil
+	}
+	var m map[string]map[string]int
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil
+	}
+	if len(m) == 0 {
+		return nil
 	}
 	return m
 }
@@ -116,11 +140,12 @@ func scanQuota(r storagepg.RowScanner, q *billing.ResourceQuota) error {
 }
 
 func scanUsage(r storagepg.RowScanner, u *billing.ResourceUsage) error {
-	var countsRaw []byte
-	if err := r.Scan(&u.TenantID, &countsRaw, &u.UpdatedAt); err != nil {
+	var countsRaw, byAppRaw []byte
+	if err := r.Scan(&u.TenantID, &countsRaw, &byAppRaw, &u.UpdatedAt); err != nil {
 		return err
 	}
 	u.Counts = unmarshalIntMap(countsRaw)
+	u.ByApp = unmarshalByApp(byAppRaw)
 	return nil
 }
 
@@ -234,14 +259,14 @@ func (s *Store) IncUsage(ctx context.Context, resource string, delta int) (billi
 	defer func() { _ = tx.Rollback(ctx) }()
 	// 预占行（首次无 usage 行）。
 	if _, err = tx.Exec(ctx,
-		`INSERT INTO billing_usages (tenant_id, counts, updated_at) VALUES ($1, '{}', now()) ON CONFLICT (tenant_id) DO NOTHING`,
+		`INSERT INTO billing_usages (tenant_id, counts, by_app, updated_at) VALUES ($1, '{}', '{}', now()) ON CONFLICT (tenant_id) DO NOTHING`,
 		tid); err != nil {
 		return billing.ResourceUsage{}, err
 	}
 	// 行锁串行化同租户并发（与 CheckAndInc 同款，保证读-改-写原子）。
-	var countsRaw []byte
+	var countsRaw, byAppRaw []byte
 	if err = tx.QueryRow(ctx,
-		`SELECT counts FROM billing_usages WHERE tenant_id=$1 FOR UPDATE`, tid).Scan(&countsRaw); err != nil {
+		`SELECT counts, by_app FROM billing_usages WHERE tenant_id=$1 FOR UPDATE`, tid).Scan(&countsRaw, &byAppRaw); err != nil {
 		return billing.ResourceUsage{}, err
 	}
 	counts := unmarshalIntMap(countsRaw)
@@ -249,14 +274,35 @@ func (s *Store) IncUsage(ctx context.Context, resource string, delta int) (billi
 	if counts[resource] < 0 {
 		counts[resource] = 0 // 夹紧负值，与内存版语义一致，防配额检查误判绕过
 	}
+	// 应用维度归因：应用级 Key 调用时 appID 非空，ByApp[appID][resource] 同步递增。
+	byApp := unmarshalByApp(byAppRaw)
+	if appID := attribution.AppFrom(ctx); appID != "" {
+		if byApp == nil {
+			byApp = map[string]map[string]int{}
+		}
+		resMap, ok := byApp[appID]
+		if !ok {
+			resMap = map[string]int{}
+			byApp[appID] = resMap
+		}
+		a := resMap[resource] + delta
+		if a < 0 {
+			a = 0
+		}
+		resMap[resource] = a
+	}
 	countsBytes, err := marshalIntMap(counts)
+	if err != nil {
+		return billing.ResourceUsage{}, err
+	}
+	byAppBytes, err := marshalByApp(byApp)
 	if err != nil {
 		return billing.ResourceUsage{}, err
 	}
 	var u billing.ResourceUsage
 	row := tx.QueryRow(ctx,
-		`UPDATE billing_usages SET counts=$2, updated_at=now() WHERE tenant_id=$1 RETURNING `+usageCols,
-		tid, countsBytes)
+		`UPDATE billing_usages SET counts=$2, by_app=$3, updated_at=now() WHERE tenant_id=$1 RETURNING `+usageCols,
+		tid, countsBytes, byAppBytes)
 	if err = scanUsage(row, &u); err != nil {
 		return billing.ResourceUsage{}, err
 	}
@@ -287,7 +333,7 @@ func (s *Store) CheckAndInc(ctx context.Context, resource string, delta int) (bi
 
 	// 1) 预占行（首次无 usage 行）。
 	if _, err = tx.Exec(ctx,
-		`INSERT INTO billing_usages (tenant_id, counts, updated_at) VALUES ($1, '{}', now()) ON CONFLICT (tenant_id) DO NOTHING`,
+		`INSERT INTO billing_usages (tenant_id, counts, by_app, updated_at) VALUES ($1, '{}', '{}', now()) ON CONFLICT (tenant_id) DO NOTHING`,
 		tid); err != nil {
 		return billing.ResourceUsage{}, err
 	}

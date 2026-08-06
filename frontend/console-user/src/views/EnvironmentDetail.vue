@@ -31,6 +31,13 @@ interface App {
   gradient: string
   initial: string
 }
+interface DataService {
+  id: string
+  kind: string
+  name: string
+  status: string
+  envId: string
+}
 
 const route = useRoute()
 const router = useRouter()
@@ -38,22 +45,29 @@ const envStore = useEnvStore()
 const env = ref<Env | null>(null)
 const workloads = ref<Workload[]>([])
 const apps = ref<App[]>([])
+const dataServices = ref<DataService[]>([])
 const loading = ref(true)
 
 const typeMeta = [
-  { key: 'service', label: '服务', icon: 'server' },
-  { key: 'job', label: '任务', icon: 'job' },
-  { key: 'cronjob', label: '定时', icon: 'clock' },
+  { key: 'service', label: '服务', icon: 'server', path: 'services' },
+  { key: 'job', label: '任务', icon: 'job', path: 'jobs' },
+  { key: 'cronjob', label: '定时', icon: 'clock', path: 'cronjobs' },
 ]
+
+// 数据服务 kind 中文标签（与 DataServices 模块对齐）。
+const KIND_LABEL: Record<string, string> = {
+  db: '数据库', cache: '缓存', mq: '消息队列', storage: '对象存储', vector: '向量数据库', search: '搜索引擎',
+}
 
 async function load() {
   loading.value = true
   try {
     const id = route.params.id as string
-    const [eResp, wResp, aResp] = await Promise.all([
+    const [eResp, wResp, aResp, dResp] = await Promise.all([
       fetchAuth('/api/environments'),
       fetchAuth(`/api/workloads?envId=${id}`),
       fetchAuth('/api/applications'),
+      fetchAuth('/api/dataservices'),
     ])
     if (eResp.ok) {
       const all = ((await eResp.json()).data ?? []) as Env[]
@@ -61,6 +75,10 @@ async function load() {
     }
     if (wResp.ok) workloads.value = (await wResp.json()).data ?? []
     if (aResp.ok) apps.value = (await aResp.json()).data ?? []
+    if (dResp.ok) {
+      const all = ((await dResp.json()).data ?? []) as DataService[]
+      dataServices.value = all.filter((d) => d.envId === id)
+    }
   } catch (e) {
     ElMessage.error('加载环境详情失败：' + (e as Error).message)
   } finally {
@@ -103,6 +121,18 @@ async function workHere() {
   }
 }
 
+// 工作负载总览 stat 卡 → 切 scope + 跳对应类型工作负载列表（覆盖 jobs/cronjobs 孤岛）。
+async function goWorkloads(path: string) {
+  if (!env.value) return
+  if (await envStore.switchEnv(env.value)) {
+    router.push(`/workloads/${path}`)
+  }
+}
+
+function openDS(kind: string, id: string) {
+  router.push(`/resources/${kind}/${id}`)
+}
+
 function openApp(appId: string) {
   router.push(`/applications/${appId}`)
 }
@@ -137,7 +167,7 @@ watch(() => route.params.id, load)
       <section class="card">
         <h3 class="card-title">工作负载总览</h3>
         <div class="stat-row">
-          <div v-for="t in typeMeta" :key="t.key" class="stat">
+          <div v-for="t in typeMeta" :key="t.key" class="stat clickable" @click="goWorkloads(t.path)">
             <div class="stat-icon"><Icon :name="t.icon" :size="18" /></div>
             <div>
               <div class="stat-v mono">{{ (byType.get(t.key) ?? []).length }}</div>
@@ -145,6 +175,25 @@ watch(() => route.params.id, load)
             </div>
           </div>
         </div>
+      </section>
+
+      <section class="card">
+        <h3 class="card-title">环境内数据服务</h3>
+        <el-table :data="dataServices" size="small" empty-text="该环境尚无数据服务">
+          <el-table-column label="名称" min-width="180">
+            <template #default="{ row }">
+              <a class="link" @click="openDS(row.kind, row.id)">{{ row.name }}</a>
+            </template>
+          </el-table-column>
+          <el-table-column label="类型" width="120">
+            <template #default="{ row }">{{ KIND_LABEL[row.kind] ?? row.kind }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-tag :type="row.status === 'running' ? 'success' : 'info'" size="small">{{ row.status }}</el-tag>
+            </template>
+          </el-table-column>
+        </el-table>
       </section>
 
       <section class="card">
@@ -311,6 +360,20 @@ watch(() => route.params.id, load)
   display: flex;
   align-items: center;
   gap: 10px;
+}
+.stat.clickable {
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.stat.clickable:hover {
+  background: var(--surface-2);
+}
+.link {
+  color: var(--brand);
+  cursor: pointer;
+}
+.link:hover {
+  text-decoration: underline;
 }
 .stat-icon {
   width: 38px;

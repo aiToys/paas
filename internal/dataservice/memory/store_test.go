@@ -36,7 +36,7 @@ func seedAll(t *testing.T, s *Store) map[string]dataservice.DataService {
 	out["globex-db"] = mk("t-globex", dataservice.KindDB, "globex-main-db", "env-globex-prod",
 		dataservice.StatusRunning, map[string]string{"engine": "mysql", "version": "8", "size_gb": "200"})
 	out["globex-vector"] = mk("t-globex", dataservice.KindVector, "globex-embedding", "env-globex-test",
-		dataservice.StatusStopped, map[string]string{"engine": "milvus", "dimension": "1536"})
+		dataservice.StatusStopped, map[string]string{"engine": "qdrant", "dimension": "1536"})
 	return out
 }
 

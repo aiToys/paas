@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aitoys/paas/internal/billing"
+	"github.com/aitoys/paas/pkg/attribution"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
@@ -60,6 +61,18 @@ func cloneIntMap(m map[string]int) map[string]int {
 	cp := make(map[string]int, len(m))
 	for k, v := range m {
 		cp[k] = v
+	}
+	return cp
+}
+
+// cloneByApp 深拷贝应用维度归因 map（两层），防外部修改污染内部状态。
+func cloneByApp(m map[string]map[string]int) map[string]map[string]int {
+	if m == nil {
+		return nil
+	}
+	cp := make(map[string]map[string]int, len(m))
+	for app, res := range m {
+		cp[app] = cloneIntMap(res)
 	}
 	return cp
 }
@@ -122,6 +135,7 @@ func (s *Store) GetUsage(ctx context.Context) (billing.ResourceUsage, error) {
 		return billing.ResourceUsage{TenantID: tid, Counts: map[string]int{}, UpdatedAt: time.Now()}, nil
 	}
 	u.Counts = cloneIntMap(u.Counts) // 返回前深拷贝
+	u.ByApp = cloneByApp(u.ByApp)
 	return u, nil
 }
 
@@ -130,6 +144,7 @@ func (s *Store) IncUsage(ctx context.Context, resource string, delta int) (billi
 	if err != nil {
 		return billing.ResourceUsage{}, err
 	}
+	appID := attribution.AppFrom(ctx) // 应用级 Key 归因（空=租户级，仅 Counts 聚合）
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	u, ok := s.usage[tid]
@@ -141,9 +156,25 @@ func (s *Store) IncUsage(ctx context.Context, resource string, delta int) (billi
 		newCnt = 0 // 回滚（delta<0）不夹紧会写负值，污染配额上限校验、高估剩余空间
 	}
 	u.Counts[resource] = newCnt
+	if appID != "" {
+		if u.ByApp == nil {
+			u.ByApp = map[string]map[string]int{}
+		}
+		resMap, ok := u.ByApp[appID]
+		if !ok {
+			resMap = map[string]int{}
+			u.ByApp[appID] = resMap
+		}
+		a := resMap[resource] + delta
+		if a < 0 {
+			a = 0
+		}
+		resMap[resource] = a
+	}
 	u.UpdatedAt = time.Now()
 	s.usage[tid] = u
-	u.Counts = cloneIntMap(u.Counts) // 返回前深拷贝
+	u.Counts = cloneIntMap(u.Counts)         // 返回前深拷贝
+	u.ByApp = cloneByApp(u.ByApp)            // 深拷贝防外部污染
 	return u, nil
 }
 

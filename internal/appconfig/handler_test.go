@@ -30,6 +30,18 @@ func newHandler(prodWrite bool) *appconfig.Handler {
 
 func acmeCtx() context.Context { return tenant.WithTenant(context.Background(), "t-acme") }
 
+// unwrapConfig 解包 {data:T} 响应契约（httputil.WriteDataCreated 包裹）拿到 ConfigItem。
+func unwrapConfig(t *testing.T, body []byte) appconfig.ConfigItem {
+	t.Helper()
+	var wrap struct {
+		Data appconfig.ConfigItem `json:"data"`
+	}
+	if err := json.Unmarshal(body, &wrap); err != nil {
+		t.Fatalf("解析 {data:T} 响应失败: %v body=%s", err, string(body))
+	}
+	return wrap.Data
+}
+
 func req(ctx context.Context, method, path string, body interface{}) *http.Request {
 	var r io.Reader
 	if body != nil {
@@ -135,10 +147,7 @@ func TestHandlerDeleteProdGuard(t *testing.T) {
 	})
 	w := httptest.NewRecorder()
 	hAdmin.ServeHTTP(w, r)
-	var created appconfig.ConfigItem
-	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
-		t.Fatalf("解析创建响应失败: %v", err)
-	}
+	created := unwrapConfig(t, w.Body.Bytes())
 
 	// dev 删生产配置 -> 403（权限拦截，配置存在）
 	r = req(acmeCtx(), "DELETE", "/api/applications/app-cs/configs/"+created.ID, nil)
@@ -163,10 +172,7 @@ func TestHandlerDeleteCrossAppForbidden(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("建配置应 201，got %d: %s", w.Code, w.Body.String())
 	}
-	var created appconfig.ConfigItem
-	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
-		t.Fatalf("解析创建响应失败: %v", err)
-	}
+	created := unwrapConfig(t, w.Body.Bytes())
 	// 用 app-rec 路径删 app-cs 的配置：List(app-rec) 不含该 cfgID → 404。
 	r = req(acmeCtx(), "DELETE", "/api/applications/app-rec/configs/"+created.ID, nil)
 	w = httptest.NewRecorder()

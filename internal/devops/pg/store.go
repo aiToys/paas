@@ -340,7 +340,8 @@ func (s *Store) runBuild(ctx context.Context, p builder.Params) {
 		if rec := recover(); rec != nil {
 			// panic 栈可能含 cloneURL=https://<PAAS_GIT_TOKEN>@...，统一 MaskToken 脱敏（与正常错误路径一致），
 			// 防 build:read 权限者经 GET /api/buildruns/{id} 读到平台 Git 凭证。
-			_, _ = s.db.Pool().Exec(ctx,
+			// WithoutCancel：baseCtx cancel 后仍需落库失败状态（与 markBuildFailed 同理）。
+			_, _ = s.db.Pool().Exec(context.WithoutCancel(ctx),
 				`UPDATE build_runs SET status=$2, finished_at=$3, log=$4 WHERE id=$1`,
 				p.BuildID, devops.BuildFailed, time.Now(), builder.MaskToken(fmt.Sprintf("构建异常: %v", rec)))
 		}
@@ -356,7 +357,8 @@ func (s *Store) runBuild(ctx context.Context, p builder.Params) {
 	res.Log = builder.MaskToken(res.Log) // 脱敏日志中的 Git token（防泄漏给 build:read 权限者）
 	if err != nil {
 		err = builder.MaskErr(err) // err 可能含 git clone 失败 stderr（含 token URL）
-		_, _ = s.db.Pool().Exec(ctx,
+		// WithoutCancel：ctx 可能因 SIGTERM 已 cancel（pipe.Build 返 err），但失败状态仍需落库。
+		_, _ = s.db.Pool().Exec(context.WithoutCancel(ctx),
 			`UPDATE build_runs SET status=$2, finished_at=$3, log=$4 WHERE id=$1`,
 			p.BuildID, devops.BuildFailed, time.Now(), err.Error()+"\n"+res.Log)
 		return
@@ -408,8 +410,10 @@ func (s *Store) runBuild(ctx context.Context, p builder.Params) {
 }
 
 // markBuildFailed 回写构建失败状态 + 日志（best-effort，错误不再向上传播因 runBuild 无返回值）。
+// 用 WithoutCancel ctx：SIGTERM 时 baseCtx 已 cancel，但失败状态必须落库（否则 build_run 永久卡 running，
+// 只能等下次启动 SweepInterrupted 兜底）。pipe.Build 仍用原 ctx 响应取消，仅落库路径脱离请求生命周期。
 func (s *Store) markBuildFailed(ctx context.Context, buildID, log string) {
-	_, _ = s.db.Pool().Exec(ctx,
+	_, _ = s.db.Pool().Exec(context.WithoutCancel(ctx),
 		`UPDATE build_runs SET status=$2, finished_at=$3, log=$4 WHERE id=$1`,
 		buildID, devops.BuildFailed, time.Now(), log)
 }

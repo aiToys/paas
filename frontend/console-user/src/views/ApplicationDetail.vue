@@ -228,6 +228,46 @@ function goDeploy() {
   activeTab.value = '部署'
 }
 
+// 资源绑定卡片点击：数据服务类型解析 name→id 跳详情（带 app 上下文），
+// 其他类型（models/gov）跳列表。DS_KINDS 见上方 addOptions 区定义。
+async function onBindingClick(g: { key: string }, it: { name: string }) {
+  const t = g.key
+  if (DS_KINDS.includes(t as TypeKey)) {
+    // 拉该 kind DS 列表，按 name 或 id 匹配解析出 dsId（绑定时 name/id 都可能）。
+    try {
+      const list = await fetchJSON<{ id: string; name: string }[]>(`/api/dataservices?kind=${t}`)
+      const ds = list.find((d) => d.name === it.name || d.id === it.name)
+      if (ds) {
+        router.push(`/resources/${t}/${ds.id}?app=${app.value?.id ?? ''}`)
+        return
+      }
+    } catch {
+      /* 解析失败降级到列表 */
+    }
+  }
+  router.push(bindingListRoute(t))
+}
+// 兜底：列表路由（解析失败或非 DS 类型）。
+function bindingListRoute(t: string): string {
+  if (t === 'models') return '/resources/models'
+  if (t === 'gov') return '/platform/governance'
+  if (t === 'dal') return '/resources/db'
+  return `/resources/${t}`
+}
+// 部署 tab 工作负载行 → 该类型工作负载列表（带 ?app= 过滤，保留应用上下文）。
+function workloadListRoute(t: string): string {
+  const kind = t === 'job' ? 'jobs' : t === 'cronjob' ? 'cronjobs' : 'services'
+  return `/workloads/${kind}?app=${route.params.id}`
+}
+// 跳可观测（带 app 维度预选）。
+function goObservability() {
+  router.push(`/platform/observability?app=${app.value?.id ?? ''}`)
+}
+// 跳 DevOps 跨应用总览。
+function goDevOps() {
+  router.push('/devops')
+}
+
 // 删除应用（级联清工作负载+配置）：高危，统一走 confirmDangerous（输入应用名确认）。
 // 删除后返回应用列表。
 async function deleteApp() {
@@ -272,6 +312,7 @@ async function deleteApp() {
           <p class="desc">{{ app.desc }}</p>
         </div>
         <div class="head-actions">
+          <button class="ghost" @click="goObservability">监控</button>
           <button class="primary" @click="goDeploy">部署</button>
           <button class="danger" @click="deleteApp">删除应用</button>
         </div>
@@ -304,14 +345,24 @@ async function deleteApp() {
             <span class="group-count mono">{{ g.items.length }}</span>
           </div>
           <div class="group-items">
-            <div v-for="it in g.items" :key="it.name" class="res-card">
+            <div v-for="it in g.items" :key="it.name" class="res-card clickable" @click="onBindingClick(g, it)">
               <div class="res-card-head">
                 <span class="res-name mono">{{ it.name }}</span>
                 <span class="res-status">已绑定</span>
               </div>
               <div class="res-type">{{ g.meta.label }}</div>
               <div v-if="it.note" class="res-detail">{{ it.note }}</div>
-              <button class="unbind" @click="unbind(it)">解绑</button>
+              <button class="unbind" @click.stop="unbind(it)">解绑</button>
+            </div>
+          </div>
+          <!-- 模型推理绑定用法说明（绑定后自动生成应用级 Key + 注入配置） -->
+          <div v-if="g.key === 'models'" class="usage-tip">
+            <span class="tip-icon">💡</span>
+            <div class="tip-body">
+              <strong>用法：</strong>绑定模型后，平台已为本应用生成专属 API Key 并注入「配置」tab
+              （<code class="mono">PAAS_LLM_API_KEY</code> / <code class="mono">PAAS_LLM_BASE_URL</code>）。
+              应用工作负载重启后自动获得该凭证，代码用 OpenAI SDK 指向
+              <code class="mono">PAAS_LLM_BASE_URL</code> 即可调用，<strong>token 用量自动归因到本应用</strong>（见「配额与账单」）。
             </div>
           </div>
         </section>
@@ -357,7 +408,7 @@ async function deleteApp() {
               <span class="env-group-count mono">{{ g.items.length }}</span>
             </div>
             <div class="wl-list">
-              <div v-for="w in g.items" :key="w.id" class="wl-row">
+              <div v-for="w in g.items" :key="w.id" class="wl-row clickable" @click="router.push(workloadListRoute(w.type))">
                 <div class="wl-main">
                   <span class="wl-name">{{ w.name }}</span>
                   <span class="wl-type">{{ w.type }}</span>
@@ -381,16 +432,19 @@ async function deleteApp() {
 
       <!-- 构建 -->
       <div v-else-if="activeTab === '构建'">
+        <div class="cross-link"><a @click="goDevOps">查看跨应用构建总览 →</a></div>
         <AppBuilds :app-id="app.id" />
       </div>
 
       <!-- 镜像（构建产物） -->
       <div v-else-if="activeTab === '镜像'">
+        <div class="cross-link"><a @click="goDevOps">查看跨应用镜像总览 →</a></div>
         <AppImages :app-id="app.id" @pick="pickImage" />
       </div>
 
       <!-- 发布 -->
       <div v-else-if="activeTab === '发布'">
+        <div class="cross-link"><a @click="goDevOps">查看跨应用发布总览 →</a></div>
         <AppReleases :app-id="app.id" :picked-image-id="pickedImageId" />
       </div>
 
@@ -1035,5 +1089,47 @@ async function deleteApp() {
 .wl-status {
   font-size: 12px;
   color: var(--text-dim);
+}
+.clickable {
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+.res-card.clickable:hover {
+  border-color: var(--brand);
+  background: var(--surface-2);
+}
+.wl-row.clickable:hover {
+  background: var(--surface-2);
+}
+.cross-link {
+  margin-bottom: 12px;
+  font-size: 12px;
+}
+.cross-link a {
+  color: var(--brand);
+  cursor: pointer;
+}
+.cross-link a:hover {
+  text-decoration: underline;
+}
+.usage-tip {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+.usage-tip .tip-icon { flex-shrink: 0; }
+.usage-tip code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--brand);
+  font-size: 11px;
 }
 </style>

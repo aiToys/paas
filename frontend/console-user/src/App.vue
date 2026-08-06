@@ -84,11 +84,12 @@ interface NavItem {
 const nav: NavItem[] = [
   { label: '应用', icon: 'deploy', to: '/applications' },
   { label: '环境', icon: 'shield', to: '/environments' },
+  // AI 服务：模型是平台共享的「能力调用」（非租户私有存储资源），与数据服务 Add-on 区分。
+  { label: 'AI 服务', icon: 'market', to: '/resources/models' },
   {
     label: '资源中心',
     icon: 'database',
     children: [
-      { label: '模型推理', icon: 'market', to: '/resources/models' },
       { label: '数据库', icon: 'database', to: '/resources/db' },
       { label: '缓存', icon: 'zap', to: '/resources/cache' },
       { label: '消息队列', icon: 'message', to: '/resources/mq' },

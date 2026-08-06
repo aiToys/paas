@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/aitoys/paas/internal/core/auth"
+	"github.com/aitoys/paas/internal/core/identity"
 	"github.com/aitoys/paas/internal/security"
 	"github.com/aitoys/paas/pkg/tenant"
 )
@@ -34,3 +35,27 @@ func (a *authAuditAdapter) Record(ctx context.Context, tenantID, actor, action, 
 }
 
 var _ auth.AuditRecorder = (*authAuditAdapter)(nil)
+
+// identityAuditAdapter 桥接 identity.AuditRecorder -> security.AuditStore。
+// identity 包不能 import security（反向依赖），由 cmd/core 注入。
+// security store 的 RecordAudit 从 ctx 取 tenant（覆盖 log.TenantID），adapter 用传入 tenantID 注入 ctx
+// （identity audit helper 已处理 ctx 无 tenant 的超管跨租户场景归 "platform"）。
+type identityAuditAdapter struct {
+	store security.AuditStore
+}
+
+func (a *identityAuditAdapter) Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error {
+	if tenantID == "" {
+		tenantID = "platform"
+	}
+	ctx = tenant.WithTenant(ctx, tenantID)
+	return a.store.RecordAudit(ctx, security.AuditLog{
+		Actor:        actor,
+		Action:       action,
+		ResourceType: resourceType,
+		ResourceID:   resourceID,
+		Detail:       detail,
+	})
+}
+
+var _ identity.AuditRecorder = (*identityAuditAdapter)(nil)

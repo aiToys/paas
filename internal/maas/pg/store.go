@@ -82,19 +82,18 @@ func (s *Store) ListModels(ctx context.Context) ([]*provider.Model, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	models := make([]*provider.Model, 0)
 	byID := make(map[string]*provider.Model)
 	for rows.Next() {
 		var m provider.Model
 		if err = scanModel(rows, &m); err != nil {
-			rows.Close()
 			return nil, err
 		}
 		m.Channels = make([]*provider.Channel, 0)
 		byID[m.ID] = &m
 		models = append(models, &m)
 	}
-	rows.Close()
 	if err = rows.Err(); err != nil {
 		return nil, err
 	}
@@ -103,18 +102,17 @@ func (s *Store) ListModels(ctx context.Context) ([]*provider.Model, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer chRows.Close()
 	for chRows.Next() {
 		var modelID string
 		var c provider.Channel
 		if err = chRows.Scan(&c.ID, &modelID, &c.Type, &c.Priority, &c.Status, &c.Endpoint, &c.Vendor, &c.UpstreamModel, &c.CredentialRef, &c.VendorID); err != nil {
-			chRows.Close()
 			return nil, err
 		}
 		if m, ok := byID[modelID]; ok {
 			m.Channels = append(m.Channels, &c)
 		}
 	}
-	chRows.Close()
 	return models, chRows.Err()
 }
 
@@ -207,17 +205,16 @@ func (s *Store) ListChannels(ctx context.Context, modelID string) ([]*provider.C
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	out := make([]*provider.Channel, 0)
 	for rows.Next() {
 		var modelID2 string
 		var c provider.Channel
 		if err = rows.Scan(&c.ID, &modelID2, &c.Type, &c.Priority, &c.Status, &c.Endpoint, &c.Vendor, &c.UpstreamModel, &c.CredentialRef, &c.VendorID); err != nil {
-			rows.Close()
 			return nil, err
 		}
 		out = append(out, &c)
 	}
-	rows.Close()
 	return out, rows.Err()
 }
 
@@ -307,16 +304,15 @@ func (s *Store) ListVendors(ctx context.Context) ([]*provider.Vendor, error) {
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
 	out := make([]*provider.Vendor, 0)
 	for rows.Next() {
 		var v provider.Vendor
 		if err = scanVendor(rows, &v); err != nil {
-			rows.Close()
 			return nil, err
 		}
 		out = append(out, &v)
 	}
-	rows.Close()
 	return out, rows.Err()
 }
 

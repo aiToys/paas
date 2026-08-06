@@ -59,10 +59,14 @@ type ResourceQuota struct {
 }
 
 // ResourceUsage 租户级当前用量计数。
+// ByApp 是应用维度归因（appID → resource → 用量），主要给模型推理 token 计费：
+// 应用级 API Key 调用 /v1 时，gateway 把 appID 注入 ctx，IncUsage 据此归位。
+// 账单可按应用拆"订单应用用了多少 token / 推荐应用用了多少"。
 type ResourceUsage struct {
-	TenantID  string         `json:"tenantId,omitempty"`
-	Counts    map[string]int `json:"counts"`
-	UpdatedAt time.Time      `json:"updatedAt"`
+	TenantID  string             `json:"tenantId,omitempty"`
+	Counts    map[string]int     `json:"counts"`
+	ByApp     map[string]map[string]int `json:"byApp,omitempty"`
+	UpdatedAt time.Time          `json:"updatedAt"`
 }
 
 // BillItem 账单明细项。

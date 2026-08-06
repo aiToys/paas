@@ -52,18 +52,38 @@ spec:
                     - 敏感 key（password/token/secretKey/database/accessKey）→ 建 Secret，Pod env 引用；
                     - host/port/uri → 可观测/调试（不进 Secret）。
                 type: object
+              cpu:
+                type: string
               engine:
                 type: string
               envId:
                 type: string
+              image:
+                type: string
               kind:
                 type: string
+              memory:
+                type: string
               name:
+                type: string
+              replicas:
+                description: |-
+                  实例浅管理字段（控制面下发，reconciler 据此调 STS）：
+                    - Replicas：副本数，nil/0 默认 1（写 0 = 停，scale 0）；多副本集群/HA 留后续。
+                    - CPU/Memory：覆盖默认 resources request（空 = defaultResources）。
+                    - StorageGB：PVC 容量 GiB（0 = 默认 10）；仅扩容（K8s 限制不可缩）。
+                    - Image：覆盖默认镜像（含 tag，版本升级用）。
+                format: int32
+                type: integer
+              source:
                 type: string
               spec:
                 additionalProperties:
                   type: string
                 type: object
+              storageGb:
+                format: int32
+                type: integer
               tenantId:
                 type: string
             required:

@@ -16,6 +16,10 @@ const (
 	TypeSecret = "secret" // 敏感值，API 掩码返回
 )
 
+// DefaultEnv 是跨环境共享配置的桶名（平台级资源凭证注入用，如模型推理 LLM Key）。
+// WorkloadReconciler 读 appconfig 时聚合 {工作负载 EnvID} + DefaultEnv。
+const DefaultEnv = "default"
+
 // SecretMask 是 Secret 值的固定掩码（不泄漏长度/内容）。
 const SecretMask = "••••••" //nolint:gosec // G101 误报：这是固定掩码占位符，非凭据
 

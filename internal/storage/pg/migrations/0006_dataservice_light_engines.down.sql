@@ -1,0 +1,2 @@
+-- 数据服务轻量引擎替换不可逆（milvus/es 数据未持久化，回滚无意义）。
+-- down 为空占位：恢复 milvus/elasticsearch 引擎需用户手动重建实例。

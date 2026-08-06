@@ -8,6 +8,7 @@ interface ApiKey {
   id: string
   tenantId: string
   userId: string
+  appId?: string // 应用级 Key：模型推理用量归因到应用（绑模型自动生成）
   roles: string[]
   key: string
   createdAt?: string
@@ -108,17 +109,21 @@ onMounted(load)
       </div>
       <div v-for="k in keys" :key="k.id" class="key-row">
         <div class="key-main">
-          <div class="key-name">{{ k.id }}</div>
-          <button class="key-val mono" @click="copy(k.key)">
+          <div class="key-name">
+            {{ k.id }}
+            <button class="copy-id-btn" @click="copy(k.id)">复制 ID</button>
+          </div>
+          <div class="key-val mono">
             {{ k.key }}
-            <span class="copy-tag">复制</span>
-          </button>
+            <span class="copy-tag">完整密钥仅创建时可见</span>
+          </div>
           <div class="key-roles">
             <span v-for="r in k.roles" :key="r" class="role-tag">{{ r }}</span>
           </div>
         </div>
         <div class="key-meta">
           <div>归属 <span class="mono">{{ k.userId }}</span></div>
+          <div v-if="k.appId" class="key-app">应用级 <span class="mono">{{ k.appId }}</span>（模型推理归因）</div>
           <div>创建 <span class="mono">{{ k.createdAt ? new Date(k.createdAt).toLocaleString() : '—' }}</span></div>
         </div>
         <div class="key-actions">
@@ -227,27 +232,38 @@ onMounted(load)
   font-weight: 600;
   font-size: 13.5px;
   margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.copy-id-btn {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.copy-id-btn:hover {
+  border-color: var(--brand);
+  color: var(--brand);
 }
 .key-val {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  border: none;
   background: var(--bg);
   padding: 4px 8px;
   border-radius: 6px;
   border: 1px solid var(--border);
   color: var(--text-dim);
   font-size: 12px;
-  cursor: pointer;
-  transition: border-color 0.12s;
-}
-.key-val:hover {
-  border-color: var(--brand);
-  color: var(--text);
 }
 .copy-tag {
-  color: var(--brand);
+  color: var(--text-faint);
+  font-size: 11px;
 }
 .key-roles {
   margin-top: 6px;

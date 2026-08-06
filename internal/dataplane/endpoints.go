@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/aitoys/paas/pkg/labels"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
@@ -65,7 +66,7 @@ func (r *k8sEndpointsReader) Instances(ctx context.Context, namespace, serviceNa
 	// 多租户隔离：Endpoints 不带 tenant label，先经同名 Service 校验归属本租户。
 	// 跨租户或不存在统一返空（不泄漏存在性），与平台 Repository 隔离语义一致。
 	svc, err := r.cs.CoreV1().Services(namespace).Get(ctx, serviceName, metav1.GetOptions{})
-	if err != nil || svc.Labels["paas.aitoys/tenant"] != tid {
+	if err != nil || svc.Labels[labels.KeyTenant] != tid {
 		return nil, nil
 	}
 	ep, err := r.cs.CoreV1().Endpoints(namespace).Get(ctx, serviceName, metav1.GetOptions{}) //nolint:staticcheck // Endpoints 在 K8s v0.36 仍主流；EndpointSlice 迁移留后续

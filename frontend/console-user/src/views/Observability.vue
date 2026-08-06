@@ -4,8 +4,11 @@
 // + 告警规则列表（增删）+ 当前告警列表（即时评估，severity 着色）。
 // 惰性时序：每次加载后端补点；前端 10s 轮询刷新指标。
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
+
+const route = useRoute()
 
 type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
 
@@ -88,7 +91,14 @@ async function loadApps() {
   if (resp.ok) {
     const json = await resp.json()
     apps.value = (json.data ?? []) as App[]
-    if (!targetApp.value && apps.value.length) targetApp.value = apps.value[0].id
+    // 支持 ?app=<id> 深链预选（来自应用详情「监控」入口）；否则取首个。
+    const q = route.query.app
+    const pre = typeof q === 'string' && q ? q : ''
+    if (!targetApp.value) {
+      targetApp.value = pre && apps.value.some((a) => a.id === pre)
+        ? pre
+        : (apps.value[0]?.id ?? '')
+    }
   }
 }
 

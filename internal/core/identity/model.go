@@ -51,10 +51,12 @@ func (r Role) Grants(p Permission) bool {
 }
 
 // APIKey 是 (租户, 用户, 角色) 三元组的凭证，鉴权与计量的统一锚点。
+// AppID 非空 = 应用级 Key（模型推理用量归因到具体应用）；空 = 租户级 Key（管理员/通用）。
 type APIKey struct {
 	ID        string    `json:"id"`
 	TenantID  string    `json:"tenantId"`
 	UserID    string    `json:"userId"`
+	AppID     string    `json:"appId,omitempty"` // 可选：绑定应用则用量归因到应用
 	Roles     []string  `json:"roles"`
 	Key       string    `json:"key"` // 明文 bearer，内存态；handler 在列表时掩码
 	CreatedAt time.Time `json:"createdAt,omitempty"`
@@ -87,6 +89,9 @@ func BuiltinRoles() map[string]Role {
 			"application:read", "workload:read", "environment:read", "model:read",
 			"repository:read", "build:read", "image:read", "release:read", "config:read", "governance:read", "observability:read", "security:read", "billing:read", "dataservice:read",
 		}},
+		// app-llm 是应用级 API Key 的最小角色（绑模型时自动生成 Key 用）：
+		// 仅含推理权限，用量归因到应用；无任何管理/写权限（最小权限原则）。
+		"app-llm": {Name: "app-llm", Permissions: []Permission{"model:infer", "model:read"}},
 	}
 }
 

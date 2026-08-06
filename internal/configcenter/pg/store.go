@@ -401,16 +401,15 @@ func (s *Store) CreatePublish(ctx context.Context, namespaceID string) (configce
 	if err != nil {
 		return configcenter.Publish{}, err
 	}
+	defer rows.Close()
 	snapshot := map[string]string{}
 	for rows.Next() {
 		var k, v string
 		if err = rows.Scan(&k, &v); err != nil {
-			rows.Close()
 			return configcenter.Publish{}, err
 		}
 		snapshot[k] = v
 	}
-	rows.Close()
 	if err = rows.Err(); err != nil {
 		return configcenter.Publish{}, err
 	}

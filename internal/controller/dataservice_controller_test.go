@@ -237,6 +237,151 @@ func TestReconcileNATS(t *testing.T) {
 	}
 }
 
+// TestEngineImageLightEngines 验证 qdrant/meilisearch 返非空镜像（本轮替换 milvus/es 占位）。
+func TestEngineImageLightEngines(t *testing.T) {
+	cases := map[string]string{
+		"vector|qdrant":      "qdrant/qdrant:v1.12.4",
+		"search|meilisearch": "meilisearch/meilisearch:v1.10",
+		"vector|milvus":      "", // 已弃用重型引擎返空 -> reconciler 走 failed
+		"search|elasticsearch": "",
+	}
+	for k, want := range cases {
+		kind, engine := k, ""
+		for i := 0; i < len(k); i++ {
+			if k[i] == '|' {
+				kind, engine = k[:i], k[i+1:]
+				break
+			}
+		}
+		if got := engineImage(kind, engine, ""); got != want {
+			t.Errorf("engineImage(%q,%q)=%q, want %q", kind, engine, got, want)
+		}
+	}
+	// registry 非空时内网化（library/<name>:<tag>，去 repo 前缀）。
+	if got := engineImage("vector", "qdrant", "hub.wang.dd:5000"); got != "hub.wang.dd:5000/library/qdrant:v1.12.4" {
+		t.Errorf("qdrant registry 内网化错误: %s", got)
+	}
+}
+
+// TestReconcileQdrant 验证 qdrant 真实落地：镜像 + env QDRANT__SERVICE_API_KEY + PVC 持久化。
+func TestReconcileQdrant(t *testing.T) {
+	scheme := newScheme(t)
+	d := &v1alpha1.DataService{
+		ObjectMeta: metav1.ObjectMeta{Name: "ds-qdrant", Namespace: "default"},
+		Spec: v1alpha1.DataServiceSpec{
+			TenantID: "t-acme", Kind: "vector", Engine: "qdrant", Name: "ds-qdrant",
+			StorageGB: 20,
+			Connection: map[string]string{"api_key": "ak-xxx"},
+		},
+	}
+	cl := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(d).WithStatusSubresource(&v1alpha1.DataService{}).Build()
+	r := &DataServiceReconciler{Client: cl, Scheme: scheme}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "ds-qdrant", Namespace: "default"}}); err != nil {
+		t.Fatalf("reconcile 失败: %v", err)
+	}
+	ctx := context.Background()
+	var sts appsv1.StatefulSet
+	if err := cl.Get(ctx, types.NamespacedName{Name: "ds-qdrant", Namespace: "default"}, &sts); err != nil {
+		t.Fatalf("应创建 StatefulSet: %v", err)
+	}
+	c := sts.Spec.Template.Spec.Containers[0]
+	if c.Image != "qdrant/qdrant:v1.12.4" {
+		t.Fatalf("qdrant 镜像错误: %s", c.Image)
+	}
+	if c.Ports[0].ContainerPort != 6333 {
+		t.Fatalf("qdrant 端口应 6333, got %d", c.Ports[0].ContainerPort)
+	}
+	// env QDRANT__SERVICE_API_KEY 引用 secret
+	var foundEnv bool
+	for _, e := range c.Env {
+		if e.Name == "QDRANT__SERVICE_API_KEY" && e.ValueFrom != nil && e.ValueFrom.SecretKeyRef.Name == "ds-qdrant-secret" {
+			foundEnv = true
+		}
+	}
+	if !foundEnv {
+		t.Fatalf("qdrant 缺 QDRANT__SERVICE_API_KEY env 引用 secret: %+v", c.Env)
+	}
+	// Secret 含 api_key
+	var sec corev1.Secret
+	_ = cl.Get(ctx, types.NamespacedName{Name: "ds-qdrant-secret", Namespace: "default"}, &sec)
+	if sec.StringData["api_key"] != "ak-xxx" {
+		t.Fatalf("Secret api_key 错误: %v", sec.StringData)
+	}
+	// PVC 持久化（VolumeClaimTemplates 创建时设）
+	if len(sts.Spec.VolumeClaimTemplates) != 1 || sts.Spec.VolumeClaimTemplates[0].Name != "data" {
+		t.Fatalf("应有 data PVC 模板, got %+v", sts.Spec.VolumeClaimTemplates)
+	}
+	got := sts.Spec.VolumeClaimTemplates[0].Spec.Resources.Requests[corev1.ResourceStorage]
+	if got.String() != "20Gi" {
+		t.Fatalf("StorageGB=20 应映射 20Gi PVC, got %s", got.String())
+	}
+	// 数据卷挂载到 qdrant 存储目录
+	if c.VolumeMounts[0].MountPath != "/qdrant/storage" {
+		t.Fatalf("qdrant 数据卷挂载点应 /qdrant/storage, got %s", c.VolumeMounts[0].MountPath)
+	}
+}
+
+// TestReconcileMeilisearch 验证 meilisearch：镜像 + env MEILI_MASTER_KEY + 端口 7700。
+func TestReconcileMeilisearch(t *testing.T) {
+	scheme := newScheme(t)
+	d := &v1alpha1.DataService{
+		ObjectMeta: metav1.ObjectMeta{Name: "ds-meili", Namespace: "default"},
+		Spec: v1alpha1.DataServiceSpec{
+			TenantID: "t-acme", Kind: "search", Engine: "meilisearch", Name: "ds-meili",
+			Connection: map[string]string{"master_key": "mk-xxx"},
+		},
+	}
+	cl := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(d).WithStatusSubresource(&v1alpha1.DataService{}).Build()
+	r := &DataServiceReconciler{Client: cl, Scheme: scheme}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "ds-meili", Namespace: "default"}}); err != nil {
+		t.Fatalf("reconcile 失败: %v", err)
+	}
+	var sts appsv1.StatefulSet
+	_ = cl.Get(context.Background(), types.NamespacedName{Name: "ds-meili", Namespace: "default"}, &sts)
+	c := sts.Spec.Template.Spec.Containers[0]
+	if c.Image != "meilisearch/meilisearch:v1.10" {
+		t.Fatalf("meilisearch 镜像错误: %s", c.Image)
+	}
+	if c.Ports[0].ContainerPort != 7700 {
+		t.Fatalf("meilisearch 端口应 7700, got %d", c.Ports[0].ContainerPort)
+	}
+	if c.VolumeMounts[0].MountPath != "/meili_data" {
+		t.Fatalf("meilisearch 数据卷挂载点应 /meili_data, got %s", c.VolumeMounts[0].MountPath)
+	}
+	var foundEnv bool
+	for _, e := range c.Env {
+		if e.Name == "MEILI_MASTER_KEY" && e.ValueFrom != nil {
+			foundEnv = true
+		}
+	}
+	if !foundEnv {
+		t.Fatalf("meilisearch 缺 MEILI_MASTER_KEY env")
+	}
+}
+
+// TestReconcileDataserviceImageOverride 验证 spec.Image 覆盖默认镜像（版本升级场景）。
+func TestReconcileDataserviceImageOverride(t *testing.T) {
+	scheme := newScheme(t)
+	d := &v1alpha1.DataService{
+		ObjectMeta: metav1.ObjectMeta{Name: "ds-up", Namespace: "default"},
+		Spec: v1alpha1.DataServiceSpec{
+			TenantID: "t-acme", Kind: "vector", Engine: "qdrant", Name: "ds-up",
+			Image: "qdrant/qdrant:v1.13.0", // 覆盖默认 v1.12.4
+			Connection: map[string]string{"api_key": "ak"},
+		},
+	}
+	cl := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(d).WithStatusSubresource(&v1alpha1.DataService{}).Build()
+	r := &DataServiceReconciler{Client: cl, Scheme: scheme}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "ds-up", Namespace: "default"}}); err != nil {
+		t.Fatalf("reconcile 失败: %v", err)
+	}
+	var sts appsv1.StatefulSet
+	_ = cl.Get(context.Background(), types.NamespacedName{Name: "ds-up", Namespace: "default"}, &sts)
+	if got := sts.Spec.Template.Spec.Containers[0].Image; got != "qdrant/qdrant:v1.13.0" {
+		t.Fatalf("spec.Image 应覆盖默认镜像, got %s", got)
+	}
+}
+
 // hasOwner 判断 OwnerReferences 是否含指定 kind。
 func hasOwner(refs []metav1.OwnerReference, kind string) bool {
 	for _, r := range refs {

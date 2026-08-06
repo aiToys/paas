@@ -10,6 +10,7 @@ import (
 
 	"github.com/aitoys/paas/internal/devops/gitea"
 	"github.com/aitoys/paas/internal/devops/registry"
+	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/httputil"
 )
 
@@ -28,9 +29,7 @@ const (
 
 // EnvTypeResolver 解析环境类型（prod|test），用于生产写权限校验。
 // 依赖倒置：devops 不直接 import environment，由 cmd/core 注入实现。
-type EnvTypeResolver interface {
-	EnvType(ctx context.Context, envID string) (string, error)
-}
+type EnvTypeResolver = environment.EnvTypeResolver
 
 // Handler 暴露 DevOps REST API。
 //
@@ -249,7 +248,7 @@ func (h *Handler) serveRepos(w http.ResponseWriter, r *http.Request, appID strin
 				return
 			}
 			repo.GiteaOwner = h.giteaClient.Username()
-			repo.GitURL = gRepo.CloneURL         // 展示用（不含凭证）
+			repo.GitURL = gRepo.CloneURL                                                    // 展示用（不含凭证）
 			repo.CloneURL = h.giteaClient.CloneURLWithAuth(repo.GiteaOwner, repo.GiteaRepo) // builder clone 用（含凭证）
 			if repo.Branch == "" {
 				repo.Branch = gRepo.DefaultBranch
@@ -298,7 +297,7 @@ func (h *Handler) serveRepoDelete(w http.ResponseWriter, r *http.Request, repoID
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
-	httputil.WriteJSON(w, http.StatusOK, map[string]string{"deleted": repoID})
+	httputil.WriteData(w, map[string]string{"deleted": repoID})
 }
 
 // serveRepoBrowse 处理 /api/applications/{id}/repositories/{rid}/{action}。
@@ -498,7 +497,7 @@ func (h *Handler) serveBuildDetail(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
-	httputil.WriteJSON(w, http.StatusOK, b)
+	httputil.WriteData(w, b)
 }
 
 // ---------- 镜像 ----------
@@ -538,7 +537,7 @@ func (h *Handler) serveImageDetail(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
-	httputil.WriteJSON(w, http.StatusOK, im)
+	httputil.WriteData(w, im)
 }
 
 // ---------- 发布 ----------
@@ -576,7 +575,7 @@ func (h *Handler) serveReleases(w http.ResponseWriter, r *http.Request, appID st
 			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
-		httputil.WriteJSON(w, http.StatusCreated, rel)
+		httputil.WriteDataCreated(w, rel)
 		return
 	}
 	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -612,5 +611,5 @@ func (h *Handler) serveReleaseAction(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}
-	httputil.WriteJSON(w, http.StatusOK, rb)
+	httputil.WriteData(w, rb)
 }

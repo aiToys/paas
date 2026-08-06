@@ -12,10 +12,11 @@ import (
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
-// Store 实现 dataservice.Repository。
+// Store 实现 dataservice.Repository + dataservice.EngineRepository。
 type Store struct {
 	mu         sync.RWMutex
 	services   map[string]dataservice.DataService
+	engines    map[string]dataservice.Engine // 平台级引擎目录（NewStore 时 seed DefaultEngines）
 	nsResolver dataservice.NamespaceResolver
 	seq        int
 }
@@ -30,11 +31,18 @@ func WithNamespaceResolver(r dataservice.NamespaceResolver) Option {
 }
 
 func NewStore(opts ...Option) *Store {
-	s := &Store{services: map[string]dataservice.DataService{}}
+	s := &Store{
+		services: map[string]dataservice.DataService{},
+		engines:  map[string]dataservice.Engine{},
+	}
 	for _, o := range opts {
 		o(s)
 	}
 	// 不 seed mock 数据服务实例（去假数据）：用户经控制台创建真实数据服务（已有真实引擎 mysql/redis/nats/minio）。
+	// 但 seed 引擎目录（平台级配置，非假数据）：开箱即有默认 managed 轻量引擎 + 重型 external-shared 占位。
+	for _, e := range dataservice.DefaultEngines() {
+		s.engines[e.ID] = e
+	}
 	return s
 }
 
@@ -55,6 +63,15 @@ func cloneStrMap(m map[string]string) map[string]string {
 		cp[k] = v
 	}
 	return cp
+}
+
+// cloneIntP 深拷 *int（Replicas 指针），避免 Get/List 返回的指针与 store 内部共享被外部修改。
+func cloneIntP(p *int) *int {
+	if p == nil {
+		return nil
+	}
+	v := *p
+	return &v
 }
 
 func tenantOrErr(ctx context.Context) (string, error) {
@@ -82,6 +99,7 @@ func (s *Store) List(ctx context.Context, kind string) ([]dataservice.DataServic
 		}
 		d.Spec = cloneStrMap(d.Spec)
 		d.Connection = cloneStrMap(d.Connection)
+		d.Replicas = cloneIntP(d.Replicas)
 		out = append(out, d)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
@@ -97,6 +115,7 @@ func (s *Store) ListAll(ctx context.Context) ([]dataservice.DataService, error) 
 	for _, d := range s.services {
 		d.Spec = cloneStrMap(d.Spec)
 		d.Connection = cloneStrMap(d.Connection)
+		d.Replicas = cloneIntP(d.Replicas)
 		out = append(out, d)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -121,6 +140,7 @@ func (s *Store) Get(ctx context.Context, id string) (dataservice.DataService, er
 	}
 	d.Spec = cloneStrMap(d.Spec)
 	d.Connection = cloneStrMap(d.Connection)
+	d.Replicas = cloneIntP(d.Replicas)
 	return d, nil
 }
 
@@ -145,11 +165,19 @@ func (s *Store) Create(ctx context.Context, d dataservice.DataService) (dataserv
 		d.ID = fmt.Sprintf("ds-%d-%d", time.Now().UnixNano(), s.seq)
 	}
 	d.TenantID = tid
+	if d.Source == "" {
+		d.Source = dataservice.SourceManaged
+	}
 	if d.Status == "" {
+		// managed 由 reconciler 回写真实 phase；external 假定外部实例可用 -> running。
 		d.Status = dataservice.StatusRunning
 	}
-	// 生成并填充 Connection（凭证 + FQDN + uri）；凭证持久化（重启不变，Secret 引用）。
-	d.FillConnection(s.namespace())
+	// managed：生成凭证 + 平台 FQDN；external：保留用户填的连接信息（host/port/credentials），不重生。
+	if !dataservice.IsExternal(d.Source) {
+		d.FillConnection(s.namespace())
+	} else {
+		d.Connection = cloneStrMap(d.Connection) // 隔离用户填入的连接 map
+	}
 	d.Spec = cloneStrMap(d.Spec) // 隔离 caller 传入的 map
 	now := time.Now()
 	d.CreatedAt = now
@@ -181,9 +209,26 @@ func (s *Store) Update(ctx context.Context, d dataservice.DataService) (dataserv
 	if d.Spec != nil {
 		ex.Spec = cloneStrMap(d.Spec) // 隔离 caller 传入，避免外部改影响 store 内部
 	}
+	// 实例管理字段（非零覆盖，与 spec 合并语义一致）：handler 读现有→改对应字段→Update。
+	if d.Replicas != nil {
+		ex.Replicas = cloneIntP(d.Replicas)
+	}
+	if d.CPU != "" {
+		ex.CPU = d.CPU
+	}
+	if d.Memory != "" {
+		ex.Memory = d.Memory
+	}
+	if d.StorageGB > 0 {
+		ex.StorageGB = d.StorageGB
+	}
+	if d.Image != "" {
+		ex.Image = d.Image
+	}
 	ex.UpdatedAt = time.Now()
 	// spec 改动后重算连接 uri/host（凭证保留，namespace 可能变）；spec 字段（如 db_name）影响 uri。
-	if ex.Connection != nil {
+	// external 模式跳过：连接信息是用户填的真实外部地址，不能被平台 FQDN 覆盖。
+	if ex.Connection != nil && !dataservice.IsExternal(ex.Source) {
 		ex.FillConnection(s.namespace())
 	}
 	// 合并后复校验，防止 PUT 用空 spec 清空 Create 时强制的必填字段。
@@ -232,6 +277,6 @@ func SeedDataServices() []dataservice.DataService {
 		mk("ds-globex-db", "t-globex", dataservice.KindDB, "globex-main-db", "env-globex-prod", dataservice.StatusRunning,
 			map[string]string{"engine": "mysql", "version": "8", "size_gb": "200"}, -36*time.Hour),
 		mk("ds-globex-vector", "t-globex", dataservice.KindVector, "globex-embedding", "env-globex-test", dataservice.StatusStopped,
-			map[string]string{"engine": "milvus", "dimension": "1536"}, -12*time.Hour),
+			map[string]string{"engine": "qdrant", "dimension": "1536"}, -12*time.Hour),
 	}
 }

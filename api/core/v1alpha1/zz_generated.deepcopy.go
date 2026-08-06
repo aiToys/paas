@@ -77,6 +77,11 @@ func (in *DataServiceSpec) DeepCopyInto(out *DataServiceSpec) {
 			(*out)[key] = val
 		}
 	}
+	if in.Replicas != nil {
+		in, out := &in.Replicas, &out.Replicas
+		*out = new(int32)
+		**out = **in
+	}
 	if in.Connection != nil {
 		in, out := &in.Connection, &out.Connection
 		*out = make(map[string]string, len(*in))

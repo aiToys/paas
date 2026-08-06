@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/aitoys/paas/api/core/v1alpha1"
+	"github.com/aitoys/paas/pkg/labels"
 )
 
 // WorkloadReconciler watch Workload CRD，把期望状态落到 K8s 资源并回写 status。
@@ -31,6 +32,40 @@ type WorkloadReconciler struct {
 	DPToken string
 	// DPEndpoint 数据面 API 地址（覆盖默认 http://paas-core.paas.svc.cluster.local/dp）。
 	DPEndpoint string
+	// Configs 应用配置查找（依赖倒置）：注入应用×环境级 appconfig（含数据服务连接 + 模型 LLM 凭证）
+	// 到 Pod env，让"绑定资源"真正生效。nil 则不注入（dev/无 K8s 场景）。桥接在 cmd/core。
+	Configs AppConfigLookup
+}
+
+// AppConfigLookup 是应用配置查找接口（依赖倒置，破除 controller→appconfig 业务包依赖）。
+// Items 返回应用工作负载应注入的 env 配置项（聚合 {envID} + DefaultEnv 跨环境桶）。
+type AppConfigLookup interface {
+	Items(ctx context.Context, tenantID, appID, envID string) ([]AppConfigItem, error)
+}
+
+// AppConfigItem 是待注入 Pod env 的配置项（Name→env 名，Value→env 值）。
+type AppConfigItem struct {
+	Name  string
+	Value string
+}
+
+// appEnvVars 查应用配置并转 K8s EnvVar。Configs nil 或查询失败返空（best-effort，不阻断 reconcile）。
+func (r *WorkloadReconciler) appEnvVars(ctx context.Context, w *v1alpha1.Workload) []corev1.EnvVar {
+	if r.Configs == nil {
+		return nil
+	}
+	items, err := r.Configs.Items(ctx, w.Spec.TenantID, w.Spec.AppID, w.Spec.EnvID)
+	if err != nil || len(items) == 0 {
+		return nil
+	}
+	vars := make([]corev1.EnvVar, 0, len(items))
+	for _, it := range items {
+		if it.Name == "" {
+			continue
+		}
+		vars = append(vars, corev1.EnvVar{Name: it.Name, Value: it.Value})
+	}
+	return vars
 }
 
 // dpEndpoint 返回数据面 API 地址（空则默认集群内 core Service 地址）。
@@ -45,9 +80,9 @@ func (r *WorkloadReconciler) dpEndpoint() string {
 func labelsFor(w *v1alpha1.Workload) map[string]string {
 	return map[string]string{
 		"app.kubernetes.io/managed-by": "paas",
-		"paas.aitoys/tenant":           w.Spec.TenantID,
-		"paas.aitoys/app":              w.Spec.AppID,
-		"paas.aitoys/workload":         w.Name,
+		labels.KeyTenant:               w.Spec.TenantID,
+		labels.KeyApp:                  w.Spec.AppID,
+		labels.KeyWorkload:             w.Name,
 	}
 }
 
@@ -137,10 +172,15 @@ func (r *WorkloadReconciler) applyDeployment(ctx context.Context, w *v1alpha1.Wo
 			ObjectMeta: metav1.ObjectMeta{Labels: labels},
 			Spec:       podSpec(w),
 		}
+		c := &dep.Spec.Template.Spec.Containers[0]
+		// 应用配置注入：数据服务连接（DATABASE_URL 等）+ 模型 LLM 凭证（PAAS_LLM_*）。
+		// 让"绑定资源"真正生效到 Pod env；best-effort，查询失败跳过。
+		if envVars := r.appEnvVars(ctx, w); len(envVars) > 0 {
+			c.Env = append(c.Env, envVars...)
+		}
 		// service 类型注入数据面发现 env（zeus 应用经 paas-registry 插件用）。
 		// DPToken 空则跳过（K8s 部署但未配 token，不影响 Deployment 本身）。
 		if w.Spec.Type == "service" && r.DPToken != "" {
-			c := &dep.Spec.Template.Spec.Containers[0]
 			c.Env = append(c.Env,
 				corev1.EnvVar{Name: "PAAS_DP_ENDPOINT", Value: r.dpEndpoint()},
 				corev1.EnvVar{Name: "PAAS_DP_TOKEN", Value: r.DPToken},
@@ -227,6 +267,11 @@ func (r *WorkloadReconciler) applyJob(ctx context.Context, w *v1alpha1.Workload)
 			// 默认 Always 会被 apiserver 拒绝 -> "Required value" 报错致 Job 永远创建失败）。
 			// 与 BackoffLimit=0 语义一致：失败即终止不重启，status 回写与 K8s 实际状态对齐。
 			job.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyNever
+			// 应用配置注入（创建时，PodTemplate 之后不可变；新增绑定需删旧建新）。
+			if envVars := r.appEnvVars(ctx, w); len(envVars) > 0 {
+				job.Spec.Template.Spec.Containers[0].Env = append(
+					job.Spec.Template.Spec.Containers[0].Env, envVars...)
+			}
 		}
 		// OwnerReference：CR 删除时 GC 清理 Job（同 Deployment）。
 		return controllerutil.SetControllerReference(w, job, r.Scheme)
@@ -264,6 +309,11 @@ func (r *WorkloadReconciler) applyCronJob(ctx context.Context, w *v1alpha1.Workl
 		}
 		// 同 applyJob：CronJob 衍生的 Job Pod 必须显式 restartPolicy（Never），否则 apiserver 拒绝。
 		cj.Spec.JobTemplate.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyNever
+		// 应用配置注入（创建时，JobTemplate PodTemplate 不可变；新增绑定需删旧建新）。
+		if envVars := r.appEnvVars(ctx, w); len(envVars) > 0 {
+			tmpl := &cj.Spec.JobTemplate.Spec.Template.Spec.Containers[0]
+			tmpl.Env = append(tmpl.Env, envVars...)
+		}
 		// OwnerReference：CR 删除时 GC 清理 CronJob（同 Deployment）。
 		return controllerutil.SetControllerReference(w, cj, r.Scheme)
 	})

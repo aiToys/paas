@@ -32,6 +32,45 @@ var validStatus = map[string]struct{}{
 	StatusCreating: {}, StatusRunning: {}, StatusStopped: {},
 }
 
+// 资源来源（部署模式）。
+const (
+	// SourceManaged 平台托管：平台拉起 Pod（轻量引擎），生成凭证，reconciler 建 STS。
+	// 仅支持轻量引擎（IsManagedEngine=true）；重型引擎选 managed 在 Validate 期拒绝。
+	SourceManaged = "managed"
+	// SourceExternalShared 共享集群：admin 在 Engine 配置共享集群连接，用户创建实例时复用
+	// 该连接（+ 自填逻辑单元名如 collection/database），平台不部署。典型：一个 milvus 集群多团队共享。
+	SourceExternalShared = "external-shared"
+	// SourceExternalDedicated 独占外部实例：用户自填连接信息（host/port/credentials），平台不部署。
+	SourceExternalDedicated = "external-dedicated"
+)
+
+var validSources = map[string]struct{}{
+	SourceManaged: {}, SourceExternalShared: {}, SourceExternalDedicated: {},
+}
+
+// IsExternal 判断 source 是否为外部模式（不部署，仅控制面记录连接 + 应用绑定注入）。
+// external-shared（共享集群）与 external-dedicated（用户自填）都不走 reconciler 拉起。
+func IsExternal(source string) bool {
+	return source == SourceExternalShared || source == SourceExternalDedicated
+}
+
+// managedEngines 是平台托管模式支持的引擎白名单（轻量、单容器可拉起）。
+// 重型引擎（milvus/es/opensearch/kafka/rabbitmq/rocketmq）不在内 -> 必须用 external 对接已有实例。
+var managedEngines = map[string]map[string]bool{
+	KindDB:      {"postgres": true, "mysql": true},
+	KindCache:   {"redis": true, "valkey": true},
+	KindMQ:      {"nats": true},
+	KindStorage: {"minio": true},
+	KindVector:  {"qdrant": true},
+	KindSearch:  {"meilisearch": true},
+}
+
+// IsManagedEngine 判断 Kind+Engine 是否支持平台托管（轻量可拉起）。
+// external 模式无此限制（任意引擎对接外部实例）。
+func IsManagedEngine(kind, engine string) bool {
+	return managedEngines[kind][engine]
+}
+
 // FieldType 表单字段类型（前端渲染用）。
 const (
 	FieldText   = "text"
@@ -76,11 +115,13 @@ var KindMetas = []KindMeta{
 		{Key: "redundancy", Label: "冗余", Type: FieldSelect, Options: []string{"standard", "ia"}, Default: "standard"},
 	}},
 	{Kind: KindVector, Label: "向量数据库", Icon: "layers", Fields: []SpecField{
-		{Key: "engine", Label: "引擎", Type: FieldSelect, Options: []string{"milvus", "qdrant"}, Default: "milvus"},
+		// 默认 Qdrant（平台托管，轻量单容器）；milvus 重型仅 external 模式对接已有集群。
+		{Key: "engine", Label: "引擎", Type: FieldSelect, Options: []string{"qdrant", "milvus"}, Default: "qdrant"},
 		{Key: "dimension", Label: "维度", Type: FieldText, Default: "1536"},
 	}},
 	{Kind: KindSearch, Label: "搜索引擎", Icon: "search", Fields: []SpecField{
-		{Key: "engine", Label: "引擎", Type: FieldSelect, Options: []string{"elasticsearch", "opensearch"}, Default: "elasticsearch"},
+		// 默认 Meilisearch（平台托管，轻量）；elasticsearch/opensearch 重型仅 external 模式对接。
+		{Key: "engine", Label: "引擎", Type: FieldSelect, Options: []string{"meilisearch", "elasticsearch", "opensearch"}, Default: "meilisearch"},
 		{Key: "shards", Label: "分片数", Type: FieldText, Default: "2"},
 	}},
 }
@@ -122,6 +163,8 @@ type DataService struct {
 	Name     string            `json:"name"` // 租户内唯一
 	Spec     map[string]string `json:"spec"`
 	Status   string            `json:"status"` // creating | running | stopped
+	Source   string            `json:"source"` // managed（平台托管）| external（接入外部实例）；空=managed
+	EngineID string            `json:"engineId,omitempty"` // 关联 Engine 目录（kind/engine/mode/connection 由其决定）
 	EnvID    string            `json:"envId"`
 	AppID    string            `json:"appId,omitempty"` // 可选预留（Add-on 绑定）
 	// Connection 平台生成（host/port/credentials/uri），Create 时由 FillConnection 填充。
@@ -131,6 +174,16 @@ type DataService struct {
 	Connection map[string]string `json:"connection,omitempty"`
 	CreatedAt  time.Time         `json:"createdAt"`
 	UpdatedAt  time.Time         `json:"updatedAt"`
+	// 实例浅管理字段（与 CRD DataServiceSpec 对齐，applier 投影到 K8s STS）：
+	//   - Replicas：nil/0=默认 1 副本；显式 0 = 停（scale 0）。
+	//   - CPU/Memory：覆盖默认容器 resources request（K8s 资源量字符串，如 "250m"/"512Mi"）。
+	//   - StorageGB：PVC 容量 GiB（0 = 默认 10）；仅扩容。
+	//   - Image：覆盖默认镜像（含 tag，版本升级）。
+	Replicas  *int   `json:"replicas,omitempty"`
+	CPU       string `json:"cpu,omitempty"`
+	Memory    string `json:"memory,omitempty"`
+	StorageGB int    `json:"storageGb,omitempty"`
+	Image     string `json:"image,omitempty"`
 }
 
 // NamespaceResolver 提供 K8s namespace（控制面生成 FQDN 用）。由 cmd/core 注入 PAAS_K8S_NAMESPACE。
@@ -155,9 +208,9 @@ func EngineOf(d DataService) string {
 	case KindStorage:
 		return "minio"
 	case KindVector:
-		return "milvus"
+		return "qdrant"
 	case KindSearch:
-		return "elasticsearch"
+		return "meilisearch"
 	}
 	return ""
 }
@@ -169,7 +222,9 @@ func EngineOf(d DataService) string {
 func (d *DataService) FillConnection(ns string) {
 	engine := EngineOf(*d)
 	hasCred := d.Connection != nil &&
-		(d.Connection["password"] != "" || d.Connection["token"] != "" || d.Connection["secretKey"] != "")
+		(d.Connection["password"] != "" || d.Connection["token"] != "" ||
+			d.Connection["secretKey"] != "" || d.Connection["api_key"] != "" ||
+			d.Connection["master_key"] != "")
 	if !hasCred {
 		d.Connection = BuildConnection(d.ID, d.Kind, engine, ns, d.Spec, GenerateCredentials(d.Kind, engine))
 		return
@@ -177,8 +232,10 @@ func (d *DataService) FillConnection(ns string) {
 	d.Connection = BuildConnection(d.ID, d.Kind, engine, ns, d.Spec, d.Connection)
 }
 
-// Validate 校验 Kind/Name/EnvID/Status/Spec 必填字段。
+// Validate 校验 Kind/Name/EnvID/Status/Source/Spec 必填字段。
 // EnvID 必填：数据服务绑定物理环境，且 prod:write 校验依赖 EnvID（空 EnvID 会绕过生产保护）。
+// managed 模式：engine 必须在白名单（轻量可拉起），重型引擎（milvus/es/kafka...）拒绝并引导用 external。
+// external 模式：engine 任意，跳过 spec 表单必填（用户填 connection，spec 字段如 dimension 非必需）。
 func (d DataService) Validate() error {
 	if _, ok := validKinds[d.Kind]; !ok {
 		return errInvalid("kind")
@@ -195,17 +252,39 @@ func (d DataService) Validate() error {
 			return errInvalid("status")
 		}
 	}
-	// 必填字段：Default 为空的 text 字段视为必填（如 storage.bucket）
-	for _, f := range KindFields(d.Kind) {
-		if f.Default == "" && d.Spec[f.Key] == "" {
-			return errInvalid("spec." + f.Key)
+	// source 空默认 managed；非空校验合法。
+	src := d.Source
+	if src == "" {
+		src = SourceManaged
+	}
+	if _, ok := validSources[src]; !ok {
+		return errInvalid("source")
+	}
+	// managed 模式：engine 必须可拉起（白名单）；重型 -> 明确错误引导 external。
+	if src == SourceManaged && !IsManagedEngine(d.Kind, EngineOf(d)) {
+		return fieldErr{field: "engine", msg: "该引擎不支持平台托管（过重），请改用 external 接入已有实例"}
+	}
+	// spec 必填校验：Default 为空的 text 字段视为必填（如 storage.bucket）。external 模式跳过（用户填 connection）。
+	if src == SourceManaged {
+		for _, f := range KindFields(d.Kind) {
+			if f.Default == "" && d.Spec[f.Key] == "" {
+				return errInvalid("spec." + f.Key)
+			}
 		}
 	}
 	return nil
 }
 
-type fieldErr struct{ field string }
+type fieldErr struct {
+	field string
+	msg   string
+}
 
-func (e fieldErr) Error() string { return "字段非法或缺失: " + e.field }
+func (e fieldErr) Error() string {
+	if e.msg != "" {
+		return e.msg
+	}
+	return "字段非法或缺失: " + e.field
+}
 
 func errInvalid(field string) error { return fieldErr{field: field} }

@@ -1,12 +1,12 @@
 package governance
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/httputil"
 )
 
@@ -20,9 +20,7 @@ const (
 
 // EnvTypeResolver 解析环境类型（prod|test），用于生产写权限校验。
 // 依赖倒置：governance 不直接 import environment，由 cmd/core 注入。
-type EnvTypeResolver interface {
-	EnvType(ctx context.Context, envID string) (string, error)
-}
+type EnvTypeResolver = environment.EnvTypeResolver
 
 // Handler 暴露服务治理（注册中心）REST API。
 //

@@ -5,6 +5,8 @@ package backup
 import (
 	"context"
 	"time"
+
+	"github.com/aitoys/paas/internal/environment"
 )
 
 // Backup 是一次备份记录。
@@ -37,9 +39,7 @@ type Repository interface {
 
 // EnvTypeResolver 解析环境类型（prod|test），用于生产写权限校验（依赖倒置，
 // 由 environment.Repository 实现）。
-type EnvTypeResolver interface {
-	EnvType(ctx context.Context, envID string) (string, error)
-}
+type EnvTypeResolver = environment.EnvTypeResolver
 
 // ResourceEnvResolver 解析数据服务资源所属环境 ID（依赖倒置，由 dataservice store 实现）。
 // backup 经 ResourceID → envID → EnvType 链路判定生产写权限。

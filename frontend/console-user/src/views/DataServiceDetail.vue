@@ -5,10 +5,11 @@
 // 详情接口 GET /api/dataservices/{id} 返回掩码连接信息（password/secretKey/token/uri 敏感字段掩码）；
 // host/port/user/database 等非敏感字段明文可复制；应用绑定经后端自动注入 appconfig，无需手动复制凭证。
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
+import { confirmDangerous } from '@/composables/useDangerConfirm'
 
 type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
 
@@ -19,6 +20,8 @@ interface DataService {
   spec: Record<string, string>
   connection?: Record<string, string>
   status: string; envId: string; createdAt: string; updatedAt: string
+  source?: string; engineId?: string
+  replicas?: number | null; cpu?: string; memory?: string; storageGb?: number; image?: string
 }
 interface MetricPoint { ts: string; value: number }
 interface MetricSeries {
@@ -32,6 +35,7 @@ interface AlertRule {
 
 const props = defineProps<{ kind: string; id: string }>()
 const router = useRouter()
+const route = useRoute()
 const envStore = useEnvStore()
 
 // 敏感字段掩码（与后端 SecretMask 一致，前端独立常量避免跨层耦合）。
@@ -43,8 +47,11 @@ const metas = ref<KindMeta[]>([])
 const ds = ref<DataService | null>(null)
 const metrics = ref<MetricSeries[]>([])
 const rules = ref<AlertRule[]>([])
+const boundApps = ref<{ id: string; name: string }[]>([])
 const loading = ref(false)
 const errorMsg = ref('') // 加载失败提示（404/网络错误），避免静默空状态
+
+interface AppLite { id: string; name: string; bindings?: { type: string; name: string }[] }
 
 const STATUS_LABEL: Record<string, string> = { running: '运行中', stopped: '已停止', creating: '创建中' }
 const STATUS_TYPE: Record<string, TagType> = { running: 'success', stopped: 'info', creating: 'warning' }
@@ -96,6 +103,22 @@ const FIELD_DEFS: Record<string, { key: string; label: string; secret?: boolean 
 
 const meta = computed(() => metas.value.find((m) => m.kind === props.kind) ?? null)
 const kindLabel = computed(() => meta.value?.label ?? props.kind)
+
+// 应用上下文：从应用「资源绑定」点入时 route.query.app 带 appID，展示绑定关系。
+const ctxApp = computed(() => {
+  const q = route.query.app
+  return typeof q === 'string' ? q : ''
+})
+// 该 kind 数据服务绑定时注入应用配置的 env key 名（与后端 injectKeys 对齐，展示用）。
+const INJECT_KEYS: Record<string, string[]> = {
+  db: ['DATABASE_URL'],
+  cache: ['REDIS_URL'],
+  mq: ['NATS_URL'],
+  storage: ['MINIO_ENDPOINT', 'MINIO_ACCESS_KEY', 'MINIO_SECRET_KEY'],
+  vector: ['VECTOR_URL'],
+  search: ['SEARCH_URL'],
+}
+const injectKeyLabels = computed(() => INJECT_KEYS[props.kind] ?? [])
 const envLabel = (id: string) => envStore.envs.find((e) => e.id === id)?.name ?? id
 
 // 按 FIELD_DEFS 顺序渲染连接字段；connection 中存在但未列出的字段兜底追加在末尾。
@@ -196,6 +219,20 @@ async function loadRules() {
   if (resp.ok) rules.value = (await resp.json()).data ?? []
 }
 
+// 反查绑定了此数据服务的应用（前端聚合：拉本租户全部应用，过滤 bindings 命中本 DS 的）。
+// 绑定项 name 可能是 DS name 或 id（后端 resolveDS 容错），两者都比对。
+async function loadBoundApps() {
+  if (!ds.value) { boundApps.value = []; return }
+  const resp = await fetchAuth('/api/applications')
+  if (!resp.ok) { boundApps.value = []; return }
+  const apps = ((await resp.json()).data ?? []) as AppLite[]
+  const kind = ds.value.kind
+  const want = [ds.value.name, ds.value.id]
+  boundApps.value = apps
+    .filter((a) => (a.bindings ?? []).some((b) => b.type === kind && want.includes(b.name)))
+    .map((a) => ({ id: a.id, name: a.name }))
+}
+
 // 针对该数据服务的告警规则（targetId 为空=全部 dataservice，或等于当前 ds.id）
 const dsRules = computed(() =>
   rules.value.filter((r) => !r.targetId || r.targetId === ds.value?.id),
@@ -216,13 +253,15 @@ async function bootstrap() {
   ds.value = null
   metrics.value = []
   rules.value = []
+  boundApps.value = []
   loading.value = true
   try {
     if (!metas.value.length) await loadMeta()
     await loadDetail()
     if (!ds.value) return // 加载失败（errorMsg 已设），不启轮询
+    syncManageForm() // 同步扩缩容/升级表单初值
     alive = true
-    await loadPollingData()
+    await Promise.all([loadPollingData(), loadBoundApps()])
   } finally {
     loading.value = false
   }
@@ -321,6 +360,66 @@ async function deleteRule(r: AlertRule) {
     ElMessage.error(err.error || '删除失败')
   }
 }
+
+// === 实例浅管理（仅 managed 模式：平台托管的实例可启停/重启/扩缩容/升级）===
+const isManaged = computed(() => !ds.value?.source || ds.value?.source === 'managed')
+const isRowProd = computed(() => envStore.envs.find((e) => e.id === ds.value?.envId)?.type === 'prod')
+const scaleForm = ref({ replicas: 1, cpu: '', memory: '', storageGb: 0 })
+const upgradeImage = ref('')
+const CPU_OPTS = ['100m', '250m', '500m', '1', '2']
+const MEM_OPTS = ['256Mi', '512Mi', '1Gi', '2Gi', '4Gi']
+
+function syncManageForm() {
+  if (!ds.value) return
+  scaleForm.value = {
+    replicas: ds.value.replicas ?? 1,
+    cpu: ds.value.cpu ?? '', memory: ds.value.memory ?? '', storageGb: ds.value.storageGb ?? 0,
+  }
+  upgradeImage.value = ds.value.image ?? ''
+}
+
+async function lifecycle(action: 'start' | 'stop' | 'restart') {
+  if (!ds.value) return
+  if (action !== 'start' && isRowProd.value) {
+    const ok = await confirmDangerous({
+      action: { stop: '停止数据服务', restart: '重启数据服务' }[action]!,
+      target: ds.value.name, requireNameConfirm: true, isProd: true,
+    })
+    if (!ok) return
+  }
+  const resp = await fetchAuth(`/api/dataservices/${ds.value.id}/${action}`, { method: 'POST' })
+  if (resp.ok) {
+    ElMessage.success({ start: '已启动', stop: '已停止', restart: '已重启' }[action])
+    await loadDetail(); syncManageForm()
+  } else {
+    const err = await resp.json().catch(() => ({}))
+    ElMessage.error(err.error || '操作失败')
+  }
+}
+
+async function scale() {
+  if (!ds.value) return
+  const body: Record<string, unknown> = {}
+  if (scaleForm.value.replicas >= 0) body.replicas = scaleForm.value.replicas
+  if (scaleForm.value.cpu) body.cpu = scaleForm.value.cpu
+  if (scaleForm.value.memory) body.memory = scaleForm.value.memory
+  if (scaleForm.value.storageGb > 0) body.storageGb = scaleForm.value.storageGb
+  const resp = await fetchAuth(`/api/dataservices/${ds.value.id}/scale`, {
+    method: 'PUT', body: JSON.stringify(body),
+  })
+  if (resp.ok) { ElMessage.success('已应用扩缩容'); await loadDetail(); syncManageForm() }
+  else { const err = await resp.json().catch(() => ({})); ElMessage.error(err.error || '扩缩容失败') }
+}
+
+async function upgrade() {
+  if (!ds.value || !upgradeImage.value.trim()) { ElMessage.warning('请填写镜像'); return }
+  const resp = await fetchAuth(`/api/dataservices/${ds.value.id}/upgrade`, {
+    method: 'PUT', body: JSON.stringify({ image: upgradeImage.value.trim() }),
+  })
+  if (resp.ok) { ElMessage.success('升级请求已提交'); await loadDetail() }
+  else { const err = await resp.json().catch(() => ({})); ElMessage.error(err.error || '升级失败') }
+}
+
 </script>
 
 <template>
@@ -331,6 +430,19 @@ async function deleteRule(r: AlertRule) {
       <h2>{{ ds.name }}</h2>
       <p class="sub">资源中心 · {{ kindLabel }} 详情</p>
     </div>
+
+    <!-- 应用上下文条：从应用「资源绑定」点入时展示绑定关系（注入到哪、跳应用、解绑） -->
+    <section v-if="ds && ctxApp" class="ctx-bar">
+      <div class="ctx-info">
+        <span class="ctx-label">被应用绑定</span>
+        <a class="ctx-app" @click="router.push(`/applications/${ctxApp}`)">应用详情 →</a>
+      </div>
+      <div class="ctx-inject">
+        连接信息已注入该应用配置：
+        <code v-for="k in injectKeyLabels" :key="k" class="mono">{{ k }}</code>
+        （default 桶，工作负载重启后生效）
+      </div>
+    </section>
 
     <!-- 加载失败兜底（404/网络错误），避免静默空状态 -->
     <section v-if="errorMsg && !loading" class="block">
@@ -364,6 +476,46 @@ async function deleteRule(r: AlertRule) {
       </el-descriptions>
     </section>
 
+    <!-- 实例管理（managed：启停/重启/扩缩容/升级；external：只读说明） -->
+    <section v-if="!errorMsg && !loading && ds" class="block">
+      <div class="block-title">实例管理</div>
+      <template v-if="isManaged">
+        <div class="mgmt-row">
+          <el-button :type="ds.status === 'running' ? 'warning' : 'success'" size="small"
+            @click="lifecycle(ds.status === 'running' ? 'stop' : 'start')">
+            {{ ds.status === 'running' ? '停止' : '启动' }}
+          </el-button>
+          <el-button size="small" @click="lifecycle('restart')">重启</el-button>
+          <el-tag v-if="isRowProd" type="danger" size="small">生产环境（操作需二次确认）</el-tag>
+        </div>
+        <div class="mgmt-sub">扩缩容（副本 / CPU / 内存 / 存储；存储仅扩容不可缩）</div>
+        <div class="mgmt-row">
+          <span class="mgmt-label">副本</span>
+          <el-input-number v-model="scaleForm.replicas" :min="0" :max="3" size="small" />
+          <span class="mgmt-label">CPU</span>
+          <el-select v-model="scaleForm.cpu" size="small" style="width:110px" clearable placeholder="默认">
+            <el-option v-for="c in CPU_OPTS" :key="c" :label="c" :value="c" />
+          </el-select>
+          <span class="mgmt-label">内存</span>
+          <el-select v-model="scaleForm.memory" size="small" style="width:120px" clearable placeholder="默认">
+            <el-option v-for="m in MEM_OPTS" :key="m" :label="m" :value="m" />
+          </el-select>
+          <span class="mgmt-label">存储(GB)</span>
+          <el-input-number v-model="scaleForm.storageGb" :min="0" :max="500" size="small" />
+          <el-button type="primary" size="small" @click="scale">应用</el-button>
+        </div>
+        <div class="mgmt-sub">版本升级（覆盖镜像，含 tag）</div>
+        <div class="mgmt-row">
+          <el-input v-model="upgradeImage" size="small" placeholder="如 qdrant/qdrant:v1.13" style="width:300px" />
+          <el-button type="primary" size="small" @click="upgrade">升级</el-button>
+          <span class="mgmt-hint" v-if="ds.image">当前：{{ ds.image }}</span>
+        </div>
+      </template>
+      <el-alert v-else type="info" :closable="false"
+        title="外部实例（平台不托管运维）"
+        description="该实例为外部接入（共享集群 / 独占外部），启停 / 扩缩容 / 升级请在对应外部集群操作。平台仅做连接注入与管理。" />
+    </section>
+
     <!-- 连接信息 -->
     <section class="block" v-if="!errorMsg && connectionFields.length">
       <div class="block-title">连接信息</div>
@@ -383,6 +535,20 @@ async function deleteRule(r: AlertRule) {
     <section class="block" v-else-if="!errorMsg && !loading">
       <div class="block-title">连接信息</div>
       <el-empty description="暂无连接信息" :image-size="48" />
+    </section>
+
+    <!-- 绑定此资源的应用（反查） -->
+    <section v-if="!errorMsg && !loading" class="block">
+      <div class="block-title">绑定此资源的应用</div>
+      <el-table v-if="boundApps.length" :data="boundApps" size="small">
+        <el-table-column label="应用">
+          <template #default="{ row }">
+            <a class="link" @click="router.push(`/applications/${row.id}`)">{{ row.name }}</a>
+          </template>
+        </el-table-column>
+        <el-table-column label="应用 ID" prop="id" />
+      </el-table>
+      <el-empty v-else description="暂无应用绑定此资源" :image-size="48" />
     </section>
 
     <!-- 监控指标 -->
@@ -490,6 +656,10 @@ async function deleteRule(r: AlertRule) {
 .page-head h2 { margin: 0 0 4px; font-size: 18px; }
 .sub { margin: 0; font-size: 12.5px; color: var(--text-dim); }
 .block { margin-bottom: 24px; }
+.mgmt-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 8px 0; }
+.mgmt-sub { font-size: 12.5px; color: var(--text-dim); margin: 14px 0 2px; }
+.mgmt-label { font-size: 12px; color: var(--text-faint); }
+.mgmt-hint { font-size: 12px; color: var(--text-faint); }
 .block-title { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 600; margin-bottom: 10px; }
 .block-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .block-head .block-title { margin-bottom: 0; }
@@ -509,4 +679,28 @@ async function deleteRule(r: AlertRule) {
 .spark-bar { flex: 1; background: var(--brand); opacity: 0.7; border-radius: 2px 2px 0 0; min-width: 2px; }
 .cond-row { display: flex; gap: 8px; width: 100%; }
 .err-actions { display: flex; justify-content: center; gap: 8px; margin-top: 12px; }
+.ctx-bar {
+  margin-bottom: 16px;
+  padding: 12px 16px;
+  border: 1px solid var(--brand);
+  border-radius: var(--radius);
+  background: var(--brand-soft);
+  font-size: 13px;
+}
+.ctx-info { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.ctx-label { font-weight: 600; color: var(--brand); }
+.ctx-app { color: var(--brand); cursor: pointer; }
+.ctx-app:hover { text-decoration: underline; }
+.ctx-inject { color: var(--text-dim); line-height: 1.6; }
+.ctx-inject code {
+  display: inline-block;
+  margin: 0 2px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--brand);
+  font-size: 11px;
+}
+.link { color: var(--brand); cursor: pointer; }
+.link:hover { text-decoration: underline; }
 </style>

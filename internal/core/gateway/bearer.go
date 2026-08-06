@@ -60,6 +60,7 @@ func BearerAuth(idb identity.Repository, jwtSecret string) func(http.Handler) ht
 				ctx = tenant.WithTenant(ctx, k.TenantID)
 				ctx = WithRoles(ctx, k.Roles)
 				ctx = WithUserID(ctx, k.UserID)
+				ctx = WithApp(ctx, k.AppID) // 应用级 Key：用量归因到应用
 			}
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})

@@ -23,11 +23,15 @@ import (
 
 // k8sAppliers 聚合 K8s 数据面 applier（workload + dataservice），供各 repo 装饰。
 // clientset + namespace 额外供 builder.K8sJob 创建构建 Job + 取 Pod 日志。
+// wlReconciler 暴露 WorkloadReconciler 引用，供 stores 构造完成后延迟注入 AppConfigLookup
+//（startManager 先于 buildAllStores，stores 就绪后才能装 appconfig 桥接）。
 type k8sAppliers struct {
-	workload    workload.Applier
-	dataservice dataservice.Applier
-	clientset   kubernetes.Interface // 供 builder.K8sJob（create Job + pods/log）；nil=K8s 不可用
-	namespace   string               // Job 落地 namespace（PAAS_K8S_NAMESPACE）
+	workload      workload.Applier
+	dataservice   dataservice.Applier
+	dsRestarter   *controller.DSRestarter // 数据服务实例滚动重启（patch STS），nil=集群外降级
+	clientset     kubernetes.Interface    // 供 builder.K8sJob（create Job + pods/log）；nil=K8s 不可用
+	namespace     string                  // Job 落地 namespace（PAAS_K8S_NAMESPACE）
+	wlReconciler  *controller.WorkloadReconciler
 }
 
 // startManager 启 controller-runtime manager（K8s 数据面），自动检测配置来源：
@@ -81,13 +85,14 @@ func startManager() (k8sAppliers, context.CancelFunc) {
 		log.Printf("K8s 数据面: 启动 manager 失败（降级为无 K8s）: %v", err)
 		return k8sAppliers{}, nil
 	}
-	if err := (&controller.WorkloadReconciler{
+	wlReconciler := &controller.WorkloadReconciler{
 		Client: mgr.GetClient(), Scheme: scheme,
 		// 数据面接入 token/端点注入 service 类型 Pod env（zeus 应用经 paas-registry 插件发现 PaaS）。
 		// token 来自 PAAS_DP_TOKEN env（helm values dataplane.token），空则不注入。
 		DPToken:    os.Getenv("PAAS_DP_TOKEN"),
 		DPEndpoint: os.Getenv("PAAS_DP_ENDPOINT_DEFAULT"),
-	}).SetupWithManager(mgr); err != nil {
+	}
+	if err := wlReconciler.SetupWithManager(mgr); err != nil {
 		log.Printf("K8s 数据面: 注册 WorkloadReconciler 失败（降级为无 K8s）: %v", err)
 		return k8sAppliers{}, nil
 	}
@@ -111,9 +116,11 @@ func startManager() (k8sAppliers, context.CancelFunc) {
 		clientset = cs
 	}
 	return k8sAppliers{
-		workload:    controller.NewK8sApplier(mgr.GetClient(), ns),
-		dataservice: controller.NewDataServiceK8sApplier(mgr.GetClient(), ns),
-		clientset:   clientset,
-		namespace:   ns,
+		workload:     controller.NewK8sApplier(mgr.GetClient(), ns),
+		dataservice:  controller.NewDataServiceK8sApplier(mgr.GetClient(), ns),
+		dsRestarter:  controller.NewDSRestarter(mgr.GetClient(), ns),
+		clientset:    clientset,
+		namespace:    ns,
+		wlReconciler: wlReconciler,
 	}, cancel
 }

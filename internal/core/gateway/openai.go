@@ -19,6 +19,9 @@ type chatReq struct {
 	Stream      bool               `json:"stream"`
 	Temperature *float64           `json:"temperature,omitempty"`
 	MaxTokens   *int               `json:"max_tokens,omitempty"`
+	// User 是 OpenAI 标准软标签字段：应用内多 agent 归因细分（如 "researcher"/"coder"）。
+	// 不做配额、仅看板聚合；与 AppID（强制计费维度）正交。
+	User string `json:"user,omitempty"`
 }
 
 type deltaMessage struct {
@@ -78,7 +81,7 @@ func ChatCompletions(gw *Gateway, meter *Meter) http.HandlerFunc {
 				lastErr = chatErr
 				continue // failover 到下一通道（尚未写 SSE headers，可安全切换）
 			}
-			serveStream(w, r, stream, meter, req.Model)
+			serveStream(w, r, stream, meter, req.Model, req.User)
 			return
 		}
 		// 全部通道失败：脱敏 cause 返客户端（不泄漏上游 URL/IP/凭证状态），原始错误入服务端日志。
@@ -112,7 +115,8 @@ func isOfflineErr(err error) bool {
 
 // serveStream 把 provider.Chunk 流转为 OpenAI 兼容 SSE 写入响应，并计量 token。
 // 客户端断开（ctx.Done）即停止消费，避免为已断开请求继续计费。
-func serveStream(w http.ResponseWriter, r *http.Request, stream <-chan provider.Chunk, meter *Meter, model string) {
+// user 是 OpenAI 兼容软标签（agent 细分），appID 来自应用级 Key（强制归因）。
+func serveStream(w http.ResponseWriter, r *http.Request, stream <-chan provider.Chunk, meter *Meter, model, user string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -156,7 +160,8 @@ loop:
 	}
 	if meter != nil {
 		tid, _ := tenant.TenantFrom(r.Context())
-		meter.Record(tid, model, tokens)
+		appID := AppFrom(r.Context())
+		meter.Record(tid, appID, model, user, tokens)
 		// Prometheus 推理指标（success）：tokens 粗估全计 completion，duration 用 wall clock。
 		meter.recordInferenceMetrics(tid, model, "success", tokens, time.Since(start).Seconds())
 	}

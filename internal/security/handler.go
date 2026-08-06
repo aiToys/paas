@@ -138,7 +138,7 @@ func (h *Handler) serveSecretCollection(w http.ResponseWriter, r *http.Request) 
 		}
 		// 记审计（创建成功）
 		h.record(r.Context(), ActionCreate, saved.ID, "创建密钥 "+sec.Name)
-		httputil.WriteJSON(w, http.StatusCreated, saved)
+		httputil.WriteDataCreated(w, saved)
 		return
 	}
 	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -173,7 +173,7 @@ func (h *Handler) serveSecretItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.record(r.Context(), ActionDelete, id, "删除密钥 "+sec.Name)
-	httputil.WriteJSON(w, http.StatusOK, map[string]string{"deleted": id})
+	httputil.WriteData(w, map[string]string{"deleted": id})
 }
 
 func (h *Handler) serveAudit(w http.ResponseWriter, r *http.Request) {

@@ -7,6 +7,7 @@ package pg
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,7 +56,9 @@ func (s *Store) namespace() string {
 
 // dsCols 与 model.DataService 字段顺序对齐（scan 列顺序必须一致）。
 // spec/connection 均为 JSONB map[string]string，分别对应 DataService.Spec / Connection。
-const dsCols = `id, tenant_id, kind, name, spec, connection, status, env_id, app_id, created_at, updated_at`
+// 末尾列：实例浅管理字段（replicas 可空，cpu/memory/image NOT NULL DEFAULT ''，storage_gb DEFAULT 0）+
+// source（managed|external，DEFAULT 'managed'）。
+const dsCols = `id, tenant_id, kind, name, spec, connection, status, source, engine_id, env_id, app_id, created_at, updated_at, replicas, cpu, memory, storage_gb, image`
 
 // marshalSpec 把 map[string]string 序列化为 JSONB 列所需的字节切片（spec 与 connection 共用）。
 // nil map 也合法--json.Marshal(nil) 输出 "null"，DB 列 NOT NULL 但默认值 '{}' 兜底；
@@ -89,11 +92,16 @@ func unmarshalSpec(raw []byte) map[string]string {
 // spec/connection 列读出为 []byte，经 unmarshalSpec 转 nil 安全的 map。
 func scanDS(r storagepg.RowScanner, d *dataservice.DataService) error {
 	var specRaw, connRaw []byte
-	if err := r.Scan(&d.ID, &d.TenantID, &d.Kind, &d.Name, &specRaw, &connRaw, &d.Status, &d.EnvID, &d.AppID, &d.CreatedAt, &d.UpdatedAt); err != nil {
+	var replicas sql.NullInt32
+	if err := r.Scan(&d.ID, &d.TenantID, &d.Kind, &d.Name, &specRaw, &connRaw, &d.Status, &d.Source, &d.EngineID, &d.EnvID, &d.AppID, &d.CreatedAt, &d.UpdatedAt, &replicas, &d.CPU, &d.Memory, &d.StorageGB, &d.Image); err != nil {
 		return err
 	}
 	d.Spec = unmarshalSpec(specRaw)
 	d.Connection = unmarshalSpec(connRaw)
+	if replicas.Valid {
+		rv := int(replicas.Int32)
+		d.Replicas = &rv
+	}
 	return nil
 }
 
@@ -181,6 +189,9 @@ func (s *Store) Create(ctx context.Context, d dataservice.DataService) (dataserv
 		d.ID = fmt.Sprintf("ds-%d-%d", time.Now().UnixNano(), s.seq.Load())
 	}
 	d.TenantID = tid
+	if d.Source == "" {
+		d.Source = dataservice.SourceManaged
+	}
 	if d.Status == "" {
 		d.Status = dataservice.StatusRunning
 	}
@@ -188,8 +199,10 @@ func (s *Store) Create(ctx context.Context, d dataservice.DataService) (dataserv
 		d.CreatedAt = time.Now()
 		d.UpdatedAt = d.CreatedAt
 	}
-	// 生成并填充 Connection（凭证 + FQDN + uri）；凭证持久化（重启不变，Secret 引用）。
-	d.FillConnection(s.namespace())
+	// managed：生成凭证 + 平台 FQDN；external：保留用户填的连接信息，不重生。
+	if !dataservice.IsExternal(d.Source) {
+		d.FillConnection(s.namespace())
+	}
 	specBytes, err := marshalSpec(d.Spec)
 	if err != nil {
 		return dataservice.DataService{}, err
@@ -199,10 +212,11 @@ func (s *Store) Create(ctx context.Context, d dataservice.DataService) (dataserv
 		return dataservice.DataService{}, err
 	}
 	row := s.db.Pool().QueryRow(ctx, `
-INSERT INTO data_services (id, tenant_id, kind, name, spec, connection, status, env_id, app_id, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+INSERT INTO data_services (id, tenant_id, kind, name, spec, connection, status, source, engine_id, env_id, app_id, created_at, updated_at, replicas, cpu, memory, storage_gb, image)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 RETURNING `+dsCols,
-		d.ID, d.TenantID, d.Kind, d.Name, specBytes, connBytes, d.Status, d.EnvID, d.AppID, d.CreatedAt, d.UpdatedAt,
+		d.ID, d.TenantID, d.Kind, d.Name, specBytes, connBytes, d.Status, d.Source, d.EngineID, d.EnvID, d.AppID, d.CreatedAt, d.UpdatedAt,
+		d.Replicas, d.CPU, d.Memory, d.StorageGB, d.Image,
 	)
 	var saved dataservice.DataService
 	if err = scanDS(row, &saved); err != nil {
@@ -242,9 +256,26 @@ func (s *Store) Update(ctx context.Context, d dataservice.DataService) (dataserv
 	if d.Spec != nil {
 		ex.Spec = d.Spec
 	}
+	// 实例管理字段（非零覆盖，与内存一致）：handler 读现有→改对应字段→Update。
+	if d.Replicas != nil {
+		ex.Replicas = d.Replicas
+	}
+	if d.CPU != "" {
+		ex.CPU = d.CPU
+	}
+	if d.Memory != "" {
+		ex.Memory = d.Memory
+	}
+	if d.StorageGB > 0 {
+		ex.StorageGB = d.StorageGB
+	}
+	if d.Image != "" {
+		ex.Image = d.Image
+	}
 	ex.UpdatedAt = time.Now()
 	// spec 改后重算 connection（凭证保留，host/port/uri 按 ns+engine 重算；与内存一致）。
-	if ex.Connection != nil {
+	// external 模式跳过：连接信息是用户填的真实外部地址，不能被平台 FQDN 覆盖。
+	if ex.Connection != nil && !dataservice.IsExternal(ex.Source) {
 		ex.FillConnection(s.namespace())
 	}
 	// 合并后复校验，防止 PUT 用空 spec 清空 Create 时强制的必填字段。
@@ -260,9 +291,9 @@ func (s *Store) Update(ctx context.Context, d dataservice.DataService) (dataserv
 		return dataservice.DataService{}, err
 	}
 	row := s.db.Pool().QueryRow(ctx, `
-UPDATE data_services SET status=$1, spec=$2, connection=$3, updated_at=$4
-WHERE id=$5 AND tenant_id=$6 RETURNING `+dsCols,
-		ex.Status, specBytes, connBytes, ex.UpdatedAt, d.ID, tid,
+UPDATE data_services SET status=$1, spec=$2, connection=$3, replicas=$4, cpu=$5, memory=$6, storage_gb=$7, image=$8, updated_at=$9
+WHERE id=$10 AND tenant_id=$11 RETURNING `+dsCols,
+		ex.Status, specBytes, connBytes, ex.Replicas, ex.CPU, ex.Memory, ex.StorageGB, ex.Image, ex.UpdatedAt, d.ID, tid,
 	)
 	var saved dataservice.DataService
 	if err = scanDS(row, &saved); err != nil {

@@ -77,10 +77,9 @@ func (r *Registry) Mux() *http.ServeMux { return r.mux }
 // Register 既注册 mux（Go 1.22 method-scoped pattern）又记录 spec 元数据。
 // 用于"一个 handler 对应一个端点"的普通路由。
 func (r *Registry) Register(method, path string, h http.Handler, opts ...Opt) {
-	rt := r.record(method, path, opts...)
+	r.record(method, path, opts...)
 	// Go 1.22 method-scoped："GET /api/applications"。
 	r.mux.Handle(method+" "+path, h)
-	_ = rt
 }
 
 // Operation 仅记录 spec 元数据，不注册 mux。

@@ -73,6 +73,7 @@ type Stores struct {
 	Environment    environment.Repository
 	AppConfig      appconfig.Repository
 	DataService    dataservice.Repository
+	Engine         dataservice.EngineRepository
 	Workload       workload.Repository
 	DevOpsRepos    devops.CodeRepoRepository
 	DevOpsBuilds   devops.BuildRunRepository
@@ -133,6 +134,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		seedPGAllIfEmpty(ctx, idb, appRepo, envRepo, appcfgRepo, rawDs, rawWl,
 			devopsRepo, govRepo, ccRepo, billingRepo, secRepo)
 		seedMaasCatalog(ctx, maasRepo, secRepo)
+		seedEnginesIfEmpty(ctx, rawDs)
 		// workload seed 用 ApplyRepo（wlRepo 已装饰：写 PG + 投影 CRD），让 seed 工作负载真实落地
 		// K8s（Deployment + nginx Pod）。seedPGAllIfEmpty 用 rawWl 不投影，故单独 seed；表空才灌（幂等）。
 		if n, err := rawWl.WorkloadsCount(ctx); err != nil {
@@ -148,6 +150,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 			Environment:    envRepo,
 			AppConfig:      appcfgRepo,
 			DataService:    dsRepo,
+			Engine:         rawDs, // PG ds store 同实现 EngineRepository（平台级，无 ApplyRepo 装饰）
 			Workload:       wlRepo,
 			DevOpsRepos:    devopsRepo,
 			DevOpsBuilds:   devopsRepo,
@@ -170,7 +173,8 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 	appRepo := appmemory.NewStore()
 	envRepo := envmemory.NewStore()
 	appcfgRepo := appcfgmemory.NewStore()
-	var dsRepo dataservice.Repository = dsmemory.NewStore(dsmemory.WithNamespaceResolver(nsResolver))
+	dsRaw := dsmemory.NewStore(dsmemory.WithNamespaceResolver(nsResolver))
+	var dsRepo dataservice.Repository = dsRaw
 	if appliers.dataservice != nil {
 		dsRepo = dataservice.NewApplyRepo(dsRepo, appliers.dataservice) // K8s 启用：dataservice 写投影 CRD
 	}
@@ -197,6 +201,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		Environment:    envRepo,
 		AppConfig:      appcfgRepo,
 		DataService:    dsRepo,
+		Engine:         dsRaw, // 内存 ds store 同实现 EngineRepository（NewStore 已 seed DefaultEngines）
 		Workload:       wlRepo,
 		DevOpsRepos:    devopsRepo,
 		DevOpsBuilds:   devopsRepo,
@@ -371,6 +376,24 @@ func seedAppConfigs(ctx context.Context, repo appconfig.Repository) {}
 // seedDataServices no-op（去假数据）：不灌 mock 数据服务实例。
 // 用户经控制台创建真实数据服务（已有真实引擎 mysql/redis/nats/minio）。
 func seedDataServices(ctx context.Context, repo dataservice.Repository) {}
+
+// seedEnginesIfEmpty 灌入默认引擎目录（平台级配置，非假数据）：表空才灌（幂等）。
+// memory 路径 NewStore 已内联 seed，仅 PG 路径需调；managed 轻量引擎 enabled + 重型 external-shared 占位。
+func seedEnginesIfEmpty(ctx context.Context, repo dataservice.EngineRepository) {
+	n, err := repo.EnginesCount(ctx)
+	if err != nil {
+		log.Printf("[seed] 统计引擎失败: %v", err)
+		return
+	}
+	if n > 0 {
+		return
+	}
+	for _, e := range dataservice.DefaultEngines() {
+		if _, err := repo.CreateEngine(ctx, e); err != nil {
+			log.Printf("[seed] 灌引擎 %s 失败: %v", e.ID, err)
+		}
+	}
+}
 
 // seedWorkloads 灌入工作负载预置数据。
 func seedWorkloads(ctx context.Context, repo workload.Repository) {

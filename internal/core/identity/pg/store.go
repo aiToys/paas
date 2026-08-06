@@ -212,8 +212,8 @@ func (s *Store) CreateAPIKey(ctx context.Context, k identity.APIKey) error {
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err = tx.Exec(ctx,
-		`INSERT INTO api_keys (id, tenant_id, user_id, key, created_at) VALUES ($1, $2, $3, $4, $5)`,
-		k.ID, k.TenantID, k.UserID, k.Key, k.CreatedAt); err != nil {
+		`INSERT INTO api_keys (id, tenant_id, user_id, app_id, key, created_at) VALUES ($1, $2, $3, $4, $5, $6)`,
+		k.ID, k.TenantID, k.UserID, k.AppID, k.Key, k.CreatedAt); err != nil {
 		if pg.IsUniqueViolation(err) {
 			return fmt.Errorf("API Key%w", pg.ErrAlreadyExists)
 		}
@@ -231,14 +231,19 @@ func (s *Store) CreateAPIKey(ctx context.Context, k identity.APIKey) error {
 // LookupAPIKey 按 bearer key 解析 (租户, 用户, 角色)。找不到返回错误（不泄漏存在性）。
 func (s *Store) LookupAPIKey(ctx context.Context, key string) (identity.APIKey, error) {
 	row := s.db.Pool().QueryRow(ctx,
-		`SELECT id, tenant_id, user_id, created_at FROM api_keys WHERE key=$1`, key)
+		`SELECT id, tenant_id, user_id, app_id, created_at FROM api_keys WHERE key=$1`, key)
 	var k identity.APIKey
 	k.Key = key
-	if err := row.Scan(&k.ID, &k.TenantID, &k.UserID, &k.CreatedAt); err != nil {
+	// app_id 可空（旧租户级 Key 行 app_id=NULL，migration 0004 增量加列），用 *string 接 NULL。
+	var appID *string
+	if err := row.Scan(&k.ID, &k.TenantID, &k.UserID, &appID, &k.CreatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return identity.APIKey{}, fmt.Errorf("API Key 无效")
 		}
 		return identity.APIKey{}, err
+	}
+	if appID != nil {
+		k.AppID = *appID
 	}
 	roles, err := s.apiKeyRoles(ctx, k.ID)
 	if err != nil {
@@ -445,7 +450,7 @@ func (s *Store) DeleteUser(ctx context.Context, tenantID, userID string) error {
 
 // ListAPIKeys tenantID 空则全租户。
 func (s *Store) ListAPIKeys(ctx context.Context, tenantID string) ([]identity.APIKey, error) {
-	q := `SELECT id, tenant_id, user_id, key, created_at FROM api_keys`
+	q := `SELECT id, tenant_id, user_id, app_id, key, created_at FROM api_keys`
 	args := []any{}
 	if tenantID != "" {
 		q += ` WHERE tenant_id=$1`
@@ -460,8 +465,13 @@ func (s *Store) ListAPIKeys(ctx context.Context, tenantID string) ([]identity.AP
 	var out []identity.APIKey
 	for rows.Next() {
 		var k identity.APIKey
-		if err := rows.Scan(&k.ID, &k.TenantID, &k.UserID, &k.Key, &k.CreatedAt); err != nil {
+		// app_id 可空（旧租户级 Key 行），用 *string 接 NULL。
+		var appID *string
+		if err := rows.Scan(&k.ID, &k.TenantID, &k.UserID, &appID, &k.Key, &k.CreatedAt); err != nil {
 			return nil, err
+		}
+		if appID != nil {
+			k.AppID = *appID
 		}
 		out = append(out, k)
 	}

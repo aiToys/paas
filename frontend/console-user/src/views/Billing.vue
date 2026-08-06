@@ -11,7 +11,7 @@ interface UsageLine {
 }
 interface UsageView {
   quota: { limits: Record<string, number> }
-  usage: { counts: Record<string, number> }
+  usage: { counts: Record<string, number>; byApp?: Record<string, Record<string, number>> }
   items: UsageLine[]
 }
 interface BillItem {
@@ -48,6 +48,18 @@ const quotaEditable = ref(false)
 const quotaDraft = ref<Record<string, number>>({})
 
 const hasOver = computed(() => view.value?.items.some((i) => i.over) ?? false)
+
+// 按应用拆 token 用量（模型推理归因）：byApp[appID].tokens → 降序展示。
+// 让租户看清"哪个应用消耗了多少 token"，与工作负载/数据服务的应用维度计费对齐。
+const tokenByApp = computed(() => {
+  const byApp = view.value?.usage.byApp
+  if (!byApp) return []
+  return Object.entries(byApp)
+    .map(([appId, res]) => ({ appId, tokens: res.tokens ?? 0 }))
+    .filter((x) => x.tokens > 0)
+    .sort((a, b) => b.tokens - a.tokens)
+})
+const totalTokens = computed(() => tokenByApp.value.reduce((s, x) => s + x.tokens, 0))
 
 function startEditQuota() {
   quotaDraft.value = { ...(view.value?.quota.limits ?? {}) }
@@ -185,6 +197,32 @@ onMounted(load)
           />
         </div>
       </div>
+    </section>
+
+    <!-- 模型推理 token 按应用拆分（应用级 Key 归因） -->
+    <section v-if="tokenByApp.length" class="block">
+      <div class="block-head">
+        <span class="block-title">模型 Token 用量 · 按应用</span>
+        <el-tag type="info" size="small">应用级 Key 归因</el-tag>
+      </div>
+      <el-table :data="tokenByApp" size="small">
+        <el-table-column label="应用" prop="appId" min-width="200" />
+        <el-table-column label="Token 用量（千）" width="180">
+          <template #default="{ row }">
+            <span class="mono">{{ row.tokens.toLocaleString() }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="占比" width="160">
+          <template #default="{ row }">
+            <el-progress
+              :percentage="Math.round((row.tokens / totalTokens) * 100) || 0"
+              :color="'#6366f1'"
+              :show-text="true"
+              :stroke-width="6"
+            />
+          </template>
+        </el-table-column>
+      </el-table>
     </section>
 
     <!-- 账单 -->

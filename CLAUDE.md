@@ -272,7 +272,7 @@ cmd/core serveHTTP
 
 解决 console-admin 三大痛点：菜单散乱（个人中心/模型/供应商都是顶级）、管理员无法跨租户查看用户数据、推理模型流式思考过程丢失。设计见 `docs/superpowers/specs/2026-08-02-p1-real-platform.md`。
 
-- **菜单架构重构**（`auth/menus.go` staticMenus）：按平台运维职责分组——工作台 / 身份与权限（租户/用户/角色/密钥）/ 推理服务（模型/供应商）/ 资源总览（应用/工作负载/数据服务）。个人中心移出侧栏（`ShowMenu:false`），路由保留供右上角用户下拉入口。子菜单 path 保持稳定（不随分组前缀化），前端跳转引用零牵连。system 重命名「身份与权限」（Lock 图标）。
+- **菜单架构重构**（`auth/menus.go` staticMenus）：按平台运维职责分组——工作台 / 身份与权限（租户/用户/角色/密钥）/ 推理服务（模型/供应商）/ 资源总览（**三级嵌套**：资源总览下按业务域分 4 组——应用运行态（应用/工作负载/数据服务/环境）/ DevOps 链路（构建/镜像/发布）/ 平台能力（配置中心/服务治理/告警规则/密钥）/ 计费审计（配额/账单/审计日志））。MenuItem.vue 递归渲染支持任意层级，dynamic.ts 只注册叶子节点（中间分组节点无 component 被跳过）。个人中心移出侧栏（`ShowMenu:false`），路由保留供右上角用户下拉入口。子菜单 path 保持稳定（不随分组前缀化），前端跳转引用零牵连。图标全局唯一（修正早期 Key×2/Odometer×2/Cpu×3 撞车）。mock/handlers/menu.ts 与后端 staticMenus() 结构对齐（dev 与生产零漂移）。
 - **跨租户资源总览**（核心：管理员管理用户数据）：各业务 Repository 加 `ListAll(ctx)`（跨租户，不过滤 tenant，返回对象带 `TenantID`，pg 提取共享查询 helper 复用 DRY）；REST `/api/admin/applications|workloads|dataservices`（`adminGuard` super_admin，**只读**——跨租户写越权风险高，资源运维仍在 console-user 租户内）。console-admin `modules/resources/` 模块 3 页（SearchTable + useCrud 假分页，租户列 + keyword + tenantId 过滤）。dataservice admin 总览同样 `MaskConnection`（与 list/detail 同源，明文仅内部绑定注入用）。
 - **全模块 admin 总览扩展**（每个模块管理功能完善 + 闭环，2026-08-04）：解决「每个模块都有后台管理、管理员能管理其他用户数据」核心诉求。environment/devops/configcenter/governance/observability/security/billing 7 模块补 `ListAll`（Repository 接口 + memory + pg）+ 11 端点（`/api/admin/environments|buildruns|images|releases|namespaces|services|alert-rules|secrets|audit-logs|quotas|bills`，`adminGuard` super_admin 只读）+ 11 前端总览页（`resources/views/{Environments,BuildRuns,Images,Releases,Namespaces,Services,AlertRules,Secrets,AuditLogs,Quotas,Bills}.vue`）+ 菜单 11 子项。security `ListAllSecrets` 返回 `Masked()`；billing `Limits`/`Items` 深拷贝防 race；observability 用 alert-rules（metrics/logs/traces 惰性时序不适总览）；devops 三实体各一端点。console-admin 后台现覆盖全部模块（身份 4 + 推理 2 + 资源总览 14 = 20 管理页），每个模块管理功能闭环。
 - **推理流式增强**（Playground 真正 SSE 效果）：推理模型（GLM/QwQ/Doubao/DeepSeek-R1 等）流式返回 `reasoning_content`（思考过程），原代码只解析 `content` 致思考阶段被丢弃→前端长时间空白。`provider.Chunk` 加 `Reasoning` 字段 → `OpenAICompatibleProvider` 解析 `delta.reasoning_content` → gateway `serveStream` 透传为 `deltaMessage.ReasoningContent` + 加 `X-Accel-Buffering: no`（防 nginx/ingress 缓冲，确保逐 chunk 到达）→ console-user Playground 渲染**可折叠「思考过程」**（流式中显「思考中…」脉动徽标）+ 正文实时流式。链路完整、断连有退出路径无 goroutine 泄漏。
@@ -404,6 +404,29 @@ console-user 弃用 localStorage 明文 API Key 裸奔模式，改走密码登�
 - **出站 HTTP client CheckRedirect 纵深（I5/I6 收口）**：第 3 轮只修了 `OpenAICompatibleProvider`（airouter Key），其余 4 个平台 client（gitea basic auth / registry / observability Prom·Loki·Tempo）仍裸 `&http.Client{Timeout}` 跟随重定向——gitea 携带 paas-bot 密码，端点被劫持/误配返 302→攻击者主机会泄漏凭证。抽 `httputil.NewClient(timeout)`（内置 `CheckRedirect=ErrUseLastResponse` 不跟随），5 处统一改用（DRY，单一真源）。
 - **前端死代码复核（确认已干净）**：lib/ 子系统全在用（http/client 是 10+ 模块 api 入口，interceptors→notify/problem/token 链完整；auth 模块经 authService 公共入口内部消费）；resources/views 经 dynamic.ts `import.meta.glob` 约定路由加载（非孤儿）；console-user 零孤儿；全仓无 notImplemented/即将/敬请期待假占位（唯一「即将」是 Icon.vue 装饰火箭图标注释），后端零 TODO/FIXME。基座已达开源标准。
 - 全量 `go test ./...` 45 包通过（修死锁后）。
+
+### 深度检测第 10 轮 + 开源打磨 + 体验优化（2026-08-05）
+
+菜单重构 + 模块互链 + 死代码复核 + 深度审计 + k8s 部署：
+
+- **后台菜单三级重构**（见上「菜单架构重构」）：资源总览 14 项平铺改 4 业务子分组（应用运行态/DevOps 链路/平台能力/计费审计），图标全局唯一（修 Key/Odometer/Cpu 撞车），mock 与后端对齐。
+- **console-user 模块互链**（消除孤岛）：① 应用详情资源绑定卡可点→资源列表；② 部署 tab 工作负载行可点→对应类型工作负载列表；③ 头部「监控」入口→`/platform/observability?app=:id`（Observability 读 query.app 预选）；④ 构建/镜像/发布 tab 加「跨应用总览→」跳 DevOps；⑤ 工作负载表格 appId 列可点→应用详情；⑥ 数据服务详情新增「绑定此资源的应用」反查面板（前端聚合 applications bindings 过滤）；⑦ 环境详情工作负载总览 stat 卡可点（覆盖 jobs/cronjobs 孤岛）+ 新增「环境内数据服务」section。
+- **死代码复核**：仓库已干净（前 9 轮已清，零 TODO/FIXME/孤儿/占位，docs/scripts 均被引用，无散落截图/临时文件）。
+- **深度审计修复**：PG `rows.Close()` 显式调用改 `defer rows.Close()`（panic 安全）—— maas/pg（ListModels/ListChannels/ListVendors 3 处）+ configcenter/pg（CreatePublish），与全仓其余 11 store 一致。子代理 fan-out 因模型限额中断，转内联审计覆盖 SQL 注入（干净，全 `$N` 参数化）、adminGuard 覆盖（全 14 `/api/admin/*` 端点挂 super_admin）、错误脱敏（WriteServiceError 完全迁移，零残留 `WriteError(500,err)`）、前端轮询清理（5 文件全 clearInterval）、goroutine 退出（已验证）。无新严重问题。
+- **构建验证**：`make test` 全绿 + `pnpm build` 三套前端通过。
+- **k8s 部署**（[[k8s-always-latest]]）：`deploy-k8s.sh` 构建前端 embed 镜像 + push registry + helm upgrade + rollout restart，e2e 验证全 200（landing/console/admin/livez/v1/models/api/admin menus 三级结构生效）。
+
+### 深度检测第 11-12 轮（并发 + 契约双路审计，2026-08-06）
+
+承接第 10 轮，并发安全/资源泄漏 + 业务契约/逻辑两路 agent 深度审计，复核前 10 轮修复 + 找新问题：
+
+- **并发路（Important）**：`devops/pg/store.go` `runBuild` SIGTERM 路径用已 cancel 的 baseCtx 写 PG（panic/err/markBuildFailed 三处）→ build_run 永久卡 running 只能等下次启动 `SweepInterrupted` 兜底。第 7 轮 `CreateRelease/RollbackRelease` 补偿事务已切 `WithoutCancel`，但 `runBuild` 自身漏修。修复：三处落库统一 `context.WithoutCancel(ctx)`（pipe.Build 仍用原 ctx 响应取消，仅落库脱离请求生命周期）。并发路 Minor 4 项（ResolveChannels 未 Clone/observability+maas 读多写少用 Mutex/airsync 循环内 Close 非 defer/memory CreateRelease 持锁跨仓储）均模式脆弱非现存缺陷，留后续。
+- **契约路（Important ×4）**：① devops handler 4 处裸 `WriteJSON` 违反 `{data:T}` 契约（`GET /buildruns/{id}` 详情、`GET /images/{id}` 详情、`POST /releases` 创建、`POST /rollback`）→ 改 `WriteData/WriteDataCreated`；② security `POST /secrets` 创建改 `WriteDataCreated`；③ appconfig `POST /configs` 创建改 `WriteDataCreated`；④ **identity 7 个写操作（Create/DeleteTenant、Create/Update/DeleteUser、Create/DeleteAPIKey）不记审计**——凭证签发/吊销 + 用户/租户增删属高敏感操作却零审计，违反「审计只增不删」合规承诺。修复：identity 定义 `AuditRecorder` 接口（依赖倒置，`Record(ctx,tenantID,actor,action,resourceType,resourceID,detail)`）+ `WithAudit` 注入 + handler 写操作成功路径调 `h.audit(...)`；cmd/core 加 `identityAuditAdapter` 桥接 `security.AuditStore`（与 `authAuditAdapter` 同源模式），actor 取 `UserIDFrom(ctx)`，超管跨租户 ctx 无 tenant 归 "platform"。
+- **契约路（Minor ×3）**：devops/security/appconfig 删除 ack `WriteJSON({"deleted":id})` → 统一 `WriteData`（与 governance/observability 对齐）。
+- **轻量引擎测试补齐**：补 `connection_test.go`（qdrant/meilisearch port=6333/7700、api_key/master_key 凭证、uri 不含凭证、mask 一律掩 uri 保 host/port）+ `dataservice_controller_test.go`（`TestEngineImageLightEngines` 含 milvus/es 弃用返空、registry 内网化；`TestReconcileQdrant`/`TestReconcileMeilisearch` 镜像+env QDRANT__SERVICE_API_KEY/MEILI_MASTER_KEY+端口+PVC size 映射 StorageGB+VolumeMount 路径；`TestReconcileDataserviceImageOverride` spec.Image 覆盖默认镜像）。修 appconfig handler_test 适配 `{data:T}` 解包。
+- **横切机制复核确认无问题**：多租户隔离（11 个 ListAll 仅 admin 路径调、全 PG 参数化）、prod:write 防护（6 模块写全接 EnvTypeResolver、先 Get 取 EnvID 再 allowProd）、配额回滚（application/workload Create 失败 -1、Delete 回收）、错误脱敏（零残留 `WriteError(500,err)`）、OpenAPI 登记（163 Operation 覆盖全部 mux 路由含 lifecycle/engine 新端点）、goroutine 退出/rows.Close/HTTP Body Close/map 锁/mutex 自死锁（第 9 轮 findImageIDByDigest 保持）全部确认。
+- **构建验证**：`go test ./...` 全绿 + `pnpm build` 三套前端通过。
+- **留后续**：ResolveChannels Clone（handler 锁外读 Status 时）、observability/maas Mutex→RWMutex（读热点）、identity 审计可在 security.AuditLog 加 ResourceType 常量枚举、airsync 循环内 defer fd 回收。
 
 
 ### DevOps CI/CD（代码->构建->镜像->发布->回滚）

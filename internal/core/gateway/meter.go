@@ -12,7 +12,8 @@ type Meter struct {
 	mu    sync.Mutex
 	total int
 	// OnTokens 用量回写钩子（main.go 注入 billing.IncUsage，P3-2 计量采集）；nil 则不回写。
-	OnTokens func(tenantID string, tokens int)
+	// appID 非空 = 应用级 Key 归因（强制计费维度）；user 是 OpenAI 兼容软标签（agent 细分，可空）。
+	OnTokens func(tenantID, appID, user string, tokens int)
 	// Inf 是 Prometheus 推理指标记录器（main.go 注入）；nil 则不记。
 	Inf *metrics.InferenceMetrics
 }
@@ -31,13 +32,14 @@ func (m *Meter) recordInferenceMetrics(tenant, model, status string, tokens int,
 }
 
 // Record 记录一次请求的 token 用量，并可选回写计费用量。
-func (m *Meter) Record(tenantID, model string, tokens int) {
+// appID 非空时用量归因到应用（模型推理计费）；user 是软标签（agent 细分，可空，仅看板聚合）。
+func (m *Meter) Record(tenantID, appID, model, user string, tokens int) {
 	m.mu.Lock()
 	m.total += tokens
 	m.mu.Unlock()
-	log.Printf("[meter] tenant=%s model=%s tokens=%d", tenantID, model, tokens)
+	log.Printf("[meter] tenant=%s app=%s model=%s user=%s tokens=%d", tenantID, appID, model, user, tokens)
 	if m.OnTokens != nil && tenantID != "" {
-		m.OnTokens(tenantID, tokens)
+		m.OnTokens(tenantID, appID, user, tokens)
 	}
 }
 
