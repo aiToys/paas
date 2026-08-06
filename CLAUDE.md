@@ -293,6 +293,16 @@ cmd/core serveHTTP
 - **e2e 验证**：三套前端 build + `make test` 全绿 + k8s 部署，核心端点全 200（applications/services?appId=/observability?appId=/billing/usage 含 byApp/configs）。
 - **留后续**：`audit_logs` 加 app_id + 应用级活动 timeline；全局资源页归属应用反查（方案 C）；概览 sparkline 接真实 Prom 后去静态降级（依赖 core 加 `paas_rps` 业务埋点）；PriceTable mock → 真实计费引擎（成本随之精确）。
 
+### P1.6 console-user IA 按操作频率重组（侧栏分层 + 头部紧凑化，2026-08-06）
+
+解决「开发者以应用操作为主，但低频项占了侧栏大多数空间、应用主线感被淹没；应用详情头部大卡片吃首屏」痛点。仅 console-user（console-admin P1.4 已重构，频率模型不同不动）。设计见 `docs/superpowers/specs/2026-08-06-console-user-ia-by-frequency.md`，纯前端零后端。
+
+- **侧栏三段分层**（`App.vue`）：主操作区（应用 brand 色强化 + DevOps + Playground + AI 服务）置顶 → 资源与能力区（资源中心/工作负载/平台能力，默认折叠，各自 `localStorage` 记忆展开态）→ 环境。资源组从「永远铺开 13 子项」改为「可点击折叠 + chevron + 记忆」，回收 ~70% 侧栏空间。「应用」brand 左竖条常显 + 字重 600 强化主线锚点。section label（主操作/资源与能力）复用 `.nav-section-label`。
+- **资源组折叠记忆**（新增 `composables/useNavState.ts`）：模块级单例 ref<Set<NavGroup>>，localStorage key `paas:nav-open:<group>`，默认全折叠，try/catch 容错。`isOpen`/`toggle` 接口。
+- **应用详情头部紧凑化**（`ApplicationDetail.vue`）：删 header 大卡片（大图标+名称行+描述行+`[监控][部署][删除应用]` 三按钮），改一行面包屑紧凑身份条（返回箭头 + 应用 / 应用名 + 环境 chip[prodenv 红] + 健康 + 右端 `⋯` `el-dropdown`）。删冗余「监控」「部署」按钮（能力交由「可观测」「部署」tab，监控大屏出口在可观测 tab 内）。描述移到概览 tab 顶部。删除应用降权进 `⋯` 下拉（`confirmDangerous` 逻辑不变）。回收首屏 ~70px。`⋯` 用纯文本（Icon `collapse` 形态是 chevrons-left 不适合）。
+- **顺带修复基线回归**：645a5c2 的 ApplicationDetail.vue vue-tsc 失败（模板引用应用工作台 Task 5 误删的 goObservability/goDeploy，pnpm build 的 vue-tsc 步骤失败被 tail 掩盖）；P1.6 删按钮后引用消除，vue-tsc 恢复绿。
+- **留后续**：命令面板（Cmd+K）跳转/创建资源（激进 IA）；「编辑应用/导出配置」后端端点 + ⋯ 下拉填充；el-dropdown 多项时迁 `@command` 模式。
+
 ### 工作负载（应用运行形态）
 
 工作负载归属应用，分三类（Service/Job/CronJob），本期进程内 mock，真实 K8s 编排为下一切片：

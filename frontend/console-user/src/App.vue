@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import { useEnvStore } from '@/stores/env'
 import { useSessionStore } from '@/stores/session'
 import { useTheme } from '@/composables/useTheme'
+import { useNavState, type NavGroup } from '@/composables/useNavState'
 
 const route = useRoute()
 const router = useRouter()
@@ -74,21 +75,31 @@ async function onPickAccount(cmd: string | number | object) {
   }
 }
 
+interface NavChild {
+  label: string
+  icon: string
+  to: string
+}
 interface NavItem {
   label: string
   icon: string
   to?: string
-  children?: { label: string; icon: string; to: string }[]
+  section?: 'main' | 'resources' // 分组标签归属（决定上方 section label）
+  primary?: boolean              // 「应用」视觉强化
+  group?: NavGroup               // 可折叠资源组的 key
+  children?: NavChild[]
 }
 
 const nav: NavItem[] = [
-  { label: '应用', icon: 'deploy', to: '/applications' },
-  { label: '环境', icon: 'shield', to: '/environments' },
-  // AI 服务：模型是平台共享的「能力调用」（非租户私有存储资源），与数据服务 Add-on 区分。
-  { label: 'AI 服务', icon: 'market', to: '/resources/models' },
+  // —— 主操作：高频开发动作 ——
+  { label: '应用', icon: 'deploy', to: '/applications', section: 'main', primary: true },
+  { label: 'DevOps', icon: 'pipeline', to: '/devops', section: 'main' },
+  { label: 'Playground', icon: 'playground', to: '/playground', section: 'main' },
+  // AI 服务：模型是平台共享的「能力调用」（非租户私有存储资源），与 Playground 配套属高频。
+  { label: 'AI 服务', icon: 'market', to: '/resources/models', section: 'main' },
+  // —— 资源与能力：创建后少动，默认折叠，各自记忆展开态 ——
   {
-    label: '资源中心',
-    icon: 'database',
+    label: '资源中心', icon: 'database', section: 'resources', group: 'resources',
     children: [
       { label: '数据库', icon: 'database', to: '/resources/db' },
       { label: '缓存', icon: 'zap', to: '/resources/cache' },
@@ -99,8 +110,7 @@ const nav: NavItem[] = [
     ],
   },
   {
-    label: '工作负载',
-    icon: 'server',
+    label: '工作负载', icon: 'server', section: 'resources', group: 'workloads',
     children: [
       { label: '服务', icon: 'server', to: '/workloads/services' },
       { label: '任务', icon: 'job', to: '/workloads/jobs' },
@@ -108,8 +118,7 @@ const nav: NavItem[] = [
     ],
   },
   {
-    label: '平台能力',
-    icon: 'service',
+    label: '平台能力', icon: 'service', section: 'resources', group: 'platform',
     children: [
       { label: '服务治理', icon: 'service', to: '/platform/governance' },
       { label: '配置中心', icon: 'layers', to: '/platform/config-center' },
@@ -117,9 +126,38 @@ const nav: NavItem[] = [
       { label: '安全', icon: 'shield', to: '/platform/security' },
     ],
   },
-  { label: 'DevOps', icon: 'pipeline', to: '/devops' },
-  { label: 'Playground', icon: 'playground', to: '/playground' },
+  // —— 环境：物理隔离单元（管理面 + 跨环境总览）——
+  { label: '环境', icon: 'shield', to: '/environments' },
 ]
+
+const { isOpen: navGroupOpen, toggle: toggleNavGroup } = useNavState()
+
+// section 首项索引：模板据此在对应项前插分组 label（主操作 / 资源与能力）。
+const sectionStarts = computed(() => {
+  const map: Record<string, number> = {}
+  nav.forEach((item, i) => {
+    if (item.section && !(item.section in map)) map[item.section] = i
+  })
+  return map
+})
+const sectionLabel: Record<string, string> = { main: '主操作', resources: '资源与能力' }
+
+// 直链/刷新进入资源组子路由时自动展开对应父组（否则父组折叠，子项 active 高亮不可见）。
+watch(
+  () => route.path,
+  (path) => {
+    for (const item of nav) {
+      if (
+        item.group &&
+        item.children?.some((c) => path === c.to || path.startsWith(c.to + '/')) &&
+        !navGroupOpen(item.group)
+      ) {
+        toggleNavGroup(item.group)
+      }
+    }
+  },
+  { immediate: true },
+)
 
 const settings = [
   { label: 'API 密钥', icon: 'key', to: '/settings/api-keys' },
@@ -145,19 +183,40 @@ function isActive(to: string) {
       </div>
 
       <nav class="nav">
-        <template v-for="item in nav" :key="item.label">
-          <RouterLink v-if="item.to" :to="item.to" class="nav-item" :class="{ active: isActive(item.to!) }">
+        <template v-for="(item, i) in nav" :key="item.label">
+          <!-- section 分组 label（主操作 / 资源与能力） -->
+          <div
+            v-if="item.section && sectionStarts[item.section] === i && !collapsed"
+            class="nav-section-label"
+          >
+            {{ sectionLabel[item.section] }}
+          </div>
+
+          <!-- 普通导航项（含应用强化） -->
+          <RouterLink
+            v-if="item.to"
+            :to="item.to"
+            class="nav-item"
+            :class="{ active: isActive(item.to!), primary: item.primary }"
+          >
             <span class="nav-bar" />
             <Icon :name="item.icon" :size="19" class="nav-icon" />
             <span v-if="!collapsed" class="nav-label">{{ item.label }}</span>
           </RouterLink>
 
-          <div v-else class="nav-group">
-            <div class="nav-item static">
+          <!-- 可折叠资源组 -->
+          <div v-else class="nav-group" :class="{ open: item.group && navGroupOpen(item.group) }">
+            <div class="nav-item group-title" @click="item.group && !collapsed && toggleNavGroup(item.group)">
               <Icon :name="item.icon" :size="19" class="nav-icon" />
               <span v-if="!collapsed" class="nav-label">{{ item.label }}</span>
+              <Icon
+                v-if="!collapsed && item.group"
+                name="chevron"
+                :size="14"
+                class="group-chev"
+              />
             </div>
-            <div v-if="!collapsed" class="sub-nav">
+            <div v-if="!collapsed" v-show="navGroupOpen(item.group!)" class="sub-nav">
               <RouterLink
                 v-for="c in item.children"
                 :key="c.to"
@@ -372,15 +431,7 @@ function isActive(to: string) {
   transition: background 0.12s, color 0.12s;
   cursor: pointer;
 }
-.nav-item.static {
-  cursor: default;
-  color: var(--text-faint);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 12px 12px 4px;
-}
-.nav-item:hover:not(.static):not(.active) {
+.nav-item:hover:not(.active) {
   background: var(--surface);
   color: var(--text);
 }
@@ -432,6 +483,46 @@ function isActive(to: string) {
   color: var(--text);
 }
 .sub-item.active {
+  color: var(--brand);
+}
+
+/* 可折叠资源组标题：可点击 + chevron 展开/收起标记 */
+.nav-item.group-title {
+  cursor: pointer;
+  user-select: none;
+  font-weight: 500;
+}
+.nav-item.group-title:hover {
+  background: var(--surface);
+  color: var(--text-dim);
+}
+.group-chev {
+  margin-left: auto;
+  color: var(--text-faint);
+  transition: transform 0.18s;
+  /* Icon 的 chevron 默认朝下（points 6 9 → 12 15 → 18 9）：
+     未展开态向左旋转 90° 朝右；展开态恢复 0° 朝下。 */
+  transform: rotate(-90deg);
+}
+.nav-group.open .group-chev {
+  transform: rotate(0);
+}
+
+/* 「应用」强化：brand 色左条常显 + brand 色文字 + 字重 600（主线锚点） */
+.nav-item.primary {
+  color: var(--brand);
+  font-weight: 600;
+}
+.nav-item.primary .nav-bar {
+  transform: translateY(-50%) scaleY(1);
+  background: var(--brand);
+}
+.nav-item.primary:hover {
+  background: var(--brand-soft);
+  color: var(--brand);
+}
+.nav-item.primary.active {
+  background: var(--brand-soft);
   color: var(--brand);
 }
 

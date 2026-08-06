@@ -264,11 +264,6 @@ async function pickImage(img: { id: string }) {
   activeTab.value = '发布'
 }
 
-// 头部「部署」按钮：切到「部署」tab（应用工作负载视图）。
-function goDeploy() {
-  activeTab.value = '部署'
-}
-
 // 资源绑定卡片点击：数据服务类型解析 name→id 跳详情（带 app 上下文），
 // 其他类型（models/gov）跳列表。DS_KINDS 见上方 addOptions 区定义。
 async function onBindingClick(g: { key: string }, it: { name: string }) {
@@ -299,10 +294,6 @@ function bindingListRoute(t: string): string {
 function workloadListRoute(t: string): string {
   const kind = t === 'job' ? 'jobs' : t === 'cronjob' ? 'cronjobs' : 'services'
   return `/workloads/${kind}?app=${route.params.id}`
-}
-// 跳可观测（带 app 维度预选）。
-function goObservability() {
-  router.push(`/platform/observability?app=${app.value?.id ?? ''}`)
 }
 // 跳 DevOps 跨应用总览。
 function goDevOps() {
@@ -336,27 +327,29 @@ async function deleteApp() {
 
 <template>
   <div class="detail">
-    <button class="back" @click="router.push('/applications')">
-      <Icon name="chevron" :size="16" style="transform: rotate(90deg)" /> 返回应用列表
-    </button>
-
-    <div v-if="loading" class="head skel-bar" />
+    <div v-if="loading" class="crumb skel-bar" />
     <template v-else-if="app">
-      <header class="head">
-        <div class="a-icon" :style="{ background: app.gradient }">{{ app.initial }}</div>
-        <div class="head-info">
-          <div class="name-row">
-            <h2>{{ app.name }}</h2>
-            <span class="env">{{ app.env }}</span>
-            <span class="health"><span class="pulse-dot" /> {{ statusLabel[app.status] ?? app.status }}</span>
-          </div>
-          <p class="desc">{{ app.desc }}</p>
+      <header class="crumb">
+        <div class="crumb-left">
+          <button class="crumb-back" @click="router.push('/applications')" title="返回应用列表">
+            <Icon name="chevron" :size="16" style="transform: rotate(-90deg)" />
+          </button>
+          <span class="crumb-root">应用</span>
+          <Icon name="chevron" :size="13" class="crumb-sep" />
+          <span class="crumb-name">{{ app.name }}</span>
+          <span class="env" :class="{ prodenv: app.env === 'prod' }">{{ app.env }}</span>
+          <span class="health"><span class="pulse-dot" /> {{ statusLabel[app.status] ?? app.status }}</span>
         </div>
-        <div class="head-actions">
-          <button class="ghost" @click="goObservability">监控</button>
-          <button class="primary" @click="goDeploy">部署</button>
-          <button class="danger" @click="deleteApp">删除应用</button>
-        </div>
+        <el-dropdown trigger="click" placement="bottom-end">
+          <button class="crumb-more" title="更多操作">
+            <span class="crumb-dots">⋯</span>
+          </button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item class="danger-item" @click="deleteApp">🗑 删除应用</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
       </header>
 
       <div class="tabs">
@@ -420,6 +413,7 @@ async function deleteApp() {
 
       <!-- 概览 = 真实工作台 -->
       <div v-else-if="activeTab === '概览'" class="overview">
+        <p v-if="app.desc" class="overview-desc">{{ app.desc }}</p>
         <div class="metrics">
           <div class="metric">
             <div class="m-v mono">{{ replicaStat.ready }}/{{ replicaStat.total }}</div>
@@ -612,32 +606,106 @@ async function deleteApp() {
   max-width: 1100px;
   margin: 0 auto;
 }
-.back {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin-bottom: 16px;
-  border: none;
-  background: transparent;
-  color: var(--text-faint);
-  font-family: inherit;
-  font-size: 13px;
-  cursor: pointer;
-  transition: color 0.12s;
-}
-.back:hover {
-  color: var(--text);
-}
-
-.head {
+/* 面包屑紧凑身份条：替代旧 header 大卡片，回收首屏垂直空间。 */
+.crumb {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 22px 24px;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  margin-bottom: 20px;
+  border-radius: var(--radius);
+  margin-bottom: 14px;
+}
+.crumb.skel-bar {
+  height: 44px;
+  border: none;
+}
+.crumb-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.crumb-back {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.crumb-back:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.crumb-root {
+  font-size: 13px;
+  color: var(--text-faint);
+}
+.crumb-sep {
+  color: var(--text-faint);
+}
+.crumb-name {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.crumb .env {
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  background: var(--success-soft);
+  color: var(--success);
+}
+.crumb .env.prodenv {
+  background: rgba(244, 63, 94, 0.12);
+  color: #f43f5e;
+}
+.crumb .health {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--success);
+}
+.crumb-more {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.12s;
+}
+.crumb-more:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.crumb-dots {
+  font-size: 20px;
+  line-height: 1;
+  color: var(--text-dim);
+}
+.overview-desc {
+  margin: 0 0 14px;
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+:deep(.danger-item) {
+  color: var(--el-color-danger, #f43f5e);
 }
 .skel-bar {
   height: 96px;
@@ -655,35 +723,16 @@ async function deleteApp() {
     animation: none;
   }
 }
-.a-icon {
-  width: 52px;
-  height: 52px;
-  border-radius: 12px;
-  display: grid;
-  place-items: center;
-  font-weight: 700;
-  font-size: 20px;
-  color: #fff;
-  flex-shrink: 0;
-}
 .a-icon.small {
   width: 32px;
   height: 32px;
   font-size: 14px;
   border-radius: 8px;
-}
-.head-info {
-  flex: 1;
-}
-.name-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.name-row h2 {
-  margin: 0;
-  font-size: 18px;
-  letter-spacing: -0.01em;
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  color: #fff;
+  flex-shrink: 0;
 }
 .env {
   padding: 2px 8px;
@@ -699,18 +748,8 @@ async function deleteApp() {
   font-size: 12px;
   color: var(--success);
 }
-.desc {
-  margin: 4px 0 0;
-  font-size: 13px;
-  color: var(--text-dim);
-}
-.head-actions {
-  display: flex;
-  gap: 8px;
-}
 .ghost,
-.primary,
-.danger {
+.primary {
   padding: 8px 16px;
   border-radius: var(--radius);
   font-family: inherit;
@@ -737,14 +776,6 @@ async function deleteApp() {
   opacity: 0.6;
   cursor: not-allowed;
   box-shadow: none;
-}
-.danger {
-  border: 1px solid var(--danger, #ef4444);
-  background: transparent;
-  color: var(--danger, #ef4444);
-}
-.danger:hover {
-  background: rgba(239, 68, 68, 0.1);
 }
 
 .tabs {
