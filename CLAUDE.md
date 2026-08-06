@@ -279,6 +279,20 @@ cmd/core serveHTTP
 - **SSE 经 hermes ingress 缓冲修复（三层根因）**：SSE 流式经 hermes ingress 被缓冲成一次性大块，三层根因逐一修复——① **zeus accesslog `statusRecorder` 未实现 `http.Flusher`**：嵌入 `http.ResponseWriter` 但 Go 接口嵌入不转发额外接口，代理/ReverseProxy 的 `w.(http.Flusher)` 断言失败 → flush 空操作 → 全量缓冲。修复：加 `Flush()` 委托底层（`if f, ok := r.ResponseWriter.(http.Flusher); ok { f.Flush() }`）。② **hermes metrics `statusRecorder` 同样问题**：同模式修复。③ **hermes SSE 分流依赖请求 Accept 头**：`isSSERequest` 检 `Accept: text/event-stream`，前端 `fetch()` 默认 `Accept: */*` → 落 `handleHTTP`。修复：Playground fetch 加 `Accept: text/event-stream`（SSE 标准声明）。修复后 `httputil.ReverseProxy` 的 `flushInterval`（对 `text/event-stream` 返回 -1 立即 flush）穿透中间件链正常工作：**无 Accept 头也 71 chunk 逐块到达**（~30-50ms/块，与直连 service 一致）。验证：修复前 ingress 1 块 vs 修复后 71 块。zeus/hermes 镜像已重建部署。
 - **深度检测第 1 轮**：19 条 `/api/admin/*` 端点全挂 adminGuard（无漏挂）；ListAll 仅 admin 路径调用，普通 List 仍强制 tenant 过滤；PG 全参数化无注入；memory 锁+深拷贝正确。修复 2 项 Important：① admin dataservices 端点 Connection 掩码（补 `MaskConnection`）；② model.go 过时注释纠正。
 
+### P1.5 应用工作台（tab 分组 + 概览真实化 + 关联能力收敛进应用，2026-08-06）
+
+解决「开发者以应用操作为主，但关联能力散落顶级菜单」痛点。应用详情升级为应用工作台，开发者进入应用即得全貌，减少跳转。设计见 `docs/superpowers/specs/2026-08-06-application-workbench-design.md`。**纯前端聚合，零后端改动**（所有数据维度已就绪）。
+
+- **tab 视觉分组**（`ApplicationDetail.vue`）：10 tab 按「运行态（概览/部署/服务治理/可观测）· 资源（资源绑定/配置/用量）· DevOps（代码仓库/构建/镜像/发布）」三组视觉分区（不折叠，一屏可见防膨胀）。
+- **概览真实化**：去 seed 假数据（`app.rps`/`app.replicas`），改聚合真实运行态——副本就绪比（workloads 聚合）+ 绑定资源数 + RPS/CPU 指标卡含 sparkline（复用 `/api/observability/metrics?targetType=app`）+ 最新发布/构建侧卡 + 资源依赖拓扑（含治理服务节点）。
+- **服务治理 tab**（`app-tabs/AppGovernance.vue` 新建，只读）：复用 `GET /api/services?appId=` 按应用过滤 + `GET /api/services/{id}`（`{service,instances}` 双重兜底解包）展开懒加载实例；路由/熔断按 serviceID ∈ 该应用服务集合过滤。注册/注销归 `/platform/governance`。
+- **可观测 tab**（`app-tabs/AppObservability.vue` 新建）：复用 `/api/observability/{metrics,logs,traces}?appId=`，4 指标卡（CPU/内存/RPS/延迟 + sparkline）+ 最近日志 + 最近 trace（展开 span），10s 轮询（silent 不闪烁，onUnmounted clearInterval）。顶部「在监控大屏中打开」保留深度排查出口。
+- **用量与成本 tab**（`app-tabs/AppUsage.vue` 新建）：`GET /api/billing/usage` 返 `usage.byApp[appID]`（gateway 经应用级 API Key 归因落库的 token/gpu **精确归因**，非近似）+ 资源占用（workloads/绑定计数）+ PriceTable 预估月成本（标注「预估」，因 PriceTable 是 mock 单价）。
+- **配置 tab 重组凭证分组**（`AppConfigs.vue` 改造）：env/secret 混合表拆成「环境变量（明文）」+「凭证/密钥（掩码）」两组——凭证组即「应用引用的密钥」的诚实落地（appconfig secret 是工作负载启动注入的真实敏感凭证；`security.Secret` 是租户级平台资产不归属应用，不强行关联）。
+- **关键澄清（billing 应用维度已就绪）**：调研发现 `ResourceUsage.ByApp map[string]map[string]int` 早已落地（memory/pg `IncUsage` 在 appID 非空时填充 + gateway `meter.Record` 经应用级 Key 归因 + pg `by_app` JSONB 列），`GET /api/billing/usage` 已暴露 `usage.byApp`。用量 tab 直接消费精确归因，无需后端改动。
+- **e2e 验证**：三套前端 build + `make test` 全绿 + k8s 部署，核心端点全 200（applications/services?appId=/observability?appId=/billing/usage 含 byApp/configs）。
+- **留后续**：`audit_logs` 加 app_id + 应用级活动 timeline；全局资源页归属应用反查（方案 C）；概览 sparkline 接真实 Prom 后去静态降级（依赖 core 加 `paas_rps` 业务埋点）；PriceTable mock → 真实计费引擎（成本随之精确）。
+
 ### 工作负载（应用运行形态）
 
 工作负载归属应用，分三类（Service/Job/CronJob），本期进程内 mock，真实 K8s 编排为下一切片：

@@ -30,6 +30,11 @@ const items = ref<ConfigItem[]>([])
 const loading = ref(false)
 const showEdit = ref(false)
 const submitting = ref(false)
+
+// 按 type 分两组：环境变量（明文）+ 凭证/密钥（掩码）。
+// 凭证组即「应用引用的密钥」——appconfig(type=secret) 是工作负载启动注入的真实敏感凭证。
+const envItems = computed(() => items.value.filter((i) => i.type === TYPE_ENV))
+const secretItems = computed(() => items.value.filter((i) => i.type === TYPE_SECRET))
 // 编辑表单：editingId 非空 = 编辑（同 key upsert）；空 = 新增
 const form = ref<{ id: string; key: string; value: string; type: string }>({ id: '', key: '', value: '', type: TYPE_ENV })
 
@@ -143,32 +148,58 @@ watch(() => props.appId, load)
     <div v-if="!hasEnv" class="cfg-empty">
       <p>请在顶栏选择一个环境，以管理该环境的应用配置。</p>
     </div>
-    <el-table v-else :data="items" v-loading="loading" size="small" empty-text="该环境尚无配置项">
-      <el-table-column prop="key" label="Key" min-width="180">
-        <template #default="{ row }"><span class="mono">{{ row.key }}</span></template>
-      </el-table-column>
-      <el-table-column label="类型" width="90">
-        <template #default="{ row }">
-          <el-tag :type="row.type === TYPE_SECRET ? 'danger' : 'info'" size="small">
-            {{ row.type === TYPE_SECRET ? 'Secret' : 'Env' }}
-          </el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="值" min-width="220">
-        <template #default="{ row }">
-          <span class="mono" :class="{ masked: row.type === TYPE_SECRET }">{{ row.value }}</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="更新时间" width="160">
-        <template #default="{ row }">{{ new Date(row.updatedAt).toLocaleString() }}</template>
-      </el-table-column>
-      <el-table-column label="操作" width="120">
-        <template #default="{ row }">
-          <el-button text type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-          <el-button text type="danger" size="small" @click="remove(row)">删除</el-button>
-        </template>
-      </el-table-column>
-    </el-table>
+
+    <!-- 环境变量 -->
+    <section v-if="hasEnv" class="cfg-group">
+      <div class="group-title">环境变量（明文）<span class="group-cnt mono">{{ envItems.length }}</span></div>
+      <el-table :data="envItems" v-loading="loading" size="small" empty-text="尚无环境变量">
+        <el-table-column prop="key" label="Key" min-width="180">
+          <template #default="{ row }"><span class="mono">{{ row.key }}</span></template>
+        </el-table-column>
+        <el-table-column label="值" min-width="220">
+          <template #default="{ row }"><span class="mono">{{ row.value }}</span></template>
+        </el-table-column>
+        <el-table-column label="更新时间" width="160">
+          <template #default="{ row }">{{ new Date(row.updatedAt).toLocaleString() }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="120">
+          <template #default="{ row }">
+            <el-button text type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+            <el-button text type="danger" size="small" @click="remove(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </section>
+
+    <!-- 凭证 / 密钥 -->
+    <section v-if="hasEnv" class="cfg-group">
+      <div class="group-title">
+        凭证 / 密钥<span class="group-cnt mono">{{ secretItems.length }}</span>
+      </div>
+      <div class="secret-tip">应用工作负载启动时注入的敏感凭证。解绑数据服务会同步清除注入的连接凭证。</div>
+      <el-table :data="secretItems" size="small" empty-text="尚无凭证">
+        <el-table-column prop="key" label="Key" min-width="200">
+          <template #default="{ row }"><span class="mono">{{ row.key }}</span></template>
+        </el-table-column>
+        <el-table-column label="值（掩码）" min-width="200">
+          <template #default="{ row }"><span class="mono masked">{{ row.value }}</span></template>
+        </el-table-column>
+        <el-table-column label="更新时间" width="160">
+          <template #default="{ row }">{{ new Date(row.updatedAt).toLocaleString() }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="120">
+          <template #default="{ row }">
+            <el-button text type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+            <el-button text type="danger" size="small" @click="remove(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </section>
+
+    <!-- 空态（两组皆空） -->
+    <div v-if="hasEnv && !items.length && !loading" class="cfg-empty">
+      <p>该环境尚无配置项，点右上角「+ 新增配置」添加。</p>
+    </div>
 
     <el-dialog v-model="showEdit" :title="form.id ? '编辑配置' : '新增配置'" width="460px">
       <el-form label-width="70px">
@@ -212,5 +243,31 @@ watch(() => props.appId, load)
 .masked {
   color: var(--text-faint);
   letter-spacing: 2px;
+}
+.cfg-group { margin-bottom: 22px; }
+.group-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+.group-cnt {
+  font-size: 11px;
+  color: var(--text-faint);
+  padding: 1px 7px;
+  background: var(--surface-2, transparent);
+  border-radius: 8px;
+}
+.secret-tip {
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
 </style>

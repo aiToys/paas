@@ -10,6 +10,9 @@ import AppBuilds from './app-tabs/AppBuilds.vue'
 import AppImages from './app-tabs/AppImages.vue'
 import AppReleases from './app-tabs/AppReleases.vue'
 import AppConfigs from './app-tabs/AppConfigs.vue'
+import AppGovernance from './app-tabs/AppGovernance.vue'
+import AppObservability from './app-tabs/AppObservability.vue'
+import AppUsage from './app-tabs/AppUsage.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -77,6 +80,25 @@ const groups = computed(() => {
 
 const totalBindings = computed(() => app.value?.bindings?.length ?? 0)
 
+// 概览真实聚合：副本就绪比 + sparkline（去 seed 假数据 rps/replicas）。
+const replicaStat = computed(() => {
+  const total = workloads.value.reduce((s, w) => s + w.replicas, 0)
+  const ready = workloads.value.reduce((s, w) => s + w.ready, 0)
+  return { ready, total }
+})
+interface MetricPoint { ts: string; value: number }
+interface MetricSeries { name: string; unit: string; current: number; points: MetricPoint[] }
+function sparkHeights(points?: MetricPoint[]): number[] {
+  if (!points || points.length < 2) return []
+  const vals = points.map((p) => p.value)
+  const min = Math.min(...vals)
+  const max = Math.max(...vals)
+  const span = max - min || 1
+  return vals.slice(-24).map((v) => 20 + ((v - min) / span) * 80)
+}
+const cpuSeries = computed(() => metrics.value.find((m) => m.name === 'cpu'))
+const rpsSeries = computed(() => metrics.value.find((m) => m.name === 'rps'))
+
 interface Workload {
   id: string
   envId: string
@@ -92,6 +114,13 @@ interface Workload {
 interface Env { id: string; name: string; type: string }
 const workloads = ref<Workload[]>([])
 const envs = ref<Env[]>([])
+
+// 概览工作台：真实运行态指标 + 最新发布/构建（去 seed 假数据 rps/replicas）。
+const metrics = ref<MetricSeries[]>([])
+interface Release { id: string; status: string; envId: string; createdAt: string }
+interface Build { id: string; status: string; startedAt: string }
+const latestRelease = ref<Release | null>(null)
+const latestBuild = ref<Build | null>(null)
 
 // 部署 tab：按环境分组（基线 default 不单显，归到所属环境）
 const workloadsByEnv = computed(() => {
@@ -115,12 +144,18 @@ async function load() {
     // fetchJSON 自动解包 {data:T} 契约，杜绝手动 json.data ?? json 的契约遗漏。
     app.value = await fetchJSON<App>(`/api/applications/${id}`)
     // 并行加载该应用的工作负载（部署 tab）与环境（分组映射）；任一失败不阻塞主信息。
-    const [ws, es] = await Promise.allSettled([
+    const [ws, es, mt, rels, blds] = await Promise.allSettled([
       fetchJSON<Workload[]>(`/api/applications/${id}/workloads`),
       fetchJSON<Env[]>('/api/environments'),
+      fetchJSON<MetricSeries[]>(`/api/observability/metrics?targetType=app&targetId=${id}`),
+      fetchJSON<Release[]>(`/api/applications/${id}/releases`),
+      fetchJSON<Build[]>(`/api/applications/${id}/buildruns`),
     ])
     workloads.value = ws.status === 'fulfilled' ? ws.value : []
     envs.value = es.status === 'fulfilled' ? es.value : []
+    metrics.value = mt.status === 'fulfilled' ? mt.value : []
+    latestRelease.value = rels.status === 'fulfilled' && rels.value.length ? rels.value[0] : null
+    latestBuild.value = blds.status === 'fulfilled' && blds.value.length ? blds.value[0] : null
   } catch (e) {
     ElMessage.error('加载应用失败：' + (e as Error).message)
   } finally {
@@ -211,8 +246,14 @@ async function unbind(b: Binding) {
   }
 }
 
-const tabs = ['概览', '资源绑定', '部署', '代码仓库', '构建', '镜像', '发布', '配置'] as const
-const activeTab = ref<(typeof tabs)[number]>('概览')
+// tab 视觉分组（运行态/资源/DevOps）：防 10 tab 平铺膨胀。
+const tabGroups = [
+  { label: '运行态', tabs: ['概览', '部署', '服务治理', '可观测'] as const },
+  { label: '资源', tabs: ['资源绑定', '配置', '用量'] as const },
+  { label: 'DevOps', tabs: ['代码仓库', '构建', '镜像', '发布'] as const },
+]
+type TabName = '概览' | '部署' | '服务治理' | '可观测' | '资源绑定' | '配置' | '用量' | '代码仓库' | '构建' | '镜像' | '发布'
+const activeTab = ref<TabName>('概览')
 
 // 镜像 tab 点「发布」-> 切到发布 tab 并预选镜像（pickedImageId 变化触发 AppReleases 打开创建弹窗）
 const pickedImageId = ref('')
@@ -319,10 +360,19 @@ async function deleteApp() {
       </header>
 
       <div class="tabs">
-        <button v-for="t in tabs" :key="t" class="tab" :class="{ on: activeTab === t }" @click="activeTab = t">
-          {{ t }}
-          <span v-if="t === '资源绑定'" class="tab-count mono">{{ totalBindings }}</span>
-        </button>
+        <template v-for="g in tabGroups" :key="g.label">
+          <span class="tab-group-label">{{ g.label }}</span>
+          <button
+            v-for="t in g.tabs"
+            :key="t"
+            class="tab"
+            :class="{ on: activeTab === t }"
+            @click="activeTab = t"
+          >
+            {{ t }}
+            <span v-if="t === '资源绑定'" class="tab-count mono">{{ totalBindings }}</span>
+          </button>
+        </template>
       </div>
 
       <!-- 资源绑定（核心） -->
@@ -368,27 +418,68 @@ async function deleteApp() {
         </section>
       </div>
 
-      <!-- 概览 -->
+      <!-- 概览 = 真实工作台 -->
       <div v-else-if="activeTab === '概览'" class="overview">
         <div class="metrics">
-          <div class="metric"><div class="m-v mono">{{ app.rps }}</div><div class="m-k">请求/秒</div></div>
-          <div class="metric"><div class="m-v mono">{{ app.replicas }}</div><div class="m-k">副本</div></div>
-          <div class="metric"><div class="m-v mono">{{ app.resources.models + app.resources.mq + app.resources.dal }}</div><div class="m-k">绑定资源</div></div>
-          <div class="metric"><div class="m-v mono">{{ app.env }}</div><div class="m-k">环境</div></div>
-        </div>
-        <div class="topo-card">
-          <div class="chart-title">资源依赖拓扑</div>
-          <div class="topo-graph">
-            <div class="topo-app">
-              <div class="a-icon small" :style="{ background: app.gradient }">{{ app.initial }}</div>
-              <span>{{ app.name }}</span>
+          <div class="metric">
+            <div class="m-v mono">{{ replicaStat.ready }}/{{ replicaStat.total }}</div>
+            <div class="m-k">副本就绪</div>
+          </div>
+          <div class="metric">
+            <div class="m-v mono">{{ totalBindings }}</div>
+            <div class="m-k">绑定资源</div>
+          </div>
+          <div class="metric">
+            <div class="m-v mono">{{ rpsSeries ? rpsSeries.current.toFixed(1) : '—' }}</div>
+            <div class="m-k">请求/秒</div>
+            <div v-if="rpsSeries" class="mini-spark">
+              <span v-for="(h, i) in sparkHeights(rpsSeries.points)" :key="i" :style="{ height: h + '%' }" />
             </div>
-            <div class="topo-links">
-              <div v-for="g in groups" :key="g.key" class="topo-res">
-                <Icon :name="g.meta.icon" :size="16" :style="{ color: g.meta.color }" />
-                <span>{{ g.meta.label }}</span>
-                <span class="topo-n mono">{{ g.items.length }}</span>
+          </div>
+          <div class="metric">
+            <div class="m-v mono">{{ cpuSeries ? cpuSeries.current.toFixed(1) + cpuSeries.unit : '—' }}</div>
+            <div class="m-k">CPU</div>
+            <div v-if="cpuSeries" class="mini-spark">
+              <span v-for="(h, i) in sparkHeights(cpuSeries.points)" :key="i" :style="{ height: h + '%' }" />
+            </div>
+          </div>
+        </div>
+
+        <div class="overview-row">
+          <div class="topo-card">
+            <div class="chart-title">资源依赖拓扑</div>
+            <div class="topo-graph">
+              <div class="topo-app">
+                <div class="a-icon small" :style="{ background: app.gradient }">{{ app.initial }}</div>
+                <span>{{ app.name }}</span>
               </div>
+              <div class="topo-links">
+                <div v-for="g in groups" :key="g.key" class="topo-res">
+                  <Icon :name="g.meta.icon" :size="16" :style="{ color: g.meta.color }" />
+                  <span>{{ g.meta.label }}</span>
+                  <span class="topo-n mono">{{ g.items.length }}</span>
+                </div>
+                <div v-if="!groups.length" class="topo-empty">尚未绑定资源</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="side-cards">
+            <div class="side-card">
+              <div class="side-label">最新发布</div>
+              <div v-if="latestRelease" class="side-body">
+                <el-tag size="small" :type="latestRelease.status === 'succeeded' ? 'success' : 'info'">{{ latestRelease.status }}</el-tag>
+                <span class="side-time">{{ new Date(latestRelease.createdAt).toLocaleString() }}</span>
+              </div>
+              <div v-else class="side-empty">暂无发布</div>
+            </div>
+            <div class="side-card">
+              <div class="side-label">最新构建</div>
+              <div v-if="latestBuild" class="side-body">
+                <el-tag size="small" :type="latestBuild.status === 'success' ? 'success' : 'info'">{{ latestBuild.status }}</el-tag>
+                <span class="side-time">{{ new Date(latestBuild.startedAt).toLocaleString() }}</span>
+              </div>
+              <div v-else class="side-empty">暂无构建</div>
             </div>
           </div>
         </div>
@@ -425,6 +516,16 @@ async function deleteApp() {
         </div>
       </div>
 
+      <!-- 服务治理 -->
+      <div v-else-if="activeTab === '服务治理'">
+        <AppGovernance :app-id="app.id" />
+      </div>
+
+      <!-- 可观测 -->
+      <div v-else-if="activeTab === '可观测'">
+        <AppObservability :app-id="app.id" />
+      </div>
+
       <!-- 代码仓库 -->
       <div v-else-if="activeTab === '代码仓库'">
         <AppRepositories :app-id="app.id" />
@@ -451,6 +552,11 @@ async function deleteApp() {
       <!-- 配置（工作负载级 env/Secret） -->
       <div v-else-if="activeTab === '配置'">
         <AppConfigs :app-id="app.id" />
+      </div>
+
+      <!-- 用量 -->
+      <div v-else-if="activeTab === '用量'">
+        <AppUsage :app-id="app.id" />
       </div>
     </template>
 
@@ -1132,4 +1238,27 @@ async function deleteApp() {
   color: var(--brand);
   font-size: 11px;
 }
+
+/* —— tab 分组标签 + 概览工作台补样式 —— */
+.tab-group-label {
+  font-size: 11px;
+  color: var(--text-faint);
+  padding: 0 8px 0 0;
+  margin-right: 4px;
+  border-right: 1px solid var(--border);
+  align-self: center;
+  height: 16px;
+  line-height: 16px;
+}
+.overview-row { display: flex; gap: 16px; flex-wrap: wrap; }
+.overview-row .topo-card { flex: 1; min-width: 320px; }
+.side-cards { display: flex; flex-direction: column; gap: 12px; min-width: 220px; }
+.side-card { padding: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); }
+.side-label { font-size: 12px; color: var(--text-faint); margin-bottom: 8px; }
+.side-body { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.side-time { font-size: 12px; color: var(--text-dim); }
+.side-empty { font-size: 13px; color: var(--text-faint); }
+.mini-spark { display: flex; align-items: flex-end; gap: 2px; height: 24px; margin-top: 6px; }
+.mini-spark span { flex: 1; background: var(--brand); opacity: 0.6; border-radius: 2px 2px 0 0; min-width: 2px; }
+.topo-empty { font-size: 12px; color: var(--text-faint); }
 </style>
