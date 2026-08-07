@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/aitoys/paas/internal/ai/knowledgebase"
+	"github.com/aitoys/paas/internal/ai/tool"
 	"github.com/aitoys/paas/internal/apiroute"
 	"github.com/aitoys/paas/internal/appconfig"
 	"github.com/aitoys/paas/internal/backup"
@@ -723,6 +724,20 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/knowledgebases/{id}/documents/{docId}", apiroute.Tags("知识库"), apiroute.Summary("文档状态"), apiroute.Perm("kb:read"), apiroute.WithResp(knowledgebase.Document{}))
 	reg.Operation("DELETE", "/api/knowledgebases/{id}/documents/{docId}", apiroute.Tags("知识库"), apiroute.Summary("删除文档（清chunks+向量+原文）"), apiroute.Perm("kb:write"))
 	reg.Operation("POST", "/api/knowledgebases/{id}/retrieve", apiroute.Tags("知识库"), apiroute.Summary("检索"), apiroute.Perm("kb:read"), apiroute.WithResp([]knowledgebase.ChunkHit{}))
+
+	// AI 工具管理（P2）：Agent 可调用的外部能力（MCP server / HTTP / 内置）。
+	// 租户私有；test/invoke 仅 mcp 类型（initialize + tools/list + tools/call）。
+	toolHandler := tool.NewHandler(stores.Tool)
+	toolHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+	mux.Handle("/api/tools", auth(toolHandler))
+	mux.Handle("/api/tools/", auth(toolHandler))
+	reg.Operation("GET", "/api/tools", apiroute.Tags("AI工具"), apiroute.Summary("工具列表"), apiroute.Perm("tool:read"), apiroute.WithResp([]tool.Tool{}))
+	reg.Operation("POST", "/api/tools", apiroute.Tags("AI工具"), apiroute.Summary("创建工具"), apiroute.Perm("tool:write"), apiroute.WithReqBody(tool.Tool{}), apiroute.WithResp(tool.Tool{}))
+	reg.Operation("GET", "/api/tools/{id}", apiroute.Tags("AI工具"), apiroute.Summary("工具详情"), apiroute.Perm("tool:read"), apiroute.WithResp(tool.Tool{}))
+	reg.Operation("PUT", "/api/tools/{id}", apiroute.Tags("AI工具"), apiroute.Summary("更新工具"), apiroute.Perm("tool:write"), apiroute.WithReqBody(tool.Tool{}), apiroute.WithResp(tool.Tool{}))
+	reg.Operation("DELETE", "/api/tools/{id}", apiroute.Tags("AI工具"), apiroute.Summary("删除工具"), apiroute.Perm("tool:write"))
+	reg.Operation("POST", "/api/tools/{id}/test", apiroute.Tags("AI工具"), apiroute.Summary("测试工具（MCP: initialize+tools/list）"), apiroute.Perm("tool:read"))
+	reg.Operation("POST", "/api/tools/{id}/invoke", apiroute.Tags("AI工具"), apiroute.Summary("调用工具（MCP: tools/call）"), apiroute.Perm("tool:read"))
 
 	mux.Handle("/livez", health.NewHandler())
 
