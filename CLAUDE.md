@@ -50,8 +50,11 @@ frontend/                       # pnpm workspace（三套前端）
 deploy/charts/paas/             # Helm chart（core + postgres + ingress，公网/离线共用）
 config/crds/                    # controller-gen 生成的 Workload CRD YAML
 docs/superpowers/{specs,plans}/ # 设计与实施计划
+examples/                       # 平台示例（**独立 module** github.com/aitoys/paas-examples，非 Platform Core）
 CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md LICENSE
 ```
+
+> **示例与平台隔离**：`examples/` 是独立 Go module（`github.com/aitoys/paas-examples`），与主仓 Go 依赖完全解耦。示例（mcp-server/traffic-gen）是**平台的用户/消费者**，演示如何被平台纳管，不属于 Platform Core——业务领域逻辑绝不进平台 `cmd/`（判断标准同下「开发约定」）。示例只用标准库，不引用任何 paas 内部包。
 
 ### 离线交付（airsync）
 

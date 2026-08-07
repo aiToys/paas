@@ -1,10 +1,11 @@
 # 平台示例镜像（mcp-server + traffic-gen）。
-# 本地预编译 linux/amd64 二进制后，用单阶段 alpine COPY（避免容器内 go mod download 网络问题）。
+# 本地预编译 linux/amd64 二进制后，单阶段 alpine COPY（避免容器内 go mod download 网络问题）。
 #
-# 构建（Mac arm64 交叉编译到 amd64）：
-#   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/mcp-server ./cmd/examples/mcp-server
-#   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/traffic-gen ./cmd/examples/traffic-gen
-#   docker build -f Dockerfile.examples -t <nodeIP>:30050/paas/paas-examples:v1 /tmp
+# 示例是独立 Go module（github.com/aitoys/paas-examples），构建须在 examples/ 目录：
+#   cd examples
+#   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/mcp-server ./mcp-server
+#   CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/traffic-gen ./traffic-gen
+#   docker build -f examples/Dockerfile -t <nodeIP>:30050/paas/paas-examples:v1 /tmp
 #   docker push <nodeIP>:30050/paas/paas-examples:v1
 # （context 是 /tmp，含两个预编译二进制；alpine 经 daocloud 中转）
 
