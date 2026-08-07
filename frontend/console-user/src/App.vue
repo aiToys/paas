@@ -119,6 +119,14 @@ const nav: NavItem[] = [
     ],
   },
   {
+    label: 'AI 编排', icon: 'pipeline', section: 'resources', group: 'ai',
+    children: [
+      { label: '工具', icon: 'service', to: '/ai/tools' },
+      { label: '提示词', icon: 'layers', to: '/ai/prompts' },
+      { label: 'Agent', icon: 'playground', to: '/ai/agents' },
+    ],
+  },
+  {
     label: '平台能力', icon: 'service', section: 'resources', group: 'platform',
     children: [
       { label: '服务治理', icon: 'service', to: '/platform/governance' },

@@ -93,6 +93,24 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '知识库' },
   },
   {
+    path: '/ai/tools',
+    name: 'ai-tools',
+    component: () => import('@/views/Tools.vue'),
+    meta: { title: '工具' },
+  },
+  {
+    path: '/ai/prompts',
+    name: 'ai-prompts',
+    component: () => import('@/views/Prompts.vue'),
+    meta: { title: '提示词' },
+  },
+  {
+    path: '/ai/agents',
+    name: 'ai-agents',
+    component: () => import('@/views/Agents.vue'),
+    meta: { title: 'Agent' },
+  },
+  {
     path: '/resources/search',
     name: 'res-search',
     component: () => import('@/views/DataServices.vue'),

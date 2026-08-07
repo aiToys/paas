@@ -2,7 +2,7 @@
 // 默认全部折叠（key 不存在视为 false）；用户展开过的组下次保持。
 import { ref } from 'vue'
 
-export type NavGroup = 'resources' | 'workloads' | 'platform'
+export type NavGroup = 'resources' | 'workloads' | 'platform' | 'ai'
 
 const STORAGE_PREFIX = 'paas:nav-open:'
 
@@ -12,7 +12,7 @@ const openSet = ref<Set<NavGroup>>(new Set(readAll()))
 function readAll(): NavGroup[] {
   // localStorage 在 SSR/异常环境可能不可用，容错。
   try {
-    const groups: NavGroup[] = ['resources', 'workloads', 'platform']
+    const groups: NavGroup[] = ['resources', 'workloads', 'platform', 'ai']
     return groups.filter((g) => localStorage.getItem(STORAGE_PREFIX + g) === '1')
   } catch {
     return []
