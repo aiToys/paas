@@ -496,16 +496,22 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 
 	// admin dataservice handler（L1 详情+实例 / L2 启停·重启·扩缩·删 / L3 代建）。
 	// 全挂 adminGuard(super_admin)；绕过 prod:write；写操作记审计；代建消耗目标租户配额。
-	dsAdminHandler := dataservice.NewAdminHandler(stores.DataService,
+	// typed nil 防御：*DSRestarter(nil) 包成接口后 != nil（与租户端 dsOpts L491 同款）。
+	// 集群外部署（无 clientset）时不注入 restarter -> handler 内 h.restarter==nil -> 返 503 友好降级，
+	// 避免装箱接口 != nil 致守护失效 -> (*DSRestarter)(nil).Restart 访问 nil client panic。
+	dsAdminOpts := []dataservice.AdminHandlerOpt{
 		dataservice.WithAdminEngineRepo(stores.Engine),
 		dataservice.WithAdminInstances(dsInstanceReader{r: dataplane.NewEndpointsReader(appliers.clientset)}),
-		dataservice.WithAdminRestarter(appliers.dsRestarter),
 		dataservice.WithAdminQuota(quotaCheckFn(stores.Billing)),
 		dataservice.WithAdminAudit(&identityAuditAdapter{store: stores.Security}),
 		dataservice.WithAdminTenants(tenantChecker{repo: stores.Identity}),
 		dataservice.WithAdminNamespace(appliers.namespace),
 		dataservice.WithAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
-	)
+	}
+	if appliers.dsRestarter != nil {
+		dsAdminOpts = append(dsAdminOpts, dataservice.WithAdminRestarter(appliers.dsRestarter))
+	}
+	dsAdminHandler := dataservice.NewAdminHandler(stores.DataService, dsAdminOpts...)
 
 	// admin environment handler（L3 代建）。环境是基础设施，admin 可代某租户建环境。
 	envAdminHandler := environment.NewAdminHandler(stores.Environment,
