@@ -8,6 +8,9 @@ import "context"
 type Repository interface {
 	// List 按 (appID, envID) 过滤；空串表示该维度不限。Secret 值掩码返回。
 	List(ctx context.Context, appID, envID string) ([]ConfigItem, error)
+	// ListPlain 同 List 但 Secret 返明文（不掩码）。仅供 reconciler 注入工作负载 env 用，
+	// 不可暴露给 API（防 read 权限者经 env 注入路径泄漏 secret 明文）。
+	ListPlain(ctx context.Context, appID, envID string) ([]ConfigItem, error)
 	// Upsert 新增或更新：同 (tenant, app, env, key) 则更新 value/type，否则插入。
 	// 返回掩码后的配置项。
 	Upsert(ctx context.Context, item ConfigItem) (ConfigItem, error)

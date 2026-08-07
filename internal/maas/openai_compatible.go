@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -14,6 +16,14 @@ import (
 	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/pkg/provider"
 )
+
+// readBodySnippet 读取响应体前 512 字节作诊断片段。
+// 上游错误 JSON 一般不含平台凭证（凭证在请求头），可安全入日志/错误，
+// 帮助定位 4xx 根因（端点 404 / 模型名 400 / 请求格式 422 等）。
+func readBodySnippet(r io.Reader) string {
+	b, _ := io.ReadAll(io.LimitReader(r, 512))
+	return strings.TrimSpace(string(b))
+}
 
 // openaiReq 是 OpenAI 兼容协议的请求体（仅取推理所需字段）。
 // DeepSeek / 通义千问 DashScope 兼容模式 / OpenAI 三家同构。
@@ -133,8 +143,10 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req provider.ChatRe
 		return nil, classifyErr(err, 0)
 	}
 	if resp.StatusCode != http.StatusOK {
+		snippet := readBodySnippet(resp.Body)
 		_ = resp.Body.Close()
-		return nil, classifyErr(nil, resp.StatusCode)
+		log.Printf("[maas] chat 上游 %s model=%s 返回 %d: %s", p.vendor, p.upstreamModel, resp.StatusCode, snippet)
+		return nil, fmt.Errorf("%w: %s %d: %s", classifyErr(nil, resp.StatusCode), p.vendor, resp.StatusCode, snippet)
 	}
 
 	ch := make(chan provider.Chunk)
@@ -234,8 +246,18 @@ type openaiEmbedResp struct {
 	} `json:"data"`
 }
 
+// embedBatchSize 是单次 /embeddings 请求的 input 上限。
+// airouter/百炼 text-embedding-v4 限制 batch size ≤ 10（超限返 400 InvalidParameter:
+// "batch size is invalid, it should not be larger than 10"）。上游限制可能因模型版本/
+// 路由实例动态变化（曾观察到 20 与 10 两种），取最保守值 10 保证稳定。大文档切片数常 > 10，
+// 必须分批调用后合并结果，否则 embedding 整体失败致文档卡 failed。
+const embedBatchSize = 10
+
 // Embed 调供应商 /embeddings 批量向量化（非流式）。失败按 sentinel 分类，
 // 与 Chat 同款（凭证缺失/offline/degraded），便于 KB 降级决策。
+//
+// 分批：texts 超过 embedBatchSize 时按批调用，结果按 index 合并（上游返回的 index 是
+// 批内相对位置，回填全局时加 offset）。任一批失败即整体失败（fail-fast，不部分入库）。
 func (p *OpenAICompatibleProvider) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	if p.resolver == nil {
 		return nil, provider.ErrCredentialMissing
@@ -247,33 +269,16 @@ func (p *OpenAICompatibleProvider) Embed(ctx context.Context, texts []string) ([
 	if len(texts) == 0 {
 		return nil, nil
 	}
-	body, _ := json.Marshal(openaiEmbedReq{Model: p.upstreamModel, Input: texts})
-	endpoint := strings.TrimRight(p.baseURL, "/") + "/embeddings"
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 
-	resp, err := p.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, classifyErr(err, 0)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, classifyErr(nil, resp.StatusCode)
-	}
-	var r openaiEmbedResp
-	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
-		return nil, fmt.Errorf("%w: 解析 embedding 响应失败: %v", provider.ErrUpstreamUnavailable, err)
-	}
 	out := make([][]float32, len(texts))
-	for _, d := range r.Data {
-		if d.Index < 0 || d.Index >= len(out) {
-			continue
+	for start := 0; start < len(texts); start += embedBatchSize {
+		end := start + embedBatchSize
+		if end > len(texts) {
+			end = len(texts)
 		}
-		out[d.Index] = d.Embedding
+		if err := p.embedBatch(ctx, apiKey, texts[start:end], out, start); err != nil {
+			return nil, err
+		}
 	}
 	// 校验：每个输入都有对应向量（缺则视为上游不可用）
 	for i := range out {
@@ -282,6 +287,41 @@ func (p *OpenAICompatibleProvider) Embed(ctx context.Context, texts []string) ([
 		}
 	}
 	return out, nil
+}
+
+// embedBatch 调用一次 /embeddings，把批内结果按 offset 回填到全局 out。
+func (p *OpenAICompatibleProvider) embedBatch(ctx context.Context, apiKey string, batch []string, out [][]float32, offset int) error {
+	body, _ := json.Marshal(openaiEmbedReq{Model: p.upstreamModel, Input: batch})
+	endpoint := strings.TrimRight(p.baseURL, "/") + "/embeddings"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := p.httpClient.Do(httpReq)
+	if err != nil {
+		return classifyErr(err, 0)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		snippet := readBodySnippet(resp.Body)
+		log.Printf("[maas] embedding 上游 %s model=%s 返回 %d: %s", p.vendor, p.upstreamModel, resp.StatusCode, snippet)
+		return fmt.Errorf("%w: %s %d: %s", classifyErr(nil, resp.StatusCode), p.vendor, resp.StatusCode, snippet)
+	}
+	var r openaiEmbedResp
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return fmt.Errorf("%w: 解析 embedding 响应失败: %v", provider.ErrUpstreamUnavailable, err)
+	}
+	// 上游返回的 index 是批内相对位置（0..len(batch)-1），回填全局 out 时加 offset。
+	for _, d := range r.Data {
+		if d.Index < 0 || d.Index >= len(batch) {
+			continue
+		}
+		out[offset+d.Index] = d.Embedding
+	}
+	return nil
 }
 
 // classifyErr 把上游错误映射为降级 sentinel（驱动 Gateway failover 决策）。

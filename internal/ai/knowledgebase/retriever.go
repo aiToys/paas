@@ -43,8 +43,8 @@ func (r *Retriever) IndexDocument(ctx context.Context, kb KnowledgeBase, doc Doc
 
 	chunks := ChunkText(content, defaultChunkSize, defaultChunkOverlap)
 	if len(chunks) == 0 {
-		// 空文档直接 indexed（0 chunks）
-		return r.repo.UpdateDocumentStatus(ctx, doc.ID, DocStatusIndexed, 0, "")
+		// 空文档直接 indexed（0 chunks）；同样用脱离请求 ctx，防超时卡 parsing。
+		return r.repo.UpdateDocumentStatus(context.WithoutCancel(ctx), doc.ID, DocStatusIndexed, 0, "")
 	}
 
 	// 按 KB.EmbeddingModel 选 Embedder
@@ -92,11 +92,15 @@ func (r *Retriever) IndexDocument(ctx context.Context, kb KnowledgeBase, doc Doc
 		r.markFailed(ctx, doc.ID, fmt.Sprintf("切片入库失败: %v", err))
 		return err
 	}
-	return r.repo.UpdateDocumentStatus(ctx, doc.ID, DocStatusIndexed, len(chunks), "")
+	// 最终状态（indexed）写入用脱离请求生命周期的 ctx：中间操作（embedding/向量入库）
+	// 已完成，状态落库不应因 processTimeout 超时或进程退出 cancel 而失败，否则文档卡 parsing。
+	return r.repo.UpdateDocumentStatus(context.WithoutCancel(ctx), doc.ID, DocStatusIndexed, len(chunks), "")
 }
 
 func (r *Retriever) markFailed(ctx context.Context, docID, msg string) {
-	_ = r.repo.UpdateDocumentStatus(ctx, docID, DocStatusFailed, 0, msg)
+	// 最终状态（failed）写入用脱离请求生命周期的 ctx：失败原因已知，状态落库不应因
+	// processTimeout 超时或进程退出 cancel 而失败，否则文档永远卡 parsing 无法重试。
+	_ = r.repo.UpdateDocumentStatus(context.WithoutCancel(ctx), docID, DocStatusFailed, 0, msg)
 }
 
 // Retrieve 检索：embed query -> 向量检索 topK -> 回查 PG 取 chunk content。

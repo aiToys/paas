@@ -3,6 +3,8 @@ package workload
 import (
 	"context"
 	"log"
+
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // Applier 把期望状态投影到数据面（K8s 启用时写 Workload CRD；nil 时 ApplyRepo 不调用）。
@@ -39,6 +41,7 @@ func (r *ApplyRepo) Create(ctx context.Context, w Workload) error {
 		return err
 	}
 	if r.applier != nil {
+		w = withTenant(ctx, w) // store 从 ctx 写 tenant，但 w 不回填；Apply 前补全 tenant 投影到 CRD label
 		r.applyLog("create", w.ID, r.applier.Apply(ctx, w))
 	}
 	return nil
@@ -50,6 +53,7 @@ func (r *ApplyRepo) Update(ctx context.Context, id string, replicas int, status 
 		return saved, err
 	}
 	if r.applier != nil {
+		saved = withTenant(ctx, saved)
 		r.applyLog("update", saved.ID, r.applier.Apply(ctx, saved))
 	}
 	return saved, nil
@@ -61,6 +65,7 @@ func (r *ApplyRepo) UpdateImage(ctx context.Context, id, image, imageRef string)
 		return saved, err
 	}
 	if r.applier != nil {
+		saved = withTenant(ctx, saved)
 		r.applyLog("update-image", saved.ID, r.applier.Apply(ctx, saved))
 	}
 	return saved, nil
@@ -76,4 +81,15 @@ func (r *ApplyRepo) Delete(ctx context.Context, id string) error {
 		}
 	}
 	return nil
+}
+
+// withTenant 补全 w.TenantID：store 从 ctx 写 tenant 但不回填传入的 w，
+// Apply 投影 CRD 需 tenant 作 label（paas.aitoys/tenant），空值致 selector/label 缺失。
+func withTenant(ctx context.Context, w Workload) Workload {
+	if w.TenantID == "" {
+		if tid, ok := tenant.TenantFrom(ctx); ok {
+			w.TenantID = tid
+		}
+	}
+	return w
 }

@@ -15,8 +15,10 @@ type appConfigLookup struct {
 	repo appconfig.Repository
 }
 
-// Items 返回工作负载应注入的 env 配置项（明文，TypeSecret 后端明文存仅 API 掩码）。
-// reconciler ctx 无 PaaS tenant，用 CRD spec 的 TenantID 注入；查询失败返空（best-effort）。
+// Items 返回工作负载应注入的 env 配置项（明文）。
+// 用 ListPlain（非 List）：List 返掩码致注入 Pod 的是 •••••• 而非真实密码/Key，
+// 工作负载拿到掩码无法连接数据服务/调 API（曾致绑定注入形同虚设）。ListPlain 仅供
+// reconciler 内部注入，不暴露 API。reconciler ctx 无 PaaS tenant，用 CRD spec 的 TenantID 注入。
 func (a appConfigLookup) Items(ctx context.Context, tenantID, appID, envID string) ([]controller.AppConfigItem, error) {
 	if a.repo == nil || appID == "" {
 		return nil, nil
@@ -29,7 +31,7 @@ func (a appConfigLookup) Items(ctx context.Context, tenantID, appID, envID strin
 		if env == "" {
 			continue
 		}
-		items, err := a.repo.List(ctx, appID, env)
+		items, err := a.repo.ListPlain(ctx, appID, env)
 		if err != nil {
 			continue
 		}

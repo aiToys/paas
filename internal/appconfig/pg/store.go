@@ -6,6 +6,8 @@ package pg
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -34,6 +36,15 @@ func scanCfg(r storagepg.RowScanner, c *appconfig.ConfigItem) error {
 // List 按 (appID, envID) 过滤当前租户的配置项；空串表示该维度不限。
 // Secret 值掩码返回（与内存一致，不泄漏）。按 key 升序。
 func (s *Store) List(ctx context.Context, appID, envID string) ([]appconfig.ConfigItem, error) {
+	return s.list(ctx, appID, envID, true)
+}
+
+// ListPlain 同 List 但 Secret 返明文（reconciler 注入工作负载 env 用，不暴露 API）。
+func (s *Store) ListPlain(ctx context.Context, appID, envID string) ([]appconfig.ConfigItem, error) {
+	return s.list(ctx, appID, envID, false)
+}
+
+func (s *Store) list(ctx context.Context, appID, envID string, mask bool) ([]appconfig.ConfigItem, error) {
 	tid, err := storagepg.TenantOrErr(ctx)
 	if err != nil {
 		return nil, err
@@ -60,7 +71,11 @@ func (s *Store) List(ctx context.Context, appID, envID string) ([]appconfig.Conf
 		if err = scanCfg(rows, &c); err != nil {
 			return nil, err
 		}
-		out = append(out, c.Masked()) // Secret 掩码
+		if mask {
+			out = append(out, c.Masked()) // Secret 掩码
+		} else {
+			out = append(out, c) // 明文（reconciler 注入用）
+		}
 	}
 	return out, rows.Err()
 }
@@ -76,6 +91,14 @@ func (s *Store) Upsert(ctx context.Context, item appconfig.ConfigItem) (appconfi
 		return appconfig.ConfigItem{}, err
 	}
 	item.TenantID = tid
+	// ID 为空时生成（创建场景；请求体不传 ID）。否则 INSERT 用空串作主键，
+	// 多次创建不同 key 的配置项会因 id="" 重复触发 app_configs_pkey 冲突
+	// （ON CONFLICT 命中的是 (tenant,app,env,key) 唯一键，不是主键 id）。
+	if item.ID == "" {
+		b := make([]byte, 8)
+		_, _ = rand.Read(b)
+		item.ID = "cfg-" + hex.EncodeToString(b)
+	}
 	// ON CONFLICT 主路径：命中唯一键 (tenant_id, app_id, env_id, key) 则更新 value/type/updated_at，
 	// RETURNING 取实际落库行（含生成的 id 与 updated_at）。
 	row := s.db.Pool().QueryRow(ctx, `

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/aitoys/paas/pkg/provider"
@@ -107,6 +109,60 @@ func TestOpenAICompatible_EmbedderTypeAssertion(t *testing.T) {
 	var p provider.Provider = NewOpenAICompatibleProvider("qwen", "http://x", "m", "sec", stubResolver{v: "k"}, nil)
 	if _, ok := p.(provider.Embedder); !ok {
 		t.Error("OpenAICompatibleProvider 应实现 provider.Embedder")
+	}
+}
+
+// TestOpenAICompatible_EmbedBatching 验证：texts 超过 embedBatchSize 时分批调用上游，
+// 每批 input ≤ embedBatchSize，结果按全局 index 正确合并。
+// 复现线上一批 size > 上限被 airouter/百炼拒（400 InvalidParameter）的场景。
+func TestOpenAICompatible_EmbedBatching(t *testing.T) {
+	const total = 50 // > embedBatchSize(10)，至少 5 批
+	var calls []int  // 记录每次请求的 input 数量
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req openaiEmbedReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("解析 embed 请求失败: %v", err)
+		}
+		calls = append(calls, len(req.Input))
+		if len(req.Input) > embedBatchSize {
+			t.Errorf("单批 input %d 超过上限 %d", len(req.Input), embedBatchSize)
+		}
+		// 每条 input 返一个 1 维向量，值 = 全局 index（input 形如 "t<idx>"，解析数字）。
+		resp := openaiEmbedResp{Data: make([]struct {
+			Embedding []float32 `json:"embedding"`
+			Index     int       `json:"index"`
+		}, len(req.Input))}
+		for i, in := range req.Input {
+			idx, _ := strconv.Atoi(strings.TrimPrefix(in, "t"))
+			resp.Data[i].Index = i // 批内相对 index
+			resp.Data[i].Embedding = []float32{float32(idx)}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	inputs := make([]string, total)
+	for i := range inputs {
+		inputs[i] = "t" + strconv.Itoa(i)
+	}
+	p := NewOpenAICompatibleProvider("qwen", srv.URL, "text-embedding-v4", "sec-test", stubResolver{v: "sk-test"}, srv.Client())
+	out, err := p.Embed(context.Background(), inputs)
+	if err != nil {
+		t.Fatalf("分批 Embed 失败: %v", err)
+	}
+	if len(out) != total {
+		t.Fatalf("应返 %d 个向量，got %d", total, len(out))
+	}
+	// 验证每批都 ≤ embedBatchSize，且批数正确（50/10=5 批：10×5）
+	if len(calls) != 5 {
+		t.Errorf("应分 5 批调用，got %d 批: %v", len(calls), calls)
+	}
+	// 验证全局 index 合并正确：out[i][0] == i
+	for i, v := range out {
+		if len(v) != 1 || v[0] != float32(i) {
+			t.Errorf("out[%d] 应 [%d]，got %v", i, i, v)
+		}
 	}
 }
 

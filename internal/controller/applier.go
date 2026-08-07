@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"log"
 	"math"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -43,6 +44,7 @@ func NewK8sApplier(cl client.Client, namespace string) *K8sApplier {
 
 // Apply CreateOrUpdate Workload CRD（期望状态）。
 func (a *K8sApplier) Apply(ctx context.Context, w workload.Workload) error {
+	log.Printf("[applier] Apply w.ID=%s name=%s port=%d cport=%d tenant=%s img=%s", w.ID, w.Name, w.Port, w.ContainerPort, w.TenantID, w.Image)
 	crd := &v1alpha1.Workload{ObjectMeta: metav1.ObjectMeta{Name: w.ID, Namespace: a.namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, a.Client, crd, func() error {
 		crd.Spec = v1alpha1.WorkloadSpec{

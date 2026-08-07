@@ -33,6 +33,15 @@ func tenantOrErr(ctx context.Context) (string, error) {
 }
 
 func (s *Store) List(ctx context.Context, appID, envID string) ([]appconfig.ConfigItem, error) {
+	return s.list(ctx, appID, envID, true)
+}
+
+// ListPlain 同 List 但 Secret 返明文（reconciler 注入工作负载 env 用）。
+func (s *Store) ListPlain(ctx context.Context, appID, envID string) ([]appconfig.ConfigItem, error) {
+	return s.list(ctx, appID, envID, false)
+}
+
+func (s *Store) list(ctx context.Context, appID, envID string, mask bool) ([]appconfig.ConfigItem, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {
 		return nil, err
@@ -50,7 +59,11 @@ func (s *Store) List(ctx context.Context, appID, envID string) ([]appconfig.Conf
 		if envID != "" && c.EnvID != envID {
 			continue
 		}
-		out = append(out, c.Masked()) // Secret 掩码
+		if mask {
+			out = append(out, c.Masked()) // Secret 掩码
+		} else {
+			out = append(out, c) // 明文（reconciler 注入用）
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out, nil

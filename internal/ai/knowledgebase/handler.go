@@ -273,16 +273,16 @@ func (h *Handler) processDocument(kb KnowledgeBase, doc Document) {
 	bucket := kb.BucketName()
 	rc, err := h.blob.GetObject(ctx, bucket, doc.ObjectKey)
 	if err != nil {
-		_ = h.repo.UpdateDocumentStatus(ctx, doc.ID, DocStatusFailed, 0, "读取原文失败: "+err.Error())
+		_ = h.repo.UpdateDocumentStatus(context.WithoutCancel(ctx), doc.ID, DocStatusFailed, 0, "读取原文失败: "+err.Error())
 		return
 	}
 	defer rc.Close()
 	content, err := Parse(doc.MIME, rc)
 	if err != nil {
-		_ = h.repo.UpdateDocumentStatus(ctx, doc.ID, DocStatusFailed, 0, "解析失败: "+err.Error())
+		_ = h.repo.UpdateDocumentStatus(context.WithoutCancel(ctx), doc.ID, DocStatusFailed, 0, "解析失败: "+err.Error())
 		return
 	}
-	_ = h.retriever.IndexDocument(ctx, kb, doc, content) // 内部更新状态 indexed/failed
+	_ = h.retriever.IndexDocument(ctx, kb, doc, content) // 内部更新状态 indexed/failed（最终状态用 WithoutCancel）
 }
 
 func (h *Handler) serveDocument(w http.ResponseWriter, r *http.Request, kbID, docID string) {
