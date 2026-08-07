@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aitoys/paas/internal/ai/knowledgebase"
 	"github.com/aitoys/paas/internal/apiroute"
 	"github.com/aitoys/paas/internal/appconfig"
 	"github.com/aitoys/paas/internal/backup"
@@ -687,6 +688,41 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/admin/providers/{id}", apiroute.Tags("供应商管理"), apiroute.Summary("供应商详情"), apiroute.Perm("super_admin"), apiroute.WithResp(provider.Vendor{}))
 	reg.Operation("PUT", "/api/admin/providers/{id}", apiroute.Tags("供应商管理"), apiroute.Summary("更新供应商"), apiroute.Perm("super_admin"), apiroute.WithReqBody(provider.Vendor{}), apiroute.WithResp(provider.Vendor{}))
 	reg.Operation("DELETE", "/api/admin/providers/{id}", apiroute.Tags("供应商管理"), apiroute.Summary("删除供应商"), apiroute.Perm("super_admin"))
+
+	// 知识库（RAG）：KB/Document/检索。复用 MaaS embedding + qdrant/minio（env 配共享实例）。
+	// PAAS_KB_QDRANT_URL / PAAS_KB_MINIO_ENDPOINT 非空才装配 retriever/blob（否则文档上传/检索 503 降级，KB CRUD 仍可用）。
+	// 多租户隔离靠 collection（kb_{kbID}）+ bucket（kb-{tenant}）名，共享 qdrant/minio 实例。多实例留后续。
+	var kbRetriever *knowledgebase.Retriever
+	var kbBlob knowledgebase.BlobStore
+	if qdrantURL := os.Getenv("PAAS_KB_QDRANT_URL"); qdrantURL != "" {
+		kbRetriever = knowledgebase.NewRetriever(
+			stores.KnowledgeBase,
+			newQdrantVectorStore(qdrantURL, os.Getenv("PAAS_KB_QDRANT_API_KEY")),
+			newMaasEmbedderFactory(stores.MaaS, secretResolver{store: stores.Security.(security.SecretStore)}),
+		)
+	}
+	if minioEp := os.Getenv("PAAS_KB_MINIO_ENDPOINT"); minioEp != "" {
+		if mb, err := newMinioBlobStore(minioEp, os.Getenv("PAAS_KB_MINIO_ACCESS_KEY"), os.Getenv("PAAS_KB_MINIO_SECRET_KEY")); err == nil {
+			kbBlob = mb
+		} else {
+			log.Printf("KB minio 初始化失败: %v", err)
+		}
+	}
+	kbHandler := knowledgebase.NewHandler(stores.KnowledgeBase, kbRetriever, kbBlob)
+	kbHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+	kbHandler.WithBaseCtx(context.Background())
+	mux.Handle("/api/knowledgebases", auth(kbHandler))
+	mux.Handle("/api/knowledgebases/", auth(kbHandler))
+	reg.Operation("GET", "/api/knowledgebases", apiroute.Tags("知识库"), apiroute.Summary("知识库列表"), apiroute.Perm("kb:read"), apiroute.WithResp([]knowledgebase.KnowledgeBase{}))
+	reg.Operation("POST", "/api/knowledgebases", apiroute.Tags("知识库"), apiroute.Summary("创建知识库"), apiroute.Perm("kb:write"), apiroute.WithReqBody(knowledgebase.KnowledgeBase{}), apiroute.WithResp(knowledgebase.KnowledgeBase{}))
+	reg.Operation("GET", "/api/knowledgebases/{id}", apiroute.Tags("知识库"), apiroute.Summary("知识库详情"), apiroute.Perm("kb:read"), apiroute.WithResp(knowledgebase.KnowledgeBase{}))
+	reg.Operation("PUT", "/api/knowledgebases/{id}", apiroute.Tags("知识库"), apiroute.Summary("更新知识库"), apiroute.Perm("kb:write"), apiroute.WithReqBody(knowledgebase.KnowledgeBase{}), apiroute.WithResp(knowledgebase.KnowledgeBase{}))
+	reg.Operation("DELETE", "/api/knowledgebases/{id}", apiroute.Tags("知识库"), apiroute.Summary("删除知识库（级联清文档+chunks+向量）"), apiroute.Perm("kb:write"))
+	reg.Operation("GET", "/api/knowledgebases/{id}/documents", apiroute.Tags("知识库"), apiroute.Summary("文档列表"), apiroute.Perm("kb:read"), apiroute.WithResp([]knowledgebase.Document{}))
+	reg.Operation("POST", "/api/knowledgebases/{id}/documents", apiroute.Tags("知识库"), apiroute.Summary("上传文档（异步解析+索引）"), apiroute.Perm("kb:write"), apiroute.WithResp(knowledgebase.Document{}))
+	reg.Operation("GET", "/api/knowledgebases/{id}/documents/{docId}", apiroute.Tags("知识库"), apiroute.Summary("文档状态"), apiroute.Perm("kb:read"), apiroute.WithResp(knowledgebase.Document{}))
+	reg.Operation("DELETE", "/api/knowledgebases/{id}/documents/{docId}", apiroute.Tags("知识库"), apiroute.Summary("删除文档（清chunks+向量+原文）"), apiroute.Perm("kb:write"))
+	reg.Operation("POST", "/api/knowledgebases/{id}/retrieve", apiroute.Tags("知识库"), apiroute.Summary("检索"), apiroute.Perm("kb:read"), apiroute.WithResp([]knowledgebase.ChunkHit{}))
 
 	mux.Handle("/livez", health.NewHandler())
 

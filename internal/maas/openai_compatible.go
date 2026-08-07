@@ -154,6 +154,71 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req provider.ChatRe
 	return ch, nil
 }
 
+// openaiEmbedReq 是 OpenAI 兼容 /embeddings 请求体。
+type openaiEmbedReq struct {
+	Model string   `json:"model"`
+	Input []string `json:"input"`
+}
+
+// openaiEmbedResp 是 /embeddings 响应。data 按 index 排序后取 embedding，
+// 确保返回顺序与输入 texts 一致（部分供应商不保证 data 数组顺序）。
+type openaiEmbedResp struct {
+	Data []struct {
+		Embedding []float32 `json:"embedding"`
+		Index     int       `json:"index"`
+	} `json:"data"`
+}
+
+// Embed 调供应商 /embeddings 批量向量化（非流式）。失败按 sentinel 分类，
+// 与 Chat 同款（凭证缺失/offline/degraded），便于 KB 降级决策。
+func (p *OpenAICompatibleProvider) Embed(ctx context.Context, texts []string) ([][]float32, error) {
+	if p.resolver == nil {
+		return nil, provider.ErrCredentialMissing
+	}
+	apiKey, err := p.resolver.Resolve(p.credentialRef)
+	if err != nil || apiKey == "" {
+		return nil, provider.ErrCredentialMissing
+	}
+	if len(texts) == 0 {
+		return nil, nil
+	}
+	body, _ := json.Marshal(openaiEmbedReq{Model: p.upstreamModel, Input: texts})
+	endpoint := strings.TrimRight(p.baseURL, "/") + "/embeddings"
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+
+	resp, err := p.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, classifyErr(err, 0)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, classifyErr(nil, resp.StatusCode)
+	}
+	var r openaiEmbedResp
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return nil, fmt.Errorf("%w: 解析 embedding 响应失败: %v", provider.ErrUpstreamUnavailable, err)
+	}
+	out := make([][]float32, len(texts))
+	for _, d := range r.Data {
+		if d.Index < 0 || d.Index >= len(out) {
+			continue
+		}
+		out[d.Index] = d.Embedding
+	}
+	// 校验：每个输入都有对应向量（缺则视为上游不可用）
+	for i := range out {
+		if out[i] == nil {
+			return nil, fmt.Errorf("%w: embedding 响应缺失 index=%d", provider.ErrUpstreamUnavailable, i)
+		}
+	}
+	return out, nil
+}
+
 // classifyErr 把上游错误映射为降级 sentinel（驱动 Gateway failover 决策）。
 func classifyErr(netErr error, status int) error {
 	if netErr != nil {

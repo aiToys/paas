@@ -36,6 +36,13 @@ type Provider interface {
 	Chat(ctx context.Context, req ChatRequest) (<-chan Chunk, error)
 }
 
+// Embedder 是向量化提供者抽象（OpenAICompatibleProvider 等实现它，用于知识库 embedding）。
+// 与 Provider 正交：仅 embedding 通道实现，不在 Provider 接口强制。
+// catalog 加载时探测 `if e, ok := p.(Embedder); ok { ... }` 决定该模型是否可用于 KB embedding。
+type Embedder interface {
+	Embed(ctx context.Context, texts []string) ([][]float32, error)
+}
+
 // CredentialResolver 解析平台级 Secret 明文（仅内存，不日志、不持久化）。
 // 由 security store 在 cmd/core 注入实现（依赖倒置，破除 maas→security import）。
 // 解析失败（凭证被删/未配置）返回错误，调用方据此把通道标记 offline。

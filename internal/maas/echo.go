@@ -44,3 +44,22 @@ func (EchoProvider) Chat(ctx context.Context, req provider.ChatRequest) (<-chan 
 	}()
 	return ch, nil
 }
+
+// Embed 返 hash 派生向量（固定维度），演示用。真实向量化由 OpenAICompatibleProvider.Embed。
+func (EchoProvider) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i, t := range texts {
+		v := make([]float32, 1024)
+		// 简单 FNV-1a 派生：文本内容决定向量值，便于测试区分不同输入
+		var h uint32 = 2166136261
+		for _, c := range t {
+			h ^= uint32(c)
+			h *= 16777619
+		}
+		for j := range v {
+			v[j] = float32((h >> (j % 32)) & 1)
+		}
+		out[i] = v
+	}
+	return out, nil
+}

@@ -14,6 +14,9 @@ import (
 	"os"
 	"strings"
 
+	"github.com/aitoys/paas/internal/ai/knowledgebase"
+	kbmemory "github.com/aitoys/paas/internal/ai/knowledgebase/memory"
+	kbpg "github.com/aitoys/paas/internal/ai/knowledgebase/pg"
 	"github.com/aitoys/paas/internal/appconfig"
 	appcfgmemory "github.com/aitoys/paas/internal/appconfig/memory"
 	appcfgpg "github.com/aitoys/paas/internal/appconfig/pg"
@@ -86,6 +89,7 @@ type Stores struct {
 	Messaging      messaging.Repository
 	Backup         backup.Repository
 	MaaS           maas.Repository
+	KnowledgeBase  knowledgebase.Repository
 }
 
 // buildAllStores 选择持久化后端、构造全模块 store 并完成 seed。
@@ -128,6 +132,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		billingRepo := billingpg.NewStore(db)
 		secRepo := secpg.NewStore(db)
 		maasRepo := mapg.NewStore(db)
+		kbRepo := kbpg.NewStore(db)
 		msgRepo := messaging.Repository(msgmemory.NewStore())
 		bkRepo := backup.Repository(bkmemory.NewStore())
 
@@ -163,6 +168,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 			Messaging:      msgRepo,
 			Backup:         bkRepo,
 			MaaS:           maasRepo,
+			KnowledgeBase:  kbRepo,
 		}
 		return stores, db.Close, nil
 	}
@@ -191,6 +197,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 	secRepo := secmemory.NewStore()
 	maasRepo := maas.NewMemoryStore()
 	seedMaasCatalog(ctx, maasRepo, secRepo)
+	kbRepo := kbmemory.NewStore()
 	msgRepo := messaging.Repository(msgmemory.NewStore())
 	bkRepo := backup.Repository(bkmemory.NewStore())
 	log.Println("持久化后端: 内存（dev/echo 路径，零依赖）")
@@ -214,6 +221,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		Messaging:      msgRepo,
 		Backup:         bkRepo,
 		MaaS:           maasRepo,
+		KnowledgeBase:  kbRepo,
 	}
 	return stores, nil, nil
 }

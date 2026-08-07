@@ -38,3 +38,15 @@ func (m MockProvider) Chat(ctx context.Context, _ provider.ChatRequest) (<-chan 
 	}()
 	return ch, nil
 }
+
+// Embed 返固定维度（mockEmbedDim，与 text-embedding-v4 对齐）零向量，演示/测试用。
+// 真实向量化由 OpenAICompatibleProvider.Embed 调供应商。
+const mockEmbedDim = 1024
+
+func (MockProvider) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		out[i] = make([]float32, mockEmbedDim)
+	}
+	return out, nil
+}
