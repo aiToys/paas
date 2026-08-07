@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,8 +21,22 @@ type openaiReq struct {
 	Model       string             `json:"model"`
 	Messages    []provider.Message `json:"messages"`
 	Stream      bool               `json:"stream"`
+	Tools       []provider.ToolDef `json:"tools,omitempty"`
+	ToolChoice  string             `json:"tool_choice,omitempty"`
 	Temperature *float64           `json:"temperature,omitempty"`
 	MaxTokens   *int               `json:"max_tokens,omitempty"`
+}
+
+// openaiToolCallDelta 是流式 tool_call 增量（按 index 聚合）。
+// 首块带 id/type/function.name，后续块仅 function.arguments 增量拼接。
+type openaiToolCallDelta struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id,omitempty"`
+	Type     string `json:"type,omitempty"`
+	Function struct {
+		Name      string `json:"name,omitempty"`
+		Arguments string `json:"arguments,omitempty"`
+	} `json:"function"`
 }
 
 // openaiDelta 是流式增量响应（仅取 choices[0].delta）。
@@ -31,10 +46,12 @@ type openaiReq struct {
 type openaiDelta struct {
 	Choices []struct {
 		Delta struct {
-			Role             string `json:"role"`
-			Content          string `json:"content"`
-			ReasoningContent string `json:"reasoning_content"`
+			Role             string                `json:"role"`
+			Content          string                `json:"content"`
+			ReasoningContent string                `json:"reasoning_content"`
+			ToolCalls        []openaiToolCallDelta `json:"tool_calls,omitempty"`
 		} `json:"delta"`
+		FinishReason string `json:"finish_reason,omitempty"`
 	} `json:"choices"`
 }
 
@@ -94,6 +111,8 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req provider.ChatRe
 		Model:       p.upstreamModel, // 转换为供应商侧模型名
 		Messages:    req.Messages,
 		Stream:      true,
+		Tools:       req.Tools,
+		ToolChoice:  req.ToolChoice,
 		Temperature: req.Temperature,
 		MaxTokens:   req.MaxTokens,
 	})
@@ -122,6 +141,9 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req provider.ChatRe
 	go func() {
 		defer close(ch)
 		defer func() { _ = resp.Body.Close() }()
+		// tool_call 按 index 累积：首 delta 带 id/name，后续 delta 仅追加 arguments 片段。
+		toolAcc := map[int]*provider.ToolCall{}
+		finishReason := ""
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 容纳长 SSE 行
 		for scanner.Scan() {
@@ -131,7 +153,7 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req provider.ChatRe
 			}
 			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 			if payload == "[DONE]" {
-				return
+				break
 			}
 			var d openaiDelta
 			if json.Unmarshal([]byte(payload), &d) != nil {
@@ -140,14 +162,57 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req provider.ChatRe
 			if len(d.Choices) == 0 {
 				continue
 			}
-			delta := d.Choices[0].Delta
-			if delta.Role == "" && delta.Content == "" && delta.ReasoningContent == "" {
+			choice := d.Choices[0]
+			if choice.FinishReason != "" {
+				finishReason = choice.FinishReason
+			}
+			delta := choice.Delta
+			// 累积 tool_calls（按 index，跨 delta 拼接 arguments）。
+			for _, tc := range delta.ToolCalls {
+				cur, ok := toolAcc[tc.Index]
+				if !ok {
+					cur = &provider.ToolCall{Type: "function"}
+					toolAcc[tc.Index] = cur
+				}
+				if tc.ID != "" {
+					cur.ID = tc.ID
+				}
+				if tc.Function.Name != "" {
+					cur.Function.Name = tc.Function.Name
+				}
+				cur.Function.Arguments += tc.Function.Arguments
+			}
+			if delta.Role == "" && delta.Content == "" && delta.ReasoningContent == "" && len(delta.ToolCalls) == 0 {
 				continue
+			}
+			// content/reasoning 流式透传（tool_calls 增量不单独推，流末统一发）。
+			if delta.Role != "" || delta.Content != "" || delta.ReasoningContent != "" {
+				select {
+				case <-ctx.Done():
+					return // 客户端断连，立即停止解析（不计费、不泄漏 goroutine）
+				case ch <- provider.Chunk{Role: delta.Role, Content: delta.Content, Reasoning: delta.ReasoningContent}:
+				}
+			}
+		}
+		// 流末：若 LLM 决定调用工具，发一个聚合 Chunk（tool_calls + finish_reason）供 runtime 续轮。
+		if len(toolAcc) > 0 {
+			calls := make([]provider.ToolCall, 0, len(toolAcc))
+			// 按 index 稳定排序，保证回放顺序确定。
+			idxs := make([]int, 0, len(toolAcc))
+			for i := range toolAcc {
+				idxs = append(idxs, i)
+			}
+			sort.Ints(idxs)
+			for _, i := range idxs {
+				calls = append(calls, *toolAcc[i])
+			}
+			if finishReason == "" {
+				finishReason = "tool_calls"
 			}
 			select {
 			case <-ctx.Done():
-				return // 客户端断连，立即停止解析（不计费、不泄漏 goroutine）
-			case ch <- provider.Chunk{Role: delta.Role, Content: delta.Content, Reasoning: delta.ReasoningContent}:
+				return
+			case ch <- provider.Chunk{ToolCalls: calls, FinishReason: finishReason}:
 			}
 		}
 	}()

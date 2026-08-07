@@ -10,8 +10,40 @@ import (
 
 // Message 表示一条对话消息。
 type Message struct {
-	Role    string `json:"role"` // "system" | "user" | "assistant"
+	Role    string `json:"role"` // "system" | "user" | "assistant" | "tool"
 	Content string `json:"content"`
+	// ToolCalls 仅 assistant 角色：LLM 决定调用工具时返回的工具调用请求。
+	// 多轮工具循环（FunctionCalling）回放历史 assistant 消息时需带上，供下游识别。
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	// ToolCallID 仅 role="tool" 消息：关联对应的 tool_call.id（OpenAI 规范要求）。
+	ToolCallID string `json:"tool_call_id,omitempty"`
+}
+
+// ToolCall 是 LLM 发起的工具调用（OpenAI 兼容 choices[].message.tool_calls）。
+type ToolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type,omitempty"` // 固定 "function"
+	Function ToolCallFunction `json:"function"`
+}
+
+// ToolCallFunction 工具调用的函数名 + 参数（Arguments 为 JSON 字符串）。
+type ToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // JSON 字符串（OpenAI 规范，非 object）
+}
+
+// ToolDef 是暴露给 LLM 的工具定义（OpenAI 兼容 tools[]，type=function）。
+// 由 Agent runtime 从工具实体（MCP server 的 ListTools schema）构建。
+type ToolDef struct {
+	Type     string          `json:"type"` // 固定 "function"
+	Function ToolDefFunction `json:"function"`
+}
+
+// ToolDefFunction 工具的函数签名（Name + 给 LLM 的 Description + JSON Schema 参数）。
+type ToolDefFunction struct {
+	Name        string         `json:"name"`
+	Description string         `json:"description"`
+	Parameters  map[string]any `json:"parameters"` // JSON Schema（permissive: {type:object}）
 }
 
 // ChatRequest 是一次推理请求。
@@ -21,6 +53,10 @@ type ChatRequest struct {
 	Stream      bool
 	Temperature *float64 `json:"temperature,omitempty"` // 采样温度，nil 表示用上游默认
 	MaxTokens   *int     `json:"max_tokens,omitempty"`  // 最大生成 token 数，nil 表示不限
+	// Tools 暴露给 LLM 的工具定义（FunctionCalling）；空表示不启用工具调用。
+	Tools []ToolDef
+	// ToolChoice 工具选择策略："" | "auto"（默认，LLM 自决）| "none"（禁用）。
+	ToolChoice string
 }
 
 // Chunk 是流式推理的一个增量块。
@@ -28,6 +64,11 @@ type Chunk struct {
 	Role      string // 首块填 role，后续为空
 	Content   string
 	Reasoning string // 推理模型的思考过程增量（OpenAI 兼容 delta.reasoning_content），无则空
+	// ToolCalls 流末累积的工具调用（仅当 LLM 决定调用工具时；中间 delta 按 index 累积）。
+	ToolCalls []ToolCall
+	// FinishReason 结束原因（"stop" | "tool_calls" | "length"）；流末块填充。
+	// runtime 据 "tool_calls" 判定进入下一轮工具循环。
+	FinishReason string
 }
 
 // Provider 是推理提供者抽象（echo / mock / OpenAICompatibleProvider 等均实现它）。

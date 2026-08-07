@@ -10,21 +10,26 @@ import (
 	"github.com/aitoys/paas/internal/ai/knowledgebase"
 	"github.com/aitoys/paas/internal/ai/prompt"
 	"github.com/aitoys/paas/internal/ai/tool"
+	"github.com/aitoys/paas/internal/ai/tool/mcp"
 	"github.com/aitoys/paas/internal/maas"
 	"github.com/aitoys/paas/pkg/provider"
 )
 
 // Runtime 执行 Agent：组装 system prompt（agent.SystemPrompt 或 PromptRef 模板）+
-// 工具描述（Tools 引用）+ KB RAG 上下文（KnowledgeBases 检索），调底层 LLM 流式输出。
+// KB RAG 上下文 + 工具定义（FunctionCalling），调底层 LLM。
+//
+// 当 Agent 配置了工具时进入**多轮工具循环**（MaxSteps 上限）：
+// 每轮把工具定义传给 LLM → 若 LLM 返回 tool_calls，runtime 调用对应工具
+// （MCP tools/call）→ 把结果作为 role=tool 消息回喂 → 下一轮 LLM 据结果作答；
+// 直到 LLM 不再请求工具（产出最终答案，流式输出），或达 MaxSteps 上限。
+// 工具调用进度作为 reasoning_content 推送（前端思考面板可见）。
 //
 // 依赖（依赖倒置，cmd/core 注入；任一为 nil 则该维度降级跳过）：
 //   - models：MaaS catalog 取底层 Provider
 //   - resolver：凭证解析
 //   - prompts：PromptRef 解析（agent.SystemPrompt 为空时用）
-//   - tools：工具描述注入
+//   - tools：工具定义 + 调用（仅 MCP 类型可调用）
 //   - kb：知识库 RAG 检索
-//
-// FunctionCalling 多轮 tool 调用循环留下一 P3 切片（当前仅描述注入 + 单轮 LLM）。
 type Runtime struct {
 	agents   Repository
 	models   maas.Repository
@@ -45,6 +50,10 @@ func NewRuntime(
 	return &Runtime{agents: agents, models: models, resolver: resolver, prompts: prompts, tools: tools, kb: kb}
 }
 
+// toolInvoker 执行单个工具调用，返回结果文本（喂给 LLM）。
+// argsJSON 是 LLM 产出的函数参数 JSON 字符串（OpenAI 规范）。
+type toolInvoker func(ctx context.Context, argsJSON string) (string, error)
+
 // lastUserText 取 messages 中最后一条 user 消息文本（KB RAG query 用）。
 func lastUserText(msgs []provider.Message) string {
 	for i := len(msgs) - 1; i >= 0; i-- {
@@ -55,7 +64,8 @@ func lastUserText(msgs []provider.Message) string {
 	return ""
 }
 
-// buildSystem 组装 system prompt：agent.SystemPrompt 或 PromptRef 模板 + 工具描述 + KB RAG 上下文。
+// buildSystem 组装 system prompt：agent.SystemPrompt 或 PromptRef 模板 + KB RAG 上下文。
+// 工具描述不在此注入（启用工具时以结构化 ToolDef 传 LLM，见 buildTools）。
 func (r *Runtime) buildSystem(ctx context.Context, a Agent, msgs []provider.Message) string {
 	sys := a.SystemPrompt
 	if sys == "" && a.PromptRef != "" && r.prompts != nil {
@@ -63,22 +73,7 @@ func (r *Runtime) buildSystem(ctx context.Context, a Agent, msgs []provider.Mess
 			sys = p.Template
 		}
 	}
-	// 工具描述注入（仅描述，供 LLM 参考；FunctionCalling 执行留下一切片）
-	if len(a.Tools) > 0 && r.tools != nil {
-		var desc []string
-		for _, tid := range a.Tools {
-			if t, err := r.tools.Get(ctx, tid); err == nil && t.Enabled {
-				desc = append(desc, fmt.Sprintf("- %s: %s", t.Name, t.Description))
-			}
-		}
-		if len(desc) > 0 {
-			if sys != "" {
-				sys += "\n\n"
-			}
-			sys += "你可使用以下工具（描述供参考）:\n" + strings.Join(desc, "\n")
-		}
-	}
-	// KB RAG：用最后一条 user 消息检索，注入相关切片
+	// KB RAG：用最后一条 user 消息检索，注入相关切片。
 	if len(a.KnowledgeBases) > 0 && r.kb != nil {
 		query := lastUserText(msgs)
 		if query != "" {
@@ -103,7 +98,76 @@ func (r *Runtime) buildSystem(ctx context.Context, a Agent, msgs []provider.Mess
 	return sys
 }
 
-// Run 执行 Agent，流式回调 onChunk。底层 LLM 不可达（凭证/模型缺失）返脱敏错误。
+// buildTools 从 agent 引用的工具实体构建 LLM 工具定义 + 调用器。
+// 仅 MCP 类型可调用：经 ListTools 取真实 JSON Schema 参数；按工具实体 Name 匹配 MCP 工具名
+// （匹配失败取首个），invoker 调 tools/call。http/builtin 暂不可调用（invoke 仅 mcp，留后续）。
+func (r *Runtime) buildTools(ctx context.Context, a Agent) ([]provider.ToolDef, map[string]toolInvoker) {
+	if r.tools == nil || len(a.Tools) == 0 {
+		return nil, nil
+	}
+	var defs []provider.ToolDef
+	invokers := map[string]toolInvoker{}
+	for _, tid := range a.Tools {
+		t, err := r.tools.Get(ctx, tid)
+		if err != nil || !t.Enabled || t.Type != tool.TypeMCP {
+			continue
+		}
+		serverURL := t.Config[tool.CfgMCPServerURL]
+		apiKey := t.Config[tool.CfgMCPAPIKey]
+		if serverURL == "" {
+			continue
+		}
+		cli := mcp.GetClient(serverURL, apiKey)
+		// Initialize + ListTools 取真实 schema（失败则降级 permissive schema，仍可调）。
+		mcpName := t.Name
+		schema := map[string]any{"type": "object", "properties": map[string]any{}}
+		if err := cli.Initialize(ctx); err == nil {
+			if tools, err := cli.ListTools(ctx); err == nil {
+				for _, mt := range tools {
+					if mt.Name == t.Name || mcpName == t.Name {
+						mcpName = mt.Name
+						if mt.InputSchema != nil {
+							schema = mt.InputSchema
+						}
+						break
+					}
+				}
+			}
+		}
+		fnName := t.Name // LLM 侧函数名 = 工具实体名（租户内唯一，避免冲突）
+		defs = append(defs, provider.ToolDef{
+			Type: "function",
+			Function: provider.ToolDefFunction{
+				Name: fnName, Description: t.Description, Parameters: schema,
+			},
+		})
+		// 捕获 mcpName（可能被 ListTools 改写）进闭包。
+		invokeMcpName := mcpName
+		cliRef := cli
+		invokers[fnName] = func(c context.Context, argsJSON string) (string, error) {
+			args := map[string]any{}
+			if argsJSON != "" {
+				_ = json.Unmarshal([]byte(argsJSON), &args) // 解析失败按空参调（permissive schema 容错）
+			}
+			res, err := cliRef.Invoke(c, invokeMcpName, args)
+			if err != nil {
+				return "", err
+			}
+			// 拼 content[].text 为结果文本（MCP 结果是多块 content）。
+			var sb strings.Builder
+			for _, c := range res.Content {
+				if c.Text != "" {
+					sb.WriteString(c.Text)
+				}
+			}
+			return sb.String(), nil
+		}
+	}
+	return defs, invokers
+}
+
+// Run 执行 Agent，流式回调 onChunk（content/reasoning + 工具进度）。
+// 启用工具时进入多轮循环；底层 LLM 不可达（凭证/模型缺失）返脱敏错误。
 func (r *Runtime) Run(ctx context.Context, agentID string, msgs []provider.Message, onChunk func(provider.Chunk)) error {
 	a, err := r.agents.Get(ctx, agentID)
 	if err != nil {
@@ -121,22 +185,80 @@ func (r *Runtime) Run(ctx context.Context, agentID string, msgs []provider.Messa
 		return fmt.Errorf("模型 %s 无通道", a.Model)
 	}
 	p := maas.BuildProvider(m.Channels[0], r.resolver)
+	return r.runLoop(ctx, p, a, msgs, onChunk)
+}
 
+// runLoop 跑多轮工具循环（抽离自 Run 便于用 fake provider 单测）。
+// p 为底层 LLM Provider；a.MaxSteps 为轮数上限。
+func (r *Runtime) runLoop(ctx context.Context, p provider.Provider, a Agent, msgs []provider.Message, onChunk func(provider.Chunk)) error {
+	// 组装对话上下文：system + 用户消息。
 	sys := r.buildSystem(ctx, a, msgs)
-	full := make([]provider.Message, 0, len(msgs)+1)
+	conv := make([]provider.Message, 0, len(msgs)+1)
 	if sys != "" {
-		full = append(full, provider.Message{Role: "system", Content: sys})
+		conv = append(conv, provider.Message{Role: "system", Content: sys})
 	}
-	full = append(full, msgs...)
+	conv = append(conv, msgs...)
 
-	chunkCh, err := p.Chat(ctx, provider.ChatRequest{Model: a.Model, Messages: full, Stream: true})
-	if err != nil {
-		return err
+	// 工具定义 + 调用器（无工具时单轮直出）。
+	defs, invokers := r.buildTools(ctx, a)
+
+	for step := 1; step <= a.MaxSteps; step++ {
+		req := provider.ChatRequest{Model: a.Model, Messages: conv, Stream: true}
+		if len(defs) > 0 {
+			req.Tools = defs
+			req.ToolChoice = "auto"
+		}
+		chunkCh, err := p.Chat(ctx, req)
+		if err != nil {
+			return err
+		}
+		var assistantText strings.Builder
+		var toolCalls []provider.ToolCall
+		for c := range chunkCh {
+			if c.Role != "" || c.Content != "" || c.Reasoning != "" {
+				onChunk(c)
+				if c.Content != "" {
+					assistantText.WriteString(c.Content)
+				}
+			}
+			if len(c.ToolCalls) > 0 {
+				toolCalls = c.ToolCalls
+			}
+		}
+		// 无工具调用：本轮 content 即最终答案（已流式输出），结束。
+		if len(toolCalls) == 0 {
+			return nil
+		}
+		// 有工具调用：回放 assistant 消息（含 tool_calls），执行工具，追加 role=tool 结果。
+		conv = append(conv, provider.Message{Role: "assistant", Content: assistantText.String(), ToolCalls: toolCalls})
+		for _, tc := range toolCalls {
+			inv, ok := invokers[tc.Function.Name]
+			result := ""
+			if !ok {
+				result = "未知工具: " + tc.Function.Name
+				onChunk(provider.Chunk{Reasoning: fmt.Sprintf("\n⚠️ 未知工具 %s\n", tc.Function.Name)})
+			} else {
+				onChunk(provider.Chunk{Reasoning: fmt.Sprintf("\n🔧 调用工具 %s(%s)\n", tc.Function.Name, tc.Function.Arguments)})
+				if res, err := inv(ctx, tc.Function.Arguments); err == nil {
+					result = res
+				} else {
+					result = "工具调用失败: " + err.Error()
+				}
+				onChunk(provider.Chunk{Reasoning: "结果: " + truncate(result, 500) + "\n"})
+			}
+			conv = append(conv, provider.Message{Role: "tool", Content: result, ToolCallID: tc.ID})
+		}
 	}
-	for chunk := range chunkCh {
-		onChunk(chunk)
-	}
+	// 达 MaxSteps 上限：最后一轮 content 已流式输出，正常结束。
 	return nil
+}
+
+// truncate 截断长文本（工具结果入 reasoning 面板用，防刷屏）。
+func truncate(s string, n int) string {
+	if len([]rune(s)) <= n {
+		return s
+	}
+	return string([]rune(s)[:n]) + "…"
 }
 
 // ServeSSE 把 Agent 运行以 OpenAI 兼容 SSE 输出（data: {choices:[{delta:{content}}]}）。
