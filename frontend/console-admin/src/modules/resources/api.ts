@@ -1,7 +1,7 @@
 // 资源总览：跨租户查看所有租户的应用/工作负载/数据服务（super_admin 平台运维视角）。
 // 对接 core /api/admin/applications|workloads|dataservices（跨租户，返回对象带 tenantId）。
 // 仅读：平台总览不强加写操作（跨租户写越权风险高，资源运维仍在 console-user 租户内进行）。
-import { api } from '@/lib/http/client'
+import { api, http } from '@/lib/http/client'
 
 export interface AdminApplication {
   id: string
@@ -374,4 +374,70 @@ export const createEnvironmentForTenant = (body: {
   cluster?: string
   desc?: string
 }) => api.post<unknown>('/api/admin/environments', body)
+
+// ============================================================================
+// admin 工作负载管理（详情+实例+日志 / 扩缩容 / 删）
+// 对接 /api/admin/workloads*。
+// ============================================================================
+
+export interface WorkloadInstance {
+  name: string
+  status?: string
+  ready?: string
+  restarts?: number
+  node?: string
+  ip?: string
+  startedAt?: string
+  message?: string
+}
+
+export interface AdminWorkloadDetail {
+  workload: AdminWorkload & {
+    laneId?: string
+    imageRef?: string
+    schedule?: string
+    command?: string
+    port?: number
+    containerPort?: number
+    createdAt?: string
+  }
+  instances: WorkloadInstance[]
+}
+
+export const fetchWorkloadDetail = (id: string) =>
+  api.get<AdminWorkloadDetail>(`/api/admin/workloads/${id}`)
+
+export const scaleWorkload = (id: string, body: { replicas: number; status?: string }) =>
+  api.put<unknown>(`/api/admin/workloads/${id}/scale`, body)
+
+export const deleteWorkload = (id: string) => api.del<unknown>(`/api/admin/workloads/${id}`)
+
+// 实例日志（text/plain，非 {data:T} 契约，需 responseType 支持）。返回纯文本。
+export const fetchWorkloadLogs = (id: string, params: { pod: string; tail?: number; previous?: boolean }) =>
+  http
+    .get<string>(`/api/admin/workloads/${id}/logs`, {
+      params,
+      responseType: 'text',
+      transformResponse: (data) => data
+    })
+    .then((res) => res.data)
+
+// ============================================================================
+// admin 应用管理（详情 / 删）
+// 对接 /api/admin/applications*。
+// ============================================================================
+
+export interface AdminApplicationDetail extends AdminApplication {
+  initial?: string
+  gradient?: string
+  resources?: { models: number; mq: number; dal: number }
+  bindings?: Array<{ type: string; name: string; note?: string }>
+  replicas?: string
+  rps?: string
+}
+
+export const fetchApplicationDetail = (id: string) =>
+  api.get<AdminApplicationDetail>(`/api/admin/applications/${id}`)
+
+export const deleteApplication = (id: string) => api.del<unknown>(`/api/admin/applications/${id}`)
 

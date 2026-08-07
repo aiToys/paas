@@ -527,6 +527,31 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	engineHandler := dataservice.NewEngineHandler(stores.Engine)
 	engineHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
+	// admin workload handler（L1 详情+实例+日志 / L2 扩缩容·删除）。
+	// 全挂 adminGuard(super_admin)；绕过 prod:write；写操作记审计；删除回收配额。
+	// 复用 statusReader（与 wlHandler 同源 K8s clientset/namespace）+ identityAuditAdapter + tenantChecker。
+	wlAdminHandler := workload.NewAdminHandler(stores.Workload,
+		workload.WithAdminStatusReader(statusReader),
+		workload.WithAdminQuota(func(ctx context.Context, delta int) error {
+			_, err := stores.Billing.CheckAndInc(ctx, billing.ResWorkloads, delta)
+			return err
+		}),
+		workload.WithAdminAudit(&identityAuditAdapter{store: stores.Security}),
+		workload.WithAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
+	)
+
+	// admin application handler（L1 详情 / L2 删除）。
+	// 业务编排类不代建（基线 spec 明确）。级联清理复用 appHandler.CascadeDelete 桥接（同款 workload+appconfig）。
+	appAdminHandler := application.NewAdminHandler(stores.Application,
+		application.WithAdminQuota(func(ctx context.Context, delta int) error {
+			_, err := stores.Billing.CheckAndInc(ctx, billing.ResApplications, delta)
+			return err
+		}),
+		application.WithAdminCascade(appCascadeDeleter{wl: stores.Workload, cfg: stores.AppConfig}),
+		application.WithAdminAudit(&identityAuditAdapter{store: stores.Security}),
+		application.WithAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
+	)
+
 	// composite：按 /api/applications/{id}/{sub} 的 sub 段分发到对应 handler。
 	// workloads -> 工作负载；repositories/buildruns/images/releases -> DevOps；其余（bindings 等）-> 应用。
 	composite := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -826,16 +851,21 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		}
 		httputil.WriteData(w, list)
 	}
-	reg.Register("GET", "/api/admin/applications", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		list, err := stores.Application.ListAll(r.Context())
-		renderList(w, list, err)
-	})),
-		apiroute.Tags("资源总览"), apiroute.Summary("应用列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]application.Application{}))
-	reg.Register("GET", "/api/admin/workloads", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		list, err := stores.Workload.ListAll(r.Context())
-		renderList(w, list, err)
-	})),
-		apiroute.Tags("资源总览"), apiroute.Summary("工作负载列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]workload.Workload{}))
+	// admin 工作负载管理（详情+实例+日志 / 扩缩容 / 删除）：mux.Handle 到 wlAdminHandler（按 method+action 分发），
+	// spec 经 reg.Operation 登记。handler 内 ServeHTTP 已含 GET 列表 + GET/{id} 详情 + GET/{id}/logs + PUT/{id}/scale + DELETE/{id}。
+	mux.Handle("/api/admin/workloads", adminGuard(wlAdminHandler))
+	mux.Handle("/api/admin/workloads/", adminGuard(wlAdminHandler))
+	reg.Operation("GET", "/api/admin/workloads", apiroute.Tags("工作负载管理"), apiroute.Summary("工作负载列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]workload.Workload{}))
+	reg.Operation("GET", "/api/admin/workloads/{id}", apiroute.Tags("工作负载管理"), apiroute.Summary("工作负载详情（跨租户，含实例）"), apiroute.Perm("super_admin"))
+	reg.Operation("GET", "/api/admin/workloads/{id}/logs", apiroute.Tags("工作负载管理"), apiroute.Summary("实例日志（Pod 级）"), apiroute.Perm("super_admin"))
+	reg.Operation("PUT", "/api/admin/workloads/{id}/scale", apiroute.Tags("工作负载管理"), apiroute.Summary("扩缩容（绕过 prod:write）"), apiroute.Perm("super_admin"))
+	reg.Operation("DELETE", "/api/admin/workloads/{id}", apiroute.Tags("工作负载管理"), apiroute.Summary("强制删除（回收配额）"), apiroute.Perm("super_admin"))
+	// admin 应用管理（详情 / 删除）：mux.Handle 到 appAdminHandler（按 method 分发）。不代建（业务编排类）。
+	mux.Handle("/api/admin/applications", adminGuard(appAdminHandler))
+	mux.Handle("/api/admin/applications/", adminGuard(appAdminHandler))
+	reg.Operation("GET", "/api/admin/applications", apiroute.Tags("应用管理"), apiroute.Summary("应用列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]application.Application{}))
+	reg.Operation("GET", "/api/admin/applications/{id}", apiroute.Tags("应用管理"), apiroute.Summary("应用详情（跨租户）"), apiroute.Perm("super_admin"))
+	reg.Operation("DELETE", "/api/admin/applications/{id}", apiroute.Tags("应用管理"), apiroute.Summary("强制删除（级联清理 + 回收配额）"), apiroute.Perm("super_admin"))
 	// admin 数据服务管理（详情+实例 / 运维 / 代建）：mux.Handle 到 dsAdminHandler（按 method+action 分发），
 	// spec 经 reg.Operation 登记。handler 内 ServeHTTP 已含 GET 列表（掩码 Connection）+ POST 代建 + {id}/{action}。
 	mux.Handle("/api/admin/dataservices", adminGuard(dsAdminHandler))
