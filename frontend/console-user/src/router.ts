@@ -87,6 +87,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '向量数据库' },
   },
   {
+    path: '/resources/knowledgebase',
+    name: 'res-knowledgebase',
+    component: () => import('@/views/KnowledgeBases.vue'),
+    meta: { title: '知识库' },
+  },
+  {
     path: '/resources/search',
     name: 'res-search',
     component: () => import('@/views/DataServices.vue'),

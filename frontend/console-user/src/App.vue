@@ -107,6 +107,7 @@ const nav: NavItem[] = [
       { label: '对象存储', icon: 'storage', to: '/resources/storage' },
       { label: '向量数据库', icon: 'layers', to: '/resources/vector' },
       { label: '搜索引擎', icon: 'search', to: '/resources/search' },
+      { label: '知识库', icon: 'layers', to: '/resources/knowledgebase' },
     ],
   },
   {
