@@ -523,6 +523,8 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// 引擎目录 handler：/api/engines（用户 enabled 列表）+ /api/admin/engines（super_admin CRUD）。
 	engineHandler := dataservice.NewEngineHandler(stores.Engine)
 	engineHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+	// admin 引擎写操作审计（平台级，super_admin 改 engine 目录记审计，与 model/vendor 同款）。
+	engineHandler.SetAdminAudit(&identityAuditAdapter{store: stores.Security}).SetAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) })
 
 	// admin workload handler（L1 详情+实例+日志 / L2 扩缩容·删除）。
 	// 全挂 adminGuard(super_admin)；绕过 prod:write；写操作记审计；删除回收配额。
@@ -659,7 +661,11 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	mux.Handle("/api/admin/engines/", adminGuard(engineHandler))
 
 	// 模型管理（平台级，super_admin 由 adminGuard 兜底）：模型/通道 CRUD + 写后增量刷新 gateway 路由表。
-	maasHandler := maas.NewHandler(stores.MaaS, gw, secretResolver{store: stores.Security.(security.SecretStore)})
+	// admin 模型/通道/供应商写操作审计（平台级，super_admin 改 model/channel/vendor 记审计，
+	// 合规「审计只增不删」——凭证/路由配置类敏感操作必须有审计轨迹，与 identity P1.4 同款）。
+	maasHandler := maas.NewHandler(stores.MaaS, gw, secretResolver{store: stores.Security.(security.SecretStore)}).
+		SetAdminAudit(&identityAuditAdapter{store: stores.Security}).
+		SetAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) })
 	mux.Handle("/api/admin/models", adminGuard(maasHandler))
 	mux.Handle("/api/admin/models/", adminGuard(maasHandler))
 	// 模型管理 spec（composite 内部按 method+path 分发，mux 已 subtree 注册，此处仅记 OpenAPI）

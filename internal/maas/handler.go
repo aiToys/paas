@@ -1,6 +1,7 @@
 package maas
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -27,11 +28,37 @@ type Handler struct {
 	repo     Repository
 	gw       provider.GatewayRegistrar // CRUD 后刷新路由表（同 ID 覆盖/注销）；nil 时跳过刷新
 	resolver provider.CredentialResolver
+	audit    AdminAuditRecorder // admin 写操作审计（平台级 model/channel/vendor 变更）
+	actorOf  func(*http.Request) string
+}
+
+// AdminAuditRecorder admin 写操作审计（依赖倒置，避免 maas->security）。平台级资源 tenantID=""。
+// cmd/core 注入 identityAuditAdapter（空 tenantID 转 "platform" 落库，满足 audit_logs.tenant_id NOT NULL）。
+type AdminAuditRecorder interface {
+	Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error
 }
 
 // NewHandler 创建模型管理 handler。gw 用于 CRUD 后增量刷新 gateway 路由表。
 func NewHandler(repo Repository, gw provider.GatewayRegistrar, resolver provider.CredentialResolver) *Handler {
 	return &Handler{repo: repo, gw: gw, resolver: resolver}
+}
+
+// SetAdminAudit 注入审计 recorder（admin 写操作记审计，平台级合规「审计只增不删」）。
+func (h *Handler) SetAdminAudit(a AdminAuditRecorder) *Handler { h.audit = a; return h }
+
+// SetAdminActor 注入 actor 提取器（取 super_admin UserID 作审计 actor）。
+func (h *Handler) SetAdminActor(f func(*http.Request) string) *Handler { h.actorOf = f; return h }
+
+// recordAudit best-effort 记审计（平台级资源 tenantID=""，identityAuditAdapter 转 "platform" 落库）。
+func (h *Handler) recordAudit(r *http.Request, action, resourceType, resourceID, detail string) {
+	if h.audit == nil {
+		return
+	}
+	actor := "admin"
+	if h.actorOf != nil {
+		actor = h.actorOf(r)
+	}
+	_ = h.audit.Record(r.Context(), "", actor, action, resourceType, resourceID, detail)
 }
 
 // ServeHTTP 按路径分发 model / channel / vendor 子资源。
@@ -125,6 +152,7 @@ func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		saved, _ := h.repo.GetModel(r.Context(), m.ID)
+		h.recordAudit(r, "admin:create", "model", m.ID, "创建模型")
 		httputil.WriteDataCreated(w, saved)
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -155,6 +183,7 @@ func (h *Handler) serveModel(w http.ResponseWriter, r *http.Request, id string) 
 			return
 		}
 		saved, _ := h.repo.GetModel(r.Context(), id)
+		h.recordAudit(r, "admin:update", "model", id, "更新模型")
 		httputil.WriteData(w, saved)
 	case http.MethodDelete:
 		if err := h.repo.DeleteModel(r.Context(), id); err != nil {
@@ -164,6 +193,7 @@ func (h *Handler) serveModel(w http.ResponseWriter, r *http.Request, id string) 
 		if h.gw != nil {
 			h.gw.UnregisterModel(id)
 		}
+		h.recordAudit(r, "admin:delete", "model", id, "删除模型")
 		httputil.WriteData(w, map[string]string{"deleted": id})
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -213,6 +243,7 @@ func (h *Handler) serveChannels(w http.ResponseWriter, r *http.Request, modelID 
 		if !h.reloadModel(w, r, modelID) {
 			return
 		}
+		h.recordAudit(r, "admin:create", "channel", c.ID, "创建通道")
 		httputil.WriteDataCreated(w, c)
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -248,6 +279,7 @@ func (h *Handler) serveChannel(w http.ResponseWriter, r *http.Request, modelID, 
 		if !h.reloadModel(w, r, modelID) {
 			return
 		}
+		h.recordAudit(r, "admin:update", "channel", channelID, "更新通道")
 		httputil.WriteData(w, c)
 	case http.MethodDelete:
 		if err := h.repo.DeleteChannel(r.Context(), modelID, channelID); err != nil {
@@ -257,6 +289,7 @@ func (h *Handler) serveChannel(w http.ResponseWriter, r *http.Request, modelID, 
 		if !h.reloadModel(w, r, modelID) {
 			return
 		}
+		h.recordAudit(r, "admin:delete", "channel", channelID, "删除通道")
 		httputil.WriteData(w, map[string]string{"deleted": channelID})
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -308,6 +341,7 @@ func (h *Handler) serveVendors(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		saved, _ := h.repo.GetVendor(r.Context(), v.ID)
+		h.recordAudit(r, "admin:create", "vendor", v.ID, "创建供应商")
 		httputil.WriteDataCreated(w, saved)
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -335,12 +369,14 @@ func (h *Handler) serveVendor(w http.ResponseWriter, r *http.Request, id string)
 			return
 		}
 		saved, _ := h.repo.GetVendor(r.Context(), id)
+		h.recordAudit(r, "admin:update", "vendor", id, "更新供应商")
 		httputil.WriteData(w, saved)
 	case http.MethodDelete:
 		if err := h.repo.DeleteVendor(r.Context(), id); err != nil {
 			writeMaasErr(w, err)
 			return
 		}
+		h.recordAudit(r, "admin:delete", "vendor", id, "删除供应商")
 		httputil.WriteData(w, map[string]string{"deleted": id})
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")

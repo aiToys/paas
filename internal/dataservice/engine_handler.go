@@ -20,11 +20,32 @@ import (
 type EngineHandler struct {
 	repo      EngineRepository
 	Authorize func(r *http.Request, perm string) bool
+	audit     AdminAuditRecorder // admin 写操作审计（平台级引擎目录变更）
+	actorOf   func(*http.Request) string
 }
 
 // NewEngineHandler 创建引擎 handler。
 func NewEngineHandler(repo EngineRepository) *EngineHandler {
 	return &EngineHandler{repo: repo}
+}
+
+// SetAdminAudit 注入审计 recorder（admin 引擎写操作记审计，平台级合规「审计只增不删」）。
+// 复用 dataservice.AdminAuditRecorder 接口（同包），与 admin_handler 同源。
+func (h *EngineHandler) SetAdminAudit(a AdminAuditRecorder) *EngineHandler { h.audit = a; return h }
+
+// SetAdminActor 注入 actor 提取器（取 super_admin UserID 作审计 actor）。
+func (h *EngineHandler) SetAdminActor(f func(*http.Request) string) *EngineHandler { h.actorOf = f; return h }
+
+// recordAudit best-effort 记审计（平台级引擎 tenantID=""，identityAuditAdapter 转 "platform" 落库）。
+func (h *EngineHandler) recordAudit(r *http.Request, action, resourceID, detail string) {
+	if h.audit == nil {
+		return
+	}
+	actor := "admin"
+	if h.actorOf != nil {
+		actor = h.actorOf(r)
+	}
+	_ = h.audit.Record(r.Context(), "", actor, action, "engine", resourceID, detail)
 }
 
 func (h *EngineHandler) allow(w http.ResponseWriter, r *http.Request, perm string) bool {
@@ -95,6 +116,7 @@ func (h *EngineHandler) serveAdminCollection(w http.ResponseWriter, r *http.Requ
 			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
+		h.recordAudit(r, "admin:create", saved.ID, "创建引擎")
 		httputil.WriteDataCreated(w, saved)
 		return
 	}
@@ -124,6 +146,7 @@ func (h *EngineHandler) serveAdminItem(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
+		h.recordAudit(r, "admin:update", id, "更新引擎")
 		httputil.WriteData(w, saved)
 	case http.MethodDelete:
 		if !h.allow(w, r, PermDataServiceWrite) {
@@ -133,6 +156,7 @@ func (h *EngineHandler) serveAdminItem(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
+		h.recordAudit(r, "admin:delete", id, "删除引擎")
 		httputil.WriteData(w, map[string]string{"deleted": id})
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
