@@ -194,6 +194,47 @@ func (d dsEnvLookup) ResourceEnv(ctx context.Context, id string) (string, error)
 	return ds.EnvID, nil
 }
 
+// dsInstanceReader 桥接 dataplane.EndpointsReader -> dataservice.InstanceReader（admin 详情读实例）。
+// 复用 /dp/ 的 Endpoints 读取真源；admin 以资源所属租户 ctx 调用穿透 reader 的 tenant label 校验。
+type dsInstanceReader struct{ r dataplane.EndpointsReader }
+
+func (a dsInstanceReader) Instances(ctx context.Context, ns, svc string) ([]dataservice.InstanceInfo, error) {
+	if a.r == nil {
+		return nil, nil
+	}
+	list, err := a.r.Instances(ctx, ns, svc)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]dataservice.InstanceInfo, 0, len(list))
+	for _, x := range list {
+		out = append(out, dataservice.InstanceInfo{Name: x.Name, IP: x.IP, Port: x.Port})
+	}
+	return out, nil
+}
+
+// tenantChecker 桥接 identity.Repository -> dataservice/environment TenantChecker（代建校验租户存在）。
+type tenantChecker struct{ repo identity.Repository }
+
+func (c tenantChecker) Exists(ctx context.Context, tenantID string) error {
+	t, err := c.repo.GetTenant(ctx, tenantID)
+	if err != nil || t.ID == "" {
+		return fmt.Errorf("租户不存在: %s", tenantID)
+	}
+	return nil
+}
+
+// quotaCheckFn 桥接 billing.CheckAndInc -> dataservice.QuotaCheckFunc（dataservices 维度）。
+// ctx 必须带目标租户（admin 代建时已 WithTenant）。
+func quotaCheckFn(bill billing.Repository) dataservice.QuotaCheckFunc {
+	return func(ctx context.Context, delta int) error {
+		if _, err := bill.CheckAndInc(ctx, billing.ResDataservices, delta); err != nil {
+			return err
+		}
+		return nil
+	}
+}
+
 // resolveAPIKey 解析 API Key：环境变量 PAAS_API_KEY 优先，否则用开发默认值（sk-acme-admin）。
 // 返回值用于 seed 兼容（自定义 Key 追加为 t-acme admin）与日志展示。
 func resolveAPIKey() string {
@@ -461,6 +502,26 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	}
 	dsHandler := dataservice.NewHandler(stores.DataService, dsOpts...)
 	dsHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+
+	// admin dataservice handler（L1 详情+实例 / L2 启停·重启·扩缩·删 / L3 代建）。
+	// 全挂 adminGuard(super_admin)；绕过 prod:write；写操作记审计；代建消耗目标租户配额。
+	dsAdminHandler := dataservice.NewAdminHandler(stores.DataService,
+		dataservice.WithAdminEngineRepo(stores.Engine),
+		dataservice.WithAdminInstances(dsInstanceReader{r: dataplane.NewEndpointsReader(appliers.clientset)}),
+		dataservice.WithAdminRestarter(appliers.dsRestarter),
+		dataservice.WithAdminQuota(quotaCheckFn(stores.Billing)),
+		dataservice.WithAdminAudit(&identityAuditAdapter{store: stores.Security}),
+		dataservice.WithAdminTenants(tenantChecker{repo: stores.Identity}),
+		dataservice.WithAdminNamespace(appliers.namespace),
+		dataservice.WithAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
+	)
+
+	// admin environment handler（L3 代建）。环境是基础设施，admin 可代某租户建环境。
+	envAdminHandler := environment.NewAdminHandler(stores.Environment,
+		environment.WithAdminTenants(tenantChecker{repo: stores.Identity}),
+		environment.WithAdminAudit(&identityAuditAdapter{store: stores.Security}),
+		environment.WithAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
+	)
 
 	// 引擎目录 handler：/api/engines（用户 enabled 列表）+ /api/admin/engines（super_admin CRUD）。
 	engineHandler := dataservice.NewEngineHandler(stores.Engine)
@@ -775,28 +836,25 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		renderList(w, list, err)
 	})),
 		apiroute.Tags("资源总览"), apiroute.Summary("工作负载列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]workload.Workload{}))
-	reg.Register("GET", "/api/admin/dataservices", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		list, err := stores.DataService.ListAll(r.Context())
-		if err != nil {
-			httputil.WriteInternalError(w, err)
-			return
-		}
-		// 跨租户总览同样掩码 Connection（password/secretKey/token/uri），与 list/detail 同源；
-		// 明文仅内部应用绑定注入用（repo.Get），任何对外端点一律掩码。
-		for i := range list {
-			list[i].Connection = dataservice.MaskConnection(list[i].Connection)
-		}
-		renderList(w, list, nil)
-	})),
-		apiroute.Tags("资源总览"), apiroute.Summary("数据服务列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]dataservice.DataService{}))
+	// admin 数据服务管理（详情+实例 / 运维 / 代建）：mux.Handle 到 dsAdminHandler（按 method+action 分发），
+	// spec 经 reg.Operation 登记。handler 内 ServeHTTP 已含 GET 列表（掩码 Connection）+ POST 代建 + {id}/{action}。
+	mux.Handle("/api/admin/dataservices", adminGuard(dsAdminHandler))
+	mux.Handle("/api/admin/dataservices/", adminGuard(dsAdminHandler))
+	reg.Operation("GET", "/api/admin/dataservices", apiroute.Tags("数据服务管理"), apiroute.Summary("数据服务列表（跨租户，掩码）"), apiroute.Perm("super_admin"), apiroute.WithResp([]dataservice.DataService{}))
+	reg.Operation("POST", "/api/admin/dataservices", apiroute.Tags("数据服务管理"), apiroute.Summary("代建数据服务（指定租户，消耗配额）"), apiroute.Perm("super_admin"))
+	reg.Operation("GET", "/api/admin/dataservices/{id}", apiroute.Tags("数据服务管理"), apiroute.Summary("数据服务详情（跨租户，含实例）"), apiroute.Perm("super_admin"))
+	reg.Operation("DELETE", "/api/admin/dataservices/{id}", apiroute.Tags("数据服务管理"), apiroute.Summary("强制删除（回收配额）"), apiroute.Perm("super_admin"))
+	reg.Operation("POST", "/api/admin/dataservices/{id}/stop", apiroute.Tags("数据服务管理"), apiroute.Summary("停止"), apiroute.Perm("super_admin"))
+	reg.Operation("POST", "/api/admin/dataservices/{id}/start", apiroute.Tags("数据服务管理"), apiroute.Summary("启动"), apiroute.Perm("super_admin"))
+	reg.Operation("POST", "/api/admin/dataservices/{id}/restart", apiroute.Tags("数据服务管理"), apiroute.Summary("滚动重启"), apiroute.Perm("super_admin"))
+	reg.Operation("PUT", "/api/admin/dataservices/{id}/scale", apiroute.Tags("数据服务管理"), apiroute.Summary("扩缩容"), apiroute.Perm("super_admin"))
 
 	// 跨租户资源总览扩展（super_admin）：环境/DevOps/配置中心/治理/可观测/安全/计费。
 	// 仅读：跨租户写越权风险高，资源运维仍在 console-user 租户内进行（admin 总览用于观测/排查）。
-	reg.Register("GET", "/api/admin/environments", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		list, err := stores.Environment.ListAll(r.Context())
-		renderList(w, list, err)
-	})),
-		apiroute.Tags("资源总览"), apiroute.Summary("环境列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]environment.Environment{}))
+	// admin 环境管理（L3 代建）：mux.Handle 到 envAdminHandler（GET 列表 + POST 代建）。
+	mux.Handle("/api/admin/environments", adminGuard(envAdminHandler))
+	reg.Operation("GET", "/api/admin/environments", apiroute.Tags("环境管理"), apiroute.Summary("环境列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]environment.Environment{}))
+	reg.Operation("POST", "/api/admin/environments", apiroute.Tags("环境管理"), apiroute.Summary("代建环境（指定租户）"), apiroute.Perm("super_admin"))
 	reg.Register("GET", "/api/admin/buildruns", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		list, err := stores.DevOpsBuilds.ListAllBuildRuns(r.Context())
 		renderList(w, list, err)

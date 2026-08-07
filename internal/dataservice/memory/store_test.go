@@ -156,3 +156,26 @@ func TestMissingTenant(t *testing.T) {
 		t.Fatal("缺失租户上下文应拒绝")
 	}
 }
+
+// TestGetAnyCrossTenant 验证 admin 跨租户 GetAny（无 tenant ctx）能取到资源 + 返回 TenantID。
+func TestGetAnyCrossTenant(t *testing.T) {
+	s := NewStore()
+	seeded := seedAll(t, s)
+	acmeDBID := seeded["acme-db"].ID
+	// Get 在无 tenant ctx 下应失败
+	if _, err := s.Get(context.Background(), acmeDBID); err == nil {
+		t.Fatal("Get 应在无 tenant ctx 下失败")
+	}
+	// GetAny 应能取到，且带 t-acme TenantID
+	got, err := s.GetAny(context.Background(), acmeDBID)
+	if err != nil {
+		t.Fatalf("GetAny: %v", err)
+	}
+	if got.TenantID != "t-acme" {
+		t.Fatalf("tenant = %s, want t-acme", got.TenantID)
+	}
+	// 不存在统一返 err（不泄漏）
+	if _, err := s.GetAny(context.Background(), "nope"); err == nil {
+		t.Fatal("GetAny 不存在应返错")
+	}
+}

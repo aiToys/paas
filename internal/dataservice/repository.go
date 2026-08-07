@@ -11,6 +11,9 @@ type Repository interface {
 	ListAll(ctx context.Context) ([]DataService, error)
 	// Get 读取单条（跨租户 not found）。
 	Get(ctx context.Context, id string) (DataService, error)
+	// GetAny 跨租户读取单条（admin 平台运维视角，不过滤 tenant；返回对象带 TenantID）。
+	// 与 Get 的区别：Get 强制 ctx tenant 隔离（租户侧），GetAny 供 admin 跨租户定位。
+	GetAny(ctx context.Context, id string) (DataService, error)
 	// Create 创建（status 空时补 running）；返回创建后的实例。
 	Create(ctx context.Context, d DataService) (DataService, error)
 	// Update 更新 spec/status（生产写权限由 handler 校验）。

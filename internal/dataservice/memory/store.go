@@ -144,6 +144,20 @@ func (s *Store) Get(ctx context.Context, id string) (dataservice.DataService, er
 	return d, nil
 }
 
+// GetAny 跨租户读取单条（admin 专用，不过滤 tenant；返回对象带 TenantID）。
+func (s *Store) GetAny(ctx context.Context, id string) (dataservice.DataService, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	d, ok := s.services[id]
+	if !ok {
+		return dataservice.DataService{}, fmt.Errorf("数据服务不存在: %s", id)
+	}
+	d.Spec = cloneStrMap(d.Spec)
+	d.Connection = cloneStrMap(d.Connection)
+	d.Replicas = cloneIntP(d.Replicas)
+	return d, nil
+}
+
 // Create 校验后存入；status 空时补 running。
 func (s *Store) Create(ctx context.Context, d dataservice.DataService) (dataservice.DataService, error) {
 	tid, err := tenantOrErr(ctx)

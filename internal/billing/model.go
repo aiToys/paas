@@ -18,12 +18,13 @@ var ErrQuotaExceeded = errors.New("配额超限")
 
 // 计费资源维度（账单与配额的 key）。
 const (
-	ResApplications = "applications" // 应用数
-	ResWorkloads    = "workloads"    // 工作负载数
-	ResModels       = "models"       // 模型部署数
-	ResGPU          = "gpu"          // GPU 卡·小时
-	ResTokens       = "tokens"       // token（千次）
-	ResStorage      = "storage_gb"   // 存储 GB
+	ResApplications  = "applications"  // 应用数
+	ResWorkloads     = "workloads"     // 工作负载数
+	ResModels        = "models"        // 模型部署数
+	ResDataservices  = "dataservices"  // 数据服务实例数
+	ResGPU           = "gpu"           // GPU 卡·小时
+	ResTokens        = "tokens"        // token（千次）
+	ResStorage       = "storage_gb"    // 存储 GB
 )
 
 // PriceTable 是各资源的平台级 mock 单价（元/单位）。
@@ -32,6 +33,7 @@ var PriceTable = map[string]float64{
 	ResApplications: 10.0,
 	ResWorkloads:    5.0,
 	ResModels:       20.0,
+	ResDataservices: 8.0,
 	ResGPU:          100.0,
 	ResTokens:       0.001,
 	ResStorage:      0.5,
@@ -39,7 +41,7 @@ var PriceTable = map[string]float64{
 
 // ResourceOrder 定义资源的稳定展示顺序（前端卡片/账单明细按此排列）。
 var ResourceOrder = []string{
-	ResApplications, ResWorkloads, ResModels, ResGPU, ResTokens, ResStorage,
+	ResApplications, ResWorkloads, ResModels, ResDataservices, ResGPU, ResTokens, ResStorage,
 }
 
 // Unlimited 表示无配额上限（Limits[res] = -1）。

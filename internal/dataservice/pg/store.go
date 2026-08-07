@@ -171,6 +171,21 @@ func (s *Store) Get(ctx context.Context, id string) (dataservice.DataService, er
 	return d, nil
 }
 
+// GetAny 跨租户读取单条（admin 平台运维视角，不过滤 tenant；返回对象带 TenantID）。
+// 与 Get 的区别：Get 强制 ctx tenant 隔离（租户侧），GetAny 供 admin 跨租户定位。
+func (s *Store) GetAny(ctx context.Context, id string) (dataservice.DataService, error) {
+	row := s.db.Pool().QueryRow(ctx,
+		`SELECT `+dsCols+` FROM data_services WHERE id=$1`, id)
+	var d dataservice.DataService
+	if err := scanDS(row, &d); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return dataservice.DataService{}, fmt.Errorf("数据服务不存在: %s", id)
+		}
+		return dataservice.DataService{}, err
+	}
+	return d, nil
+}
+
 // Create 写入数据服务。以 ctx 租户写 tenant_id；status 空补 running（与内存一致）。
 // CreatedAt 零值兜底当前时间（与内存一致，避免 0001-01-01 排序异常）；
 // 租户内 name 唯一冲突 -> 「数据服务已存在」（与内存一致）。

@@ -48,6 +48,7 @@ func DefaultQuota(tid string, at time.Time) billing.ResourceQuota {
 			billing.ResApplications: 50,
 			billing.ResWorkloads:    100,
 			billing.ResModels:       10,
+			billing.ResDataservices: 20,
 			billing.ResGPU:          8,
 			billing.ResTokens:       billing.Unlimited, // token 默认不限
 			billing.ResStorage:      500,
