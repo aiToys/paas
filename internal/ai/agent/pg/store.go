@@ -107,6 +107,7 @@ func (s *Store) Create(ctx context.Context, a agent.Agent) (agent.Agent, error) 
 	if a.MaxSteps == 0 {
 		a.MaxSteps = agent.DefaultMaxSteps
 	}
+	a.Enabled = true // 创建即启用（与平台「创建即可用」惯例一致；用户可 Update 关闭）
 	a.TenantID = tid
 	now := time.Now()
 	a.CreatedAt, a.UpdatedAt = now, now

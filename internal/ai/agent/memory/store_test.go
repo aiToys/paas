@@ -18,7 +18,7 @@ func TestCreateAndGet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if a.ID == "" || a.TenantID != "t-a" || a.MaxSteps != agent.DefaultMaxSteps {
+	if a.ID == "" || a.TenantID != "t-a" || a.MaxSteps != agent.DefaultMaxSteps || !a.Enabled {
 		t.Fatalf("Create 回填错: %+v", a)
 	}
 	// 读返深拷贝
