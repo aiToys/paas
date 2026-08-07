@@ -5,6 +5,7 @@
     size="50%"
     @update:model-value="(v) => emit('update:modelValue', v)"
     @open="loadAll"
+    @close="onClose"
   >
     <div v-loading="loading">
       <template v-if="detail">
@@ -56,7 +57,7 @@
 </template>
 
 <script lang="ts" setup>
-import { ref } from 'vue'
+import { ref, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   fetchApplicationDetail,
@@ -88,13 +89,18 @@ const loadDetail = async () => {
 }
 const loadAudits = async () => {
   if (!props.id) return
-  const res = await fetchAuditLogList({ page: 1, size: 50 })
+  const res = await fetchAuditLogList({ page: 1, size: 1000 })
   audits.value = (res.records ?? []).filter((a) => a.resourceId === props.id)
 }
 const loadAll = () => {
   loadDetail()
   loadAudits()
 }
+const onClose = () => {
+  detail.value = null
+  audits.value = []
+}
+onUnmounted(onClose)
 
 const remove = async () => {
   try {

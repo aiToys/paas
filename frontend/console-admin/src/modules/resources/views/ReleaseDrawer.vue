@@ -5,6 +5,7 @@
     size="55%"
     @update:model-value="(v) => emit('update:modelValue', v)"
     @open="loadDetail"
+    @close="onClose"
   >
     <div v-loading="loading">
       <template v-if="detail">
@@ -52,7 +53,7 @@
 </template>
 
 <script lang="ts" setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchReleaseDetail, rollbackRelease, type AdminReleaseDetail } from '../api'
 
@@ -81,6 +82,10 @@ const loadDetail = async () => {
     loading.value = false
   }
 }
+const onClose = () => {
+  detail.value = null
+}
+onUnmounted(onClose)
 
 const rollback = async () => {
   try {

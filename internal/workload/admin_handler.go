@@ -260,7 +260,7 @@ func (h *AdminHandler) serveLogs(w http.ResponseWriter, r *http.Request, id stri
 
 // adminScaleInput 扩缩容请求体。
 type adminScaleInput struct {
-	Replicas int    `json:"replicas"`
+	Replicas *int   `json:"replicas,omitempty"`
 	Status   string `json:"status,omitempty"`
 }
 
@@ -281,12 +281,21 @@ func (h *AdminHandler) serveScale(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 	ctx, rr := adminTenantCtx(r, wl.TenantID)
-	updated, err := h.repo.Update(ctx, id, in.Replicas, in.Status)
+	// replicas 缺省时保留当前值（防 body 漏 replicas 致意外缩容到 0，与 dataservice scale 对齐）。
+	replicas := wl.Replicas
+	if in.Replicas != nil {
+		replicas = *in.Replicas
+	}
+	updated, err := h.repo.Update(ctx, id, replicas, in.Status)
 	if err != nil {
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}
-	h.recordAudit(rr, wl.TenantID, "admin:scale", id, fmt.Sprintf("扩缩容至 %d 副本", in.Replicas))
+	detail := fmt.Sprintf("扩缩容至 %d 副本", replicas)
+	if in.Replicas == nil {
+		detail = "更新状态：" + in.Status
+	}
+	h.recordAudit(rr, wl.TenantID, "admin:scale", id, detail)
 	httputil.WriteData(w, updated)
 }
 

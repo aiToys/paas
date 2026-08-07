@@ -245,14 +245,16 @@ func (h *AdminHandler) serveRestart(w http.ResponseWriter, r *http.Request, d Da
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if h.restarter != nil {
-		ctx, rr := tenantCtx(r, d.TenantID)
-		if err := h.restarter.Restart(ctx, d.ID); err != nil {
-			httputil.WriteInternalError(w, err)
-			return
-		}
-		h.recordAudit(rr, d.TenantID, "admin:restart", d.ID, "restart dataservice")
+	if h.restarter == nil {
+		httputil.WriteServiceError(w, http.StatusNotFound, fmt.Errorf("重启不可用（非集群部署）"))
+		return
 	}
+	ctx, rr := tenantCtx(r, d.TenantID)
+	if err := h.restarter.Restart(ctx, d.ID); err != nil {
+		httputil.WriteInternalError(w, err)
+		return
+	}
+	h.recordAudit(rr, d.TenantID, "admin:restart", d.ID, "restart dataservice")
 	httputil.WriteData(w, map[string]string{"restarted": d.ID})
 }
 

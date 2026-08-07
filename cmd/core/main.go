@@ -906,11 +906,12 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 
 	// 跨租户资源总览扩展（super_admin）：环境/DevOps/配置中心/治理/可观测/安全/计费。
 	// 仅读：跨租户写越权风险高，资源运维仍在 console-user 租户内进行（admin 总览用于观测/排查）。
-	// admin 环境管理（L3 代建）：mux.Handle 到 envAdminHandler（GET 列表 + POST 代建）。
+	// admin 环境管理（L1 详情 / L3 代建）：mux.Handle 到 envAdminHandler（GET 列表 + GET {id} 详情 + POST 代建）。
 	// 双注册（无尾斜杠 + 有尾斜杠）兼容客户端追加尾斜杠访问，与 dataservice/workload/application 对齐。
 	mux.Handle("/api/admin/environments", adminGuard(envAdminHandler))
 	mux.Handle("/api/admin/environments/", adminGuard(envAdminHandler))
 	reg.Operation("GET", "/api/admin/environments", apiroute.Tags("环境管理"), apiroute.Summary("环境列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]environment.Environment{}))
+	reg.Operation("GET", "/api/admin/environments/{id}", apiroute.Tags("环境管理"), apiroute.Summary("环境详情（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp(environment.Environment{}))
 	reg.Operation("POST", "/api/admin/environments", apiroute.Tags("环境管理"), apiroute.Summary("代建环境（指定租户）"), apiroute.Perm("super_admin"))
 	reg.Register("GET", "/api/admin/buildruns", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		list, err := stores.DevOpsBuilds.ListAllBuildRuns(r.Context())

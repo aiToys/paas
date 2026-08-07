@@ -5,6 +5,7 @@
     size="50%"
     @update:model-value="(v) => emit('update:modelValue', v)"
     @open="loadDetail"
+    @close="onClose"
   >
     <div v-loading="loading">
       <template v-if="detail">
@@ -44,7 +45,7 @@
 </template>
 
 <script lang="ts" setup>
-import { ref } from 'vue'
+import { ref, onUnmounted } from 'vue'
 import { fetchImageDetail, type AdminImageDetail } from '../api'
 
 const props = defineProps<{ modelValue: boolean; id: string }>()
@@ -62,6 +63,10 @@ const loadDetail = async () => {
     loading.value = false
   }
 }
+const onClose = () => {
+  detail.value = null
+}
+onUnmounted(onClose)
 </script>
 
 <style scoped>

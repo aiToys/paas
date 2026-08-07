@@ -82,7 +82,7 @@
           <div class="block-title">连接信息（敏感字段已掩码）</div>
           <el-descriptions :column="1" border size="small">
             <el-descriptions-item v-for="(v, k) in detail.resource.connection" :key="k" :label="String(k)">
-              {{ v }}
+              {{ displayValue(k, v) }}
             </el-descriptions-item>
           </el-descriptions>
         </div>
@@ -128,6 +128,15 @@ const acting = ref(false)
 const scale = ref<{ replicas?: number; cpu?: string; memory?: string }>({})
 let timer: number | undefined
 
+// SENSITIVE_KEYS 客户端兜底掩码（防御性深度：后端 maskDS 已掩码 password/secretKey/token/uri，
+// 前端兜底防后端未来新增敏感字段忘记加入 MaskConnection 白名单时泄漏到 DOM）。
+const SENSITIVE_KEYS = new Set([
+  'password', 'secret', 'secretkey', 'token', 'apikey', 'api_key',
+  'master_key', 'masterkey', 'accesskey', 'access_key', 'uri', 'connectionstring'
+])
+const displayValue = (k: string, v: unknown) =>
+  SENSITIVE_KEYS.has(String(k).toLowerCase()) ? '••••••' : (v ?? '-')
+
 const kindLabel = (k: string) =>
   (({ db: '数据库', cache: '缓存', mq: '消息队列', storage: '对象存储', vector: '向量库', search: '搜索引擎' }) as Record<string, string>)[k] ?? k
 const statusType = (s: string) =>
@@ -144,7 +153,7 @@ const loadDetail = async () => {
 }
 const loadAudits = async () => {
   if (!props.id) return
-  const res = await fetchAuditLogList({ page: 1, size: 50 })
+  const res = await fetchAuditLogList({ page: 1, size: 1000 })
   audits.value = (res.records ?? []).filter((a) => a.resourceId === props.id)
 }
 const loadAll = () => {

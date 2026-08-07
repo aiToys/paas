@@ -83,6 +83,8 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveList(w, r)
 	case path == "/api/admin/environments" && r.Method == http.MethodPost:
 		h.serveCreate(w, r)
+	case strings.HasPrefix(path, "/api/admin/environments/"):
+		h.serveItem(w, r)
 	default:
 		// 已知列表路径但方法非 GET/POST -> 405；其余未注册路径 -> 404。
 		if path == "/api/admin/environments" {
@@ -91,6 +93,44 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteError(w, http.StatusNotFound, "not found")
 		}
 	}
+}
+
+// serveItem 处理 /api/admin/environments/{id}（GET 详情）。
+func (h *AdminHandler) serveItem(w http.ResponseWriter, r *http.Request) {
+	id := strings.Trim(strings.TrimPrefix(strings.TrimRight(r.URL.Path, "/"), "/api/admin/environments/"), "/")
+	if id == "" || strings.Contains(id, "/") {
+		httputil.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method != http.MethodGet {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	h.serveDetail(w, r, id)
+}
+
+// serveDetail 跨租户环境详情（ListAll filter by id）。
+func (h *AdminHandler) serveDetail(w http.ResponseWriter, r *http.Request, id string) {
+	e, err := h.findByID(r.Context(), id)
+	if err != nil {
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
+		return
+	}
+	httputil.WriteData(w, e)
+}
+
+// findByID 跨租户取单条环境（ListAll filter by id）。
+func (h *AdminHandler) findByID(ctx context.Context, id string) (Environment, error) {
+	list, err := h.repo.ListAll(ctx)
+	if err != nil {
+		return Environment{}, err
+	}
+	for _, e := range list {
+		if e.ID == id {
+			return e, nil
+		}
+	}
+	return Environment{}, fmt.Errorf("环境不存在: %s", id)
 }
 
 // serveList 跨租户列表。

@@ -10,6 +10,7 @@ import (
 
 	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/environment/memory"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 type errT struct{}
@@ -81,5 +82,38 @@ func TestAdminCreateEnvironmentUnknownTenant(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("want 400 got %d", rec.Code)
+	}
+}
+
+// TestAdminEnvironmentDetail 验证环境详情 GET /{id}（L1，基线 spec P1 要求 L3 代建 + L1 详情）。
+func TestAdminEnvironmentDetail(t *testing.T) {
+	repo := memory.NewStore()
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	if err := repo.Create(ctx, environment.Environment{ID: "env-test", Name: "test", Type: "test", Cluster: "test-bj"}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	h := environment.NewAdminHandler(repo)
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/environments/env-test", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Data environment.Environment `json:"data"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	if out.Data.ID != "env-test" {
+		t.Fatalf("id=%s want env-test", out.Data.ID)
+	}
+}
+
+func TestAdminEnvironmentDetailNotFound(t *testing.T) {
+	h := environment.NewAdminHandler(memory.NewStore())
+	req := httptest.NewRequest(http.MethodGet, "/api/admin/environments/nope", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("code=%d want 404", rec.Code)
 	}
 }
