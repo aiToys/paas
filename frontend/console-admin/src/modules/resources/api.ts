@@ -120,6 +120,7 @@ export interface AdminBuildRun {
   message: string
   status: string
   imageId?: string
+  log?: string
   startedAt: string
   finishedAt?: string
 }
@@ -440,4 +441,33 @@ export const fetchApplicationDetail = (id: string) =>
   api.get<AdminApplicationDetail>(`/api/admin/applications/${id}`)
 
 export const deleteApplication = (id: string) => api.del<unknown>(`/api/admin/applications/${id}`)
+
+// ============================================================================
+// admin DevOps 管理（构建/镜像/发布 详情 + 回滚）
+// 对接 /api/admin/buildruns|images|releases/{id}*。
+// BuildRun/Image/Release Repository 无 Delete 方法 -> 不提供删除；
+// BuildRun 重试涉及异步构建流转，admin 路径不干净复用，YAGNI 跳过。
+// ============================================================================
+
+// -- 构建详情（含 Log）--
+export type AdminBuildRunDetail = AdminBuildRun
+
+export const fetchBuildRunDetail = (id: string) =>
+  api.get<AdminBuildRunDetail>(`/api/admin/buildruns/${id}`)
+
+// -- 镜像详情 --
+export type AdminImageDetail = AdminImage
+
+export const fetchImageDetail = (id: string) =>
+  api.get<AdminImageDetail>(`/api/admin/images/${id}`)
+
+// -- 发布详情 + 回滚 --
+export type AdminReleaseDetail = AdminRelease
+
+export const fetchReleaseDetail = (id: string) =>
+  api.get<AdminReleaseDetail>(`/api/admin/releases/${id}`)
+
+// 回滚发布（绕过 prod:write，记审计；返回新建的回滚 release）。
+export const rollbackRelease = (id: string) =>
+  api.post<AdminRelease>(`/api/admin/releases/${id}/rollback`, {})
 

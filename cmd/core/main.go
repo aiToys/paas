@@ -540,6 +540,15 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		workload.WithAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
 	)
 
+	// admin devops handler（构建/镜像/发布 详情 + 回滚）。不代建（业务编排类）。
+	// 全挂 adminGuard(super_admin)；绕过 prod:write（super_admin 有权干预生产）；写操作记审计。
+	// 复用 identityAuditAdapter + actor wrapper。BuildRun/Image/Release Repository 无 Delete 方法 -> 不提供删除；
+	// BuildRun 重试涉及异步构建流转（baseCtx/pipeline），admin handler 内不干净复用，YAGNI 跳过。
+	devopsAdminHandler := devops.NewAdminHandler(stores.DevOpsBuilds, stores.DevOpsImages, stores.DevOpsReleases,
+		devops.WithAdminAudit(&identityAuditAdapter{store: stores.Security}),
+		devops.WithAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
+	)
+
 	// admin application handler（L1 详情 / L2 删除）。
 	// 业务编排类不代建（基线 spec 明确）。级联清理复用 appHandler.CascadeDelete 桥接（同款 workload+appconfig）。
 	appAdminHandler := application.NewAdminHandler(stores.Application,
@@ -900,6 +909,16 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		renderList(w, list, err)
 	})),
 		apiroute.Tags("资源总览"), apiroute.Summary("发布列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]devops.Release{}))
+	// admin devops 管理（构建/镜像/发布 详情 + 发布回滚）：mux.Handle 到 devopsAdminHandler（按 path 前缀分发）。
+	// /api/admin/buildruns|images|releases（无尾斜杠）GET 列表仍走上面 reg.Register；
+	// /api/admin/buildruns|images|releases/（有尾斜杠，{id}）走 devopsAdminHandler。Go 1.22 ServeMux 最长前缀匹配区分两者。
+	mux.Handle("/api/admin/buildruns/", adminGuard(devopsAdminHandler))
+	mux.Handle("/api/admin/images/", adminGuard(devopsAdminHandler))
+	mux.Handle("/api/admin/releases/", adminGuard(devopsAdminHandler))
+	reg.Operation("GET", "/api/admin/buildruns/{id}", apiroute.Tags("DevOps管理"), apiroute.Summary("构建详情（跨租户，含日志）"), apiroute.Perm("super_admin"), apiroute.WithResp(devops.BuildRun{}))
+	reg.Operation("GET", "/api/admin/images/{id}", apiroute.Tags("DevOps管理"), apiroute.Summary("镜像详情（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp(devops.Image{}))
+	reg.Operation("GET", "/api/admin/releases/{id}", apiroute.Tags("DevOps管理"), apiroute.Summary("发布详情（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp(devops.Release{}))
+	reg.Operation("POST", "/api/admin/releases/{id}/rollback", apiroute.Tags("DevOps管理"), apiroute.Summary("回滚发布（绕过 prod:write，记审计）"), apiroute.Perm("super_admin"), apiroute.WithResp(devops.Release{}))
 	reg.Register("GET", "/api/admin/namespaces", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		list, err := stores.ConfigCenter.ListAllNamespaces(r.Context())
 		renderList(w, list, err)

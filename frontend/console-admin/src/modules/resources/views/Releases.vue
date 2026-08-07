@@ -38,16 +38,22 @@
       <el-tag v-if="row.isRollback" type="warning" size="small">回滚</el-tag>
       <span v-else>-</span>
     </template>
+    <template #col-detail="{ row }">
+      <el-button type="primary" link size="small" @click="openDetail(row)">详情 / 回滚</el-button>
+    </template>
   </SearchTable>
+
+  <ReleaseDrawer v-model="detailVisible" :id="detailId" @refresh="fetchList" />
 </template>
 
 <script lang="ts" setup>
-import { computed, onMounted } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import { SearchTable } from '@/app/components'
 import { useCrud } from '@/app/composables/useCrud'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
 import { fetchReleaseList, type AdminRelease, type ResSearchRequest } from '../api'
+import ReleaseDrawer from './ReleaseDrawer.vue'
 
 const { listData, loading, pagination, searchForm, fetchList, handleSearch, handleReset, handlePageChange } =
   useCrud<AdminRelease>({
@@ -59,8 +65,15 @@ const { listData, loading, pagination, searchForm, fetchList, handleSearch, hand
 const tableData = computed(() => listData.value as unknown as Record<string, unknown>[])
 
 const releaseStatusType = (s: string) =>
-  (({ success: 'success', failed: 'danger', 'rolled-back': 'info', pending: 'warning' }) as Record<string, string>)[s] ??
-  'info'
+  (
+    {
+      succeeded: 'success',
+      failed: 'danger',
+      'rolled-back': 'info',
+      deploying: 'warning',
+      pending: 'warning'
+    } as Record<string, string>
+  )[s] ?? 'info'
 
 const columns = computed<ColumnDef[]>(() => [
   { prop: 'tenantId', label: '租户', width: 130 },
@@ -70,8 +83,16 @@ const columns = computed<ColumnDef[]>(() => [
   { prop: 'strategy', label: '策略', width: 100 },
   { prop: 'status', label: '状态', width: 110, slot: 'status' },
   { prop: 'isRollback', label: '回滚', width: 80, slot: 'isRollback' },
-  { prop: 'createdAt', label: '发布时间', width: 180 }
+  { prop: 'createdAt', label: '发布时间', width: 180 },
+  { prop: 'detail', label: '操作', width: 110, slot: 'detail', hideable: false }
 ])
+
+const detailVisible = ref(false)
+const detailId = ref('')
+const openDetail = (row: AdminRelease) => {
+  detailId.value = row.id
+  detailVisible.value = true
+}
 
 onMounted(() => fetchList())
 </script>
