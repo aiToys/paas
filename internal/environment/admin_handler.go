@@ -84,7 +84,12 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case path == "/api/admin/environments" && r.Method == http.MethodPost:
 		h.serveCreate(w, r)
 	default:
-		httputil.WriteError(w, http.StatusNotFound, "not found")
+		// 已知列表路径但方法非 GET/POST -> 405；其余未注册路径 -> 404。
+		if path == "/api/admin/environments" {
+			httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		} else {
+			httputil.WriteError(w, http.StatusNotFound, "not found")
+		}
 	}
 }
 

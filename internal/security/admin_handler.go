@@ -86,8 +86,14 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminTenantCtx 派生资源所属租户 ctx（admin 跨租户操作以资源租户身份执行下游）。
-// 平台级 Secret（TenantID 空）时 WithTenant 传空字符串，下游 ListAll 仍可工作（platform scope 不按租户过滤）。
+// 平台级 Secret（TenantID 空）注入 sentinel "platform"：下游 DeleteSecret 调 TenantOrErr
+// 拒绝空字符串（返 "missing tenant context"），sentinel 让其通过；SQL tenant_id='platform'
+// 不会误匹配租户级（NULL ≠ 'platform'），OR scope='platform' 命中平台级行（与 identityAuditAdapter 同款）。
+// 审计仍记真实 sec.TenantID（空），由 identityAuditAdapter 转 "platform" 落库。
 func adminTenantCtx(r *http.Request, tenantID string) (context.Context, *http.Request) {
+	if tenantID == "" {
+		tenantID = "platform"
+	}
 	ctx := tenant.WithTenant(r.Context(), tenantID)
 	return ctx, r.WithContext(ctx)
 }

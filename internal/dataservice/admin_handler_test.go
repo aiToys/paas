@@ -133,6 +133,18 @@ func TestAdminScaleMergesFields(t *testing.T) {
 	}
 }
 
+// TestAdminItemMethodNotAllowed 验证 /{id} 非 GET/DELETE 方法返 405。
+// 修复前：serveDetail 未检查方法，POST /{id} 落入 serveDetail 返 200 详情（契约违反）。
+func TestAdminItemMethodNotAllowed(t *testing.T) {
+	h, _, _ := newAdminForTest(t)
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/dataservices/ds-1", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("code=%d body=%s（POST /{id} 应 405）", rec.Code, rec.Body.String())
+	}
+}
+
 // TestAdminCreateConsumesQuotaAndRollsBackOnFailure 代建缺 engineId 期望 400 + 配额不消耗。
 func TestAdminCreateConsumesQuotaAndRollsBackOnFailure(t *testing.T) {
 	repo := dsmemory.NewStore()

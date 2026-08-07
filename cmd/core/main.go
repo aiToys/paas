@@ -376,31 +376,22 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		_, err := stores.Billing.CheckAndInc(ctx, billing.ResApplications, delta)
 		return err
 	}
+	// workload 维度配额回收（级联删工作负载 + admin 删除共用，DRY 单一真源）。
+	wlQuotaFn := func(ctx context.Context, delta int) error {
+		_, err := stores.Billing.CheckAndInc(ctx, billing.ResWorkloads, delta)
+		return err
+	}
 	// 绑定数据服务时自动注入连接信息到 appconfig（DATABASE_URL/REDIS_URL/...），工作负载重启即生效。
 	appHandler.Binder = &dsBindingInjector{dsRepo: stores.DataService, cfgRepo: stores.AppConfig, appRepo: stores.Application, idb: stores.Identity}
 	// 删除应用时级联清理关联资源（best-effort）：工作负载（含 K8s Deployment/Job）+ 应用配置（env/Secret）。
+	// 工作负载删除成功后回收 workload 维度配额（与 workload handler Delete 对齐）。
 	// devops 历史记录（仓库/构建/镜像/发布）保留作历史归档，不随应用删除。
-	appHandler.CascadeDelete = func(ctx context.Context, appID string) error {
-		wls, lErr := stores.Workload.List(ctx, "", appID, "")
-		if lErr != nil {
-			return lErr
-		}
-		for _, w := range wls {
-			if err := stores.Workload.Delete(ctx, w.ID); err != nil {
-				log.Printf("级联删工作负载失败（best-effort）: app=%s wl=%s: %v", appID, w.ID, err) //nolint:gosec // G706 误报
-			}
-		}
-		cfgs, cErr := stores.AppConfig.List(ctx, appID, "")
-		if cErr != nil {
-			return cErr
-		}
-		for _, c := range cfgs {
-			if err := stores.AppConfig.Delete(ctx, c.ID); err != nil {
-				log.Printf("级联删应用配置失败（best-effort）: app=%s cfg=%s: %v", appID, c.ID, err) //nolint:gosec // G706 误报
-			}
-		}
-		return nil
-	}
+	// admin 删应用复用同一 appCascadeDeleter（DRY，注入 wlQuota）。
+	appHandler.CascadeDelete = appCascadeDeleter{
+		wl:      stores.Workload,
+		cfg:     stores.AppConfig,
+		wlQuota: wlQuotaFn,
+	}.CascadeDelete
 
 	// 环境（物理隔离单元 prod|test）：方法级权限 environment:read/write + prod 写校验。
 	// 同时作 EnvTypeResolver 横切注入到 workload/devops/appconfig/governance/dataservice。
@@ -532,10 +523,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// 复用 statusReader（与 wlHandler 同源 K8s clientset/namespace）+ identityAuditAdapter + tenantChecker。
 	wlAdminHandler := workload.NewAdminHandler(stores.Workload,
 		workload.WithAdminStatusReader(statusReader),
-		workload.WithAdminQuota(func(ctx context.Context, delta int) error {
-			_, err := stores.Billing.CheckAndInc(ctx, billing.ResWorkloads, delta)
-			return err
-		}),
+		workload.WithAdminQuota(wlQuotaFn),
 		workload.WithAdminAudit(&identityAuditAdapter{store: stores.Security}),
 		workload.WithAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
 	)
@@ -550,13 +538,13 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	)
 
 	// admin application handler（L1 详情 / L2 删除）。
-	// 业务编排类不代建（基线 spec 明确）。级联清理复用 appHandler.CascadeDelete 桥接（同款 workload+appconfig）。
+	// 业务编排类不代建（基线 spec 明确）。级联清理复用 appCascadeDeleter（与租户侧 appHandler.CascadeDelete 同一实现，注入 wlQuota 回收 workload 配额）。
 	appAdminHandler := application.NewAdminHandler(stores.Application,
 		application.WithAdminQuota(func(ctx context.Context, delta int) error {
 			_, err := stores.Billing.CheckAndInc(ctx, billing.ResApplications, delta)
 			return err
 		}),
-		application.WithAdminCascade(appCascadeDeleter{wl: stores.Workload, cfg: stores.AppConfig}),
+		application.WithAdminCascade(appCascadeDeleter{wl: stores.Workload, cfg: stores.AppConfig, wlQuota: wlQuotaFn}),
 		application.WithAdminAudit(&identityAuditAdapter{store: stores.Security}),
 		application.WithAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
 	)
@@ -576,8 +564,10 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 
 	// admin billing handler（配额列表+调整 / 账单列表+详情+标记已付）。
 	// 全挂 adminGuard(super_admin)；绕过 prod:write；写操作记审计。调整配额不消耗配额（SetQuota 改 Limits）。
+	// 注入 tenantChecker 校验租户存在（防给不存在租户设配额污染数据，与 dataservice/environment 代建对齐）。
 	billAdminHandler := billing.NewAdminHandler(stores.Billing,
 		billing.WithAdminAudit(&identityAuditAdapter{store: stores.Security}),
+		billing.WithAdminTenants(tenantChecker{repo: stores.Identity}),
 		billing.WithAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
 	)
 
@@ -917,7 +907,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// 跨租户资源总览扩展（super_admin）：环境/DevOps/配置中心/治理/可观测/安全/计费。
 	// 仅读：跨租户写越权风险高，资源运维仍在 console-user 租户内进行（admin 总览用于观测/排查）。
 	// admin 环境管理（L3 代建）：mux.Handle 到 envAdminHandler（GET 列表 + POST 代建）。
+	// 双注册（无尾斜杠 + 有尾斜杠）兼容客户端追加尾斜杠访问，与 dataservice/workload/application 对齐。
 	mux.Handle("/api/admin/environments", adminGuard(envAdminHandler))
+	mux.Handle("/api/admin/environments/", adminGuard(envAdminHandler))
 	reg.Operation("GET", "/api/admin/environments", apiroute.Tags("环境管理"), apiroute.Summary("环境列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]environment.Environment{}))
 	reg.Operation("POST", "/api/admin/environments", apiroute.Tags("环境管理"), apiroute.Summary("代建环境（指定租户）"), apiroute.Perm("super_admin"))
 	reg.Register("GET", "/api/admin/buildruns", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

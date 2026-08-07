@@ -81,7 +81,12 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/api/admin/applications/"):
 		h.serveItem(w, r)
 	default:
-		httputil.WriteError(w, http.StatusNotFound, "not found")
+		// 已知列表路径但方法非 GET -> 405；其余未注册路径 -> 404。
+		if path == "/api/admin/applications" {
+			httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		} else {
+			httputil.WriteError(w, http.StatusNotFound, "not found")
+		}
 	}
 }
 

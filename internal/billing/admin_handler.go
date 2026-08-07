@@ -30,15 +30,21 @@ type AdminAuditRecorder interface {
 	Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error
 }
 
+// AdminTenantChecker 校验租户存在（admin 调整配额 body tenantId 校验，防孤儿配额记录）。cmd/core 桥接 identity.Repository。
+type AdminTenantChecker interface {
+	Exists(ctx context.Context, tenantID string) error
+}
+
 // AdminHandler 暴露配额+账单 admin REST API（/api/admin/quotas* + /api/admin/bills*）。
 //
 // 注入：Repository（含 ListAllQuotas/SetQuota/ListAllBills/PayBill）+
-// AdminAuditRecorder + actor 提取器。
+// AdminAuditRecorder + actor 提取器 + TenantChecker（调整配额校验租户存在）。
 //
 // 绕过 prod:write（super_admin 有权干预），但写操作必记审计。
 type AdminHandler struct {
 	repo    Repository
 	audit   AdminAuditRecorder
+	tenants AdminTenantChecker
 	actorOf func(*http.Request) string
 }
 
@@ -57,6 +63,11 @@ func NewAdminHandler(repo Repository, opts ...AdminHandlerOpt) *AdminHandler {
 // WithAdminAudit 注入审计 recorder。
 func WithAdminAudit(a AdminAuditRecorder) AdminHandlerOpt {
 	return func(h *AdminHandler) { h.audit = a }
+}
+
+// WithAdminTenants 注入租户校验器（调整配额校验租户存在，防给不存在租户设配额污染数据）。
+func WithAdminTenants(c AdminTenantChecker) AdminHandlerOpt {
+	return func(h *AdminHandler) { h.tenants = c }
 }
 
 // WithAdminActor 注入 actor 提取器（取 super_admin UserID 作审计 actor）。
@@ -135,6 +146,12 @@ func (h *AdminHandler) serveSetQuota(w http.ResponseWriter, r *http.Request) {
 	if in.TenantID == "" {
 		httputil.WriteError(w, http.StatusBadRequest, "missing tenantId")
 		return
+	}
+	if h.tenants != nil {
+		if err := h.tenants.Exists(r.Context(), in.TenantID); err != nil {
+			httputil.WriteServiceError(w, http.StatusBadRequest, fmt.Errorf("租户不存在: %s", in.TenantID))
+			return
+		}
 	}
 	q := ResourceQuota{TenantID: in.TenantID, Limits: in.Limits}
 	ctx, rr := adminTenantCtx(r, in.TenantID)

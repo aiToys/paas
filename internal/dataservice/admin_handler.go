@@ -113,7 +113,12 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/api/admin/dataservices/"):
 		h.serveItem(w, r)
 	default:
-		httputil.WriteError(w, http.StatusNotFound, "not found")
+		// 已知列表路径但方法非 GET/POST -> 405；其余未注册路径 -> 404。
+		if path == "/api/admin/dataservices" {
+			httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		} else {
+			httputil.WriteError(w, http.StatusNotFound, "not found")
+		}
 	}
 }
 
@@ -189,6 +194,10 @@ func (h *AdminHandler) serveItem(w http.ResponseWriter, r *http.Request) {
 
 // serveDetail 详情：资源（掩码 Connection）+ 运行实例（目标租户 ctx 读 Endpoints）。
 func (h *AdminHandler) serveDetail(w http.ResponseWriter, r *http.Request, d DataService) {
+	if r.Method != http.MethodGet {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
 	out := map[string]any{
 		"resource": maskDS(d),
 	}
@@ -237,13 +246,13 @@ func (h *AdminHandler) serveRestart(w http.ResponseWriter, r *http.Request, d Da
 		return
 	}
 	if h.restarter != nil {
-		ctx, _ := tenantCtx(r, d.TenantID)
+		ctx, rr := tenantCtx(r, d.TenantID)
 		if err := h.restarter.Restart(ctx, d.ID); err != nil {
 			httputil.WriteInternalError(w, err)
 			return
 		}
+		h.recordAudit(rr, d.TenantID, "admin:restart", d.ID, "restart dataservice")
 	}
-	h.recordAudit(r, d.TenantID, "admin:restart", d.ID, "restart dataservice")
 	httputil.WriteData(w, map[string]string{"restarted": d.ID})
 }
 
@@ -286,19 +295,21 @@ func (h *AdminHandler) serveScale(w http.ResponseWriter, r *http.Request, d Data
 	httputil.WriteData(w, maskDS(updated))
 }
 
-// serveDelete 强制删除（先回收目标租户配额，再以资源租户 ctx 删）。
+// serveDelete 强制删除（先以资源租户 ctx 删，成功后回收配额，与租户侧/application admin 对齐）。
+// 顺序：先 Delete 再 quota(-1)。若先 -1 再 Delete，Delete 失败时配额已扣减且重试可累积虚减（配额绕过）。
 func (h *AdminHandler) serveDelete(w http.ResponseWriter, r *http.Request, d DataService) {
 	if r.Method != http.MethodDelete {
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	ctx, rr := tenantCtx(r, d.TenantID)
-	if h.quota != nil {
-		_ = h.quota(ctx, -1) // 回收配额 best-effort（删除主操作不因配额回滚失败而阻断）
-	}
 	if err := h.repo.Delete(ctx, d.ID); err != nil {
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
+	}
+	// 删除成功后回收配额 best-effort（-1 失败不阻断返回 deleted，下次重试自然恢复一致）。
+	if h.quota != nil {
+		_ = h.quota(ctx, -1)
 	}
 	h.recordAudit(rr, d.TenantID, "admin:delete", d.ID, "delete dataservice")
 	httputil.WriteData(w, map[string]string{"deleted": d.ID})

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -19,6 +20,16 @@ type fakeAudit struct{ last string }
 func (a *fakeAudit) Record(ctx context.Context, tid, actor, action, rt, rid, detail string) error {
 	a.last = action
 	return nil
+}
+
+// fakeTenants 校验租户存在（仅 t-acme 接受，与 seed 数据一致）。
+type fakeTenants struct{}
+
+func (fakeTenants) Exists(ctx context.Context, id string) error {
+	if id == "t-acme" {
+		return nil
+	}
+	return fmt.Errorf("租户不存在: %s", id)
 }
 
 // newAdminForTest 构造 admin handler + 已灌的配额+账单（属 t-acme）。
@@ -39,6 +50,7 @@ func newAdminForTest(t *testing.T) (*billing.AdminHandler, *fakeAudit) {
 	au := &fakeAudit{}
 	h := billing.NewAdminHandler(repo,
 		billing.WithAdminAudit(au),
+		billing.WithAdminTenants(fakeTenants{}),
 		billing.WithAdminActor(func(*http.Request) string { return "u-admin" }),
 	)
 	return h, au
@@ -92,6 +104,21 @@ func TestAdminSetQuotaMissingTenant(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAdminSetQuotaRejectsUnknownTenant 验证调整配额校验租户存在（防给不存在租户设配额污染数据 + 审计）。
+func TestAdminSetQuotaRejectsUnknownTenant(t *testing.T) {
+	h, au := newAdminForTest(t)
+	body := bytes.NewReader([]byte(`{"tenantId":"t-unknown","limits":{}}`))
+	req := httptest.NewRequest(http.MethodPut, "/api/admin/quotas", body)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d body=%s（未知租户应 400）", rec.Code, rec.Body.String())
+	}
+	if au.last != "" {
+		t.Fatalf("未知租户不应记审计，audit=%s", au.last)
 	}
 }
 

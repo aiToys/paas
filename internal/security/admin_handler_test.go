@@ -96,3 +96,28 @@ func TestAdminDeleteUsesResourceTenantCtx(t *testing.T) {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+// TestAdminDeletePlatformSecret 验证删除平台级 Secret（TenantID 空）成功。
+// 修复前：adminTenantCtx(r, "") 注入空 ctx，下游 DeleteSecret 调 tenantOrErr 拒绝空串
+// 返 "missing tenant context" -> 404，admin 无法删平台级推理凭证。
+// 修复后：adminTenantCtx 注入 sentinel "platform"，tenantOrErr 通过，
+// memory DeleteSecret `sec.Scope != ScopePlatform` 为 false 不拒绝（PG SQL scope='platform' 命中）。
+func TestAdminDeletePlatformSecret(t *testing.T) {
+	h, au := newAdminForTest(t)
+	req := httptest.NewRequest(http.MethodDelete, "/api/admin/secrets/sec-platform-airouter", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s（平台级 Secret 删除应成功）", rec.Code, rec.Body.String())
+	}
+	if au.last != "admin:delete" {
+		t.Fatalf("audit=%s", au.last)
+	}
+	// 验证已删除（再 GET 返 404）。
+	req2 := httptest.NewRequest(http.MethodGet, "/api/admin/secrets/sec-platform-airouter", nil)
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusNotFound {
+		t.Fatalf("删除后应 404，code=%d", rec2.Code)
+	}
+}
