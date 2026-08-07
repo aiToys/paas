@@ -452,6 +452,44 @@ console-user 弃用 localStorage 明文 API Key 裸奔模式，改走密码登�
 - **构建验证**：`go test ./...` 全绿 + `pnpm build` 三套前端通过。
 - **留后续**：ResolveChannels Clone（handler 锁外读 Status 时）、observability/maas Mutex→RWMutex（读热点）、identity 审计可在 security.AuditLog 加 ResourceType 常量枚举、airsync 循环内 defer fd 回收。
 
+### P1-P4 admin 管理基线（console-admin 资源总览闭环，2026-08-07）
+
+承接 P1.6，解决「console-admin 资源总览无管理功能、像查看面板」痛点。admin = 平台运营中枢（看穿+干预+代建+审计），与 console-user 租户自助正交。设计见 `docs/superpowers/specs/2026-08-07-admin-management-foundation-design.md`。
+
+**三层模型**（基线 spec）：
+- **L1 详情可见**：跨租户 GET /{id} 详情（资源 + 运行实例 Pod 级）
+- **L2 运维干预**：启停·重启·扩缩·删·日志·注销实例·回滚·set-quota·pay（绕过 prod:write 但审计+UI警示）
+- **L3 代建**：仅基础设施类（dataservice/environment），代建消耗目标租户配额
+
+**跨租户写端点规范**（横切继承，全 10 admin handler）：
+- 独立 /api/admin/<resource>/{id}/{action} 端点 + adminGuard(super_admin)
+- 跨租户读：ListAll filter by id（绕过 Repository.Get 的 ctx tenant 强制）/ GetAny（dataservice）
+- 写操作：tenant.WithTenant 派生目标租户 ctx + 绕过 prod:write + 全记审计（admin: 前缀，target_tenant=资源租户，平台级 Secret tenant_id="" 经 identityAuditAdapter 转 "platform"）
+- 代建消耗目标租户配额（QuotaCheck +1，失败回滚）；删除回收配额（-1，Delete 成功后）
+- 凭证 Connection 一律 MaskConnection 掩码；security Secret 返回 Masked()
+
+**模块覆盖**（10 admin handler，console-admin 20 管理页闭环）：
+- P1 数据服务（dataservice L1+L2+L3）+ 环境（environment L3 代建 + L1 详情）—— 样板
+- P2 工作负载（workload L1+L2）+ 应用（application L1+L2，CascadeDeleter 级联清 workload+appconfig）
+- P3 DevOps（buildruns/images/releases L1 详情 + 回滚）
+- P4 治理（governance 服务 L1+L2）/ 可观测（observability 告警规则 L1+L2）/ 计费（billing 配额调整+账单标记）/ 安全（security 密钥 L1+L2）
+
+**横切正确性**（深度检测验证）：appCascadeDeleter 级联删 workload 回收 workload 配额（admin+租户侧统一复用 appCascadeDeleter）；平台级 Secret sentinel "platform"（DeleteSecret TenantOrErr 通过，不误删租户级）；typed-nil 防御（restarter opts 条件注入，集群外返 503 友好降级）；workload scale Replicas *int（nil 保留当前值防意外缩容）。
+
+**留后续**：maas（9 端点）+ engine（3 端点）admin 写操作审计（违反「审计只增不删」，super_admin 信任角色，上线后补，模式已标准化参照 identity P1.4）；devops BuildRun/Image/Release L2 delete + observability AlertRule L2 启停（需先补 Repository Delete/Update 方法）；workload admin serveList 跨租户不回填 K8s 真实状态。
+
+### 深度检测第 13-16 轮（admin 跨租户 5 轮审查，2026-08-07）
+
+P1-P4 admin 跨租户管理代码 5 轮深度审查（每轮独立 agent 视角），修复 16 个 findings（1 Critical + 11 Important + 4 Minor）：
+
+- **第 1 轮（5 路：安全/多租户隔离/并发/契约/业务逻辑）9 findings**：security 删平台级 Secret 失败（Critical，adminTenantCtx sentinel "platform"）；dataservice/workload serveDelete 配额回收顺序错（改先 Delete 再 -1）；appCascadeDeleter 级联删 workload 不回收配额（注入 wlQuota，admin+租户侧统一）；dataservice serveDetail 未检查 HTTP 方法（405）；4 admin ServeHTTP 列表路径 405；environment admin 尾斜杠注册；serveRestart recordAudit 用 rr；billing serveSetQuota 校验租户存在。
+- **第 2 轮（前端深审 + 修复验证 + 路由/OpenAPI）3 findings**：Drawer 审计 section 假阴性（fetchAuditLogList size 50->1000）；DataserviceDrawer 连接信息 SENSITIVE_KEYS 客户端兜底掩码（防后端漏加字段白名单泄漏）；4 Drawer（Application/BuildRun/Image/Release）关闭后 detail 清空（@close+onUnmounted）。
+- **第 3 轮（横切继承 + 模块闭环）3 findings**：dataservice serveRestart restarter=nil 假成功+漏审计（改返 503）；environment admin 补 L1 详情 GET /{id}（基线 spec P1 要求）；workload scale Replicas 改 *int（nil 保留当前值防意外缩容）。
+- **第 4 轮（部署前最终审查）1 Critical**：admin dataservice restarter typed-nil panic（*DSRestarter(nil) 装箱接口 != nil 致守护失效 -> panic，opts 列表模式条件注入修复，集群外 503 降级）；maas/engine 审计留后续。
+- **第 5 轮（部署 e2e）**：deploy-k8s.sh + curl admin 端点全 403（adminGuard super_admin 生效）+ 新 L1 详情 environments/{id} 路由注册 + OpenAPI 登记。
+
+验证：go test ./... -race 全绿（含回归测试 security TestAdminDeletePlatformSecret / billing TestAdminSetQuotaRejectsUnknownTenant / dataservice TestAdminItemMethodNotAllowed + environment TestAdminEnvironmentDetail）+ 前端 console-admin build 通过 + k8s e2e 全通过。
+
 ### DevOps 发布体验改造（指挥台 + 发布流水线 + 一键发布，2026-08-06）
 
 DevOps 中心从「只读监控大屏」升级为「CI/CD 指挥台」，补齐发布流水线逐级提升，发布点击数从 6+ 降到 2：
