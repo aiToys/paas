@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/aitoys/paas/internal/ai/agent"
 	"github.com/aitoys/paas/internal/ai/knowledgebase"
 	"github.com/aitoys/paas/internal/maas"
 	"github.com/aitoys/paas/pkg/provider"
@@ -243,4 +245,21 @@ func (f *maasEmbedderFactory) EmbedderFor(ctx context.Context, modelID string) (
 	}
 	f.cache.Store(modelID, e)
 	return e, nil
+}
+
+// agentDispatcherAdapter 把 agent.Runtime 适配为 gateway.AgentDispatcher。
+//
+// gateway 包不 import agent（避免循环依赖），由 cmd/core 注入此适配器。
+// model 形如 "agent:<id>"——剥前缀得 agentID，调 runtime.ServeSSE 以 OpenAI 兼容 SSE 输出。
+type agentDispatcherAdapter struct{ rt *agent.Runtime }
+
+const agentModelPrefix = "agent:"
+
+func (a agentDispatcherAdapter) Match(model string) bool {
+	return len(model) > len(agentModelPrefix) && strings.HasPrefix(model, agentModelPrefix)
+}
+
+func (a agentDispatcherAdapter) ServeSSE(w http.ResponseWriter, r *http.Request, model string, msgs []provider.Message) error {
+	agentID := strings.TrimPrefix(model, agentModelPrefix)
+	return a.rt.ServeSSE(w, r.Context(), agentID, msgs)
 }

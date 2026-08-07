@@ -359,7 +359,10 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		Version:     "1.0",
 		Description: "一站式 PaaS 平台——服务治理 / 中间件 / MaaS / DevOps 统一控制面",
 	})
-	mux.Handle("/v1/chat/completions", auth(gateway.Require("model:infer")(gateway.ChatCompletions(gw, meter))))
+	// agentDispatcherHolder：agent:{id} 虚拟模型路由的 late-binding 持有者。
+	// 此处注册进 /v1/chat/completions，agentRuntime 构造后（下方 AI 装配段）Set 注入。
+	agentDispatcherHolder := &gateway.AgentDispatcherHolder{}
+	mux.Handle("/v1/chat/completions", auth(gateway.Require("model:infer")(gateway.ChatCompletions(gw, meter, agentDispatcherHolder))))
 	// 模型目录端点（GET-only）走 Register：验证 mux 驱动 + spec 生成双路径。
 	reg.Register("GET", "/v1/models", auth(gateway.Require("model:read")(gateway.ListModels(gw))),
 		apiroute.Tags("MaaS"), apiroute.Summary("OpenAI 兼容模型列表"),
@@ -756,6 +759,8 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// AI Agent（P3）：组装 system prompt + 工具描述 + KB RAG 调底层 LLM。
 	// runtime 注入 MaaS（取 Provider）+ 凭证 + prompt/tool/KB（组装上下文）。
 	agentRuntime := agent.NewRuntime(stores.Agent, stores.MaaS, secretResolver{store: stores.Security.(security.SecretStore)}, stores.Prompt, stores.Tool, kbRetriever)
+	// 注入 gateway 虚拟模型路由：/v1/chat/completions 收 model="agent:{id}" 时转交 runtime。
+	agentDispatcherHolder.Set(agentDispatcherAdapter{rt: agentRuntime})
 	agentHandler := agent.NewHandler(stores.Agent, agentRuntime)
 	agentHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 	mux.Handle("/api/agents", auth(agentHandler))
@@ -931,7 +936,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("PUT", "/api/admin/engines/{id}", apiroute.Tags("引擎目录"), apiroute.Summary("更新引擎"), apiroute.Perm("super_admin"), apiroute.WithReqBody(dataservice.Engine{}), apiroute.WithResp(dataservice.Engine{}))
 	reg.Operation("DELETE", "/api/admin/engines/{id}", apiroute.Tags("引擎目录"), apiroute.Summary("删除引擎"), apiroute.Perm("super_admin"))
 	// 推理（流式）
-	reg.Operation("POST", "/v1/chat/completions", apiroute.Tags("MaaS"), apiroute.Summary("流式推理（OpenAI 兼容 SSE）"), apiroute.Perm("model:infer"), apiroute.WithReqBody(provider.ChatRequest{}))
+	reg.Operation("POST", "/v1/chat/completions", apiroute.Tags("MaaS"), apiroute.Summary("流式推理（OpenAI 兼容 SSE；model 支持 agent:{id} 虚拟模型调 Agent）"), apiroute.Perm("model:infer"), apiroute.WithReqBody(provider.ChatRequest{}))
 
 	// /api/auth/* + /api/system/menus：console-admin 身份对接。
 	// login/refresh 公开（不挂 BearerAuth）；logout/me/menus 需鉴权。

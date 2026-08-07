@@ -39,7 +39,11 @@ type chatChoice struct {
 // 按通道优先级依次尝试：某通道 Chat 返回 degraded 类错误（限流/不可用）→ 标 degraded，
 // 自动切下一通道；offline 类错误（凭证缺失/配置错误）→ 标 offline，亦切下一通道。
 // 全部通道失败才返回 503。非 stream 请求本切片也以 SSE 形式返回（前端按 SSE 解析）。
-func ChatCompletions(gw *Gateway, meter *Meter) http.HandlerFunc {
+//
+// agents（可选）支持 agent:{id} 虚拟模型路由：req.Model 命中 agent 前缀时，
+// 不走 catalog 通道，改由 Agent runtime 组装上下文（system prompt + 工具 + KB RAG）
+// 调底层 LLM 后以同样 OpenAI 兼容 SSE 输出。agents 为 nil 或未注入时，agent 模型返 404。
+func ChatCompletions(gw *Gateway, meter *Meter, agents *AgentDispatcherHolder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 限制请求体 1MiB，防超大 JSON 撑爆内存（DoS 硬化）。
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
@@ -50,6 +54,14 @@ func ChatCompletions(gw *Gateway, meter *Meter) http.HandlerFunc {
 		}
 		if req.Model == "" || len(req.Messages) == 0 {
 			httputil.WriteError(w, http.StatusBadRequest, "model 与 messages 必填")
+			return
+		}
+		// Agent 虚拟模型：委托 runtime（不经通道/failover；用量按 agent:{id} 维度计量）。
+		if agents != nil && agents.Match(req.Model) {
+			if err := agents.ServeSSE(w, r, req.Model, req.Messages); err != nil {
+				// ServeSSE 写 SSE 头后才失败时已无法改 HTTP 状态码，仅日志（与 serveStream 同）。
+				log.Printf("[gateway] agent %s 执行失败: %v", req.Model, err) //nolint:gosec // 请求 path 入日志是标准实践
+			}
 			return
 		}
 		channels, err := gw.ResolveChannels(req.Model)

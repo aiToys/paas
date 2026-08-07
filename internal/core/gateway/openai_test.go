@@ -44,7 +44,7 @@ func TestChatCompletionsStreamsContentAndDone(t *testing.T) {
 	})
 	meter := &Meter{}
 
-	h := ChatCompletions(gw, meter)
+	h := ChatCompletions(gw, meter, nil)
 	rec := httptest.NewRecorder()
 	body := strings.NewReader(`{"model":"echo","messages":[{"role":"user","content":"你好"}],"stream":true}`)
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
@@ -59,7 +59,7 @@ func TestChatCompletionsStreamsContentAndDone(t *testing.T) {
 
 func TestChatCompletionsUnknownModel(t *testing.T) {
 	gw := New()
-	h := ChatCompletions(gw, &Meter{})
+	h := ChatCompletions(gw, &Meter{}, nil)
 	rec := httptest.NewRecorder()
 	body := strings.NewReader(`{"model":"ghost","messages":[{"role":"user","content":"x"}]}`)
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
@@ -90,7 +90,7 @@ func TestChatCompletionsFailoverOnDegraded(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	body := strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"x"}]}`)
-	ChatCompletions(gw, &Meter{}).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
+	ChatCompletions(gw, &Meter{}, nil).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
 
 	assert.Contains(t, rec.Body.String(), "备通道OK")
 	assert.Contains(t, rec.Body.String(), "data: [DONE]")
@@ -111,7 +111,7 @@ func TestChatCompletionsAllChannelsFail(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	body := strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"x"}]}`)
-	ChatCompletions(gw, &Meter{}).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
+	ChatCompletions(gw, &Meter{}, nil).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
 
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	// degraded 类标 degraded，offline 类（凭证缺失）标 offline
@@ -141,4 +141,49 @@ func TestCatalogModelsRichInfo(t *testing.T) {
 	assert.Contains(t, body, `"id":"echo"`)
 	assert.Contains(t, body, `"vendor":"test-vendor"`)
 	assert.Contains(t, body, `"channels"`, "富信息应含通道列表")
+}
+
+// stubAgentDispatcher 记录收到的 model 与 msgs，写一段固定 SSE。
+type stubAgentDispatcher struct {
+	gotModel string
+	gotN     int
+}
+
+func (s *stubAgentDispatcher) Match(model string) bool { return strings.HasPrefix(model, "agent:") }
+func (s *stubAgentDispatcher) ServeSSE(w http.ResponseWriter, _ *http.Request, model string, msgs []provider.Message) error {
+	s.gotModel = model
+	s.gotN = len(msgs)
+	w.Header().Set("Content-Type", "text/event-stream")
+	_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"agent-echo\"}}]}\n\ndata: [DONE]\n\n"))
+	return nil
+}
+
+// agent:{id} 虚拟模型路由：holder.Match 命中时委托 dispatcher，不查 catalog 通道。
+func TestChatCompletionsAgentVirtualModel(t *testing.T) {
+	gw := New()
+	// 即便同名 "agent:bot" 也没注册进 catalog，应走 dispatcher 而非 ResolveChannels（否则 404）。
+	stub := &stubAgentDispatcher{}
+	holder := &AgentDispatcherHolder{}
+	holder.Set(stub)
+
+	h := ChatCompletions(gw, &Meter{}, holder)
+	rec := httptest.NewRecorder()
+	body := strings.NewReader(`{"model":"agent:bot","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
+
+	require.Equal(t, http.StatusOK, rec.Code, "agent 走 dispatcher 不经通道解析")
+	assert.Equal(t, "agent:bot", stub.gotModel)
+	assert.Equal(t, 1, stub.gotN, "透传 messages")
+	assert.Contains(t, rec.Body.String(), "agent-echo")
+}
+
+// holder 未注入 dispatcher 时 Match 安全返 false，agent 模型走 catalog 解析 → 404 不 panic。
+func TestChatCompletionsAgentHolderEmptySafe(t *testing.T) {
+	gw := New()
+	holder := &AgentDispatcherHolder{} // 未 Set
+	h := ChatCompletions(gw, &Meter{}, holder)
+	rec := httptest.NewRecorder()
+	body := strings.NewReader(`{"model":"agent:bot","messages":[{"role":"user","content":"hi"}]}`)
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
+	require.Equal(t, http.StatusNotFound, rec.Code)
 }
