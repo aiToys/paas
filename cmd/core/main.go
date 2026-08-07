@@ -383,7 +383,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		return err
 	}
 	// 绑定数据服务时自动注入连接信息到 appconfig（DATABASE_URL/REDIS_URL/...），工作负载重启即生效。
-	appHandler.Binder = &dsBindingInjector{dsRepo: stores.DataService, cfgRepo: stores.AppConfig, appRepo: stores.Application, idb: stores.Identity}
+	appHandler.Binder = &dsBindingInjector{dsRepo: stores.DataService, cfgRepo: stores.AppConfig, appRepo: stores.Application, idb: stores.Identity, kbRepo: stores.KnowledgeBase}
 	// 删除应用时级联清理关联资源（best-effort）：工作负载（含 K8s Deployment/Job）+ 应用配置（env/Secret）。
 	// 工作负载删除成功后回收 workload 维度配额（与 workload handler Delete 对齐）。
 	// devops 历史记录（仓库/构建/镜像/发布）保留作历史归档，不随应用删除。

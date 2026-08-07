@@ -9,6 +9,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/aitoys/paas/internal/ai/knowledgebase"
 	"github.com/aitoys/paas/internal/appconfig"
 	"github.com/aitoys/paas/internal/core/application"
 	"github.com/aitoys/paas/internal/core/identity"
@@ -23,6 +24,7 @@ type dsBindingInjector struct {
 	cfgRepo appconfig.Repository
 	appRepo application.Repository // 查应用剩余绑定，解绑时重新注入同 Kind 连接（避免误删仍需的 key）
 	idb     identity.Repository    // 模型绑定时创建应用级 API Key（用量归因到应用）
+	kbRepo  knowledgebase.Repository // 知识库绑定时注入 KB_ID/API_BASE
 }
 
 // isDataserviceKind 判断绑定类型是否为数据服务 kind（db/cache/mq/storage/vector/search）。
@@ -128,6 +130,9 @@ func (b dsBindingInjector) OnBind(ctx context.Context, appID, btype, name string
 	if btype == "models" {
 		return b.bindModel(ctx, appID)
 	}
+	if btype == "knowledgebase" {
+		return b.bindKB(ctx, appID, name)
+	}
 	if !isDataserviceKind(btype) || b.dsRepo == nil || b.cfgRepo == nil {
 		return nil
 	}
@@ -191,6 +196,9 @@ func (b dsBindingInjector) bindModel(ctx context.Context, appID string) error {
 func (b dsBindingInjector) OnUnbind(ctx context.Context, appID, btype, name string) error {
 	if btype == "models" {
 		return b.unbindModel(ctx, appID)
+	}
+	if btype == "knowledgebase" {
+		return b.unbindKB(ctx, appID)
 	}
 	if !isDataserviceKind(btype) || b.dsRepo == nil || b.cfgRepo == nil {
 		return nil
@@ -271,4 +279,71 @@ func (b dsBindingInjector) unbindModel(ctx context.Context, appID string) error 
 		}
 	}
 	return nil
+}
+
+// bindKB 知识库绑定时注入 KB_ID + KB_API_BASE（"default" 桶，跨环境共享；TypeSecret 复用 upsert，
+// 实际非敏感但应用启动注入明文 env 即可）。应用据此调用 retrieve 端点：
+// {KB_API_BASE}/api/knowledgebases/{KB_ID}/retrieve。
+// 应用级 API Key（kb:read）留后续，MVP 用户用自身 Key 调用。
+func (b dsBindingInjector) bindKB(ctx context.Context, appID, name string) error {
+	if b.kbRepo == nil || b.cfgRepo == nil {
+		return nil
+	}
+	kb, err := b.resolveKB(ctx, name)
+	if err != nil {
+		return err
+	}
+	b.upsert(ctx, appID, appconfig.DefaultEnv, []struct{ Key, Value string }{
+		{"KB_ID", kb.ID},
+		{"KB_API_BASE", kbBaseURL()},
+	})
+	return nil
+}
+
+// resolveKB 按 nameOrID 解析知识库（先 ID 直查，未命中按 name 遍历，与 resolveDS 同款）。
+func (b dsBindingInjector) resolveKB(ctx context.Context, nameOrID string) (knowledgebase.KnowledgeBase, error) {
+	if kb, err := b.kbRepo.Get(ctx, nameOrID); err == nil {
+		return kb, nil
+	}
+	list, err := b.kbRepo.List(ctx)
+	if err != nil {
+		return knowledgebase.KnowledgeBase{}, err
+	}
+	for _, kb := range list {
+		if kb.Name == nameOrID {
+			return kb, nil
+		}
+	}
+	return knowledgebase.KnowledgeBase{}, fmt.Errorf("知识库不存在: %s", nameOrID)
+}
+
+// unbindKB 解绑知识库：删 appconfig 的 KB_ID/KB_API_BASE（"default" 桶）。
+func (b dsBindingInjector) unbindKB(ctx context.Context, appID string) error {
+	if b.cfgRepo == nil {
+		return nil
+	}
+	items, err := b.cfgRepo.List(ctx, appID, appconfig.DefaultEnv)
+	if err != nil {
+		return err
+	}
+	want := map[string]bool{"KB_ID": true, "KB_API_BASE": true}
+	for _, it := range items {
+		if want[it.Key] {
+			if err := b.cfgRepo.Delete(ctx, it.ID); err != nil {
+				log.Printf("dsBindingInjector unbindKB: 删 appconfig id=%s 失败: %v", it.ID, err)
+			}
+		}
+	}
+	return nil
+}
+
+// kbBaseURL 解析 KB API 入口：env PAAS_API_BASE 优先（去 /v1 后缀），否则集群内 core service 默认。
+func kbBaseURL() string {
+	if v := os.Getenv("PAAS_API_BASE"); v != "" {
+		if len(v) >= 3 && v[len(v)-3:] == "/v1" {
+			return v[:len(v)-3]
+		}
+		return v
+	}
+	return "http://paas-core.paas.svc.cluster.local:8080"
 }
