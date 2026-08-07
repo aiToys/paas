@@ -2,9 +2,11 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
+	"github.com/aitoys/paas/internal/ai/guardrail"
 	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/pkg/provider"
 )
@@ -180,6 +182,16 @@ func (h *Handler) serveRun(w http.ResponseWriter, r *http.Request, id string) {
 	if len(req.Messages) == 0 {
 		w.Header().Set("Content-Type", "application/json")
 		httputil.WriteError(w, http.StatusBadRequest, "messages 不能为空")
+		return
+	}
+	// 输入护栏预检：开 SSE 前返干净 422（命中后 ServeSSE 已写头无法改 status）。
+	if err := h.runtime.CheckInput(r.Context(), id, req.Messages); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		if errors.Is(err, guardrail.ErrBlocked) {
+			httputil.WriteError(w, http.StatusUnprocessableEntity, err.Error())
+		} else {
+			h.writeErr(w, err)
+		}
 		return
 	}
 	if err := h.runtime.ServeSSE(w, r.Context(), id, req.Messages); err != nil {

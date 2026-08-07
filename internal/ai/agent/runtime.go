@@ -4,16 +4,25 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
+	"github.com/aitoys/paas/internal/ai/guardrail"
 	"github.com/aitoys/paas/internal/ai/knowledgebase"
 	"github.com/aitoys/paas/internal/ai/prompt"
 	"github.com/aitoys/paas/internal/ai/tool"
 	"github.com/aitoys/paas/internal/ai/tool/mcp"
 	"github.com/aitoys/paas/internal/maas"
 	"github.com/aitoys/paas/pkg/provider"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// tracer 是 Agent 运行的 OTel tracer（noop tracer 未接后端时无开销）。
+var tracer = otel.Tracer("paas.ai/agent")
 
 // Runtime 执行 Agent：组装 system prompt（agent.SystemPrompt 或 PromptRef 模板）+
 // KB RAG 上下文 + 工具定义（FunctionCalling），调底层 LLM。
@@ -37,7 +46,16 @@ type Runtime struct {
 	prompts  prompt.Repository
 	tools    tool.Repository
 	kb       *knowledgebase.Retriever
+	guard    guardrail.Guard // 输入/输出护栏（nil 全放行）
+	// promptLogEnabled 为 true 时，结构化日志记录输入/输出摘要（脱敏长度），便于审计/调试。
+	promptLogEnabled bool
 }
+
+// WithGuard 注入护栏（依赖倒置；不调则全放行）。
+func (r *Runtime) WithGuard(g guardrail.Guard) *Runtime { r.guard = g; return r }
+
+// WithPromptLog 开启输入/输出摘要日志（PAAS_AI_LOG_PROMPTS=true 时调）。
+func (r *Runtime) WithPromptLog(enabled bool) *Runtime { r.promptLogEnabled = enabled; return r }
 
 func NewRuntime(
 	agents Repository,
@@ -168,6 +186,8 @@ func (r *Runtime) buildTools(ctx context.Context, a Agent) ([]provider.ToolDef, 
 
 // Run 执行 Agent，流式回调 onChunk（content/reasoning + 工具进度）。
 // 启用工具时进入多轮循环；底层 LLM 不可达（凭证/模型缺失）返脱敏错误。
+// 输入护栏在调 LLM 前拦截（命中返 ErrBlocked）；输出护栏逐段检（命中截断 + ErrBlocked）。
+// 整轮包在 gen_ai OTel span 内（接 Tempo 后 /api/observability/traces 可观测）。
 func (r *Runtime) Run(ctx context.Context, agentID string, msgs []provider.Message, onChunk func(provider.Chunk)) error {
 	a, err := r.agents.Get(ctx, agentID)
 	if err != nil {
@@ -175,6 +195,12 @@ func (r *Runtime) Run(ctx context.Context, agentID string, msgs []provider.Messa
 	}
 	if !a.Enabled {
 		return fmt.Errorf("agent 已禁用")
+	}
+	// 输入护栏：检查最后一条用户消息（拦截滥用/越权提示）。
+	if r.guard != nil {
+		if d := r.guard.CheckInput(ctx, lastUserText(msgs)); !d.Allowed {
+			return fmt.Errorf("%w: %s", guardrail.ErrBlocked, d.Reason)
+		}
 	}
 	// 取底层 Provider（MaaS catalog）
 	m, err := r.models.GetModel(ctx, a.Model)
@@ -185,7 +211,56 @@ func (r *Runtime) Run(ctx context.Context, agentID string, msgs []provider.Messa
 		return fmt.Errorf("模型 %s 无通道", a.Model)
 	}
 	p := maas.BuildProvider(m.Channels[0], r.resolver)
-	return r.runLoop(ctx, p, a, msgs, onChunk)
+
+	// gen_ai span：OpenTelemetry GenAI 语义约定，接 Tempo 后可观测 Agent 链路。
+	ctx, span := tracer.Start(ctx, "agent.run",
+		trace.WithAttributes(
+			attribute.String("gen_ai.operation.name", "agent"),
+			attribute.String("gen_ai.system", "paas"),
+			attribute.String("gen_ai.request.model", a.Model),
+			attribute.String("gen_ai.agent.id", agentID),
+		),
+	)
+	defer span.End()
+	if r.promptLogEnabled {
+		log.Printf("[ai] agent=%s model=%s inputChars=%d", agentID, a.Model, totalChars(msgs))
+	}
+
+	err = r.runLoop(ctx, p, a, msgs, onChunk)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+	}
+	span.SetAttributes(attribute.Int("gen_ai.agent.max_steps", a.MaxSteps))
+	return err
+}
+
+// CheckInput 仅做输入护栏预检（不调 LLM），供 handler 在开 SSE 前返回干净 422。
+// 无护栏或通过返 nil；命中返 wrapped ErrBlocked。Run 内部也会再检一次（覆盖不经 handler 的
+// gateway agent:{id} 路径），双重保险。
+func (r *Runtime) CheckInput(ctx context.Context, agentID string, msgs []provider.Message) error {
+	if r.guard == nil {
+		return nil
+	}
+	a, err := r.agents.Get(ctx, agentID)
+	if err != nil {
+		return err
+	}
+	if !a.Enabled {
+		return fmt.Errorf("agent 已禁用")
+	}
+	if d := r.guard.CheckInput(ctx, lastUserText(msgs)); !d.Allowed {
+		return fmt.Errorf("%w: %s", guardrail.ErrBlocked, d.Reason)
+	}
+	return nil
+}
+
+// totalChars 统计消息总字符数（prompt 日志摘要用，不含完整内容防泄漏）。
+func totalChars(msgs []provider.Message) int {
+	n := 0
+	for _, m := range msgs {
+		n += len([]rune(m.Content))
+	}
+	return n
 }
 
 // runLoop 跑多轮工具循环（抽离自 Run 便于用 fake provider 单测）。
@@ -216,6 +291,12 @@ func (r *Runtime) runLoop(ctx context.Context, p provider.Provider, a Agent, msg
 		var toolCalls []provider.ToolCall
 		for c := range chunkCh {
 			if c.Role != "" || c.Content != "" || c.Reasoning != "" {
+				// 输出护栏：逐段检生成内容（命中即截断 + ErrBlocked，停止后续输出）。
+				if r.guard != nil && c.Content != "" {
+					if d := r.guard.CheckOutput(ctx, c.Content); !d.Allowed {
+						return fmt.Errorf("%w: %s", guardrail.ErrBlocked, d.Reason)
+					}
+				}
 				onChunk(c)
 				if c.Content != "" {
 					assistantText.WriteString(c.Content)
@@ -227,6 +308,9 @@ func (r *Runtime) runLoop(ctx context.Context, p provider.Provider, a Agent, msg
 		}
 		// 无工具调用：本轮 content 即最终答案（已流式输出），结束。
 		if len(toolCalls) == 0 {
+			if r.promptLogEnabled {
+				log.Printf("[ai] agent=%s 输出字符数=%d", a.ID, assistantText.Len())
+			}
 			return nil
 		}
 		// 有工具调用：回放 assistant 消息（含 tool_calls），执行工具，追加 role=tool 结果。

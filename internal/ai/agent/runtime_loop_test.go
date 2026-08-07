@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/aitoys/paas/internal/ai/guardrail"
 	"github.com/aitoys/paas/pkg/provider"
 )
 
@@ -101,4 +103,53 @@ func TestRunLoopMaxStepsCap(t *testing.T) {
 	if fp.calls != 3 {
 		t.Fatalf("应跑满 MaxSteps=3 兜底，实际 %d", fp.calls)
 	}
+}
+
+// 输入护栏命中：Run 在调 LLM 前拦截（不会跑任何轮），返 ErrBlocked。
+func TestRunInputGuardBlocks(t *testing.T) {
+	fp := &twoRoundFakeProvider{}
+	rt := (&Runtime{agents: &stubRepo{a: Agent{ID: "a", Enabled: true, Model: "m", MaxSteps: 3}}}).
+		WithGuard(&guardrail.RuleGuard{BannedWords: []string{"forbidden"}})
+	err := rt.Run(context.Background(), "a",
+		[]provider.Message{{Role: "user", Content: "this is FORBIDDEN text"}},
+		func(provider.Chunk) {})
+	if !errors.Is(err, guardrail.ErrBlocked) {
+		t.Fatalf("应返 ErrBlocked，got %v", err)
+	}
+	if fp.calls != 0 {
+		t.Fatalf("护栏命中不应调 LLM，实际调 %d 次", fp.calls)
+	}
+}
+
+// 输出护栏命中：runLoop 逐段检，命中即截断 + ErrBlocked。
+func TestRunLoopOutputGuardBlocks(t *testing.T) {
+	// 输出 fake：第 1 轮直接给内容（含禁用词），无 tool_call。
+	out := &outputFake{chunks: []provider.Chunk{{Role: "assistant"}, {Content: "leaked BOMB info"}}}
+	rt := (&Runtime{agents: &stubRepo{a: Agent{ID: "a", Enabled: true, Model: "m", MaxSteps: 3}}}).
+		WithGuard(&guardrail.RuleGuard{BannedWords: []string{"bomb"}})
+	var got strings.Builder
+	err := rt.runLoop(context.Background(), out, Agent{ID: "a", Model: "m", MaxSteps: 3},
+		[]provider.Message{{Role: "user", Content: "x"}}, func(c provider.Chunk) { got.WriteString(c.Content) })
+	if !errors.Is(err, guardrail.ErrBlocked) {
+		t.Fatalf("应返 ErrBlocked，got %v", err)
+	}
+	// 命中段不应透传给 onChunk（拦截前未输出该段）。
+	if strings.Contains(got.String(), "BOMB") {
+		t.Fatalf("拦截段不应透传，got %q", got.String())
+	}
+}
+
+// outputFake 推送固定 chunk 序列（不依赖 tool/result 续轮）。
+type outputFake struct{ chunks []provider.Chunk }
+
+func (p *outputFake) Name() string { return "out-fake" }
+func (p *outputFake) Chat(_ context.Context, _ provider.ChatRequest) (<-chan provider.Chunk, error) {
+	ch := make(chan provider.Chunk)
+	go func() {
+		defer close(ch)
+		for _, c := range p.chunks {
+			ch <- c
+		}
+	}()
+	return ch, nil
 }

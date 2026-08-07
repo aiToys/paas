@@ -20,6 +20,7 @@ import (
 	"github.com/aitoys/paas/internal/ai/tool"
 	"github.com/aitoys/paas/internal/ai/prompt"
 	"github.com/aitoys/paas/internal/ai/agent"
+	"github.com/aitoys/paas/internal/ai/guardrail"
 	"github.com/aitoys/paas/internal/apiroute"
 	"github.com/aitoys/paas/internal/appconfig"
 	"github.com/aitoys/paas/internal/backup"
@@ -758,7 +759,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 
 	// AI Agent（P3）：组装 system prompt + 工具描述 + KB RAG 调底层 LLM。
 	// runtime 注入 MaaS（取 Provider）+ 凭证 + prompt/tool/KB（组装上下文）。
-	agentRuntime := agent.NewRuntime(stores.Agent, stores.MaaS, secretResolver{store: stores.Security.(security.SecretStore)}, stores.Prompt, stores.Tool, kbRetriever)
+	agentRuntime := agent.NewRuntime(stores.Agent, stores.MaaS, secretResolver{store: stores.Security.(security.SecretStore)}, stores.Prompt, stores.Tool, kbRetriever).
+		WithGuard(guardrail.NewFromEnv()).
+		WithPromptLog(os.Getenv("PAAS_AI_LOG_PROMPTS") == "true")
 	// 注入 gateway 虚拟模型路由：/v1/chat/completions 收 model="agent:{id}" 时转交 runtime。
 	agentDispatcherHolder.Set(agentDispatcherAdapter{rt: agentRuntime})
 	agentHandler := agent.NewHandler(stores.Agent, agentRuntime)
