@@ -303,3 +303,75 @@ export const fetchBillList = (params: ResSearchRequest) =>
       (has(b.id, params.keyword ?? '') || has(b.period, params.keyword ?? '') || has(b.status, params.keyword ?? ''))
     )
   )
+
+// ============================================================================
+// admin 管理 API（L1 详情+实例 / L2 运维+删 / L3 代建）—— 数据服务 + 环境样板
+// 对接 /api/admin/dataservices* + /api/admin/environments（POST 代建）。
+// ============================================================================
+
+// -- 租户下拉（代建选归属租户）--
+export interface AdminTenant {
+  id: string
+  name: string
+}
+export const fetchAllTenants = () => api.get<AdminTenant[]>('/api/admin/tenants')
+
+// -- 数据服务详情（资源 + 运行实例）--
+export interface DataserviceInstance {
+  name: string
+  ip: string
+  port: number
+}
+export interface AdminDataserviceDetail {
+  resource: AdminDataservice & {
+    engineId?: string
+    source?: string
+    replicas?: number
+    cpu?: string
+    memory?: string
+    storageGb?: number
+    envId?: string
+    spec?: Record<string, string>
+    connection?: Record<string, string>
+    createdAt?: string
+  }
+  instances: DataserviceInstance[]
+}
+
+export const fetchDataserviceDetail = (id: string) =>
+  api.get<AdminDataserviceDetail>(`/api/admin/dataservices/${id}`)
+
+// start/stop/restart 统一 action
+export const dataserviceAction = (id: string, action: 'start' | 'stop' | 'restart') =>
+  api.post<unknown>(`/api/admin/dataservices/${id}/${action}`, {})
+
+export const scaleDataservice = (
+  id: string,
+  body: { replicas?: number; cpu?: string; memory?: string; storageGb?: number }
+) => api.put<unknown>(`/api/admin/dataservices/${id}/scale`, body)
+
+export const deleteDataservice = (id: string) => api.del<unknown>(`/api/admin/dataservices/${id}`)
+
+export const createDataserviceForTenant = (body: {
+  tenantId: string
+  id?: string
+  name: string
+  engineId: string
+  envId?: string
+  replicas?: number
+  cpu?: string
+  memory?: string
+  storageGb?: number
+  connection?: Record<string, string>
+}) => api.post<unknown>('/api/admin/dataservices', body)
+
+// -- 环境代建 --
+export const createEnvironmentForTenant = (body: {
+  tenantId: string
+  id?: string
+  name: string
+  type: 'prod' | 'test'
+  cluster?: string
+  desc?: string
+}) => api.post<unknown>('/api/admin/environments', body)
+

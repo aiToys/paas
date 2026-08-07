@@ -28,6 +28,7 @@
     </template>
 
     <template #actions>
+      <el-button type="primary" :icon="Plus" @click="createVisible = true">新建环境</el-button>
       <el-button :icon="Refresh" @click="fetchList">刷新</el-button>
     </template>
 
@@ -37,15 +38,18 @@
       </el-tag>
     </template>
   </SearchTable>
+
+  <EnvironmentCreateDrawer v-model="createVisible" @created="fetchList" />
 </template>
 
 <script lang="ts" setup>
-import { computed, onMounted } from 'vue'
-import { Refresh } from '@element-plus/icons-vue'
+import { computed, ref } from 'vue'
+import { Plus, Refresh } from '@element-plus/icons-vue'
 import { SearchTable } from '@/app/components'
 import { useCrud } from '@/app/composables/useCrud'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
 import { fetchEnvironmentList, type AdminEnvironment, type ResSearchRequest } from '../api'
+import EnvironmentCreateDrawer from './EnvironmentCreateDrawer.vue'
 
 const { listData, loading, pagination, searchForm, fetchList, handleSearch, handleReset, handlePageChange } =
   useCrud<AdminEnvironment>({
@@ -55,6 +59,7 @@ const { listData, loading, pagination, searchForm, fetchList, handleSearch, hand
   })
 
 const tableData = computed(() => listData.value as unknown as Record<string, unknown>[])
+const createVisible = ref(false)
 
 const columns = computed<ColumnDef[]>(() => [
   { prop: 'tenantId', label: '租户', width: 130 },
@@ -64,5 +69,5 @@ const columns = computed<ColumnDef[]>(() => [
   { prop: 'cluster', label: '集群', width: 140 }
 ])
 
-onMounted(() => fetchList())
+fetchList()
 </script>
