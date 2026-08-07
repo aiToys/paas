@@ -26,6 +26,9 @@ import (
 	"github.com/aitoys/paas/internal/ai/agent"
 	agentmemory "github.com/aitoys/paas/internal/ai/agent/memory"
 	agentpg "github.com/aitoys/paas/internal/ai/agent/pg"
+	"github.com/aitoys/paas/internal/ai/eval"
+	evalmemory "github.com/aitoys/paas/internal/ai/eval/memory"
+	evalpg "github.com/aitoys/paas/internal/ai/eval/pg"
 	"github.com/aitoys/paas/internal/appconfig"
 	appcfgmemory "github.com/aitoys/paas/internal/appconfig/memory"
 	appcfgpg "github.com/aitoys/paas/internal/appconfig/pg"
@@ -102,6 +105,7 @@ type Stores struct {
 	Tool           tool.Repository
 	Prompt         prompt.Repository
 	Agent          agent.Repository
+	Eval           eval.Repository
 }
 
 // buildAllStores 选择持久化后端、构造全模块 store 并完成 seed。
@@ -148,6 +152,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		toolRepo := toolpg.NewStore(db)
 		promptRepo := promptpg.NewStore(db)
 		agentRepo := agentpg.NewStore(db)
+		evalRepo := evalpg.NewStore(db)
 		msgRepo := messaging.Repository(msgmemory.NewStore())
 		bkRepo := backup.Repository(bkmemory.NewStore())
 
@@ -187,6 +192,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 			Tool:           toolRepo,
 			Prompt:         promptRepo,
 			Agent:          agentRepo,
+			Eval:           evalRepo,
 		}
 		return stores, db.Close, nil
 	}
@@ -246,6 +252,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		Tool:           toolRepo,
 		Prompt:         promptRepo,
 		Agent:          agentRepo,
+		Eval:           evalmemory.NewStore(),
 	}
 	return stores, nil, nil
 }

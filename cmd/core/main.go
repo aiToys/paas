@@ -20,6 +20,7 @@ import (
 	"github.com/aitoys/paas/internal/ai/tool"
 	"github.com/aitoys/paas/internal/ai/prompt"
 	"github.com/aitoys/paas/internal/ai/agent"
+	"github.com/aitoys/paas/internal/ai/eval"
 	"github.com/aitoys/paas/internal/ai/guardrail"
 	"github.com/aitoys/paas/internal/apiroute"
 	"github.com/aitoys/paas/internal/appconfig"
@@ -774,6 +775,17 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("PUT", "/api/agents/{id}", apiroute.Tags("Agent"), apiroute.Summary("更新 Agent"), apiroute.Perm("agent:write"), apiroute.WithReqBody(agent.Agent{}), apiroute.WithResp(agent.Agent{}))
 	reg.Operation("DELETE", "/api/agents/{id}", apiroute.Tags("Agent"), apiroute.Summary("删除 Agent"), apiroute.Perm("agent:write"))
 	reg.Operation("POST", "/api/agents/{id}/run", apiroute.Tags("Agent"), apiroute.Summary("运行 Agent（SSE 流式，OpenAI 兼容）"), apiroute.Perm("agent:read"))
+
+	// AI 评估（P4）：为 Agent 定义测试用例 + 批量跑测评分。service 注入 agentRuntime 作 Runner。
+	evalSvc := eval.NewService(stores.Eval, agentRuntime)
+	evalHandler := eval.NewHandler(stores.Eval, evalSvc)
+	evalHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+	mux.Handle("/api/agent-evals", auth(evalHandler))
+	mux.Handle("/api/agent-evals/", auth(evalHandler))
+	reg.Operation("GET", "/api/agent-evals", apiroute.Tags("评估"), apiroute.Summary("评估用例列表（?agentId=）"), apiroute.Perm("agent:read"), apiroute.WithResp([]eval.EvalCase{}))
+	reg.Operation("POST", "/api/agent-evals", apiroute.Tags("评估"), apiroute.Summary("创建评估用例"), apiroute.Perm("agent:write"), apiroute.WithReqBody(eval.EvalCase{}), apiroute.WithResp(eval.EvalCase{}))
+	reg.Operation("DELETE", "/api/agent-evals/{id}", apiroute.Tags("评估"), apiroute.Summary("删除评估用例"), apiroute.Perm("agent:write"))
+	reg.Operation("POST", "/api/agent-evals/run", apiroute.Tags("评估"), apiroute.Summary("跑某 Agent 全部用例（?agentId=）"), apiroute.Perm("agent:read"), apiroute.WithResp([]eval.EvalResult{}))
 
 	mux.Handle("/livez", health.NewHandler())
 
