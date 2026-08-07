@@ -471,3 +471,48 @@ export const fetchReleaseDetail = (id: string) =>
 export const rollbackRelease = (id: string) =>
   api.post<AdminRelease>(`/api/admin/releases/${id}/rollback`, {})
 
+// ============================================================================
+// admin 治理/可观测/计费/安全 管理（P4：详情 + 运维操作 + 删）
+// 对接 /api/admin/services|alert-rules|quotas|bills|secrets/{id}*。
+// 全挂 adminGuard(super_admin)；绕过 prod:write；写操作记审计；密钥掩码。
+// ============================================================================
+
+// -- 服务治理：服务详情（含实例）+ 注销实例 + 删服务 --
+export interface AdminServiceInstance {
+  id: string
+  tenantId: string
+  serviceId: string
+  addr: string
+  status: string
+  laneId: string
+  updatedAt: string
+}
+export interface AdminServiceDetail {
+  service: AdminService
+  instances: AdminServiceInstance[]
+}
+export const fetchServiceDetail = (id: string) =>
+  api.get<AdminServiceDetail>(`/api/admin/services/${id}`)
+export const deregisterServiceInstance = (serviceId: string, instanceId: string) =>
+  api.del<unknown>(`/api/admin/services/${serviceId}/instances/${instanceId}`)
+export const deleteService = (id: string) => api.del<unknown>(`/api/admin/services/${id}`)
+
+// -- 可观测：告警规则详情 + 删 --
+export type AdminAlertRuleDetail = AdminAlertRule
+export const fetchAlertRuleDetail = (id: string) =>
+  api.get<AdminAlertRuleDetail>(`/api/admin/alert-rules/${id}`)
+export const deleteAlertRule = (id: string) => api.del<unknown>(`/api/admin/alert-rules/${id}`)
+
+// -- 计费：配额调整 + 账单详情 + 标记已付 --
+export const setQuotaForTenant = (body: { tenantId: string; limits: Record<string, number> }) =>
+  api.put<unknown>('/api/admin/quotas', body)
+export type AdminBillDetail = AdminBill
+export const fetchBillDetail = (id: string) => api.get<AdminBillDetail>(`/api/admin/bills/${id}`)
+export const payBill = (id: string) => api.post<unknown>(`/api/admin/bills/${id}/pay`, {})
+
+// -- 安全：密钥详情（掩码）+ 删 --
+export type AdminSecretDetail = AdminSecret
+export const fetchSecretDetail = (id: string) =>
+  api.get<AdminSecretDetail>(`/api/admin/secrets/${id}`)
+export const deleteSecret = (id: string) => api.del<unknown>(`/api/admin/secrets/${id}`)
+

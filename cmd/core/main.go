@@ -561,6 +561,32 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		application.WithAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
 	)
 
+	// admin governance handler（L1 服务详情+实例 / L2 注销实例·删服务）。
+	// 全挂 adminGuard(super_admin)；绕过 prod:write；写操作记审计。路由/熔断无 ListAll -> 只做服务。
+	govAdminHandler := governance.NewAdminHandler(stores.Governance,
+		governance.WithAdminAudit(&identityAuditAdapter{store: stores.Security}),
+		governance.WithAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
+	)
+
+	// admin observability handler（L1 告警规则详情 / L2 删除）。无 UpdateAlertRule -> 启停跳过，只做删。
+	obsAdminHandler := observability.NewAdminHandler(obsRepo,
+		observability.WithAdminAudit(&identityAuditAdapter{store: stores.Security}),
+		observability.WithAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
+	)
+
+	// admin billing handler（配额列表+调整 / 账单列表+详情+标记已付）。
+	// 全挂 adminGuard(super_admin)；绕过 prod:write；写操作记审计。调整配额不消耗配额（SetQuota 改 Limits）。
+	billAdminHandler := billing.NewAdminHandler(stores.Billing,
+		billing.WithAdminAudit(&identityAuditAdapter{store: stores.Security}),
+		billing.WithAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
+	)
+
+	// admin security handler（L1 密钥详情（掩码）/ L2 删除）。平台级 Secret TenantID 空，target_tenant 记空。
+	secAdminHandler := security.NewAdminHandler(stores.Security,
+		security.WithAdminAudit(&identityAuditAdapter{store: stores.Security}),
+		security.WithAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
+	)
+
 	// composite：按 /api/applications/{id}/{sub} 的 sub 段分发到对应 handler。
 	// workloads -> 工作负载；repositories/buildruns/images/releases -> DevOps；其余（bindings 等）-> 应用。
 	composite := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -929,31 +955,48 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		renderList(w, list, err)
 	})),
 		apiroute.Tags("资源总览"), apiroute.Summary("服务列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]governance.Service{}))
+	// admin governance 管理（服务详情+实例 / 注销实例·删服务）：mux.Handle 到 govAdminHandler（按 path 分发）。
+	// /api/admin/services（无尾斜杠）GET 列表仍走 reg.Register；/api/admin/services/（有尾斜杠，{id}）走 govAdminHandler。
+	mux.Handle("/api/admin/services/", adminGuard(govAdminHandler))
+	reg.Operation("GET", "/api/admin/services/{id}", apiroute.Tags("治理管理"), apiroute.Summary("服务详情（跨租户，含实例）"), apiroute.Perm("super_admin"), apiroute.WithResp(governance.ServiceDetail{}))
+	reg.Operation("DELETE", "/api/admin/services/{id}", apiroute.Tags("治理管理"), apiroute.Summary("强制删服务（级联清实例，绕过 prod:write）"), apiroute.Perm("super_admin"))
+	reg.Operation("DELETE", "/api/admin/services/{id}/instances/{iid}", apiroute.Tags("治理管理"), apiroute.Summary("注销实例（绕过 prod:write）"), apiroute.Perm("super_admin"))
 	reg.Register("GET", "/api/admin/alert-rules", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		list, err := obsRepo.ListAllAlertRules(r.Context())
 		renderList(w, list, err)
 	})),
 		apiroute.Tags("资源总览"), apiroute.Summary("告警规则列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]observability.AlertRule{}))
+	// admin observability 管理（告警规则详情 / 删除）：mux.Handle 到 obsAdminHandler。
+	// /api/admin/alert-rules（无尾斜杠）GET 列表仍走 reg.Register；/api/admin/alert-rules/（有尾斜杠，{id}）走 obsAdminHandler。
+	mux.Handle("/api/admin/alert-rules/", adminGuard(obsAdminHandler))
+	reg.Operation("GET", "/api/admin/alert-rules/{id}", apiroute.Tags("可观测管理"), apiroute.Summary("告警规则详情（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp(observability.AlertRule{}))
+	reg.Operation("DELETE", "/api/admin/alert-rules/{id}", apiroute.Tags("可观测管理"), apiroute.Summary("强制删除告警规则（绕过 prod:write）"), apiroute.Perm("super_admin"))
 	reg.Register("GET", "/api/admin/secrets", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		list, err := stores.Security.ListAllSecrets(r.Context())
 		renderList(w, list, err)
 	})),
 		apiroute.Tags("资源总览"), apiroute.Summary("密钥列表（跨租户，掩码）"), apiroute.Perm("super_admin"), apiroute.WithResp([]security.Secret{}))
+	// admin security 管理（密钥详情（掩码）/ 删除）：mux.Handle 到 secAdminHandler。
+	// /api/admin/secrets（无尾斜杠）GET 列表仍走 reg.Register；/api/admin/secrets/（有尾斜杠，{id}）走 secAdminHandler。
+	mux.Handle("/api/admin/secrets/", adminGuard(secAdminHandler))
+	reg.Operation("GET", "/api/admin/secrets/{id}", apiroute.Tags("安全管理"), apiroute.Summary("密钥详情（跨租户，掩码）"), apiroute.Perm("super_admin"), apiroute.WithResp(security.Secret{}))
+	reg.Operation("DELETE", "/api/admin/secrets/{id}", apiroute.Tags("安全管理"), apiroute.Summary("强制删除密钥（绕过 prod:write）"), apiroute.Perm("super_admin"))
 	reg.Register("GET", "/api/admin/audit-logs", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		list, err := stores.Security.ListAllAuditLogs(r.Context())
 		renderList(w, list, err)
 	})),
 		apiroute.Tags("资源总览"), apiroute.Summary("审计日志列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]security.AuditLog{}))
-	reg.Register("GET", "/api/admin/quotas", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		list, err := stores.Billing.ListAllQuotas(r.Context())
-		renderList(w, list, err)
-	})),
-		apiroute.Tags("资源总览"), apiroute.Summary("配额列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]billing.ResourceQuota{}))
-	reg.Register("GET", "/api/admin/bills", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		list, err := stores.Billing.ListAllBills(r.Context())
-		renderList(w, list, err)
-	})),
-		apiroute.Tags("资源总览"), apiroute.Summary("账单列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]billing.BillingRecord{}))
+	// admin billing 管理（配额列表+调整 / 账单列表+详情+标记已付）：mux.Handle 到 billAdminHandler（按 method+path 分发）。
+	// PUT /quotas 与 GET /quotas 同路径需同 handler 分发，原 reg.Register GET 列表删并入 billAdminHandler.ServeHTTP。
+	mux.Handle("/api/admin/quotas", adminGuard(billAdminHandler))
+	mux.Handle("/api/admin/quotas/", adminGuard(billAdminHandler))
+	mux.Handle("/api/admin/bills", adminGuard(billAdminHandler))
+	mux.Handle("/api/admin/bills/", adminGuard(billAdminHandler))
+	reg.Operation("GET", "/api/admin/quotas", apiroute.Tags("计费管理"), apiroute.Summary("配额列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]billing.ResourceQuota{}))
+	reg.Operation("PUT", "/api/admin/quotas", apiroute.Tags("计费管理"), apiroute.Summary("调整配额（绕过 prod:write）"), apiroute.Perm("super_admin"))
+	reg.Operation("GET", "/api/admin/bills", apiroute.Tags("计费管理"), apiroute.Summary("账单列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]billing.BillingRecord{}))
+	reg.Operation("GET", "/api/admin/bills/{id}", apiroute.Tags("计费管理"), apiroute.Summary("账单详情（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp(billing.BillingRecord{}))
+	reg.Operation("POST", "/api/admin/bills/{id}/pay", apiroute.Tags("计费管理"), apiroute.Summary("标记账单已付（绕过 prod:write）"), apiroute.Perm("super_admin"), apiroute.WithResp(billing.BillingRecord{}))
 
 	// messaging（MQ topic/消费组 CRUD，租户隔离，方法级 dataservice 权限）。
 	mux.Handle("/api/mq-topics", auth(msgHandler))

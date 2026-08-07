@@ -1,6 +1,6 @@
 <template>
   <SearchTable
-    title="账单总览（跨租户）"
+    title="账单总览（跨租户：详情 / 标记已付）"
     :loading="loading"
     :data="tableData"
     :columns="columns"
@@ -39,16 +39,28 @@
     <template #col-total="{ row }">
       ¥{{ Number(row.total).toFixed(2) }}
     </template>
+    <template #col-action="{ row }">
+      <el-button
+        v-if="row.status === 'unpaid'"
+        type="success"
+        link
+        size="small"
+        :loading="payingId === row.id"
+        @click="doPay(row.id)"
+      >标记已付</el-button>
+      <span v-else style="color: var(--el-text-color-secondary)">-</span>
+    </template>
   </SearchTable>
 </template>
 
 <script lang="ts" setup>
-import { computed, onMounted } from 'vue'
+import { computed, ref } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { SearchTable } from '@/app/components'
 import { useCrud } from '@/app/composables/useCrud'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
-import { fetchBillList, type AdminBill, type ResSearchRequest } from '../api'
+import { fetchBillList, payBill, type AdminBill, type ResSearchRequest } from '../api'
 
 const { listData, loading, pagination, searchForm, fetchList, handleSearch, handleReset, handlePageChange } =
   useCrud<AdminBill>({
@@ -65,8 +77,26 @@ const columns = computed<ColumnDef[]>(() => [
   { prop: 'period', label: '周期', width: 110 },
   { prop: 'total', label: '金额', width: 110, slot: 'total' },
   { prop: 'status', label: '状态', width: 100, slot: 'status' },
-  { prop: 'createdAt', label: '创建时间', width: 180 }
+  { prop: 'createdAt', label: '创建时间', width: 180 },
+  { prop: 'action', label: '操作', width: 110, slot: 'action', hideable: false }
 ])
 
-onMounted(() => fetchList())
+const payingId = ref('')
+const doPay = async (id: string) => {
+  try {
+    await ElMessageBox.confirm('确认标记该账单为已支付？', '提示', { type: 'warning' })
+  } catch {
+    return
+  }
+  payingId.value = id
+  try {
+    await payBill(id)
+    ElMessage.success('已标记为已支付')
+    fetchList()
+  } finally {
+    payingId.value = ''
+  }
+}
+
+fetchList()
 </script>
