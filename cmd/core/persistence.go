@@ -23,6 +23,9 @@ import (
 	"github.com/aitoys/paas/internal/ai/prompt"
 	promptmemory "github.com/aitoys/paas/internal/ai/prompt/memory"
 	promptpg "github.com/aitoys/paas/internal/ai/prompt/pg"
+	"github.com/aitoys/paas/internal/ai/agent"
+	agentmemory "github.com/aitoys/paas/internal/ai/agent/memory"
+	agentpg "github.com/aitoys/paas/internal/ai/agent/pg"
 	"github.com/aitoys/paas/internal/appconfig"
 	appcfgmemory "github.com/aitoys/paas/internal/appconfig/memory"
 	appcfgpg "github.com/aitoys/paas/internal/appconfig/pg"
@@ -98,6 +101,7 @@ type Stores struct {
 	KnowledgeBase  knowledgebase.Repository
 	Tool           tool.Repository
 	Prompt         prompt.Repository
+	Agent          agent.Repository
 }
 
 // buildAllStores 选择持久化后端、构造全模块 store 并完成 seed。
@@ -143,6 +147,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		kbRepo := kbpg.NewStore(db)
 		toolRepo := toolpg.NewStore(db)
 		promptRepo := promptpg.NewStore(db)
+		agentRepo := agentpg.NewStore(db)
 		msgRepo := messaging.Repository(msgmemory.NewStore())
 		bkRepo := backup.Repository(bkmemory.NewStore())
 
@@ -181,6 +186,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 			KnowledgeBase:  kbRepo,
 			Tool:           toolRepo,
 			Prompt:         promptRepo,
+			Agent:          agentRepo,
 		}
 		return stores, db.Close, nil
 	}
@@ -212,6 +218,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 	kbRepo := kbmemory.NewStore()
 	toolRepo := toolmemory.NewStore()
 	promptRepo := promptmemory.NewStore()
+	agentRepo := agentmemory.NewStore()
 	msgRepo := messaging.Repository(msgmemory.NewStore())
 	bkRepo := backup.Repository(bkmemory.NewStore())
 	log.Println("持久化后端: 内存（dev/echo 路径，零依赖）")
@@ -238,6 +245,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		KnowledgeBase:  kbRepo,
 		Tool:           toolRepo,
 		Prompt:         promptRepo,
+		Agent:          agentRepo,
 	}
 	return stores, nil, nil
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/aitoys/paas/internal/ai/knowledgebase"
 	"github.com/aitoys/paas/internal/ai/tool"
 	"github.com/aitoys/paas/internal/ai/prompt"
+	"github.com/aitoys/paas/internal/ai/agent"
 	"github.com/aitoys/paas/internal/apiroute"
 	"github.com/aitoys/paas/internal/appconfig"
 	"github.com/aitoys/paas/internal/backup"
@@ -751,6 +752,20 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/prompts/{id}", apiroute.Tags("Prompt"), apiroute.Summary("取单版本"), apiroute.Perm("prompt:read"), apiroute.WithResp(prompt.Prompt{}))
 	reg.Operation("DELETE", "/api/prompts/{id}", apiroute.Tags("Prompt"), apiroute.Summary("删单版本"), apiroute.Perm("prompt:write"))
 	reg.Operation("POST", "/api/prompts/{id}/activate", apiroute.Tags("Prompt"), apiroute.Summary("激活该版本"), apiroute.Perm("prompt:write"), apiroute.WithResp(prompt.Prompt{}))
+
+	// AI Agent（P3）：组装 system prompt + 工具描述 + KB RAG 调底层 LLM。
+	// runtime 注入 MaaS（取 Provider）+ 凭证 + prompt/tool/KB（组装上下文）。
+	agentRuntime := agent.NewRuntime(stores.Agent, stores.MaaS, secretResolver{store: stores.Security.(security.SecretStore)}, stores.Prompt, stores.Tool, kbRetriever)
+	agentHandler := agent.NewHandler(stores.Agent, agentRuntime)
+	agentHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+	mux.Handle("/api/agents", auth(agentHandler))
+	mux.Handle("/api/agents/", auth(agentHandler))
+	reg.Operation("GET", "/api/agents", apiroute.Tags("Agent"), apiroute.Summary("Agent 列表"), apiroute.Perm("agent:read"), apiroute.WithResp([]agent.Agent{}))
+	reg.Operation("POST", "/api/agents", apiroute.Tags("Agent"), apiroute.Summary("创建 Agent"), apiroute.Perm("agent:write"), apiroute.WithReqBody(agent.Agent{}), apiroute.WithResp(agent.Agent{}))
+	reg.Operation("GET", "/api/agents/{id}", apiroute.Tags("Agent"), apiroute.Summary("Agent 详情"), apiroute.Perm("agent:read"), apiroute.WithResp(agent.Agent{}))
+	reg.Operation("PUT", "/api/agents/{id}", apiroute.Tags("Agent"), apiroute.Summary("更新 Agent"), apiroute.Perm("agent:write"), apiroute.WithReqBody(agent.Agent{}), apiroute.WithResp(agent.Agent{}))
+	reg.Operation("DELETE", "/api/agents/{id}", apiroute.Tags("Agent"), apiroute.Summary("删除 Agent"), apiroute.Perm("agent:write"))
+	reg.Operation("POST", "/api/agents/{id}/run", apiroute.Tags("Agent"), apiroute.Summary("运行 Agent（SSE 流式，OpenAI 兼容）"), apiroute.Perm("agent:read"))
 
 	mux.Handle("/livez", health.NewHandler())
 
