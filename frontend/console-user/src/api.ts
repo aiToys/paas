@@ -16,7 +16,9 @@ function refreshSession(): Promise<boolean> {
 // fetchAuth 统一注入 credentials，处理 401/429 全局提示。返回原始 Response，由调用方解码。
 export async function fetchAuth(path: string, opts: RequestInit = {}): Promise<Response> {
   const headers = new Headers(opts.headers)
-  if (opts.body && !headers.has('Content-Type')) {
+  // FormData 不设 Content-Type --浏览器需自动生成 multipart/form-data; boundary=...，
+  // 强加 application/json 会覆盖 boundary 致后端 ParseMultipartForm 失败。
+  if (opts.body && !(opts.body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json')
   }
   const resp = await fetch(path, { ...opts, headers, credentials: 'include' })
