@@ -16,6 +16,7 @@ import (
 	"github.com/aitoys/paas/internal/ai/guardrail"
 	"github.com/aitoys/paas/internal/ai/knowledgebase"
 	"github.com/aitoys/paas/internal/core/gateway"
+	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/internal/maas"
 	"github.com/aitoys/paas/pkg/provider"
 
@@ -39,7 +40,8 @@ type qdrantVectorStore struct {
 func newQdrantVectorStore(url, apiKey string) *qdrantVectorStore {
 	return &qdrantVectorStore{
 		baseURL: url, apiKey: apiKey,
-		client: &http.Client{Timeout: 30 * time.Second},
+		// httputil.NewClient 内置 CheckRedirect=ErrUseLastResponse（防 SSRF，与平台出站 client 一致）。
+		client: httputil.NewClient(30 * time.Second),
 	}
 }
 

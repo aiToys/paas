@@ -30,12 +30,19 @@ type Client struct {
 	idCounter atomic.Uint64
 }
 
-// NewClient 构造 MCP client。http.Client 不跟随重定向（防 SSRF，复用 httputil.NewClient 模式）。
+// NewClient 构造 MCP client。http.Client 不跟随重定向（CheckRedirect=ErrUseLastResponse，
+// 防 serverURL 被配为攻击者主机返 302->Bearer apiKey 外发，复用 httputil.NewClient 模式）。
+// Timeout=0 由 ctx 控制超时（MCP 调用可能长耗时）。
 func NewClient(serverURL, apiKey string) *Client {
 	return &Client{
 		serverURL: serverURL,
 		apiKey:    apiKey,
-		http:      &http.Client{Timeout: 0}, // 超时由 ctx 控制
+		http: &http.Client{
+			Timeout: 0,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 }
 
