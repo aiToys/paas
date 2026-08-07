@@ -1,9 +1,17 @@
 package gateway
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/aitoys/paas/pkg/provider"
+)
+
+// Agent 虚拟模型路由错误 sentinels（gateway 包内定义，避免 gateway import agent 破解耦）。
+// adapter（cmd/core）把 agent/guardrail 错误映射到这些 sentinel，gateway 据此返 HTTP 状态。
+var (
+	ErrAgentNotFound = errors.New("agent not found")
+	ErrAgentBlocked  = errors.New("agent 内容被护栏拦截")
 )
 
 // AgentDispatcher 把 agent:{id} 虚拟模型路由到 Agent runtime（P3）。

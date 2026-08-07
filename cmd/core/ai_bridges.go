@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,7 +13,9 @@ import (
 	"time"
 
 	"github.com/aitoys/paas/internal/ai/agent"
+	"github.com/aitoys/paas/internal/ai/guardrail"
 	"github.com/aitoys/paas/internal/ai/knowledgebase"
+	"github.com/aitoys/paas/internal/core/gateway"
 	"github.com/aitoys/paas/internal/maas"
 	"github.com/aitoys/paas/pkg/provider"
 
@@ -261,5 +264,17 @@ func (a agentDispatcherAdapter) Match(model string) bool {
 
 func (a agentDispatcherAdapter) ServeSSE(w http.ResponseWriter, r *http.Request, model string, msgs []provider.Message) error {
 	agentID := strings.TrimPrefix(model, agentModelPrefix)
+	// 预检：agent 存在 + 启用 + 输入护栏（SSE 写头前，让 gateway 能返干净 4xx 而非空 SSE 流）。
+	// Run 内部会再检一次（覆盖直接调 runtime 的路径），双重保险。
+	// 映射 agent/guardrail 错误到 gateway sentinel（避免 gateway import agent 破解耦）。
+	if err := a.rt.CheckInput(r.Context(), agentID, msgs); err != nil {
+		if errors.Is(err, guardrail.ErrBlocked) {
+			return gateway.ErrAgentBlocked
+		}
+		if errors.Is(err, agent.ErrAgentNotFound) {
+			return gateway.ErrAgentNotFound
+		}
+		return err
+	}
 	return a.rt.ServeSSE(w, r.Context(), agentID, msgs)
 }

@@ -187,3 +187,36 @@ func TestChatCompletionsAgentHolderEmptySafe(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
 	require.Equal(t, http.StatusNotFound, rec.Code)
 }
+
+// errAgentDispatcher 模拟预检失败：返回指定 sentinel（测 ChatCompletions 错误映射）。
+type errAgentDispatcher struct{ sentinel error }
+
+func (e *errAgentDispatcher) Match(model string) bool { return strings.HasPrefix(model, "agent:") }
+func (e *errAgentDispatcher) ServeSSE(_ http.ResponseWriter, _ *http.Request, _ string, _ []provider.Message) error {
+	return e.sentinel
+}
+
+// agent 不存在 -> 404（SSE 写头前预检，干净状态码非空流）。
+func TestChatCompletionsAgentNotFound(t *testing.T) {
+	gw := New()
+	holder := &AgentDispatcherHolder{}
+	holder.Set(&errAgentDispatcher{sentinel: ErrAgentNotFound})
+	h := ChatCompletions(gw, &Meter{}, holder)
+	rec := httptest.NewRecorder()
+	body := strings.NewReader(`{"model":"agent:ghost","messages":[{"role":"user","content":"hi"}]}`)
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Contains(t, rec.Body.String(), "agent not found")
+}
+
+// 护栏拦截 -> 422。
+func TestChatCompletionsAgentBlocked(t *testing.T) {
+	gw := New()
+	holder := &AgentDispatcherHolder{}
+	holder.Set(&errAgentDispatcher{sentinel: ErrAgentBlocked})
+	h := ChatCompletions(gw, &Meter{}, holder)
+	rec := httptest.NewRecorder()
+	body := strings.NewReader(`{"model":"agent:bot","messages":[{"role":"user","content":"x"}]}`)
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/chat/completions", body))
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+}

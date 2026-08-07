@@ -316,6 +316,23 @@ func (s *Store) UpdateDocumentStatus(ctx context.Context, docID, status string, 
 	return nil
 }
 
+// UpdateDocumentObjectKey 更新文档原文对象 key（CreateDocument 后算出 ObjectKey 回写）。
+func (s *Store) UpdateDocumentObjectKey(ctx context.Context, docID, objectKey string) error {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	tag, err := s.db.Pool().Exec(ctx,
+		`UPDATE ai_documents SET object_key=$1 WHERE id=$2 AND tenant_id=$3`, objectKey, docID, tid)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return knowledgebase.ErrDocNotFound
+	}
+	return nil
+}
+
 // DeleteDocument 删文档（FK CASCADE 清 ai_chunks；向量/原文清理由 handler 调 VectorStore/BlobStore）。
 func (s *Store) DeleteDocument(ctx context.Context, docID string) error {
 	tid, err := storagepg.TenantOrErr(ctx)

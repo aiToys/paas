@@ -240,8 +240,8 @@ func (h *Handler) serveDocumentUpload(w http.ResponseWriter, r *http.Request, kb
 		return
 	}
 	doc.ObjectKey = fmt.Sprintf("%s/%s/%s", kbID, doc.ID, header.Filename)
-	// 更新 ObjectKey（CreateDocument 不含 ObjectKey 的话）
-	_ = h.repo.UpdateDocumentStatus(r.Context(), doc.ID, DocStatusParsing, 0, "")
+	// 回写 ObjectKey（CreateDocument 时 doc.ID 未生成，object_key 为空；不回写则删文档时 minio 原文残留泄漏）。
+	_ = h.repo.UpdateDocumentObjectKey(r.Context(), doc.ID, doc.ObjectKey)
 	// 存原文到 minio
 	bucket := kb.BucketName()
 	if err := h.blob.EnsureBucket(r.Context(), bucket); err != nil {
@@ -309,6 +309,11 @@ func (h *Handler) serveDocument(w http.ResponseWriter, r *http.Request, kbID, do
 		doc, err := h.repo.GetDocument(r.Context(), docID)
 		if err != nil {
 			h.writeErr(w, err)
+			return
+		}
+		// 校验 doc 归属路径 KB（防本租户内跨 KB 删他人文档，统一 not found 不泄漏）。
+		if doc.KBID != kbID {
+			httputil.WriteError(w, http.StatusNotFound, "文档不存在")
 			return
 		}
 		// 清向量 points（需先取 chunks 拿 point_ids）

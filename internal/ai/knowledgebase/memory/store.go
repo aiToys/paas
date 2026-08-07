@@ -33,7 +33,8 @@ func NewStore() *Store {
 func tenantOrErr(ctx context.Context) (string, error) {
 	tid, ok := tenant.TenantFrom(ctx)
 	if !ok {
-		return "", fmt.Errorf("missing tenant context")
+		// 无 tenant 统一 not found 不泄漏（与其他 AI 模块 memory tenantOrErr 一致）。
+		return "", knowledgebase.ErrKBNotFound
 	}
 	return tid, nil
 }
@@ -272,6 +273,23 @@ func (s *Store) UpdateDocumentStatus(ctx context.Context, docID, status string, 
 	d.Status = status
 	d.ChunkCount = chunkCount
 	d.Message = msg
+	s.docs[docID] = d
+	return nil
+}
+
+// UpdateDocumentObjectKey 更新文档原文对象 key（memory 路径同步）。
+func (s *Store) UpdateDocumentObjectKey(ctx context.Context, docID, objectKey string) error {
+	tid, err := tenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, ok := s.docs[docID]
+	if !ok || d.TenantID != tid {
+		return knowledgebase.ErrDocNotFound
+	}
+	d.ObjectKey = objectKey
 	s.docs[docID] = d
 	return nil
 }

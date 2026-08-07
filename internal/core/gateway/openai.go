@@ -59,8 +59,17 @@ func ChatCompletions(gw *Gateway, meter *Meter, agents *AgentDispatcherHolder) h
 		// Agent 虚拟模型：委托 runtime（不经通道/failover；用量按 agent:{id} 维度计量）。
 		if agents != nil && agents.Match(req.Model) {
 			if err := agents.ServeSSE(w, r, req.Model, req.Messages); err != nil {
-				// ServeSSE 写 SSE 头后才失败时已无法改 HTTP 状态码，仅日志（与 serveStream 同）。
-				log.Printf("[gateway] agent %s 执行失败: %v", req.Model, err) //nolint:gosec // 请求 path 入日志是标准实践
+				// 预检错误（agent 不存在/禁用/护栏拦截）发生在 SSE 写头前，返干净 4xx。
+				// ServeSSE 内部流式错误已无法改 status，仅日志（与 serveStream 同）。
+				switch {
+				case errors.Is(err, ErrAgentBlocked):
+					httputil.WriteError(w, http.StatusUnprocessableEntity, err.Error())
+				case errors.Is(err, ErrAgentNotFound):
+					httputil.WriteError(w, http.StatusNotFound, "agent not found")
+				default:
+					log.Printf("[gateway] agent %s 执行失败: %v", req.Model, err) //nolint:gosec // 请求 path 入日志是标准实践
+					httputil.WriteError(w, http.StatusServiceUnavailable, "agent unavailable")
+				}
 			}
 			return
 		}

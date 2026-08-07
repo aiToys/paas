@@ -30,6 +30,9 @@ type Repository interface {
 	CreateDocument(ctx context.Context, doc Document) (Document, error)
 	// UpdateDocumentStatus 更新文档状态 + chunkCount + message（异步处理完成回写）。
 	UpdateDocumentStatus(ctx context.Context, docID, status string, chunkCount int, msg string) error
+	// UpdateDocumentObjectKey 更新文档原文对象 key（CreateDocument 后算出 ObjectKey 回写，
+	// 防止 object_key 永久空致删文档时 minio 原文残留泄漏）。
+	UpdateDocumentObjectKey(ctx context.Context, docID, objectKey string) error
 	// DeleteDocument 删除文档（级联清 chunks；向量+原文清理由 handler 调 VectorStore/BlobStore）。
 	DeleteDocument(ctx context.Context, docID string) error
 

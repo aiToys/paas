@@ -774,7 +774,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/agents/{id}", apiroute.Tags("Agent"), apiroute.Summary("Agent 详情"), apiroute.Perm("agent:read"), apiroute.WithResp(agent.Agent{}))
 	reg.Operation("PUT", "/api/agents/{id}", apiroute.Tags("Agent"), apiroute.Summary("更新 Agent"), apiroute.Perm("agent:write"), apiroute.WithReqBody(agent.Agent{}), apiroute.WithResp(agent.Agent{}))
 	reg.Operation("DELETE", "/api/agents/{id}", apiroute.Tags("Agent"), apiroute.Summary("删除 Agent"), apiroute.Perm("agent:write"))
-	reg.Operation("POST", "/api/agents/{id}/run", apiroute.Tags("Agent"), apiroute.Summary("运行 Agent（SSE 流式，OpenAI 兼容）"), apiroute.Perm("agent:read"))
+	reg.Operation("POST", "/api/agents/{id}/run", apiroute.Tags("Agent"), apiroute.Summary("运行 Agent（SSE 流式，OpenAI 兼容）"), apiroute.Perm("agent:write"))
 
 	// AI 评估（P4）：为 Agent 定义测试用例 + 批量跑测评分。service 注入 agentRuntime 作 Runner。
 	evalSvc := eval.NewService(stores.Eval, agentRuntime)

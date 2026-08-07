@@ -32,6 +32,10 @@ func (s *Service) RunAll(ctx context.Context, agentID string) ([]EvalResult, err
 	}
 	results := make([]EvalResult, 0, len(cases))
 	for _, c := range cases {
+		// 调用方取消（客户端断连）即停止，不再跑后续用例（防 LLM token 空耗）。
+		if err := ctx.Err(); err != nil {
+			return results, err
+		}
 		results = append(results, s.runOne(ctx, c))
 	}
 	return results, nil

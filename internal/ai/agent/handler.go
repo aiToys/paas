@@ -163,7 +163,7 @@ func (h *Handler) serveRun(w http.ResponseWriter, r *http.Request, id string) {
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if !h.allow(w, r, PermAgentRead) {
+	if !h.allow(w, r, PermAgentWrite) {
 		return
 	}
 	if h.runtime == nil {
