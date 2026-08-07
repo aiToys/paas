@@ -143,15 +143,28 @@ function stopPoll() {
   if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
 }
 
+// 注意：onUpload 用 fetchAuth（非 fetchJSON）——multipart body 不能被 fetchAuth
+// 强加 Content-Type:application/json（会破坏 boundary），故手动检查 resp.ok + 解 error。
 async function onUpload(file: File) {
   if (!currentKB.value) return
   const fd = new FormData()
   fd.append('file', file)
   try {
-    await fetchAuth(`/api/knowledgebases/${currentKB.value.id}/documents`, {
+    const resp = await fetchAuth(`/api/knowledgebases/${currentKB.value.id}/documents`, {
       method: 'POST',
       body: fd,
     })
+    if (!resp.ok) {
+      const j = await resp.json().catch(() => ({}))
+      const msg = (j && typeof j === 'object' && 'error' in j ? j.error : null) || `HTTP ${resp.status}`
+      // 503 = 集群未配 qdrant/minio 后端，给可操作提示（避免误以为上传成功）
+      if (resp.status === 503) {
+        ElMessage.error('知识库后端未就绪：' + msg + '（需管理员配置向量库/对象存储）')
+      } else {
+        ElMessage.error('上传失败：' + msg)
+      }
+      return
+    }
     ElMessage.success('上传成功，正在解析+索引')
     await loadDocs()
     startPoll()
@@ -247,8 +260,8 @@ onUnmounted(stopPoll)
       >
         <el-button type="primary">上传文档（txt/md/html）</el-button>
       </el-upload>
-      <p v-if="!vectorDS.length || !storageDS.length" style="color:var(--el-color-warning);margin-top:8px">
-        提示：文档上传/检索需后端配置 PAAS_KB_QDRANT_URL / PAAS_KB_MINIO_ENDPOINT（否则 503）。
+      <p style="color:var(--el-text-color-secondary);margin-top:8px;font-size:12px">
+        文档解析+检索依赖平台向量库/对象存储后端（管理员配置）；上传后若长时间停留「解析中」或返回 503，请联系管理员。
       </p>
       <el-table :data="docs" style="margin-top:12px" empty-text="暂无文档">
         <el-table-column prop="name" label="文件名" />

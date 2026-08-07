@@ -101,6 +101,19 @@ spec:
               value: {{ .Values.dataplane.token | default "" | quote }}
             - name: PAAS_DP_ENDPOINT_DEFAULT
               value: {{ .Values.dataplane.endpoint | default "" | quote }}
+            # 知识库（RAG）后端：共享 qdrant（向量）+ minio（对象存储）实例。
+            # 任一为空则文档上传/检索 503 降级（KB CRUD 仍可用）。embedding 复用 MaaS airouter 通道（text-embedding-v4）。
+            # minio endpoint 不含 scheme（minio SDK 自动判 http/https，内网 http）。
+            - name: PAAS_KB_QDRANT_URL
+              value: {{ .Values.kb.qdrantURL | default "" | quote }}
+            - name: PAAS_KB_QDRANT_API_KEY
+              value: {{ .Values.kb.qdrantAPIKey | default "" | quote }}
+            - name: PAAS_KB_MINIO_ENDPOINT
+              value: {{ .Values.kb.minioEndpoint | default "" | quote }}
+            - name: PAAS_KB_MINIO_ACCESS_KEY
+              value: {{ .Values.kb.minioAccessKey | default "" | quote }}
+            - name: PAAS_KB_MINIO_SECRET_KEY
+              value: {{ .Values.kb.minioSecretKey | default "" | quote }}
           resources: {{- toYaml .Values.resources | nindent 12 }}
           readinessProbe:
             httpGet: { path: /livez, port: http }

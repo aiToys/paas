@@ -92,7 +92,15 @@ else
 fi
 
 echo ""
-echo "▶ 3/4 envsubst values（注入 NODE_IP=${NODE_IP}）→ helm upgrade --install..."
+echo "▶ 3/5 部署知识库后端（qdrant + minio 共享实例，KB RAG 用）..."
+# KB 共享 infra：镜像来自内网 registry（library/qdrant + library/minio）。
+# ${NODE_IP} 由 envsubst 注入镜像地址；values-paas-k8s.yaml 的 kb 段指向这些 Service。
+export NODE_IP
+envsubst < deploy/kb/qdrant.yaml | kubectl -n "$NS" apply -f -
+envsubst < deploy/kb/minio.yaml | kubectl -n "$NS" apply -f -
+
+echo ""
+echo "▶ 4/5 envsubst values（注入 NODE_IP=${NODE_IP}）→ helm upgrade --install..."
 VALUES_TMP="$(mktemp -t paas-values.XXXXXX.yaml)"
 export NODE_IP
 envsubst < deploy/charts/paas/values-paas-k8s.yaml > "$VALUES_TMP"
@@ -107,7 +115,7 @@ rm -f "$VALUES_TMP"
 # 会造成「部署成功但 Pod 跑旧镜像 digest」的假象。强制 rollout restart，
 # 配合 pullPolicy: Always 确保每次部署拉取最新 push 的 digest。
 echo ""
-echo "▶ 4/4 强制 rollout restart（拉取最新镜像 digest）..."
+echo "▶ 5/5 强制 rollout restart（拉取最新镜像 digest）..."
 kubectl -n "$NS" rollout restart deploy/"${RELEASE}-core"
 
 echo ""

@@ -69,6 +69,16 @@ dataplane:
   token: ""                       # API Key（绑 tenant）；演示可填 sk-acme-admin
   endpoint: ""                    # /dp/ 地址，空用默认 http://paas-core.paas.svc.cluster.local/dp
 
+# 知识库（RAG）后端：共享 qdrant（向量）+ minio（对象存储）实例。
+# 任一为空则文档上传/检索 503 降级（KB CRUD 仍可用）。embedding 复用 MaaS airouter（text-embedding-v4）。
+# 私有化/集群部署：先 apply deploy/kb/{qdrant,minio}.yaml 起共享实例，再填本段指向它们。
+kb:
+  qdrantURL: ""                   # qdrant REST 根地址（http://host:6333）
+  qdrantAPIKey: ""                # qdrant API key（QDRANT__SERVICE__API_KEY）
+  minioEndpoint: ""               # minio API endpoint（host:9000，不含 scheme）
+  minioAccessKey: ""              # minio access key（MINIO_ROOT_USER）
+  minioSecretKey: ""              # minio secret key（MINIO_ROOT_PASSWORD）
+
 # 演示凭证 seed：true（默认，dev/demo 友好）灌入 admin/123456 + sk-acme-admin/sk-globex-admin/sk-acme-dev；
 # 生产部署必须设 false，关闭演示凭证防止开源仓公开值成为后门（PAAS_DISABLE_DEMO_SEED=true）。
 seed:

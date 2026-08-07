@@ -52,7 +52,8 @@ func (s *qdrantVectorStore) do(ctx context.Context, method, path string, body an
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if s.apiKey != "" {
-		req.Header.Set("x-api-key", s.apiKey)
+		// qdrant REST 鉴权 header 是 `api-key`（非 x-api-key），见 qdrant security 文档。
+		req.Header.Set("api-key", s.apiKey)
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {

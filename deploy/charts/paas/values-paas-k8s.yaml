@@ -68,3 +68,12 @@ dataplane:
   token: "sk-acme-admin"
   endpoint: ""   # 空用默认 http://paas-core.paas.svc.cluster.local/dp
 
+# 知识库（RAG）后端：共享 qdrant（向量）+ minio（对象存储）实例（deploy/kb/{qdrant,minio}.yaml 部署）。
+# embedding 复用 MaaS airouter（text-embedding-v4，需 maas.airouterApiKey）。
+kb:
+  qdrantURL: "http://paas-kb-qdrant.paas.svc.cluster.local:6333"
+  qdrantAPIKey: "paas-kb-qdrant-dev"
+  minioEndpoint: "paas-kb-minio.paas.svc.cluster.local:9000"
+  minioAccessKey: "paas-kb"
+  minioSecretKey: "paas-kb-minio-dev"
+
