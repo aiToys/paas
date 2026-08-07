@@ -18,6 +18,7 @@ import (
 
 	"github.com/aitoys/paas/internal/ai/knowledgebase"
 	"github.com/aitoys/paas/internal/ai/tool"
+	"github.com/aitoys/paas/internal/ai/prompt"
 	"github.com/aitoys/paas/internal/apiroute"
 	"github.com/aitoys/paas/internal/appconfig"
 	"github.com/aitoys/paas/internal/backup"
@@ -738,6 +739,18 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("DELETE", "/api/tools/{id}", apiroute.Tags("AI工具"), apiroute.Summary("删除工具"), apiroute.Perm("tool:write"))
 	reg.Operation("POST", "/api/tools/{id}/test", apiroute.Tags("AI工具"), apiroute.Summary("测试工具（MCP: initialize+tools/list）"), apiroute.Perm("tool:read"))
 	reg.Operation("POST", "/api/tools/{id}/invoke", apiroute.Tags("AI工具"), apiroute.Summary("调用工具（MCP: tools/call）"), apiroute.Perm("tool:read"))
+
+	// Prompt 模板管理（P2）：版本化提示词，同 name 多版本，最新版自动激活。
+	promptHandler := prompt.NewHandler(stores.Prompt)
+	promptHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+	mux.Handle("/api/prompts", auth(promptHandler))
+	mux.Handle("/api/prompts/", auth(promptHandler))
+	reg.Operation("GET", "/api/prompts", apiroute.Tags("Prompt"), apiroute.Summary("Prompt 列表（全部版本）"), apiroute.Perm("prompt:read"), apiroute.WithResp([]prompt.Prompt{}))
+	reg.Operation("POST", "/api/prompts", apiroute.Tags("Prompt"), apiroute.Summary("创建 Prompt（同 name 自动 version+1 且激活）"), apiroute.Perm("prompt:write"), apiroute.WithReqBody(prompt.Prompt{}), apiroute.WithResp(prompt.Prompt{}))
+	reg.Operation("GET", "/api/prompts/active", apiroute.Tags("Prompt"), apiroute.Summary("取激活版本（?name=）"), apiroute.Perm("prompt:read"), apiroute.WithResp(prompt.Prompt{}))
+	reg.Operation("GET", "/api/prompts/{id}", apiroute.Tags("Prompt"), apiroute.Summary("取单版本"), apiroute.Perm("prompt:read"), apiroute.WithResp(prompt.Prompt{}))
+	reg.Operation("DELETE", "/api/prompts/{id}", apiroute.Tags("Prompt"), apiroute.Summary("删单版本"), apiroute.Perm("prompt:write"))
+	reg.Operation("POST", "/api/prompts/{id}/activate", apiroute.Tags("Prompt"), apiroute.Summary("激活该版本"), apiroute.Perm("prompt:write"), apiroute.WithResp(prompt.Prompt{}))
 
 	mux.Handle("/livez", health.NewHandler())
 

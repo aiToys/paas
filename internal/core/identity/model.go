@@ -84,12 +84,13 @@ func BuiltinRoles() map[string]Role {
 			"dataservice:read", "dataservice:write",
 			"kb:read", "kb:write",
 			"tool:read", "tool:write",
+			"prompt:read", "prompt:write",
 			"model:infer", "model:read",
 			// 无 prod:write：developer 在生产环境只读，防误操作
 		}},
 		"viewer": {Name: "viewer", Permissions: []Permission{
 			"application:read", "workload:read", "environment:read", "model:read",
-			"repository:read", "build:read", "image:read", "release:read", "config:read", "governance:read", "observability:read", "security:read", "billing:read", "dataservice:read", "kb:read", "tool:read",
+			"repository:read", "build:read", "image:read", "release:read", "config:read", "governance:read", "observability:read", "security:read", "billing:read", "dataservice:read", "kb:read", "tool:read", "prompt:read",
 		}},
 		// app-llm 是应用级 API Key 的最小角色（绑模型时自动生成 Key 用）：
 		// 仅含推理权限，用量归因到应用；无任何管理/写权限（最小权限原则）。
