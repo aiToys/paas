@@ -30,6 +30,7 @@ var (
 	ErrRepoNotFound     = errors.New("仓库不存在")
 	ErrRepoExists       = errors.New("仓库已存在")
 	ErrUnauthorized     = errors.New("gitea 鉴权失败")
+	ErrMergeConflict     = errors.New("合并冲突，请手动解决")
 )
 
 // Client 调 Gitea REST API（/api/v1）。baseURL 形如 http://gitea.paas.svc.cluster.local:3000。
@@ -258,4 +259,91 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 // pathEscape URL 路径段转义（owner/repo/path 可能含特殊字符）。
 func pathEscape(s string) string {
 	return url.PathEscape(s)
+}
+
+// Merge 把 head 分支合并到 base（baseline stage 合并主干用）。
+// 两步：创建 PR -> merge PR。mode: "ff"(merge commit) | "squash"。
+// 合并冲突（分叉且 ff 不可行）-> ErrMergeConflict；仓库不存在 -> ErrRepoNotFound；
+// Gitea 不可达 -> ErrGiteaUnavailable。
+// 返回合并后 base 分支最新 commit SHA（mergeSHA，baseline stage 记录用）。
+func (c *Client) Merge(ctx context.Context, owner, repo, head, base, mode string) (string, error) {
+	// 1. 创建 PR
+	prBody := map[string]any{
+		"base":  base,
+		"head":  head,
+		"title": fmt.Sprintf("Merge %s into %s", head, base),
+	}
+	var pr struct {
+		Number int `json:"number"`
+		Head   struct {
+			SHA string `json:"sha"`
+		} `json:"head"`
+	}
+	prPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls", pathEscape(owner), pathEscape(repo))
+	if err := c.doJSON(ctx, http.MethodPost, prPath, prBody, &pr); err != nil {
+		return "", err
+	}
+	// 2. merge PR（Do=merge/squash）
+	mergeBody := map[string]any{
+		"Do":                mergeDo(mode),
+		"MergeTitleField":   "",
+		"MergeMessageField": "",
+	}
+	mergePath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/merge", pathEscape(owner), pathEscape(repo), pr.Number)
+	if err := c.doMerge(ctx, mergePath, mergeBody); err != nil {
+		return "", err
+	}
+	// 3. 取 merge 后 base 最新 commit SHA（squash=新 commit / ff=head commit）
+	commits, err := c.ListCommits(ctx, owner, repo, 1)
+	if err != nil || len(commits) == 0 {
+		// 降级：用 PR head SHA（mergeSHA 近似，baseline 记录足够）
+		return pr.Head.SHA, nil
+	}
+	return commits[0].SHA, nil
+}
+
+// mergeDo 把 mode 映射为 Gitea PR merge 的 Do 字段。
+// "squash" -> "squash"；其余（含 "ff"）-> "merge"（创建 merge commit）。
+func mergeDo(mode string) string {
+	if mode == "squash" {
+		return "squash"
+	}
+	return "merge"
+}
+
+// doMerge 合并 PR；200/201 成功，409 冲突 -> ErrMergeConflict
+// （与 doJSON 的 409->ErrRepoExists 语义区分，merge 冲突不是仓库已存在）。
+func (c *Client) doMerge(ctx context.Context, path string, body any) error {
+	if c.baseURL == "" {
+		return ErrGiteaUnavailable
+	}
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("编码请求体失败: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(buf))
+	if err != nil {
+		return ErrGiteaUnavailable
+	}
+	req.SetBasicAuth(c.username, c.password)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrGiteaUnavailable, err)
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusCreated:
+		return nil
+	case http.StatusConflict:
+		return ErrMergeConflict
+	case http.StatusNotFound:
+		return ErrRepoNotFound
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return ErrUnauthorized
+	default:
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("gitea merge %s 返回 %d: %s", path, resp.StatusCode, string(b))
+	}
 }
