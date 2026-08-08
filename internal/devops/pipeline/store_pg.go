@@ -218,10 +218,7 @@ func (s *pgStore) DeletePipeline(ctx context.Context, id string) error {
 	if !hit {
 		return ErrPipelineNotFound
 	}
-	// stage_runs 经 ON DELETE CASCADE 自动清；pipeline_runs 需显式删（无 CASCADE 到 pipelines）。
-	if _, err = tx.Exec(ctx, `DELETE FROM stage_runs WHERE pipeline_run_id IN (SELECT id FROM pipeline_runs WHERE pipeline_id=$1)`, id); err != nil {
-		return err
-	}
+	// pipeline_runs 删除时 stage_runs 经 ON DELETE CASCADE 自动清；pipeline_runs 无 CASCADE 到 pipelines 需显式删。
 	if _, err = tx.Exec(ctx, `DELETE FROM pipeline_runs WHERE pipeline_id=$1`, id); err != nil {
 		return err
 	}
@@ -253,7 +250,7 @@ func (s *pgStore) ListRuns(ctx context.Context, appID, pipelineID, status string
 		args = append(args, status)
 		q += fmt.Sprintf(` AND status=$%d`, len(args))
 	}
-	q += ` ORDER BY created_at DESC, id DESC`
+	q += ` ORDER BY created_at DESC, id DESC LIMIT 1000`
 	rows, err := s.db.Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
@@ -319,22 +316,22 @@ func (s *pgStore) CreateRun(ctx context.Context, in PipelineRun) (PipelineRun, e
 	if in.CreatedAt.IsZero() {
 		in.CreatedAt = time.Now()
 	}
-	// 校验 pipeline 存在 + 归属（与内存版一致）
-	var hit bool
-	if err = s.db.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM pipelines WHERE id=$1 AND tenant_id=$2)`, in.PipelineID, tid).Scan(&hit); err != nil {
-		return PipelineRun{}, err
-	}
-	if !hit {
-		return PipelineRun{}, ErrPipelineNotFound
-	}
-	// 事务包住 pipeline_runs INSERT + stage_runs 写入，保证原子
-	// （避免 INSERT 成功但 stage_runs 写失败留孤儿 run；与 UpdateRun 事务内重写模式一致）。
+	// 事务包住 pipeline 校验（FOR UPDATE 锁行防并发 DeletePipeline 致孤儿 run）+
+	// pipeline_runs INSERT + stage_runs 写入，保证原子（与 UpdateRun 事务内重写模式一致）。
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return PipelineRun{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// 校验 pipeline 存在 + 归属 + 锁行（与内存版锁内原子校验+INSERT 语义一致）
+	var hit bool
+	if err = tx.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM pipelines WHERE id=$1 AND tenant_id=$2 FOR UPDATE)`, in.PipelineID, tid).Scan(&hit); err != nil {
+		return PipelineRun{}, err
+	}
+	if !hit {
+		return PipelineRun{}, ErrPipelineNotFound
+	}
 	_, err = tx.Exec(ctx,
 		`INSERT INTO pipeline_runs (id, tenant_id, app_id, pipeline_id, branch, commit, repo_id, trigger, trigger_ref, status, current_stage, version, created_at, finished_at)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
@@ -349,10 +346,16 @@ func (s *pgStore) CreateRun(ctx context.Context, in PipelineRun) (PipelineRun, e
 		}
 		return PipelineRun{}, err
 	}
-	// 写入初始 stage_runs（若调用方传入）；与 UpdateRun 同一事务内 INSERT 模式。
+	// 写入初始 stage_runs（若调用方传入）；marshal 错误显式检查（与 CreatePipeline 一致）。
 	for _, sr := range in.StageRuns {
-		inB, _ := json.Marshal(sr.Input)
-		outB, _ := json.Marshal(sr.Output)
+		inB, mErr := json.Marshal(sr.Input)
+		if mErr != nil {
+			return PipelineRun{}, fmt.Errorf("序列化 stage input 失败: %w", mErr)
+		}
+		outB, mErr := json.Marshal(sr.Output)
+		if mErr != nil {
+			return PipelineRun{}, fmt.Errorf("序列化 stage output 失败: %w", mErr)
+		}
 		if _, err = tx.Exec(ctx,
 			`INSERT INTO stage_runs (pipeline_run_id, `+stageRunCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
 			in.ID, sr.Index, sr.Type, sr.Name, sr.Status, inB, outB, nullTime(sr.StartedAt), nullTime(sr.FinishedAt), sr.Error); err != nil {
@@ -394,8 +397,14 @@ func (s *pgStore) UpdateRun(ctx context.Context, in PipelineRun) (PipelineRun, e
 		return PipelineRun{}, err
 	}
 	for _, sr := range in.StageRuns {
-		inB, _ := json.Marshal(sr.Input)
-		outB, _ := json.Marshal(sr.Output)
+		inB, mErr := json.Marshal(sr.Input)
+		if mErr != nil {
+			return PipelineRun{}, fmt.Errorf("序列化 stage input 失败: %w", mErr)
+		}
+		outB, mErr := json.Marshal(sr.Output)
+		if mErr != nil {
+			return PipelineRun{}, fmt.Errorf("序列化 stage output 失败: %w", mErr)
+		}
 		if _, err = tx.Exec(ctx,
 			`INSERT INTO stage_runs (pipeline_run_id, `+stageRunCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
 			in.ID, sr.Index, sr.Type, sr.Name, sr.Status, inB, outB, nullTime(sr.StartedAt), nullTime(sr.FinishedAt), sr.Error); err != nil {
