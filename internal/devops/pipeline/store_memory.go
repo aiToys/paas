@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"context"
-	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -85,7 +84,7 @@ func (s *memoryStore) CreatePipeline(ctx context.Context, p Pipeline) (Pipeline,
 		return Pipeline{}, err
 	}
 	if p.ID == "" {
-		p.ID = fmt.Sprintf("pipe-%d", time.Now().UnixNano())
+		p.ID = newID("pipe")
 	}
 	if p.CreatedAt.IsZero() {
 		p.CreatedAt = time.Now()
@@ -208,7 +207,7 @@ func (s *memoryStore) CreateRun(ctx context.Context, r PipelineRun) (PipelineRun
 	}
 	r.TenantID = tid
 	if r.ID == "" {
-		r.ID = fmt.Sprintf("run-%d", time.Now().UnixNano())
+		r.ID = newID("run")
 	}
 	if r.CreatedAt.IsZero() {
 		r.CreatedAt = time.Now()
@@ -324,7 +323,7 @@ func (s *memoryStore) CreateTemplate(ctx context.Context, t PipelineTemplate) (P
 		t.TenantID = tid
 	}
 	if t.ID == "" {
-		t.ID = fmt.Sprintf("tpl-%d", time.Now().UnixNano())
+		t.ID = newID("tpl")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

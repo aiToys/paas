@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
     pipeline_id   TEXT NOT NULL,
     branch        TEXT NOT NULL DEFAULT '',
     commit        TEXT NOT NULL DEFAULT '',
+    repo_id       TEXT NOT NULL DEFAULT '',  -- run 时解析 app 绑定的 internal CodeRepo（build stage 用）
     trigger       TEXT NOT NULL,
     trigger_ref   TEXT NOT NULL DEFAULT '',
     status        TEXT NOT NULL,
