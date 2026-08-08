@@ -440,6 +440,23 @@ func (s *Store) GetRelease(ctx context.Context, id string) (devops.Release, erro
 	return r, nil
 }
 
+// SetReleaseVersion 回填版本号（baseline stage 打版本）。
+func (s *Store) SetReleaseVersion(ctx context.Context, id, version string) error {
+	tid, err := tenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.releases[id]
+	if !ok || r.TenantID != tid {
+		return fmt.Errorf("发布不存在: %s", id)
+	}
+	r.Version = version
+	s.releases[id] = r
+	return nil
+}
+
 // CreateRelease 编排发布：取镜像 -> 找/建目标环境基线 Workload -> 更新镜像 -> 记录回滚指针 -> 存发布单。
 // 策略非 rolling 也走 rolling 编排（mock 期无真实流量切分），Release.Strategy 记录请求策略。
 func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (devops.Release, error) {

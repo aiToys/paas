@@ -579,6 +579,23 @@ func scanRelease(r pg.RowScanner, rel *devops.Release) error {
 		&rel.CreatedAt, &rel.CreatedBy, &rel.PromotedFrom, &rel.Version)
 }
 
+// SetReleaseVersion 回填版本号（baseline stage 打版本）。
+func (s *Store) SetReleaseVersion(ctx context.Context, id, version string) error {
+	tid, err := pg.TenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	tag, err := s.db.Pool().Exec(ctx,
+		`UPDATE releases SET version=$1 WHERE id=$2 AND tenant_id=$3`, version, id, tid)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("发布不存在: %s", id)
+	}
+	return nil
+}
+
 // CreateRelease 编排发布：取镜像 -> 找/建目标环境基线 Workload -> 更新镜像 -> 记录回滚指针 -> 存发布单。
 // **逻辑逐行对齐内存版**（internal/devops/memory/store.go CreateRelease），仅把内存 map 操作换成 SQL。
 // 事务仅覆盖 releases 表写入；workload 侧操作经接口，失败按内存版同款回滚语义（不在 DB 层做跨 store 事务）。

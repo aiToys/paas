@@ -46,6 +46,9 @@ type ReleaseRepository interface {
 	// 复用 CreateRelease 编排，新 release 记 PromotedFrom=源 release ID（晋升链可追溯）。
 	// targetEnvID 由调用方（handler）经 environment.NextPromoteTarget 算出并完成 prod:write 校验。
 	PromoteRelease(ctx context.Context, srcReleaseID, targetEnvID string) (Release, error)
+	// SetReleaseVersion 给已存在的发布单回填版本号（baseline stage 打版本时调）。
+	// 跨租户访问返 not found 不泄漏（与 GetRelease 同源）。
+	SetReleaseVersion(ctx context.Context, id, version string) error
 	// ListAllReleases 跨租户列出全部发布（admin 平台总览，不过滤 tenant，返回对象带 TenantID）。
 	ListAllReleases(ctx context.Context) ([]Release, error)
 }

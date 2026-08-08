@@ -12,12 +12,15 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"time"
 
 	"github.com/aitoys/paas/internal/devops"
+	"github.com/aitoys/paas/internal/devops/gitea"
+	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
@@ -34,16 +37,28 @@ type Releaser interface {
 	PollWorkloadReady(ctx context.Context, workloadID string) error // 阻塞到 ready 或超时
 	WorkloadDomain(ctx context.Context, workloadID string) string    // 拼探活 URL
 	LatestReadyImage(ctx context.Context, appID string) (string, error) // app 最新 ready Image（CD 用）
+	// Promote 晋升源 release 到下一环境（adapter 内部经 environment.NextPromoteTarget 算 target）。
+	Promote(ctx context.Context, srcReleaseID string) (devops.Release, error)
+	// SetVersion 给本次 run 涉及的 Release 批量回填版本号（baseline stage 打版本）。
+	SetVersion(ctx context.Context, releaseIDs []string, version string) error
+}
+
+// GiteaMerger 桥接 gitea.Client（baseline stage 合并主干）。
+// ResolveRepo 取 app 绑定的 internal CodeRepo 的 owner/repo；external repo 返错（跳过 merge）。
+type GiteaMerger interface {
+	ResolveRepo(ctx context.Context, appID string) (owner, repo string, err error)
+	Merge(ctx context.Context, owner, repo, head, base, mode string) (string, error)
 }
 
 // Engine 异步推进 PipelineRun 状态机。
 // Pipelines 取 stage 定义（run 不嵌入 Pipeline，按 PipelineID 联合查）；
-// Runs 读写 run 状态；Builds/Releases 桥接 devops 执行体。
+// Runs 读写 run 状态；Builds/Releases 桥接 devops 执行体；Gitea 可选（baseline merge）。
 type Engine struct {
 	Pipelines Repository
 	Runs      RunRepository
 	Builds    BuildRunner
 	Releases  Releaser
+	Gitea     GiteaMerger // 可选，nil 时 baseline 跳过 merge 仅打版本
 }
 
 // Start 起 goroutine 推进 runID（不阻塞，handler 调后立即返回）。
@@ -125,10 +140,10 @@ func (e *Engine) execStage(ctx context.Context, run *PipelineRun, stage StageDef
 		return e.execTest(ctx, run, stage, sr)
 	case StageApprove:
 		return e.execApprove(ctx, run, stage, sr)
-	case StagePromote, StageBaseline:
-		err := fmt.Errorf("stage 类型 %s 未实现（Task 10）", stage.Type)
-		sr.Error = err.Error()
-		return true, err
+	case StagePromote:
+		return e.execPromote(ctx, run, stage, sr)
+	case StageBaseline:
+		return e.execBaseline(ctx, run, stage, sr)
 	}
 	err := fmt.Errorf("未知 stage 类型 %s", stage.Type)
 	sr.Error = err.Error()
@@ -229,6 +244,102 @@ func (e *Engine) execApprove(ctx context.Context, run *PipelineRun, stage StageD
 	sr.Status = StageWaiting
 	sr.Input = map[string]any{"message": strOr(stage.Params, "message", "等待审批")}
 	return false, nil
+}
+
+// execPromote 晋升 stage：取前序 deploy 的 releaseId -> Releaser.Promote 晋升到下一环境。
+// adapter 内部经 environment.NextPromoteTarget 算 target；已是最高阶返 ErrNoPromoteTarget。
+func (e *Engine) execPromote(ctx context.Context, run *PipelineRun, stage StageDef, sr *StageRun) (bool, error) {
+	srcReleaseID, err := resolvePriorOutput(*run, OutReleaseID)
+	if err != nil {
+		sr.Error = err.Error()
+		return true, err
+	}
+	rel, err := e.Releases.Promote(ctx, srcReleaseID)
+	if err != nil {
+		if errors.Is(err, environment.ErrNoPromoteTarget) {
+			sr.Error = "已是最高阶环境，无晋升目标"
+		} else {
+			sr.Error = err.Error()
+		}
+		return true, err
+	}
+	sr.Output = map[string]any{OutReleaseID: rel.ID}
+	sr.Status = StageSuccess
+	sr.FinishedAt = time.Now()
+	return true, nil
+}
+
+// execBaseline 基线 stage：1. 打版本（回填本次 run 涉及的所有 Release.Version）+ 2. 合并主干（可选）。
+// merge 冲突不中止（版本已打），仅记 sr.Error 警告，让用户手动解决。
+func (e *Engine) execBaseline(ctx context.Context, run *PipelineRun, stage StageDef, sr *StageRun) (bool, error) {
+	version := computeVersion(*run, stage)
+	// 收集本次 run 涉及的所有 releaseID（deploy/promote stage 输出，向前扫描）
+	var releaseIDs []string
+	for i := 0; i <= run.CurrentStage && i < len(run.StageRuns); i++ {
+		if id, ok := run.StageRuns[i].Output[OutReleaseID].(string); ok && id != "" {
+			releaseIDs = append(releaseIDs, id)
+		}
+	}
+	if len(releaseIDs) > 0 {
+		if err := e.Releases.SetVersion(ctx, releaseIDs, version); err != nil {
+			sr.Error = err.Error()
+			return true, err
+		}
+	}
+	run.Version = version
+	out := map[string]any{OutVersion: version}
+
+	// 合并主干（mainBranch 非空 + Gitea 注入才 merge）
+	mainBranch := strOr(stage.Params, "mainBranch", "")
+	if mainBranch != "" && e.Gitea != nil {
+		owner, repo, err := e.Gitea.ResolveRepo(ctx, run.AppID)
+		if err == nil {
+			mergeSHA, merr := e.Gitea.Merge(ctx, owner, repo, run.Branch, mainBranch,
+				strOr(stage.Params, "mergeMode", "squash"))
+			if merr != nil {
+				if errors.Is(merr, gitea.ErrMergeConflict) {
+					sr.Error = "合并冲突，请手动解决"
+				} else {
+					sr.Error = merr.Error()
+				}
+			} else {
+				out[OutMergeSHA] = mergeSHA
+			}
+		}
+		// ResolveRepo 失败（external repo / 无 internal repo）跳过 merge，仅打版本
+	}
+	sr.Output = out
+	sr.Status = StageSuccess // baseline 即使 merge 冲突也标 success（版本已打）
+	sr.FinishedAt = time.Now()
+	return true, nil
+}
+
+// computeVersion 版本号生成。
+// auto-increment=<branch>-<runID 后 6 位>；manual=触发时填的 run.Version；tag=commit 短 sha。
+func computeVersion(run PipelineRun, stage StageDef) string {
+	switch strOr(stage.Params, "versionStrategy", "auto-increment") {
+	case "manual":
+		if run.Version != "" {
+			return run.Version
+		}
+	case "tag":
+		if run.Commit != "" {
+			n := 8
+			if len(run.Commit) < n {
+				n = len(run.Commit)
+			}
+			return run.Commit[:n]
+		}
+	}
+	return fmt.Sprintf("%s-%s", run.Branch, shortID(run.ID))
+}
+
+// shortID 取 ID 后 6 位（runSeq 占位，无全局序列时的确定性派生）。
+func shortID(id string) string {
+	if len(id) <= 6 {
+		return id
+	}
+	return id[len(id)-6:]
 }
 
 // Resume 恢复 paused run 的某 stage（handler approve 调用）。
