@@ -463,6 +463,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	pipelineHandler := pipeline.NewHandler(stores.Pipeline, stores.Pipeline, stores.Pipeline, pipeEngine,
 		pipeline.WithAuthorize(func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }),
 		pipeline.WithEnvType(envTypeBridge(stores.Environment)),
+		pipeline.WithPromoteTargetType(promoteTargetTypeBridge(stores.Environment)),
 		pipeline.WithRepoResolver(&repoResolverBridge{repos: stores.DevOpsRepos}),
 		pipeline.WithAudit(&identityAuditAdapter{store: stores.Security}),
 		pipeline.WithActorFn(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),

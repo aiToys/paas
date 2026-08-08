@@ -21,6 +21,7 @@ import (
 
 	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/httputil"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // 权限常量（identity.BuiltinRoles developer/viewer 对齐）。
@@ -40,6 +41,11 @@ type AuditRecorder interface {
 // EnvTypeResolver 生产 deploy 校验（pipeline run 的 deploy stage 到 prod 要求 prod:write）。
 type EnvTypeResolver func(ctx context.Context, envID string) (string, error)
 
+// PromoteTargetTypeResolver 解析 promote stage 目标环境类型（前序 deploy envId 的下一阶环境）。
+// 用于 triggerRun 时静态预演 promote 链：目标 prod 则要求 PermProdWrite（与 deploy 同源横切）。
+// nil 时跳过 promote prod 校验（测试场景）。
+type PromoteTargetTypeResolver func(ctx context.Context, envID string) (string, error)
+
 // RepoResolver 解析 app 绑定的 internal CodeRepo ID（build stage 用；nil 时 repoID 空）。
 type RepoResolver interface {
 	ResolveInternalRepo(ctx context.Context, appID string) (string, error)
@@ -55,6 +61,10 @@ type Handler struct {
 	Authorize func(r *http.Request, perm string) bool
 	// envType 生产 deploy 校验（nil 跳过 prod:write 检查）。
 	envType EnvTypeResolver
+	// promoteTargetType 解析 promote stage 的目标环境类型（nil 跳过 promote prod 校验）。
+	// 取前序 deploy stage 的 envId → NextPromoteTarget(envId).Type；目标 prod 要求 PermProdWrite
+	// （防 developer 经 [deploy test, promote] 链路绕过 prod:write 把变更发布到生产）。
+	promoteTargetType PromoteTargetTypeResolver
 	// repos 解析 app 绑定的 internal CodeRepo（nil 时 repoID 空）。
 	repos RepoResolver
 	// audit 审计记录器（nil 跳过）。
@@ -73,6 +83,11 @@ func WithAuthorize(f func(r *http.Request, perm string) bool) HandlerOpt {
 // WithEnvType 注入环境类型解析（生产 deploy 校验）。
 func WithEnvType(f EnvTypeResolver) HandlerOpt {
 	return func(h *Handler) { h.envType = f }
+}
+
+// WithPromoteTargetType 注入 promote 目标环境类型解析（promote 到 prod 校验）。
+func WithPromoteTargetType(f PromoteTargetTypeResolver) HandlerOpt {
+	return func(h *Handler) { h.promoteTargetType = f }
 }
 
 // WithRepoResolver 注入 CodeRepo 解析器。
@@ -398,8 +413,14 @@ func (h *Handler) triggerRun(w http.ResponseWriter, r *http.Request, appID, pid 
 		httputil.WriteServiceError(w, toHTTPStatus(err), err)
 		return
 	}
-	// prod:write 校验：deploy stage 目标环境为 prod 时要求调用者持 prod:write
-	if !h.allowProdDeploy(w, r, p.Stages) {
+	// deploy stage envId 必填校验（fail-fast，避免注定失败的 run 占住单实例串行槽位）
+	if msg := validateDeployEnvs(p.Stages); msg != "" {
+		httputil.WriteError(w, http.StatusBadRequest, msg)
+		return
+	}
+	// prod:write 校验：deploy stage 目标环境为 prod，或 promote stage 目标环境（前序 deploy envId
+	// 的下一阶）为 prod 时，要求调用者持 prod:write（防 developer 经 [deploy test, promote] 绕过）
+	if !h.allowProdFlow(w, r, p.Stages) {
 		return
 	}
 	// 单实例串行：已有 running/paused run 拒绝
@@ -441,28 +462,61 @@ func (h *Handler) triggerRun(w http.ResponseWriter, r *http.Request, appID, pid 
 	httputil.WriteDataCreated(w, created)
 }
 
-// allowProdDeploy 扫描 deploy stage 目标环境，prod 要求 prod:write（防 developer 经 CI 直接 deploy prod）。
-func (h *Handler) allowProdDeploy(w http.ResponseWriter, r *http.Request, stages []StageDef) bool {
-	if h.envType == nil {
+// validateDeployEnvs 校验每个 deploy stage 必须含 envId（fail-fast）。
+// 返回非空中文消息表示校验失败（handler 返 400）。
+func validateDeployEnvs(stages []StageDef) string {
+	for _, s := range stages {
+		if s.Type == StageDeploy && strOr(s.Params, "envId", "") == "" {
+			return "deploy stage 缺 envId 参数: " + s.Name
+		}
+	}
+	return ""
+}
+
+// allowProdFlow 扫描 deploy + promote stage 的目标环境，任一为 prod 要求 PermProdWrite。
+//
+// deploy stage：直接取 params.envId 查类型。
+// promote stage：取前序最近 deploy stage 的 envId，经 promoteTargetType 算下一阶环境类型
+// （promote 提升的是前序 deploy 产生的 release，target = NextPromoteTarget(前序 deploy envId)）。
+// 覆盖 [deploy test, promote] 这类把变更间接发布到 prod 的链路（防绕过 prod:write）。
+func (h *Handler) allowProdFlow(w http.ResponseWriter, r *http.Request, stages []StageDef) bool {
+	if h.envType == nil && h.promoteTargetType == nil {
 		return true // 未注入环境解析（测试场景），跳过
 	}
+	lastDeployEnvID := ""
 	for _, s := range stages {
-		if s.Type != StageDeploy {
-			continue
-		}
-		envID := strOr(s.Params, "envId", "")
-		if envID == "" {
-			continue
-		}
-		etype, err := h.envType(r.Context(), envID)
-		if err == nil && etype == environment.TypeProd {
-			if h.Authorize != nil && !h.Authorize(r, PermProdWrite) {
-				httputil.WriteError(w, http.StatusForbidden, "forbidden: missing "+PermProdWrite)
-				return false
+		switch s.Type {
+		case StageDeploy:
+			lastDeployEnvID = strOr(s.Params, "envId", "")
+			if lastDeployEnvID == "" || h.envType == nil {
+				continue
+			}
+			if etype, err := h.envType(r.Context(), lastDeployEnvID); err == nil && etype == environment.TypeProd {
+				if !h.hasProdWrite(w, r) {
+					return false
+				}
+			}
+		case StagePromote:
+			if lastDeployEnvID == "" || h.promoteTargetType == nil {
+				continue
+			}
+			if etype, err := h.promoteTargetType(r.Context(), lastDeployEnvID); err == nil && etype == environment.TypeProd {
+				if !h.hasProdWrite(w, r) {
+					return false
+				}
 			}
 		}
 	}
 	return true
+}
+
+// hasProdWrite 校验调用者持 prod:write，失败写 403 返 false。
+func (h *Handler) hasProdWrite(w http.ResponseWriter, r *http.Request) bool {
+	if h.Authorize == nil || h.Authorize(r, PermProdWrite) {
+		return true
+	}
+	httputil.WriteError(w, http.StatusForbidden, "forbidden: missing "+PermProdWrite)
+	return false
 }
 
 // atoiSafe 字符串转 int（失败返 0，stage idx 用）。
@@ -489,6 +543,8 @@ func toHTTPStatus(err error) int {
 }
 
 // recordAudit 记审计（audit/actorFn nil 跳过）。
+// tenantID 从 ctx 取（租户管理员可在本租户审计日志查到 pipeline 操作）；ctx 无租户归 "platform"
+// （adapter 层 identityAuditAdapter 对空 tenantID 兜底归 platform，与 identity/auth 同源）。
 func (h *Handler) recordAudit(r *http.Request, action, resourceType, resourceID, detail string) {
 	if h.audit == nil {
 		return
@@ -497,5 +553,6 @@ func (h *Handler) recordAudit(r *http.Request, action, resourceType, resourceID,
 	if h.actorFn != nil {
 		actor = h.actorFn(r)
 	}
-	_ = h.audit.Record(r.Context(), "", actor, action, resourceType, resourceID, detail)
+	tid, _ := tenant.TenantFrom(r.Context())
+	_ = h.audit.Record(r.Context(), tid, actor, action, resourceType, resourceID, detail)
 }

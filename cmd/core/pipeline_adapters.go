@@ -207,3 +207,15 @@ func envTypeBridge(envs environment.Repository) pipeline.EnvTypeResolver {
 		return env.Type, nil
 	}
 }
+
+// promoteTargetTypeBridge 构造 PromoteTargetTypeResolver（promote 到 prod 校验）：
+// envID 的下一阶环境（NextPromoteTarget）类型。triggerRun 静态预演 promote 链用。
+func promoteTargetTypeBridge(envs environment.Repository) pipeline.PromoteTargetTypeResolver {
+	return func(ctx context.Context, envID string) (string, error) {
+		target, err := envs.NextPromoteTarget(ctx, envID)
+		if err != nil {
+			return "", err
+		}
+		return target.Type, nil
+	}
+}

@@ -369,6 +369,70 @@ func TestRunProdWriteGuard(t *testing.T) {
 	}
 }
 
+// TestRunPromoteProdGuard 验证 promote 链路 prod:write 横切：
+// pipeline [deploy(env-test), promote]，promote 目标=prod（NextPromoteTarget(test)=prod），
+// developer（pipeline:write 通，prod:write 拒）触发应被 403 拦截——防绕过 prod:write 经 CI 发布生产。
+func TestRunPromoteProdGuard(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := acmeCtxEngine()
+	p, _ := s.CreatePipeline(ctx, Pipeline{
+		Name: "p-promote", AppID: "app-promote", Kind: KindCD,
+		Stages: []StageDef{
+			{Name: "部署测试", Type: StageDeploy, Params: map[string]any{
+				"envId": "env-test", "imageSource": ImageSelected, "imageId": "img-1",
+			}},
+			{Name: "提升", Type: StagePromote},
+		},
+	})
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: &fakeReleaser{}}
+	h := NewHandler(s, s, s, eng)
+	// developer：pipeline:write 通，prod:write 拒
+	h.Authorize = func(r *http.Request, perm string) bool { return perm != PermProdWrite }
+	h.envType = func(ctx context.Context, envID string) (string, error) {
+		if envID == "env-prod" {
+			return environment.TypeProd, nil
+		}
+		return "test", nil // env-test 非生产
+	}
+	// promote 目标：env-test 的下一阶 = prod
+	h.promoteTargetType = func(ctx context.Context, envID string) (string, error) {
+		if envID == "env-test" {
+			return environment.TypeProd, nil
+		}
+		return "", nil
+	}
+
+	req := acmeReq(http.MethodPost, "/api/applications/app-promote/pipelines/"+p.ID+"/run", `{"branch":"main"}`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("developer [deploy test, promote→prod] 期望 403，got %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestRunDeployMissingEnvId 验证 deploy stage 缺 envId fail-fast（400，不占单实例槽位）。
+func TestRunDeployMissingEnvId(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := acmeCtxEngine()
+	p, _ := s.CreatePipeline(ctx, Pipeline{
+		Name: "p-noenv", AppID: "app-noenv", Kind: KindCD,
+		Stages: []StageDef{
+			{Name: "部署", Type: StageDeploy, Params: map[string]any{ // 缺 envId
+				"imageSource": ImageSelected, "imageId": "img-1",
+			}},
+		},
+	})
+	h := NewHandler(s, s, s, &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: &fakeReleaser{}})
+	h.Authorize = allowAll
+
+	req := acmeReq(http.MethodPost, "/api/applications/app-noenv/pipelines/"+p.ID+"/run", `{"branch":"main"}`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("deploy 缺 envId 期望 400，got %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRunSingleInstance(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := acmeCtxEngine()

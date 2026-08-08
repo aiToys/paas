@@ -135,10 +135,13 @@ func (e *Engine) Advance(ctx context.Context, runID string) error {
 			return e.markSucceeded(ctx, run)
 		}
 		stage := pipe.Stages[run.CurrentStage]
-		// run.StageRuns 可能少于 pipe.Stages（恢复场景）；按需扩容
+		// run.StageRuns 可能少于 pipe.Stages（恢复场景）；按需扩容。
+		// 按 Index 取对应 stage 的 Type/Name（而非循环外缓存的当前 stage），避免极端恢复场景
+		// （CurrentStage 跳过中间 stage）批量填补错类型/错名。
 		for len(run.StageRuns) <= run.CurrentStage {
+			s := pipe.Stages[len(run.StageRuns)]
 			run.StageRuns = append(run.StageRuns, StageRun{
-				Index: len(run.StageRuns), Type: stage.Type, Name: stage.Name, Status: StagePending,
+				Index: len(run.StageRuns), Type: s.Type, Name: s.Name, Status: StagePending,
 			})
 		}
 		sr := &run.StageRuns[run.CurrentStage]
