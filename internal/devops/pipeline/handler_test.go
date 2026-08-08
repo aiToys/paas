@@ -7,7 +7,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/aitoys/paas/internal/devops"
+	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
@@ -225,5 +228,219 @@ func TestPipelineMethodNotAllowed(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("期望 405，got %d", rec.Code)
+	}
+}
+
+// ---------- PipelineRun 测试 ----------
+
+// waitRun 轮询 run 直到达到 want 或终态（failed/aborted）或超时。
+func waitRun(t *testing.T, s *memoryStore, ctx context.Context, runID, want string, timeout time.Duration) PipelineRun {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var run PipelineRun
+	for time.Now().Before(deadline) {
+		run, _ = s.GetRun(ctx, runID)
+		if run.Status == want || run.Status == RunFailed || run.Status == RunAborted {
+			return run
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return run
+}
+
+func TestRunManualTriggerAndAdvance(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := acmeCtxEngine()
+	p, _ := s.CreatePipeline(ctx, Pipeline{
+		Name: "p-ci", AppID: "app-ci", Kind: KindCI,
+		Stages: []StageDef{
+			{Name: "构建", Type: StageBuild},
+			{Name: "部署", Type: StageDeploy, Params: map[string]any{"envId": "env-dev", "imageSource": ImagePriorBuild}},
+		},
+	})
+	eng := &Engine{
+		Pipelines: s, Runs: s,
+		Builds:   fakeBuilder{buildStatus: devops.BuildSuccess, imageID: "img-1"},
+		Releases: &fakeReleaser{},
+	}
+	h := NewHandler(s, s, s, eng)
+	h.Authorize = allowAll
+
+	req := acmeReq(http.MethodPost, "/api/applications/app-ci/pipelines/"+p.ID+"/run", `{"branch":"main"}`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("run 期望 201，got %d body %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data PipelineRun `json:"data"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Data.Status != RunRunning {
+		t.Fatalf("新建 run 期望 running，got %s", resp.Data.Status)
+	}
+
+	run := waitRun(t, s, ctx, resp.Data.ID, RunSucceeded, 2*time.Second)
+	if run.Status != RunSucceeded {
+		t.Fatalf("期望 succeeded，got %s", run.Status)
+	}
+	for i, sr := range run.StageRuns {
+		if sr.Status != StageSuccess {
+			t.Fatalf("stage %d 期望 success，got %s", i, sr.Status)
+		}
+	}
+}
+
+func TestRunApproveFlow(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := acmeCtxEngine()
+	p, _ := s.CreatePipeline(ctx, Pipeline{
+		Name: "p-cd", AppID: "app-cd", Kind: KindCD,
+		Stages: []StageDef{
+			{Name: "审批", Type: StageApprove},
+			{Name: "部署", Type: StageDeploy, Params: map[string]any{
+				"envId": "env-dev", "imageSource": ImageSelected, "imageId": "img-1",
+			}},
+		},
+	})
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: &fakeReleaser{}}
+	h := NewHandler(s, s, s, eng)
+	h.Authorize = allowAll
+
+	// run -> 异步推进到 approve 暂停
+	req := acmeReq(http.MethodPost, "/api/applications/app-cd/pipelines/"+p.ID+"/run", `{"branch":"main"}`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("run 期望 201，got %d", rec.Code)
+	}
+	var resp struct {
+		Data PipelineRun `json:"data"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	runID := resp.Data.ID
+
+	// 等暂停
+	run := waitRun(t, s, ctx, runID, RunPaused, 2*time.Second)
+	if run.Status != RunPaused {
+		t.Fatalf("期望 paused，got %s", run.Status)
+	}
+	// POST approve stage 0
+	req = acmeReq(http.MethodPost, "/api/pipelineruns/"+runID+"/stages/0/approve", "")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve 期望 200，got %d body %s", rec.Code, rec.Body.String())
+	}
+	// 等恢复后 succeeded
+	run = waitRun(t, s, ctx, runID, RunSucceeded, 2*time.Second)
+	if run.Status != RunSucceeded {
+		t.Fatalf("approve 后期望 succeeded，got %s", run.Status)
+	}
+}
+
+func TestRunProdWriteGuard(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := acmeCtxEngine()
+	p, _ := s.CreatePipeline(ctx, Pipeline{
+		Name: "p-prod", AppID: "app-prod", Kind: KindCD,
+		Stages: []StageDef{
+			{Name: "部署", Type: StageDeploy, Params: map[string]any{
+				"envId": "env-prod", "imageSource": ImageSelected, "imageId": "img-1",
+			}},
+		},
+	})
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: &fakeReleaser{}}
+	h := NewHandler(s, s, s, eng)
+	// developer：pipeline:write 通，prod:write 拒
+	h.Authorize = func(r *http.Request, perm string) bool { return perm != PermProdWrite }
+	h.envType = func(ctx context.Context, envID string) (string, error) {
+		if envID == "env-prod" {
+			return environment.TypeProd, nil
+		}
+		return "test", nil
+	}
+
+	req := acmeReq(http.MethodPost, "/api/applications/app-prod/pipelines/"+p.ID+"/run", `{"branch":"main"}`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("developer deploy prod 期望 403，got %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRunSingleInstance(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := acmeCtxEngine()
+	p, _ := s.CreatePipeline(ctx, Pipeline{
+		Name: "p-si", AppID: "app-si", Kind: KindCI,
+		Stages: []StageDef{{Name: "构建", Type: StageBuild}},
+	})
+	// 已有 running run
+	_, _ = s.CreateRun(ctx, PipelineRun{
+		PipelineID: p.ID, AppID: p.AppID, Branch: "main", Trigger: "manual",
+		Status: RunRunning, CurrentStage: 0,
+		StageRuns: []StageRun{{Index: 0, Type: StageBuild, Name: "构建", Status: StageRunning}},
+	})
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: &fakeReleaser{}}
+	h := NewHandler(s, s, s, eng)
+	h.Authorize = allowAll
+
+	req := acmeReq(http.MethodPost, "/api/applications/app-si/pipelines/"+p.ID+"/run", `{"branch":"main"}`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("已有 running run 期望 409，got %d body %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRunAbort(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := acmeCtxEngine()
+	p, _ := s.CreatePipeline(ctx, Pipeline{
+		Name: "p-abort", AppID: "app-abort", Kind: KindCD,
+		Stages: []StageDef{
+			{Name: "审批", Type: StageApprove},
+			{Name: "部署", Type: StageDeploy, Params: map[string]any{
+				"envId": "env-dev", "imageSource": ImageSelected, "imageId": "img-1",
+			}},
+		},
+	})
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: &fakeReleaser{}}
+	h := NewHandler(s, s, s, eng)
+	h.Authorize = allowAll
+
+	// run -> 异步推进到 approve 暂停
+	req := acmeReq(http.MethodPost, "/api/applications/app-abort/pipelines/"+p.ID+"/run", `{"branch":"main"}`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	var resp struct {
+		Data PipelineRun `json:"data"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	runID := resp.Data.ID
+
+	// 等 paused
+	run := waitRun(t, s, ctx, runID, RunPaused, 2*time.Second)
+	if run.Status != RunPaused {
+		t.Fatalf("期望 paused，got %s", run.Status)
+	}
+	// abort
+	req = acmeReq(http.MethodPost, "/api/pipelineruns/"+runID+"/abort", "")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("abort 期望 200，got %d body %s", rec.Code, rec.Body.String())
+	}
+	run, _ = s.GetRun(ctx, runID)
+	if run.Status != RunAborted {
+		t.Fatalf("期望 aborted，got %s", run.Status)
+	}
+	// 再次 abort 已终态 -> 409
+	req = acmeReq(http.MethodPost, "/api/pipelineruns/"+runID+"/abort", "")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("已终态 abort 期望 409，got %d", rec.Code)
 	}
 }

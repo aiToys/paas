@@ -14,9 +14,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
+	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/httputil"
 )
 
@@ -24,12 +27,22 @@ import (
 const (
 	PermPipelineRead  = "pipeline:read"
 	PermPipelineWrite = "pipeline:write"
+	// PermProdWrite 生产写权限（与 identity.PermProdWrite 同值；本地定义避免 pipeline->identity import）。
+	PermProdWrite = "prod:write"
 )
 
 // AuditRecorder 审计记录（依赖倒置，避免 pipeline->identity import）。
 // 与 identity.AuditRecorder 同源签名，cmd/core 装配桥接。
 type AuditRecorder interface {
 	Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error
+}
+
+// EnvTypeResolver 生产 deploy 校验（pipeline run 的 deploy stage 到 prod 要求 prod:write）。
+type EnvTypeResolver func(ctx context.Context, envID string) (string, error)
+
+// RepoResolver 解析 app 绑定的 internal CodeRepo ID（build stage 用；nil 时 repoID 空）。
+type RepoResolver interface {
+	ResolveInternalRepo(ctx context.Context, appID string) (string, error)
 }
 
 // Handler Pipeline HTTP 入口（composite 按路径分发）。
@@ -40,6 +53,10 @@ type Handler struct {
 	engine    *Engine
 	// Authorize 权限校验（nil 跳过，测试场景）。
 	Authorize func(r *http.Request, perm string) bool
+	// envType 生产 deploy 校验（nil 跳过 prod:write 检查）。
+	envType EnvTypeResolver
+	// repos 解析 app 绑定的 internal CodeRepo（nil 时 repoID 空）。
+	repos RepoResolver
 	// audit 审计记录器（nil 跳过）。
 	audit   AuditRecorder
 	actorFn func(r *http.Request) string
@@ -51,6 +68,16 @@ type HandlerOpt func(*Handler)
 // WithAuthorize 注入权限校验。
 func WithAuthorize(f func(r *http.Request, perm string) bool) HandlerOpt {
 	return func(h *Handler) { h.Authorize = f }
+}
+
+// WithEnvType 注入环境类型解析（生产 deploy 校验）。
+func WithEnvType(f EnvTypeResolver) HandlerOpt {
+	return func(h *Handler) { h.envType = f }
+}
+
+// WithRepoResolver 注入 CodeRepo 解析器。
+func WithRepoResolver(r RepoResolver) HandlerOpt {
+	return func(h *Handler) { h.repos = r }
 }
 
 // WithAudit 注入审计记录器。
@@ -159,6 +186,16 @@ func (h *Handler) serveAppPipelines(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+
+	// /api/applications/{id}/pipelines/{pid}/run
+	if len(parts) == 4 && parts[3] == "run" {
+		if r.Method != http.MethodPost {
+			httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		h.triggerRun(w, r, appID, parts[2])
+		return
+	}
 	httputil.WriteError(w, http.StatusNotFound, "not found")
 }
 
@@ -249,9 +286,189 @@ func (h *Handler) serveTemplates(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteData(w, list)
 }
 
-// serveRuns 占位（Task 12 实现 run/approve/abort）。
+// serveRuns 处理 /api/pipelineruns[/{id}[/stages/{idx}/approve|/abort]]。
+//   GET  /api/pipelineruns?appId=&pipelineId=&status=  列表
+//   GET  /api/pipelineruns/{id}                       详情
+//   POST /api/pipelineruns/{id}/stages/{idx}/approve  恢复 paused run
+//   POST /api/pipelineruns/{id}/abort                 终止 run
 func (h *Handler) serveRuns(w http.ResponseWriter, r *http.Request) {
-	httputil.WriteError(w, http.StatusNotImplemented, "pipeline runs: not implemented yet")
+	rest := strings.TrimPrefix(r.URL.Path, "/api/pipelineruns")
+	rest = strings.Trim(rest, "/")
+
+	// GET 列表
+	if rest == "" && r.Method == http.MethodGet {
+		if !h.allow(w, r, PermPipelineRead) {
+			return
+		}
+		list, err := h.runs.ListRuns(r.Context(),
+			r.URL.Query().Get("appId"),
+			r.URL.Query().Get("pipelineId"),
+			r.URL.Query().Get("status"))
+		if err != nil {
+			httputil.WriteInternalError(w, err)
+			return
+		}
+		httputil.WriteData(w, list)
+		return
+	}
+
+	parts := strings.Split(rest, "/")
+	if len(parts) == 0 || parts[0] == "" {
+		httputil.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	id := parts[0]
+
+	// GET /{id}
+	if r.Method == http.MethodGet && len(parts) == 1 {
+		if !h.allow(w, r, PermPipelineRead) {
+			return
+		}
+		run, err := h.runs.GetRun(r.Context(), id)
+		if err != nil {
+			httputil.WriteServiceError(w, toHTTPStatus(err), err)
+			return
+		}
+		httputil.WriteData(w, run)
+		return
+	}
+
+	// POST /{id}/stages/{idx}/approve
+	if r.Method == http.MethodPost && len(parts) == 4 && parts[1] == "stages" && parts[3] == "approve" {
+		if !h.allow(w, r, PermPipelineWrite) {
+			return
+		}
+		if h.engine == nil {
+			httputil.WriteError(w, http.StatusServiceUnavailable, "engine not configured")
+			return
+		}
+		stageIdx := atoiSafe(parts[2])
+		if err := h.engine.Resume(r.Context(), id, stageIdx); err != nil {
+			httputil.WriteServiceError(w, toHTTPStatus(err), err)
+			return
+		}
+		h.recordAudit(r, "approve", "pipeline_run", id, fmt.Sprintf("stage=%d", stageIdx))
+		httputil.WriteData(w, map[string]string{"resumed": id})
+		return
+	}
+
+	// POST /{id}/abort
+	if r.Method == http.MethodPost && len(parts) == 2 && parts[1] == "abort" {
+		if !h.allow(w, r, PermPipelineWrite) {
+			return
+		}
+		if h.engine == nil {
+			httputil.WriteError(w, http.StatusServiceUnavailable, "engine not configured")
+			return
+		}
+		if err := h.engine.Abort(r.Context(), id); err != nil {
+			httputil.WriteServiceError(w, toHTTPStatus(err), err)
+			return
+		}
+		h.recordAudit(r, "abort", "pipeline_run", id, "")
+		httputil.WriteData(w, map[string]string{"aborted": id})
+		return
+	}
+	httputil.WriteError(w, http.StatusNotFound, "not found")
+}
+
+// triggerRun POST /api/applications/{id}/pipelines/{pid}/run。
+// body {branch, commit?, version?} -> 建 PipelineRun + engine.Start。
+// prod:write 横切：deploy stage 目标环境为 prod 要求调用者持 prod:write。
+// 单实例串行：已有 running/paused run 拒绝（ErrActiveRunExists）。
+func (h *Handler) triggerRun(w http.ResponseWriter, r *http.Request, appID, pid string) {
+	if !h.allow(w, r, PermPipelineWrite) {
+		return
+	}
+	var body struct {
+		Branch  string `json:"branch"`
+		Commit  string `json:"commit"`
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if body.Branch == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "branch required")
+		return
+	}
+	p, err := h.pipes.GetPipeline(r.Context(), pid)
+	if err != nil {
+		httputil.WriteServiceError(w, toHTTPStatus(err), err)
+		return
+	}
+	// prod:write 校验：deploy stage 目标环境为 prod 时要求调用者持 prod:write
+	if !h.allowProdDeploy(w, r, p.Stages) {
+		return
+	}
+	// 单实例串行：已有 running/paused run 拒绝
+	active, err := h.runs.HasActiveRun(r.Context(), pid)
+	if err != nil {
+		httputil.WriteInternalError(w, err)
+		return
+	}
+	if active {
+		httputil.WriteServiceError(w, http.StatusConflict, ErrActiveRunExists)
+		return
+	}
+	// 解析 repoID（app 绑定的 internal CodeRepo；build stage 用）
+	repoID := ""
+	if h.repos != nil {
+		if rid, rerr := h.repos.ResolveInternalRepo(r.Context(), appID); rerr == nil {
+			repoID = rid
+		}
+	}
+	// 初始化 stage_runs
+	stageRuns := make([]StageRun, len(p.Stages))
+	for i, s := range p.Stages {
+		stageRuns[i] = StageRun{Index: i, Type: s.Type, Name: s.Name, Status: StagePending}
+	}
+	run := PipelineRun{
+		PipelineID: pid, AppID: appID, Branch: body.Branch, Commit: body.Commit,
+		RepoID: repoID, Version: body.Version, Trigger: "manual",
+		Status: RunRunning, CurrentStage: 0, StageRuns: stageRuns,
+	}
+	created, err := h.runs.CreateRun(r.Context(), run)
+	if err != nil {
+		httputil.WriteServiceError(w, toHTTPStatus(err), err)
+		return
+	}
+	h.recordAudit(r, "run", "pipeline_run", created.ID, fmt.Sprintf("pipeline=%s branch=%s", pid, body.Branch))
+	if h.engine != nil {
+		h.engine.Start(r.Context(), created.ID)
+	}
+	httputil.WriteDataCreated(w, created)
+}
+
+// allowProdDeploy 扫描 deploy stage 目标环境，prod 要求 prod:write（防 developer 经 CI 直接 deploy prod）。
+func (h *Handler) allowProdDeploy(w http.ResponseWriter, r *http.Request, stages []StageDef) bool {
+	if h.envType == nil {
+		return true // 未注入环境解析（测试场景），跳过
+	}
+	for _, s := range stages {
+		if s.Type != StageDeploy {
+			continue
+		}
+		envID := strOr(s.Params, "envId", "")
+		if envID == "" {
+			continue
+		}
+		etype, err := h.envType(r.Context(), envID)
+		if err == nil && etype == environment.TypeProd {
+			if h.Authorize != nil && !h.Authorize(r, PermProdWrite) {
+				httputil.WriteError(w, http.StatusForbidden, "forbidden: missing "+PermProdWrite)
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// atoiSafe 字符串转 int（失败返 0，stage idx 用）。
+func atoiSafe(s string) int {
+	n, _ := strconv.Atoi(s)
+	return n
 }
 
 // ---------- 辅助 ----------
@@ -262,7 +479,8 @@ func toHTTPStatus(err error) int {
 	case errors.Is(err, ErrPipelineNotFound), errors.Is(err, ErrRunNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, ErrPipelineExists), errors.Is(err, ErrActiveRunExists),
-		errors.Is(err, ErrRunExists), errors.Is(err, ErrTemplateExists):
+		errors.Is(err, ErrRunExists), errors.Is(err, ErrTemplateExists),
+		errors.Is(err, ErrNotPaused), errors.Is(err, ErrStageNotCurrent), errors.Is(err, ErrNotRunning):
 		return http.StatusConflict
 	case errors.Is(err, ErrNoTenant):
 		return http.StatusBadRequest

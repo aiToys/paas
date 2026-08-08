@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/aitoys/paas/internal/devops"
@@ -53,25 +54,66 @@ type GiteaMerger interface {
 // Engine 异步推进 PipelineRun 状态机。
 // Pipelines 取 stage 定义（run 不嵌入 Pipeline，按 PipelineID 联合查）；
 // Runs 读写 run 状态；Builds/Releases 桥接 devops 执行体；Gitea 可选（baseline merge）。
+// cancels 维护 run->cancel，Abort 时 cancel 传播给进行中的 PollBuildRun。
 type Engine struct {
 	Pipelines Repository
 	Runs      RunRepository
 	Builds    BuildRunner
 	Releases  Releaser
 	Gitea     GiteaMerger // 可选，nil 时 baseline 跳过 merge 仅打版本
+
+	mu      sync.Mutex
+	cancels map[string]context.CancelFunc
 }
 
 // Start 起 goroutine 推进 runID（不阻塞，handler 调后立即返回）。
-// 从 ctx 提取 tenant 注入 background（store 强制 tenant 过滤，丢失则 GetRun 报 missing tenant）；
-// 进程退出 goroutine 终止，run 卡 Running（留后续 SweepInterrupted 兜底，同 devops runBuild 模式）。
+// 从 ctx 提取 tenant 注入 background（store 强制 tenant 过滤）；派生 cancelCtx 存入 cancels，
+// Abort 时 cancel 传播给 PollBuildRun 阻塞调用。
 func (e *Engine) Start(ctx context.Context, runID string) {
 	tid, _ := tenant.TenantFrom(ctx)
+	runCtx, cancel := context.WithCancel(context.Background())
+	runCtx = tenant.WithTenant(runCtx, tid)
+	e.mu.Lock()
+	if e.cancels == nil {
+		e.cancels = map[string]context.CancelFunc{}
+	}
+	e.cancels[runID] = cancel
+	e.mu.Unlock()
 	go func() {
-		bgCtx := tenant.WithTenant(context.Background(), tid)
-		if err := e.Advance(bgCtx, runID); err != nil {
+		defer e.releaseCancel(runID)
+		if err := e.Advance(runCtx, runID); err != nil {
 			log.Printf("pipeline: advance run %s 失败: %v", runID, err)
 		}
 	}()
+}
+
+func (e *Engine) releaseCancel(runID string) {
+	e.mu.Lock()
+	delete(e.cancels, runID)
+	e.mu.Unlock()
+}
+
+// Abort 终止 run：标 aborted + cancel 进行中的 advance（PollBuildRun 因 ctx.Done 退出）。
+// 仅 running/paused 可 abort；已终态（succeeded/failed/aborted）返 ErrNotRunning。
+func (e *Engine) Abort(ctx context.Context, runID string) error {
+	run, err := e.Runs.GetRun(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if run.Status != RunRunning && run.Status != RunPaused {
+		return ErrNotRunning
+	}
+	run.Status = RunAborted
+	run.FinishedAt = time.Now()
+	if _, err := e.Runs.UpdateRun(ctx, run); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	if cancel, ok := e.cancels[runID]; ok {
+		cancel()
+	}
+	e.mu.Unlock()
+	return nil
 }
 
 // Advance 同步推进 runID 到终态或暂停点。返回 nil 表示 run 已到终态（succeeded/failed/paused）。
@@ -435,6 +477,9 @@ func resolvePriorOutput(run PipelineRun, key string) (string, error) {
 // ---------- 状态机落库 ----------
 
 func (e *Engine) markFailed(ctx context.Context, run PipelineRun, cause error) error {
+	if ctx.Err() != nil {
+		return nil // Abort 已标 aborted，不覆盖
+	}
 	run.Status = RunFailed
 	run.FinishedAt = time.Now()
 	// cause 已在 execStage 写入对应 sr.Error；此处只落 run 状态
@@ -443,6 +488,9 @@ func (e *Engine) markFailed(ctx context.Context, run PipelineRun, cause error) e
 }
 
 func (e *Engine) markSucceeded(ctx context.Context, run PipelineRun) error {
+	if ctx.Err() != nil {
+		return nil // Abort 已标 aborted，不覆盖
+	}
 	run.Status = RunSucceeded
 	run.FinishedAt = time.Now()
 	_, err := e.Runs.UpdateRun(ctx, run)

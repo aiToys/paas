@@ -13,6 +13,7 @@ var (
 	ErrRunNotFound      = errors.New("pipeline run not found")
 	ErrRunExists        = errors.New("pipeline run already exists")        // ID 冲突
 	ErrActiveRunExists  = errors.New("active pipeline run already exists") // 单实例串行：同一 pipeline 已有 running/paused 运行
+	ErrNotRunning       = errors.New("pipeline run not running or paused") // Abort 守卫：仅 running/paused 可 abort
 	ErrTemplateExists   = errors.New("pipeline template already exists")
 	ErrNoTenant         = errors.New("missing tenant context")
 )
