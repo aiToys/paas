@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 应用详情 - 流水线 tab：按 Kind 分组卡片，新建（从模板/空白/微服务快捷）、删除、编辑、运行。
-// 设计器/运行视图 Task 3/4 接入，先用占位组件（本文件独立可测）。
+// 设计器抽屉（PipelineDesigner）+ 运行视图抽屉（PipelineRunView）。
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchAuth } from '@/api'
@@ -10,6 +10,7 @@ import {
 } from '@/api/pipeline'
 import { useEnvStore } from '@/stores/env'
 import PipelineDesigner from './PipelineDesigner.vue'
+import PipelineRunView from './PipelineRunView.vue'
 
 const props = defineProps<{ appId: string }>()
 const envStore = useEnvStore()
@@ -23,7 +24,7 @@ const createDlg = ref(false)
 const creating = ref(false)
 const createForm = ref<{ name: string; kind: 'ci' | 'cd'; templateId: string }>({ name: '', kind: 'ci', templateId: 'tpl-ci' })
 
-// 设计器 / 运行视图抽屉（Task 3/4 接入；先占位）
+// 设计器 / 运行视图抽屉
 const designerPid = ref<string | null>(null)
 const runViewId = ref<string | null>(null)
 
@@ -132,10 +133,6 @@ const statusTag = (s?: string) => {
   const map: Record<string, string> = { succeeded: 'success', failed: 'danger', aborted: 'info', running: 'warning', paused: 'warning' }
   return { type: map[s] || 'info', label: s }
 }
-
-// Task 4 接入前运行视图占位组件（避免编译报错；Task 4 接入后替换为真实 import）
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const PipelineRunView = { template: '<div class="todo" style="padding:20px;color:#909399">运行视图待接入（Task 4）</div>' }
 </script>
 
 <template>
@@ -202,11 +199,11 @@ const PipelineRunView = { template: '<div class="todo" style="padding:20px;color
       </template>
     </el-dialog>
 
-    <!-- 设计器抽屉（Task 3 替换占位为真实组件） -->
+    <!-- 设计器抽屉 -->
     <el-drawer v-model="designerPid" size="60%" title="流水线设计器" @close="designerPid = null">
       <PipelineDesigner v-if="designerPid" :app-id="appId" :pid="designerPid" @saved="load" />
     </el-drawer>
-    <!-- 运行视图抽屉（Task 4 替换占位为真实组件） -->
+    <!-- 运行视图抽屉 -->
     <el-drawer v-model="runViewId" size="50%" title="运行视图" @close="runViewId = null">
       <PipelineRunView v-if="runViewId" :run-id="runViewId" />
     </el-drawer>
