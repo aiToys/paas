@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// DevOps 中心：跨应用 CI/CD 指挥台（构建 / 镜像 / 发布 + 流水线矩阵）。
+// DevOps 中心：跨应用 CI/CD 指挥台（流水线矩阵 / 运行记录 / 构建 / 镜像库 / 发布）。
 // 不止总览：构建行可重新构建、发布行/流水线格可提升（promote）、行可点跳应用详情。
 // 发布回滚/提升走 useDangerConfirm（生产按目标 env.type 显式 isProd，覆盖顶栏 scope）。
 import { computed, onMounted, onUnmounted, ref } from 'vue'
@@ -8,6 +8,7 @@ import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import { useEnvStore, type Env } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
+import { listRuns, type PipelineRun } from '@/api/pipeline'
 
 type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
 
@@ -29,6 +30,7 @@ const builds = ref<BuildRun[]>([])
 const registryRepos = ref<{ name: string }[]>([])
 const expandedTags = ref<Record<string, { tag: string; digest: string }[]>>({})
 const releases = ref<Release[]>([])
+const recentRuns = ref<PipelineRun[]>([])
 const loading = ref(false)
 const busy = ref(false) // 重新构建/提升 进行中（防重复点击）
 
@@ -42,6 +44,13 @@ const RELEASE_STATUS: Record<string, { label: string; type: TagType }> = {
   succeeded: { label: '已生效', type: 'success' },
   'rolled-back': { label: '已回滚', type: 'info' },
   deploying: { label: '部署中', type: 'warning' },
+}
+const RUN_STATUS: Record<string, { label: string; type: TagType }> = {
+  running: { label: '运行中', type: 'warning' },
+  paused: { label: '等待审批', type: 'warning' },
+  succeeded: { label: '成功', type: 'success' },
+  failed: { label: '失败', type: 'danger' },
+  aborted: { label: '已中止', type: 'info' },
 }
 
 // 应用名映射：onMounted 时一次拉取应用列表建 Map。
@@ -90,23 +99,37 @@ async function loadReleases() {
   const resp = await fetchAuth('/api/releases')
   if (resp.ok) releases.value = (await resp.json()).data ?? []
 }
+async function loadRuns() {
+  try {
+    const all = await listRuns()
+    // 取最近 20 条（按 createdAt 倒序）
+    recentRuns.value = [...all].sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt)).slice(0, 20)
+  } catch { /* 非关键 */ }
+}
+// 当前阶段名（运行中显示 stageRuns[currentStage].name）
+function currentStageName(r: PipelineRun): string {
+  return r.stageRuns[r.currentStage]?.name ?? '-'
+}
 
 async function load() {
   loading.value = true
   try {
     if (!envStore.envs.length) await envStore.loadEnvs()
-    await Promise.all([loadBuilds(), loadRegistry(), loadReleases(), loadAppNames()])
+    await Promise.all([loadBuilds(), loadRegistry(), loadReleases(), loadAppNames(), loadRuns()])
   } finally {
     loading.value = false
   }
 }
 
-// 构建状态轮询（5s）+ 发布状态轮询（10s，流水线/发布 tab 用）
+// 构建状态轮询（5s）+ 发布状态轮询（10s，流水线/发布/运行记录 tab 用）
 let buildTimer: number | undefined
 let releaseTimer: number | undefined
 function startPoll() {
   buildTimer = window.setInterval(loadBuilds, 5000)
-  releaseTimer = window.setInterval(loadReleases, 10000)
+  releaseTimer = window.setInterval(() => {
+    loadReleases()
+    loadRuns()
+  }, 10000)
 }
 
 // 重新构建（构建行操作：用原 repoId 触发新构建）。
@@ -271,6 +294,40 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
+      </el-tab-pane>
+
+      <!-- 运行记录：跨应用最近流水线运行（新 pipeline 引擎：build/deploy/test/approve/promote/baseline） -->
+      <el-tab-pane label="运行记录" name="runs">
+        <p class="tab-hint">最近流水线运行，点击应用跳详情。运行中/等待审批自动轮询（10s）。</p>
+        <el-table :data="recentRuns" size="small" v-loading="loading" empty-text="暂无运行记录">
+          <el-table-column label="应用" width="140">
+            <template #default="{ row }">
+              <span class="mono clickable" @click="goApp(row.appId)">{{ appName(row.appId) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-tag :type="(RUN_STATUS[row.status]?.type) || 'info'" size="small">
+                {{ RUN_STATUS[row.status]?.label || row.status }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="当前阶段" min-width="120">
+            <template #default="{ row }">{{ currentStageName(row) }}</template>
+          </el-table-column>
+          <el-table-column label="分支" width="110">
+            <template #default="{ row }"><span class="mono">{{ row.branch }}</span></template>
+          </el-table-column>
+          <el-table-column label="版本" width="100">
+            <template #default="{ row }">
+              <span v-if="row.version" class="mono">{{ row.version }}</span>
+              <span v-else class="faint">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="开始时间" width="170">
+            <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
+          </el-table-column>
+        </el-table>
       </el-tab-pane>
 
       <!-- 构建 -->
