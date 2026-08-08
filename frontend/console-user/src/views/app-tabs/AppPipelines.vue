@@ -9,6 +9,7 @@ import {
   listPipelines, createPipeline, deletePipeline, listTemplates, triggerRun,
 } from '@/api/pipeline'
 import { useEnvStore } from '@/stores/env'
+import PipelineDesigner from './PipelineDesigner.vue'
 
 const props = defineProps<{ appId: string }>()
 const envStore = useEnvStore()
@@ -132,9 +133,7 @@ const statusTag = (s?: string) => {
   return { type: map[s] || 'info', label: s }
 }
 
-// Task 3/4 接入前的占位组件（避免本任务编译报错；Task 3/4 接入后替换为真实 import）
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const PipelineDesigner = { template: '<div class="todo" style="padding:20px;color:#909399">设计器待接入（Task 3）</div>' }
+// Task 4 接入前运行视图占位组件（避免编译报错；Task 4 接入后替换为真实 import）
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 const PipelineRunView = { template: '<div class="todo" style="padding:20px;color:#909399">运行视图待接入（Task 4）</div>' }
 </script>
