@@ -6,6 +6,7 @@ import Icon from '@/components/Icon.vue'
 import { fetchAuth, fetchJSON } from '@/api'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import AppRepositories from './app-tabs/AppRepositories.vue'
+import AppPipelines from './app-tabs/AppPipelines.vue'
 import AppBuilds from './app-tabs/AppBuilds.vue'
 import AppImages from './app-tabs/AppImages.vue'
 import AppReleases from './app-tabs/AppReleases.vue'
@@ -250,9 +251,9 @@ async function unbind(b: Binding) {
 const tabGroups = [
   { label: '运行态', tabs: ['概览', '部署', '服务治理', '可观测'] as const },
   { label: '资源', tabs: ['资源绑定', '配置', '用量'] as const },
-  { label: 'DevOps', tabs: ['代码仓库', '构建', '镜像', '发布'] as const },
+  { label: 'DevOps', tabs: ['流水线', '代码仓库', '构建', '镜像', '发布'] as const },
 ]
-type TabName = '概览' | '部署' | '服务治理' | '可观测' | '资源绑定' | '配置' | '用量' | '代码仓库' | '构建' | '镜像' | '发布'
+type TabName = '概览' | '部署' | '服务治理' | '可观测' | '资源绑定' | '配置' | '用量' | '流水线' | '代码仓库' | '构建' | '镜像' | '发布'
 const activeTab = ref<TabName>('概览')
 
 // 镜像 tab 点「发布」-> 切到发布 tab 并预选镜像（pickedImageId 变化触发 AppReleases 打开创建弹窗）
@@ -523,6 +524,11 @@ async function deleteApp() {
       <!-- 代码仓库 -->
       <div v-else-if="activeTab === '代码仓库'">
         <AppRepositories :app-id="app.id" />
+      </div>
+
+      <!-- 流水线（DevOps 分组首位，主线） -->
+      <div v-else-if="activeTab === '流水线'">
+        <AppPipelines :app-id="app.id" />
       </div>
 
       <!-- 构建 -->

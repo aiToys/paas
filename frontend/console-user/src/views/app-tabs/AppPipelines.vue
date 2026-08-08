@@ -1,0 +1,232 @@
+<script setup lang="ts">
+// 应用详情 - 流水线 tab：按 Kind 分组卡片，新建（从模板/空白/微服务快捷）、删除、编辑、运行。
+// 设计器/运行视图 Task 3/4 接入，先用占位组件（本文件独立可测）。
+import { ref, computed, onMounted } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { fetchAuth } from '@/api'
+import {
+  type Pipeline, type PipelineTemplate, type PipelineRun,
+  listPipelines, createPipeline, deletePipeline, listTemplates, triggerRun,
+} from '@/api/pipeline'
+import { useEnvStore } from '@/stores/env'
+
+const props = defineProps<{ appId: string }>()
+const envStore = useEnvStore()
+
+const pipelines = ref<Pipeline[]>([])
+const templates = ref<PipelineTemplate[]>([])
+const loading = ref(false)
+
+// 新建弹窗
+const createDlg = ref(false)
+const creating = ref(false)
+const createForm = ref<{ name: string; kind: 'ci' | 'cd'; templateId: string }>({ name: '', kind: 'ci', templateId: 'tpl-ci' })
+
+// 设计器 / 运行视图抽屉（Task 3/4 接入；先占位）
+const designerPid = ref<string | null>(null)
+const runViewId = ref<string | null>(null)
+
+const ciPipelines = computed(() => pipelines.value.filter((p) => p.kind === 'ci'))
+const cdPipelines = computed(() => pipelines.value.filter((p) => p.kind === 'cd'))
+
+async function load() {
+  loading.value = true
+  try {
+    const [ps, ts] = await Promise.all([listPipelines(props.appId), listTemplates()])
+    pipelines.value = ps
+    templates.value = ts
+  } catch (e: any) {
+    ElMessage.error(e.message || '加载流水线失败')
+  } finally {
+    loading.value = false
+  }
+}
+onMounted(load)
+
+function openCreate() {
+  createForm.value = { name: '', kind: 'ci', templateId: 'tpl-ci' }
+  createDlg.value = true
+}
+
+async function doCreate() {
+  if (!createForm.value.name.trim()) { ElMessage.warning('请输入流水线名称'); return }
+  creating.value = true
+  try {
+    const created = await createPipeline(props.appId, {
+      name: createForm.value.name.trim(),
+      kind: createForm.value.kind,
+      templateId: createForm.value.templateId || undefined,
+    })
+    ElMessage.success('已创建（从模板初始化，可编辑修改）')
+    createDlg.value = false
+    pipelines.value.push(created)
+    designerPid.value = created.id // 创建后直接进设计器
+  } catch (e: any) {
+    ElMessage.error(e.message || '创建失败')
+  } finally {
+    creating.value = false
+  }
+}
+
+// 微服务快捷：一次建 ci + cd 两条
+async function createMicroservice() {
+  const { value: name } = await ElMessageBox.prompt('微服务名（用作 ci/cd 流水线名前缀）', '新建微服务流水线', {
+    confirmButtonText: '创建 ci+cd', cancelButtonText: '取消', inputPlaceholder: '如 product',
+  }).catch(() => ({ value: '' }))
+  if (!name) return
+  try {
+    const ci = await createPipeline(props.appId, { name: `${name}-ci`, kind: 'ci', templateId: 'tpl-ci' })
+    const cd = await createPipeline(props.appId, { name: `${name}-cd`, kind: 'cd', templateId: 'tpl-cd' })
+    pipelines.value.push(ci, cd)
+    ElMessage.success(`已创建 ${name}-ci + ${name}-cd`)
+  } catch (e: any) {
+    ElMessage.error(e.message || '创建失败')
+  }
+}
+
+async function remove(p: Pipeline) {
+  try {
+    await ElMessageBox.confirm(`删除流水线「${p.name}」？此操作不可逆。`, '删除确认', { type: 'warning' })
+    await deletePipeline(props.appId, p.id)
+    pipelines.value = pipelines.value.filter((x) => x.id !== p.id)
+    ElMessage.success('已删除')
+  } catch (e: any) {
+    if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
+  }
+}
+
+// 触发运行（Task 5 增强 CD 版本选择 + 生产确认；本任务简化：默认 branch=main）
+async function run(p: Pipeline) {
+  try {
+    const r = await triggerRun(props.appId, p.id, { branch: p.trigger.branch || 'main' })
+    runViewId.value = r.id
+    ElMessage.success('已触发运行')
+  } catch (e: any) {
+    ElMessage.error(e.message || '触发失败') // 含 403 prod:write / 409 单实例串行 / 400 envId 缺失
+  }
+}
+
+// 流水线是否含 prod deploy（卡片标红警示）
+function hasProdDeploy(p: Pipeline): boolean {
+  return p.stages.some((s) => s.type === 'deploy' &&
+    envStore.envs.find((e) => e.id === s.params?.envId)?.type === 'prod')
+}
+
+// 最近一次运行状态（卡片角标）
+const latestRuns = ref<Record<string, PipelineRun>>({})
+async function loadLatest() {
+  try {
+    const runs = await fetchAuth('/api/pipelineruns?appId=' + props.appId).then((r) => r.json()).then((j) => j.data ?? [])
+    const map: Record<string, PipelineRun> = {}
+    for (const r of runs as PipelineRun[]) {
+      if (!map[r.pipelineId]) map[r.pipelineId] = r // 列表已按时间倒序
+    }
+    latestRuns.value = map
+  } catch { /* 非关键 */ }
+}
+onMounted(loadLatest)
+
+const statusTag = (s?: string) => {
+  if (!s) return null
+  const map: Record<string, string> = { succeeded: 'success', failed: 'danger', aborted: 'info', running: 'warning', paused: 'warning' }
+  return { type: map[s] || 'info', label: s }
+}
+
+// Task 3/4 接入前的占位组件（避免本任务编译报错；Task 3/4 接入后替换为真实 import）
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const PipelineDesigner = { template: '<div class="todo" style="padding:20px;color:#909399">设计器待接入（Task 3）</div>' }
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const PipelineRunView = { template: '<div class="todo" style="padding:20px;color:#909399">运行视图待接入（Task 4）</div>' }
+</script>
+
+<template>
+  <div class="app-pipelines" v-loading="loading">
+    <div class="cross-link"><a @click="$router.push('/devops')">查看跨应用流水线总览 →</a></div>
+
+    <div class="actions">
+      <el-button type="primary" @click="openCreate">＋ 新建流水线</el-button>
+      <el-button @click="createMicroservice">微服务（ci+cd）</el-button>
+      <el-button text @click="load">刷新</el-button>
+    </div>
+
+    <template v-for="kind in ['ci', 'cd']" :key="kind">
+      <div class="group" v-if="(kind === 'ci' ? ciPipelines : cdPipelines).length">
+        <div class="group-title">{{ kind === 'ci' ? '开发流水线 (CI)' : '发布流水线 (CD)' }}</div>
+        <div class="cards">
+          <div v-for="p in (kind === 'ci' ? ciPipelines : cdPipelines)" :key="p.id" class="pipe-card"
+               :class="{ 'prod-warn': hasProdDeploy(p) }">
+            <div class="pipe-head">
+              <span class="pipe-name">{{ p.name }}</span>
+              <el-tag v-if="statusTag(latestRuns[p.id]?.status)" size="small"
+                      :type="statusTag(latestRuns[p.id]?.status)!.type">
+                {{ statusTag(latestRuns[p.id]?.status)!.label }}
+              </el-tag>
+            </div>
+            <div class="pipe-stages">
+              <span v-for="(s, i) in p.stages" :key="i" class="stage-chip">{{ s.name }}</span>
+            </div>
+            <div class="pipe-actions">
+              <el-button size="small" @click="designerPid = p.id">编辑</el-button>
+              <el-button size="small" type="primary" @click="run(p)">运行</el-button>
+              <el-button size="small" text type="danger" @click="remove(p)">删除</el-button>
+            </div>
+            <div v-if="hasProdDeploy(p)" class="prod-badge">⚠️ 含生产环境</div>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <el-empty v-if="!pipelines.length && !loading" description="暂无流水线">
+      <el-button type="primary" @click="openCreate">新建第一条流水线</el-button>
+    </el-empty>
+
+    <!-- 新建弹窗 -->
+    <el-dialog v-model="createDlg" title="新建流水线" width="460px">
+      <el-form label-width="80px">
+        <el-form-item label="名称"><el-input v-model="createForm.name" placeholder="如 product-ci" /></el-form-item>
+        <el-form-item label="类型">
+          <el-radio-group v-model="createForm.kind" @change="createForm.templateId = createForm.kind === 'ci' ? 'tpl-ci' : 'tpl-cd'">
+            <el-radio value="ci">CI 开发流水线</el-radio>
+            <el-radio value="cd">CD 发布流水线</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="模板">
+          <el-select v-model="createForm.templateId">
+            <el-option v-for="t in templates.filter(t => t.kind === createForm.kind)" :key="t.id" :value="t.id" :label="t.name" />
+            <el-option value="">空白（自定义）</el-option>
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="createDlg = false">取消</el-button>
+        <el-button type="primary" :loading="creating" @click="doCreate">创建</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 设计器抽屉（Task 3 替换占位为真实组件） -->
+    <el-drawer v-model="designerPid" size="60%" title="流水线设计器" @close="designerPid = null">
+      <PipelineDesigner v-if="designerPid" :app-id="appId" :pid="designerPid" @saved="load" />
+    </el-drawer>
+    <!-- 运行视图抽屉（Task 4 替换占位为真实组件） -->
+    <el-drawer v-model="runViewId" size="50%" title="运行视图" @close="runViewId = null">
+      <PipelineRunView v-if="runViewId" :run-id="runViewId" />
+    </el-drawer>
+  </div>
+</template>
+
+<style scoped>
+.cross-link { margin-bottom: 12px; }
+.cross-link a { color: var(--el-color-primary); cursor: pointer; font-size: 13px; }
+.actions { margin-bottom: 16px; display: flex; gap: 8px; }
+.group { margin-bottom: 24px; }
+.group-title { font-weight: 600; color: var(--el-text-color-primary); margin-bottom: 12px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+.pipe-card { border: 1px solid var(--el-border-color-lighter); border-radius: 8px; padding: 14px; background: var(--el-bg-color); position: relative; }
+.pipe-card.prod-warn { border-color: var(--el-color-danger); }
+.pipe-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.pipe-name { font-weight: 600; }
+.pipe-stages { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
+.stage-chip { background: var(--el-fill-color-light); padding: 2px 8px; border-radius: 10px; font-size: 12px; }
+.pipe-actions { display: flex; gap: 8px; }
+.prod-badge { color: var(--el-color-danger); font-size: 12px; margin-top: 8px; }
+</style>
