@@ -190,6 +190,7 @@ type BuildRun struct {
 	Status     string    `json:"status"`
 	ImageID    string    `json:"imageId,omitempty"`
 	Log        string    `json:"log,omitempty"`
+	BuildArgs  map[string]string `json:"buildArgs,omitempty"`
 	StartedAt  time.Time `json:"startedAt"`
 	FinishedAt time.Time `json:"finishedAt,omitempty"`
 }
@@ -208,6 +209,7 @@ type Image struct {
 	BuildRunID string    `json:"buildRunId"`
 	BuiltAt    time.Time `json:"builtAt"`
 	Status     string    `json:"status"`
+	Version    string    `json:"version,omitempty"` // 发布版本号（release stage 写入点；空=未发布）
 }
 
 // Release 是一次发布：把某镜像以某策略部署到某环境，编排目标环境的基线 Workload。
@@ -225,7 +227,9 @@ type Release struct {
 	PreviousImageID string    `json:"previousImageId,omitempty"` // 回滚指针
 	IsRollback      bool      `json:"isRollback"`
 	PromotedFrom    string    `json:"promotedFrom,omitempty"` // 晋升来源 release ID（非空=由 promote 产生）
-	Version         string    `json:"version,omitempty"` // 发布版本号（baseline stage 写入点）
+	Version         string    `json:"version,omitempty"` // 发布版本号（release stage 写入点）
+	LaneID          string    `json:"laneId,omitempty"`      // 部署到的泳道（default=基线）
+	SourceRunID     string    `json:"sourceRunId,omitempty"` // 由哪次 pipeline run 部署（追溯）
 	CreatedAt       time.Time `json:"createdAt"`
 	CreatedBy       string    `json:"createdBy"`
 }

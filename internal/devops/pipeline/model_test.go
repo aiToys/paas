@@ -34,3 +34,17 @@ func TestStageDefValidate(t *testing.T) {
 		t.Fatalf("missing name want errStageNameRequired got %v", err)
 	}
 }
+
+func TestStageDefValidateAcceptsRelease(t *testing.T) {
+	s := StageDef{Name: "发布版本", Type: StageRelease}
+	if err := s.validate(); err != nil {
+		t.Errorf("release stage 应合法: %v", err)
+	}
+}
+
+func TestStageRunLogField(t *testing.T) {
+	sr := StageRun{Index: 0, Type: StageBuild, Name: "构建", Log: "构建已提交\n"}
+	if sr.Log != "构建已提交\n" {
+		t.Error("StageRun.Log 字段未生效")
+	}
+}

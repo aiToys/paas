@@ -47,6 +47,10 @@ const (
 	StageSkipped = "skipped"
 )
 
+// LaneDefault 泳道默认值（基线）。与 workload.LaneDefault 同值；
+// pipeline 层独立声明避免 import 循环（workload 不应成为 pipeline 的依赖）。
+const LaneDefault = "default"
+
 // StageType stage 类型枚举。
 const (
 	StageBuild    = "build"
@@ -54,6 +58,7 @@ const (
 	StageTest     = "test"
 	StageApprove  = "approve"
 	StagePromote  = "promote"
+	StageRelease  = "release"  // 打版本号里程碑（git tag + Image.version），不部署
 	StageBaseline = "baseline"
 )
 
@@ -151,6 +156,7 @@ type StageRun struct {
 	StartedAt time.Time      `json:"startedAt,omitempty"`
 	FinishedAt time.Time     `json:"finishedAt,omitempty"`
 	Error     string         `json:"error,omitempty"`
+	Log       string         `json:"log,omitempty"` // 执行过程关键事件（append-only，logf helper 写入）
 }
 
 // StageRun Output 已知 key（stage 输出链）。
@@ -184,7 +190,7 @@ func (p Pipeline) Validate() error {
 
 func (s StageDef) validate() error {
 	switch s.Type {
-	case StageBuild, StageDeploy, StageTest, StageApprove, StagePromote, StageBaseline:
+	case StageBuild, StageDeploy, StageTest, StageApprove, StagePromote, StageRelease, StageBaseline:
 		// valid
 	default:
 		return ErrInvalidStageType
