@@ -270,10 +270,10 @@ func scanBuild(r pg.RowScanner, b *devops.BuildRun) error {
 
 // CreateBuildRun 触发一次构建。校验仓库归属后置 pending，启动 mock CI runner 异步流转并产出 Image。
 // 校验逻辑与内存版一致：仓库须存在 + 本租户 + AppID 匹配。
-func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) error {
+func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) (devops.BuildRun, error) {
 	tid, err := pg.TenantOrErr(ctx)
 	if err != nil {
-		return err
+		return devops.BuildRun{}, err
 	}
 	// 校验仓库归属（与内存版同款语义）
 	var repo devops.CodeRepo
@@ -283,12 +283,12 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) error {
 		&repo.Dockerfile, &repo.BuildContext, &repo.Status, &repo.CreatedAt,
 		&repo.Source, &repo.GiteaOwner, &repo.GiteaRepo, &repo.CloneURL); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("仓库不存在或不属于本应用: %s", b.RepoID)
+			return devops.BuildRun{}, fmt.Errorf("仓库不存在或不属于本应用: %s", b.RepoID)
 		}
-		return err
+		return devops.BuildRun{}, err
 	}
 	if repo.AppID != b.AppID {
-		return fmt.Errorf("仓库不存在或不属于本应用: %s", b.RepoID)
+		return devops.BuildRun{}, fmt.Errorf("仓库不存在或不属于本应用: %s", b.RepoID)
 	}
 
 	b.ID = newID("build")
@@ -310,7 +310,7 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) error {
 		b.ID, b.TenantID, b.AppID, b.RepoID, b.Trigger, b.Commit, b.Branch, b.Message,
 		b.Status, b.ImageID, b.Log, b.StartedAt, b.FinishedAt)
 	if err != nil {
-		return err
+		return devops.BuildRun{}, err
 	}
 
 	// CI runner：pending -> running -> success/failed（产出 Image）。
@@ -324,7 +324,7 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) error {
 		TenantID: tid, AppID: b.AppID, BuildID: b.ID, Commit: b.Commit, Branch: b.Branch,
 		GitURL: gitURL, Dockerfile: repo.Dockerfile, BuildContext: repo.BuildContext,
 	}) //nolint:gosec // G118 误报：后台构建任务须脱离请求生命周期，不持 request ctx 是有意为之
-	return nil
+	return b, nil
 }
 
 // runBuild 执行构建流水线并持久化状态。pipeline nil 时用 Mock。

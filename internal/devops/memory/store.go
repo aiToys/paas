@@ -194,16 +194,16 @@ func (s *Store) GetBuildRun(ctx context.Context, id string) (devops.BuildRun, er
 }
 
 // Create 触发一次构建。校验仓库归属后置 pending，启动 mock CI runner 异步流转并产出 Image。
-func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) error {
+func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) (devops.BuildRun, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {
-		return err
+		return devops.BuildRun{}, err
 	}
 	s.mu.Lock()
 	repo, ok := s.repos[b.RepoID]
 	if !ok || repo.TenantID != tid || repo.AppID != b.AppID {
 		s.mu.Unlock()
-		return fmt.Errorf("仓库不存在或不属于本应用: %s", b.RepoID)
+		return devops.BuildRun{}, fmt.Errorf("仓库不存在或不属于本应用: %s", b.RepoID)
 	}
 	b.ID = newID("build")
 	b.TenantID = tid
@@ -235,7 +235,7 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) error {
 		TenantID: tid, AppID: b.AppID, BuildID: b.ID, Commit: b.Commit, Branch: b.Branch,
 		GitURL: gitURL, Dockerfile: repo.Dockerfile, BuildContext: repo.BuildContext,
 	}) //nolint:gosec // G118 误报：后台构建须脱离请求生命周期，不持 request ctx 是有意为之
-	return nil
+	return b, nil
 }
 
 // SetPipeline 注入构建流水线（cmd/core 按 PAAS_DEVOPS_REAL 注入 Real）；nil=Mock。

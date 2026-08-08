@@ -66,10 +66,10 @@ func newFixture(prodWrite bool) devopsFixture {
 		panic(err)
 	}
 	// 触发构建产出镜像（mock CI runner 异步，并行触发后统一等待）
-	if err := s.CreateBuildRun(acme, devops.BuildRun{AppID: "app-cs", RepoID: "repo-acme-cs"}); err != nil {
+	if _, err := s.CreateBuildRun(acme, devops.BuildRun{AppID: "app-cs", RepoID: "repo-acme-cs"}); err != nil {
 		panic(err)
 	}
-	if err := s.CreateBuildRun(globex, devops.BuildRun{AppID: "app-agent", RepoID: "repo-globex-agent"}); err != nil {
+	if _, err := s.CreateBuildRun(globex, devops.BuildRun{AppID: "app-agent", RepoID: "repo-globex-agent"}); err != nil {
 		panic(err)
 	}
 	time.Sleep(1300 * time.Millisecond)

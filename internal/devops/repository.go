@@ -19,7 +19,9 @@ type CodeRepoRepository interface {
 type BuildRunRepository interface {
 	ListBuildRuns(ctx context.Context, appID string) ([]BuildRun, error)
 	GetBuildRun(ctx context.Context, id string) (BuildRun, error)
-	CreateBuildRun(ctx context.Context, b BuildRun) error
+	// CreateBuildRun 触发一次构建；mock CI runner 异步流转状态并产出 Image。
+	// 返回写入后的 BuildRun（含生成的 ID），供调用方（pipeline engine）轮询。
+	CreateBuildRun(ctx context.Context, b BuildRun) (BuildRun, error)
 	// ListAllBuildRuns 跨租户列出全部构建（admin 平台总览，不过滤 tenant，返回对象带 TenantID）。
 	ListAllBuildRuns(ctx context.Context) ([]BuildRun, error)
 }

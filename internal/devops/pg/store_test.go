@@ -180,7 +180,7 @@ func TestBuildRunRunner(t *testing.T) {
 	repoID := repoList[0].ID
 
 	// 触发构建
-	if err := s.CreateBuildRun(ctx, devops.BuildRun{AppID: "app-cs", RepoID: repoID}); err != nil {
+	if _, err := s.CreateBuildRun(ctx, devops.BuildRun{AppID: "app-cs", RepoID: repoID}); err != nil {
 		t.Fatalf("CreateBuildRun: %v", err)
 	}
 	// BuildRun ID 同理由 List 取回
@@ -250,7 +250,7 @@ func TestCreateBuildRunRepoMismatch(t *testing.T) {
 	ctx := acmeCtx()
 
 	// 不存在的仓库
-	if err := s.CreateBuildRun(ctx, devops.BuildRun{AppID: "app-cs", RepoID: "no-such"}); err == nil {
+	if _, err := s.CreateBuildRun(ctx, devops.BuildRun{AppID: "app-cs", RepoID: "no-such"}); err == nil {
 		t.Fatalf("仓库不存在应报错")
 	}
 
@@ -262,7 +262,7 @@ func TestCreateBuildRunRepoMismatch(t *testing.T) {
 	if len(repoList) != 1 {
 		t.Fatalf("应 1 个仓库, got %d", len(repoList))
 	}
-	if err := s.CreateBuildRun(ctx, devops.BuildRun{AppID: "wrong-app", RepoID: repoList[0].ID}); err == nil {
+	if _, err := s.CreateBuildRun(ctx, devops.BuildRun{AppID: "wrong-app", RepoID: repoList[0].ID}); err == nil {
 		t.Fatalf("AppID 不匹配应报错")
 	}
 }

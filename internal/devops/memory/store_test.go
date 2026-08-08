@@ -68,7 +68,7 @@ func TestBuildRunMockCI(t *testing.T) {
 		t.Fatalf("建仓库失败: %v", err)
 	}
 
-	if err := s.CreateBuildRun(ctx, devops.BuildRun{
+	if _, err := s.CreateBuildRun(ctx, devops.BuildRun{
 		AppID: "app-cs", RepoID: "repo-acme-cs", Trigger: devops.TriggerManual,
 	}); err != nil {
 		t.Fatalf("触发构建失败: %v", err)
@@ -163,7 +163,7 @@ func TestReleasePreviousAndRollback(t *testing.T) {
 	}
 
 	// 触发构建产出新镜像 img2
-	if err := s.CreateBuildRun(ctx, devops.BuildRun{AppID: "app-cs", RepoID: "repo-acme-cs"}); err != nil {
+	if _, err := s.CreateBuildRun(ctx, devops.BuildRun{AppID: "app-cs", RepoID: "repo-acme-cs"}); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(1200 * time.Millisecond)

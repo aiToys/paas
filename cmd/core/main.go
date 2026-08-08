@@ -39,6 +39,7 @@ import (
 	"github.com/aitoys/paas/internal/dataservice"
 	"github.com/aitoys/paas/internal/devops"
 	"github.com/aitoys/paas/internal/devops/gitea"
+	"github.com/aitoys/paas/internal/devops/pipeline"
 	"github.com/aitoys/paas/internal/devops/registry"
 	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/governance"
@@ -446,6 +447,27 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	)
 	devopsHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
+	// 流水线引擎（变更→构建→发布→部署→测试→写基线，可自定义，每应用多条）：
+	// engine 经 buildBridge/releaseBridge/giteaBridge 桥接 devops 业务包（依赖倒置破循环）；
+	// handler 注入 EnvTypeResolver（prod deploy 校验）+ RepoResolver（build stage 解析内置仓库）+
+	// identityAuditAdapter（审计，与 identity/devops 同源）+ actor（gateway.UserIDFrom）。
+	pipeEngine := &pipeline.Engine{
+		Pipelines: stores.Pipeline, Runs: stores.Pipeline,
+		Builds:   &buildBridge{builds: stores.DevOpsBuilds},
+		Releases: &releaseBridge{
+			releases: stores.DevOpsReleases, images: stores.DevOpsImages,
+			workloads: stores.Workload, envs: stores.Environment,
+		},
+		Gitea: &giteaBridge{repos: stores.DevOpsRepos, gitea: giteaClient},
+	}
+	pipelineHandler := pipeline.NewHandler(stores.Pipeline, stores.Pipeline, stores.Pipeline, pipeEngine,
+		pipeline.WithAuthorize(func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }),
+		pipeline.WithEnvType(envTypeBridge(stores.Environment)),
+		pipeline.WithRepoResolver(&repoResolverBridge{repos: stores.DevOpsRepos}),
+		pipeline.WithAudit(&identityAuditAdapter{store: stores.Security}),
+		pipeline.WithActorFn(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
+	)
+
 	// 应用配置（工作负载级 env/Secret）：注入 environment store（prod 写校验）。
 	// Secret 后端明文存储，API 返回固定掩码；与配置中心（服务治理，运行时动态）严格区分。
 	appconfigHandler := appconfig.NewHandler(stores.AppConfig, appconfig.WithEnvResolver(stores.Environment))
@@ -605,6 +627,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 				case "repositories", "buildruns", "images", "releases":
 					devopsHandler.ServeHTTP(w, r)
 					return
+				case "pipelines":
+					pipelineHandler.ServeHTTP(w, r)
+					return
 				case "configs":
 					appconfigHandler.ServeHTTP(w, r)
 					return
@@ -624,6 +649,10 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	mux.Handle("/api/images/", auth(devopsHandler))
 	mux.Handle("/api/releases", auth(devopsHandler))
 	mux.Handle("/api/releases/", auth(devopsHandler))
+	// 流水线（平台预置模板 + run 列表/详情/审批/终止）。应用作用域 pipelines 经 composite 分发。
+	mux.Handle("/api/pipeline-templates", auth(pipelineHandler))
+	mux.Handle("/api/pipelineruns", auth(pipelineHandler))
+	mux.Handle("/api/pipelineruns/", auth(pipelineHandler))
 	// 镜像库实时视图（registry v2 catalog/tags），复用 devops handler 分发 + image:read 权限。
 	mux.Handle("/api/registry", auth(devopsHandler))
 	mux.Handle("/api/registry/", auth(devopsHandler))
@@ -879,6 +908,22 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// 镜像库实时视图（registry v2）
 	reg.Operation("GET", "/api/registry/repositories", apiroute.Tags("DevOps"), apiroute.Summary("镜像仓库 catalog（registry v2 实时）"), apiroute.Perm("image:read"), apiroute.WithResp([]string{}))
 	reg.Operation("GET", "/api/registry/tags", apiroute.Tags("DevOps"), apiroute.Summary("镜像 tag+digest（?repository=）"), apiroute.Perm("image:read"))
+	// 流水线（变更→构建→发布→部署→测试→写基线，可自定义；每应用多条）
+	reg.Operation("GET", "/api/pipeline-templates", apiroute.Tags("流水线"), apiroute.Summary("流水线模板（平台预置 + 租户自定义）"), apiroute.Perm("pipeline:read"), apiroute.WithResp([]pipeline.PipelineTemplate{}))
+	reg.Operation("GET", "/api/applications/{id}/pipelines", apiroute.Tags("流水线"), apiroute.Summary("应用流水线列表"), apiroute.Perm("pipeline:read"), apiroute.WithResp([]pipeline.Pipeline{}))
+	reg.Operation("POST", "/api/applications/{id}/pipelines", apiroute.Tags("流水线"), apiroute.Summary("创建流水线（可从模板）"), apiroute.Perm("pipeline:write"), apiroute.WithReqBody(pipeline.Pipeline{}), apiroute.WithResp(pipeline.Pipeline{}))
+	reg.Operation("GET", "/api/applications/{id}/pipelines/{pid}", apiroute.Tags("流水线"), apiroute.Summary("流水线详情"), apiroute.Perm("pipeline:read"), apiroute.WithResp(pipeline.Pipeline{}))
+	reg.Operation("PUT", "/api/applications/{id}/pipelines/{pid}", apiroute.Tags("流水线"), apiroute.Summary("更新流水线"), apiroute.Perm("pipeline:write"), apiroute.WithReqBody(pipeline.Pipeline{}), apiroute.WithResp(pipeline.Pipeline{}))
+	reg.Operation("DELETE", "/api/applications/{id}/pipelines/{pid}", apiroute.Tags("流水线"), apiroute.Summary("删除流水线"), apiroute.Perm("pipeline:write"))
+	reg.Operation("POST", "/api/applications/{id}/pipelines/{pid}/run", apiroute.Tags("流水线"), apiroute.Summary("手动触发流水线运行"), apiroute.Perm("pipeline:write"), apiroute.WithReqBody(struct {
+		Branch  string `json:"branch"`
+		Commit  string `json:"commit"`
+		Version string `json:"version"`
+	}{}), apiroute.WithResp(pipeline.PipelineRun{}))
+	reg.Operation("GET", "/api/pipelineruns", apiroute.Tags("流水线"), apiroute.Summary("运行列表（?appId=&pipelineId=&status=）"), apiroute.Perm("pipeline:read"), apiroute.WithResp([]pipeline.PipelineRun{}))
+	reg.Operation("GET", "/api/pipelineruns/{id}", apiroute.Tags("流水线"), apiroute.Summary("运行详情（含各 stage 状态/输入输出）"), apiroute.Perm("pipeline:read"), apiroute.WithResp(pipeline.PipelineRun{}))
+	reg.Operation("POST", "/api/pipelineruns/{id}/stages/{idx}/approve", apiroute.Tags("流水线"), apiroute.Summary("审批/人工确认通过（恢复 paused run）"), apiroute.Perm("pipeline:write"))
+	reg.Operation("POST", "/api/pipelineruns/{id}/abort", apiroute.Tags("流水线"), apiroute.Summary("终止运行"), apiroute.Perm("pipeline:write"))
 	// 应用配置
 	reg.Operation("GET", "/api/applications/{id}/configs", apiroute.Tags("应用配置"), apiroute.Summary("应用配置项（掩码）"), apiroute.Perm("config:read"), apiroute.WithResp([]appconfig.ConfigItem{}))
 	reg.Operation("POST", "/api/applications/{id}/configs", apiroute.Tags("应用配置"), apiroute.Summary("新增/更新配置项"), apiroute.Perm("config:write"), apiroute.WithReqBody(appconfig.ConfigItem{}), apiroute.WithResp(appconfig.ConfigItem{}))

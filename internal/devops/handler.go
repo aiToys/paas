@@ -479,7 +479,7 @@ func (h *Handler) serveBuildRuns(w http.ResponseWriter, r *http.Request, appID s
 				}
 			}
 		}
-		if err := h.builds.CreateBuildRun(r.Context(), b); err != nil {
+		if _, err := h.builds.CreateBuildRun(r.Context(), b); err != nil {
 			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}

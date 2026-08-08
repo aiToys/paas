@@ -55,7 +55,7 @@ func newAdminFixture(t *testing.T) adminFixture {
 		t.Fatalf("CreateRepo: %v", err)
 	}
 	// 触发两次构建产出两个镜像
-	if err := s.CreateBuildRun(acme, devops.BuildRun{AppID: "app-cs", RepoID: "repo-acme-cs"}); err != nil {
+	if _, err := s.CreateBuildRun(acme, devops.BuildRun{AppID: "app-cs", RepoID: "repo-acme-cs"}); err != nil {
 		t.Fatalf("CreateBuildRun1: %v", err)
 	}
 	time.Sleep(1300 * time.Millisecond)
@@ -63,7 +63,7 @@ func newAdminFixture(t *testing.T) adminFixture {
 	if len(imgs1) == 0 {
 		t.Fatalf("no images after first build")
 	}
-	if err := s.CreateBuildRun(acme, devops.BuildRun{AppID: "app-cs", RepoID: "repo-acme-cs"}); err != nil {
+	if _, err := s.CreateBuildRun(acme, devops.BuildRun{AppID: "app-cs", RepoID: "repo-acme-cs"}); err != nil {
 		t.Fatalf("CreateBuildRun2: %v", err)
 	}
 	time.Sleep(1300 * time.Millisecond)
