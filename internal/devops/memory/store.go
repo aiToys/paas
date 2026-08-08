@@ -518,6 +518,7 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 		PreviousImageID: previousImageID,
 		CreatedBy:       input.CreatedBy,
 		CreatedAt:       time.Now(),
+		Version:         "", // 初始为空，由 baseline stage 写入
 	}
 	s.releases[rel.ID] = rel // 已在 s.mu 临界区内（step2-3 持锁）
 	return rel, nil
@@ -568,6 +569,7 @@ func (s *Store) RollbackRelease(ctx context.Context, releaseID string) (devops.R
 		PreviousImageID: orig.ImageID,
 		IsRollback:      true,
 		CreatedAt:       time.Now(),
+		Version:         "", // 回滚发布初始为空
 	}
 	s.releases[rb.ID] = rb
 	s.mu.Unlock()

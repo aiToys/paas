@@ -80,7 +80,7 @@ const (
 	repoCols    = `id, tenant_id, app_id, git_url, branch, dockerfile, build_context, status, created_at, source, gitea_owner, gitea_repo, clone_url`
 	buildCols   = `id, tenant_id, app_id, repo_id, trigger, commit, branch, message, status, image_id, log, started_at, finished_at`
 	imageCols   = `id, tenant_id, app_id, registry, tag, digest, source, branch, build_run_id, built_at, status`
-	releaseCols = `id, tenant_id, app_id, env_id, image_id, image_digest, strategy, status, workload_id, previous_image_id, is_rollback, created_at, created_by, promoted_from`
+	releaseCols = `id, tenant_id, app_id, env_id, image_id, image_digest, strategy, status, workload_id, previous_image_id, is_rollback, created_at, created_by, promoted_from, version`
 )
 
 // ---------- CodeRepoRepository ----------
@@ -576,7 +576,7 @@ func scanRelease(r pg.RowScanner, rel *devops.Release) error {
 	return r.Scan(
 		&rel.ID, &rel.TenantID, &rel.AppID, &rel.EnvID, &rel.ImageID, &rel.ImageDigest,
 		&rel.Strategy, &rel.Status, &rel.WorkloadID, &rel.PreviousImageID, &rel.IsRollback,
-		&rel.CreatedAt, &rel.CreatedBy, &rel.PromotedFrom)
+		&rel.CreatedAt, &rel.CreatedBy, &rel.PromotedFrom, &rel.Version)
 }
 
 // CreateRelease 编排发布：取镜像 -> 找/建目标环境基线 Workload -> 更新镜像 -> 记录回滚指针 -> 存发布单。
@@ -671,12 +671,13 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 		PreviousImageID: previousImageID,
 		CreatedBy:       input.CreatedBy,
 		CreatedAt:       time.Now(),
+		Version:         "", // 初始为空，由 baseline stage 写入
 	}
 	_, err = s.db.Pool().Exec(ctx,
-		`INSERT INTO releases (`+releaseCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+		`INSERT INTO releases (`+releaseCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
 		rel.ID, rel.TenantID, rel.AppID, rel.EnvID, rel.ImageID, rel.ImageDigest,
 		rel.Strategy, rel.Status, rel.WorkloadID, rel.PreviousImageID, rel.IsRollback,
-		rel.CreatedAt, rel.CreatedBy, rel.PromotedFrom)
+		rel.CreatedAt, rel.CreatedBy, rel.PromotedFrom, rel.Version)
 	if err != nil {
 		// 补偿事务：workload 已切新镜像但 release 记录未落库 -> 回滚 workload 到发布前状态，
 		// 防丢失 PreviousImageID 回滚指针（best-effort，补偿失败不掩盖主错误）。
@@ -758,6 +759,7 @@ func (s *Store) RollbackRelease(ctx context.Context, releaseID string) (devops.R
 		PreviousImageID: orig.ImageID,
 		IsRollback:      true,
 		CreatedAt:       time.Now(),
+		Version:         "", // 回滚发布初始为空
 	}
 	tx, err := s.db.Pool().Begin(ctx)
 	if err != nil {
@@ -780,10 +782,10 @@ func (s *Store) RollbackRelease(ctx context.Context, releaseID string) (devops.R
 		return devops.Release{}, err
 	}
 	if _, err = tx.Exec(ctx,
-		`INSERT INTO releases (`+releaseCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		`INSERT INTO releases (`+releaseCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
 		rb.ID, rb.TenantID, rb.AppID, rb.EnvID, rb.ImageID, rb.ImageDigest,
 		rb.Strategy, rb.Status, rb.WorkloadID, rb.PreviousImageID, rb.IsRollback,
-		rb.CreatedAt, rb.CreatedBy, rb.PromotedFrom); err != nil {
+		rb.CreatedAt, rb.CreatedBy, rb.PromotedFrom, rb.Version); err != nil {
 		return devops.Release{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {

@@ -319,3 +319,28 @@ func TestCreateRepoDefaults(t *testing.T) {
 		t.Fatalf("TenantID 应由 ctx 写入")
 	}
 }
+
+// TestReleaseVersionRoundTrip 验证 Version 字段的读写透传。
+func TestReleaseVersionRoundTrip(t *testing.T) {
+	s := NewStore(wlmemory.NewStore())
+	ctx := acmeCtx()
+
+	// 自建镜像 fixture
+	img := seedImage(s, "img-version-test", "t-acme", "app-cs")
+
+	// 用 seedRelease 白盒注入带 Version 的发布单
+	rel := seedRelease(s, "rel-version-test", "t-acme", "app-cs", "env-acme-test", img.ID, img.Digest, "wl-cs-api")
+	rel.Version = "v1.2.3"
+	s.mu.Lock()
+	s.releases[rel.ID] = rel
+	s.mu.Unlock()
+
+	// 读取发布单，验证 Version 字段透传
+	got, err := s.GetRelease(ctx, rel.ID)
+	if err != nil {
+		t.Fatalf("GetRelease 失败: %v", err)
+	}
+	if got.Version != "v1.2.3" {
+		t.Fatalf("Version=%s, want v1.2.3", got.Version)
+	}
+}
