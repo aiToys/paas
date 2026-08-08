@@ -10,12 +10,14 @@ import (
 
 // sentinel 错误
 var (
-	errNameRequired     = errors.New("name required")
-	errAppRequired      = errors.New("appId required")
-	ErrInvalidKind      = errors.New("invalid kind")
-	ErrNoStages         = errors.New("no stages")
-	ErrInvalidStageType = errors.New("invalid stage type")
+	errNameRequired      = errors.New("name required")
+	errAppRequired       = errors.New("appId required")
+	ErrInvalidKind       = errors.New("invalid kind")
+	ErrNoStages          = errors.New("no stages")
+	ErrInvalidStageType  = errors.New("invalid stage type")
 	errStageNameRequired = errors.New("stage name required")
+	ErrNotPaused         = errors.New("run not paused")
+	ErrStageNotCurrent   = errors.New("stage not current")
 )
 
 // Kind 流水线分类（UI 分组 + 职责划分）。

@@ -14,9 +14,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/aitoys/paas/internal/devops"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // BuildRunner 桥接 devops BuildRunRepository（依赖倒置）。
@@ -45,11 +47,13 @@ type Engine struct {
 }
 
 // Start 起 goroutine 推进 runID（不阻塞，handler 调后立即返回）。
-// ctx 派生自 background（进程级，不绑请求生命周期）；进程退出 goroutine 终止，
-// run 卡 Running（留后续 SweepInterrupted 兜底，同 devops runBuild 模式）。
+// 从 ctx 提取 tenant 注入 background（store 强制 tenant 过滤，丢失则 GetRun 报 missing tenant）；
+// 进程退出 goroutine 终止，run 卡 Running（留后续 SweepInterrupted 兜底，同 devops runBuild 模式）。
 func (e *Engine) Start(ctx context.Context, runID string) {
+	tid, _ := tenant.TenantFrom(ctx)
 	go func() {
-		if err := e.Advance(context.Background(), runID); err != nil {
+		bgCtx := tenant.WithTenant(context.Background(), tid)
+		if err := e.Advance(bgCtx, runID); err != nil {
 			log.Printf("pipeline: advance run %s 失败: %v", runID, err)
 		}
 	}()
@@ -117,8 +121,12 @@ func (e *Engine) execStage(ctx context.Context, run *PipelineRun, stage StageDef
 		return e.execBuild(ctx, run, stage, sr)
 	case StageDeploy:
 		return e.execDeploy(ctx, run, stage, sr)
-	case StageTest, StageApprove, StagePromote, StageBaseline:
-		err := fmt.Errorf("stage 类型 %s 未实现（Task 9/10）", stage.Type)
+	case StageTest:
+		return e.execTest(ctx, run, stage, sr)
+	case StageApprove:
+		return e.execApprove(ctx, run, stage, sr)
+	case StagePromote, StageBaseline:
+		err := fmt.Errorf("stage 类型 %s 未实现（Task 10）", stage.Type)
 		sr.Error = err.Error()
 		return true, err
 	}
@@ -186,6 +194,100 @@ func (e *Engine) execDeploy(ctx context.Context, run *PipelineRun, stage StageDe
 	sr.Status = StageSuccess
 	sr.FinishedAt = time.Now()
 	return true, nil
+}
+
+// execTest 测试 stage：smoke（HTTP 探活自动）/ manual（人工确认暂停）。
+// smoke 取前序 deploy 的 workloadDomain + path 轮询 2xx；manual 暂停等 Resume。
+func (e *Engine) execTest(ctx context.Context, run *PipelineRun, stage StageDef, sr *StageRun) (bool, error) {
+	mode := strOr(stage.Params, "mode", TestSmoke)
+	if mode == TestManual {
+		// 人工确认：暂停 run，等外部 Resume
+		sr.Status = StageWaiting
+		sr.Input = map[string]any{"mode": TestManual, "message": strOr(stage.Params, "message", "请确认测试通过")}
+		return false, nil
+	}
+	// smoke：探活前序 deploy 的 domain + path
+	domain, err := resolvePriorOutput(*run, OutWorkloadDomain)
+	if err != nil {
+		sr.Error = err.Error()
+		return true, err
+	}
+	path := strOr(stage.Params, "path", "/livez")
+	url := fmt.Sprintf("http://%s%s", domain, path)
+	if err := pollHTTP(ctx, url, 2*time.Minute); err != nil {
+		sr.Error = fmt.Sprintf("探活失败 %s: %v", url, err)
+		return true, err
+	}
+	sr.Output = map[string]any{"result": "ok", "url": url}
+	sr.Status = StageSuccess
+	sr.FinishedAt = time.Now()
+	return true, nil
+}
+
+// execApprove 审批 stage：暂停 run 等外部 Resume（通过）或 Abort（拒绝，Task 12）。
+func (e *Engine) execApprove(ctx context.Context, run *PipelineRun, stage StageDef, sr *StageRun) (bool, error) {
+	sr.Status = StageWaiting
+	sr.Input = map[string]any{"message": strOr(stage.Params, "message", "等待审批")}
+	return false, nil
+}
+
+// Resume 恢复 paused run 的某 stage（handler approve 调用）。
+// 标记该 stage 成功 + currentStage++ + run.Status=running，再启 advance 异步推进。
+// 拒绝审批走 Abort（Task 12），此处只处理通过路径。
+func (e *Engine) Resume(ctx context.Context, runID string, stageIdx int) error {
+	run, err := e.Runs.GetRun(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if run.Status != RunPaused {
+		return ErrNotPaused
+	}
+	if stageIdx != run.CurrentStage {
+		return ErrStageNotCurrent
+	}
+	run.StageRuns[stageIdx].Status = StageSuccess
+	run.StageRuns[stageIdx].FinishedAt = time.Now()
+	run.CurrentStage++
+	run.Status = RunRunning
+	if _, err := e.Runs.UpdateRun(ctx, run); err != nil {
+		return err
+	}
+	e.Start(ctx, runID)
+	return nil
+}
+
+// pollHTTP GET 轮询 url 到 2xx 或超时，用于 smoke 探活。
+// 不跟随重定向（CheckRedirect=ErrUseLastResponse，与平台出站 client SSRF 防护一致）。
+func pollHTTP(ctx context.Context, url string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	client := &http.Client{
+		Timeout:       5 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("探活超时")
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 // resolveImage deploy stage 镜像来源解析（CI/CD 解耦核心）。

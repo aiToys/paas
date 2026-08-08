@@ -2,7 +2,10 @@ package pipeline
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/aitoys/paas/internal/devops"
 	"github.com/aitoys/paas/pkg/tenant"
@@ -24,9 +27,10 @@ func (f fakeBuilder) PollBuildRun(ctx context.Context, buildID string) (devops.B
 }
 
 type fakeReleaser struct {
-	imageID    string // LatestReadyImage 返回
-	latestErr  error
-	deployErr  error // CreateRelease 错误（可选）
+	imageID   string // LatestReadyImage 返回
+	latestErr error
+	deployErr error // CreateRelease 错误（可选）
+	domain    string // WorkloadDomain 返回（空则默认 wl-{id}.svc.cluster.local）
 }
 
 func (f fakeReleaser) CreateRelease(ctx context.Context, input devops.ReleaseInput) (devops.Release, error) {
@@ -35,8 +39,13 @@ func (f fakeReleaser) CreateRelease(ctx context.Context, input devops.ReleaseInp
 	}
 	return devops.Release{ID: "rel-1", AppID: input.AppID, EnvID: input.EnvID, ImageID: input.ImageID, WorkloadID: "wl-1"}, nil
 }
-func (f fakeReleaser) PollWorkloadReady(ctx context.Context, workloadID string) error  { return nil }
-func (f fakeReleaser) WorkloadDomain(ctx context.Context, workloadID string) string     { return workloadID + ".svc.cluster.local" }
+func (f fakeReleaser) PollWorkloadReady(ctx context.Context, workloadID string) error { return nil }
+func (f fakeReleaser) WorkloadDomain(ctx context.Context, workloadID string) string {
+	if f.domain != "" {
+		return f.domain
+	}
+	return workloadID + ".svc.cluster.local"
+}
 func (f fakeReleaser) LatestReadyImage(ctx context.Context, appID string) (string, error) {
 	return f.imageID, f.latestErr
 }
@@ -252,5 +261,156 @@ func TestStrOrAndGetStringMap(t *testing.T) {
 	}
 	if _, ok := m["BAD"]; ok {
 		t.Fatal("getStringMap 应跳过非 string 值")
+	}
+}
+
+// seedPipeline 建 pipeline + run（stages 由调用方传），返 run。
+func seedPipeline(t *testing.T, s *memoryStore, name, appID, kind string, stages []StageDef) PipelineRun {
+	t.Helper()
+	ctx := acmeCtxEngine()
+	p, err := s.CreatePipeline(ctx, Pipeline{
+		Name: name, AppID: appID, Kind: kind, Stages: stages,
+	})
+	if err != nil {
+		t.Fatalf("CreatePipeline 失败: %v", err)
+	}
+	stageRuns := make([]StageRun, len(stages))
+	for i, st := range stages {
+		stageRuns[i] = StageRun{Index: i, Type: st.Type, Name: st.Name, Status: StagePending}
+	}
+	r, err := s.CreateRun(ctx, PipelineRun{
+		PipelineID: p.ID, AppID: p.AppID, Branch: "main", Commit: "abc123", RepoID: "repo-1",
+		Trigger: "manual", Status: RunRunning, CurrentStage: 0, StageRuns: stageRuns,
+	})
+	if err != nil {
+		t.Fatalf("CreateRun 失败: %v", err)
+	}
+	return r
+}
+
+func TestEngineTestSmokeSuccess(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	s := NewMemoryStore()
+	r := seedPipeline(t, s, "p-smoke", "app-smoke", KindCI, []StageDef{
+		{Name: "部署", Type: StageDeploy, Params: map[string]any{
+			"envId": "env-dev", "imageSource": ImageSelected, "imageId": "img-1",
+		}},
+		{Name: "冒烟", Type: StageTest, Params: map[string]any{"mode": TestSmoke, "path": "/livez"}},
+	})
+
+	eng := &Engine{
+		Pipelines: s, Runs: s,
+		Builds:   fakeBuilder{},
+		Releases: fakeReleaser{domain: srv.Listener.Addr().String()},
+	}
+	if err := eng.Advance(acmeCtxEngine(), r.ID); err != nil {
+		t.Fatalf("Advance 失败: %v", err)
+	}
+
+	run, _ := s.GetRun(acmeCtxEngine(), r.ID)
+	if run.Status != RunSucceeded {
+		t.Fatalf("run.Status 期望 succeeded，got %s", run.Status)
+	}
+	if run.StageRuns[1].Status != StageSuccess {
+		t.Fatalf("test stage 期望 success，got %s", run.StageRuns[1].Status)
+	}
+	if run.StageRuns[1].Output["result"] != "ok" {
+		t.Fatalf("test Output.result 期望 ok，got %v", run.StageRuns[1].Output["result"])
+	}
+}
+
+func TestEngineTestManualPause(t *testing.T) {
+	s := NewMemoryStore()
+	r := seedPipeline(t, s, "p-manual", "app-manual", KindCI, []StageDef{
+		{Name: "人工测试", Type: StageTest, Params: map[string]any{"mode": TestManual}},
+	})
+
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: fakeReleaser{}}
+	if err := eng.Advance(acmeCtxEngine(), r.ID); err != nil {
+		t.Fatalf("Advance 失败: %v", err)
+	}
+
+	run, _ := s.GetRun(acmeCtxEngine(), r.ID)
+	if run.Status != RunPaused {
+		t.Fatalf("test-manual 期望 paused，got %s", run.Status)
+	}
+	if run.StageRuns[0].Status != StageWaiting {
+		t.Fatalf("test stage 期望 waiting，got %s", run.StageRuns[0].Status)
+	}
+	if run.StageRuns[0].Input["mode"] != TestManual {
+		t.Fatalf("test Input.mode 期望 manual，got %v", run.StageRuns[0].Input["mode"])
+	}
+}
+
+func TestEngineApprovePauseResume(t *testing.T) {
+	s := NewMemoryStore()
+	r := seedPipeline(t, s, "p-appr", "app-appr", KindCD, []StageDef{
+		{Name: "审批", Type: StageApprove},
+		{Name: "部署", Type: StageDeploy, Params: map[string]any{
+			"envId": "env-prod", "imageSource": ImageSelected, "imageId": "img-1",
+		}},
+	})
+
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: fakeReleaser{}}
+	// 第一次 advance -> paused at approve
+	if err := eng.Advance(acmeCtxEngine(), r.ID); err != nil {
+		t.Fatalf("Advance 第一次: %v", err)
+	}
+	run, _ := s.GetRun(acmeCtxEngine(), r.ID)
+	if run.Status != RunPaused {
+		t.Fatalf("期望 paused，got %s", run.Status)
+	}
+	if run.StageRuns[0].Status != StageWaiting {
+		t.Fatalf("approve stage 期望 waiting，got %s", run.StageRuns[0].Status)
+	}
+	if run.CurrentStage != 0 {
+		t.Fatalf("paused 时 CurrentStage 期望 0，got %d", run.CurrentStage)
+	}
+
+	// Resume（异步推进，轮询等终态）
+	if err := eng.Resume(acmeCtxEngine(), r.ID, 0); err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		run, _ = s.GetRun(acmeCtxEngine(), r.ID)
+		if run.Status == RunSucceeded || run.Status == RunFailed {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if run.Status != RunSucceeded {
+		t.Fatalf("Resume 后期望 succeeded，got %s", run.Status)
+	}
+	if run.CurrentStage != 2 {
+		t.Fatalf("CurrentStage 期望 2，got %d", run.CurrentStage)
+	}
+	if run.StageRuns[0].Status != StageSuccess {
+		t.Fatalf("approve stage 恢复后期望 success，got %s", run.StageRuns[0].Status)
+	}
+}
+
+func TestEngineResumeGuards(t *testing.T) {
+	s := NewMemoryStore()
+	r := seedPipeline(t, s, "p-guard", "app-guard", KindCD, []StageDef{
+		{Name: "审批", Type: StageApprove},
+	})
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: fakeReleaser{}}
+
+	// 未 paused 时 Resume -> ErrNotPaused
+	if err := eng.Resume(acmeCtxEngine(), r.ID, 0); err != ErrNotPaused {
+		t.Fatalf("未 paused Resume 期望 ErrNotPaused，got %v", err)
+	}
+	// advance -> paused
+	if err := eng.Advance(acmeCtxEngine(), r.ID); err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	// stageIdx 不匹配 -> ErrStageNotCurrent
+	if err := eng.Resume(acmeCtxEngine(), r.ID, 1); err != ErrStageNotCurrent {
+		t.Fatalf("stageIdx 不匹配期望 ErrStageNotCurrent，got %v", err)
 	}
 }
