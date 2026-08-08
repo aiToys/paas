@@ -25,15 +25,15 @@ func paasLabels(tid string) map[string]string {
 func TestK8sStatusReader_FillStatusService(t *testing.T) {
 	cs := fake.NewSimpleClientset(
 		&appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "wl-1", Namespace: "paas", Labels: paasLabels("t-acme")},
+			ObjectMeta: metav1.ObjectMeta{Name: "wl-1", Namespace: tenant.Namespace("t-acme"), Labels: paasLabels("t-acme")},
 			Status:     appsv1.DeploymentStatus{Replicas: 3, ReadyReplicas: 2},
 		},
 		&appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "wl-2", Namespace: "paas", Labels: paasLabels("t-acme")},
+			ObjectMeta: metav1.ObjectMeta{Name: "wl-2", Namespace: tenant.Namespace("t-acme"), Labels: paasLabels("t-acme")},
 			Status:     appsv1.DeploymentStatus{Replicas: 2, ReadyReplicas: 2},
 		},
 	)
-	r := NewK8sStatusReader(cs, "paas")
+	r := NewK8sStatusReader(cs)
 	wls := []workload.Workload{
 		{ID: "wl-1", TenantID: "t-acme", Type: workload.TypeService, Replicas: 3, Status: "deploying"},
 		{ID: "wl-2", TenantID: "t-acme", Type: workload.TypeService, Replicas: 2, Status: "deploying"},
@@ -58,13 +58,13 @@ func TestK8sStatusReader_FillStatusFailed(t *testing.T) {
 	// Progressing=False（ProgressDeadlineExceeded）+ Ready=0 + Replicas>0 -> failed
 	cs := fake.NewSimpleClientset(
 		&appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "wl-fail", Namespace: "paas", Labels: paasLabels("t-acme")},
+			ObjectMeta: metav1.ObjectMeta{Name: "wl-fail", Namespace: tenant.Namespace("t-acme"), Labels: paasLabels("t-acme")},
 			Status: appsv1.DeploymentStatus{Replicas: 1, ReadyReplicas: 0, Conditions: []appsv1.DeploymentCondition{{
 				Type: appsv1.DeploymentProgressing, Status: "False", Reason: "ProgressDeadlineExceeded",
 			}}},
 		},
 	)
-	r := NewK8sStatusReader(cs, "paas")
+	r := NewK8sStatusReader(cs)
 	wls := []workload.Workload{{ID: "wl-fail", TenantID: "t-acme", Type: workload.TypeService, Replicas: 1, Status: "deploying"}}
 	if err := r.FillStatus(tenant.WithTenant(context.Background(), "t-acme"), wls); err != nil {
 		t.Fatalf("FillStatus: %v", err)
@@ -77,15 +77,15 @@ func TestK8sStatusReader_FillStatusFailed(t *testing.T) {
 func TestK8sStatusReader_FillStatusJobAndCron(t *testing.T) {
 	cs := fake.NewSimpleClientset(
 		&batchv1.Job{
-			ObjectMeta: metav1.ObjectMeta{Name: "wl-job", Namespace: "paas", Labels: paasLabels("t-acme")},
+			ObjectMeta: metav1.ObjectMeta{Name: "wl-job", Namespace: tenant.Namespace("t-acme"), Labels: paasLabels("t-acme")},
 			Status:     batchv1.JobStatus{Succeeded: 1},
 		},
 		&batchv1.CronJob{
-			ObjectMeta: metav1.ObjectMeta{Name: "wl-cron", Namespace: "paas", Labels: paasLabels("t-acme")},
+			ObjectMeta: metav1.ObjectMeta{Name: "wl-cron", Namespace: tenant.Namespace("t-acme"), Labels: paasLabels("t-acme")},
 			Status:     batchv1.CronJobStatus{Active: []corev1.ObjectReference{{}, {}}},
 		},
 	)
-	r := NewK8sStatusReader(cs, "paas")
+	r := NewK8sStatusReader(cs)
 	wls := []workload.Workload{
 		{ID: "wl-job", TenantID: "t-acme", Type: workload.TypeJob, Status: "running"},
 		{ID: "wl-cron", TenantID: "t-acme", Type: workload.TypeCronJob, Status: "pending"},
@@ -103,7 +103,7 @@ func TestK8sStatusReader_FillStatusJobAndCron(t *testing.T) {
 
 func TestK8sStatusReader_NilAndNoTenant(t *testing.T) {
 	// clientset nil -> no-op（降级，保持原值）
-	r := NewK8sStatusReader(nil, "paas")
+	r := NewK8sStatusReader(nil)
 	wls := []workload.Workload{{ID: "wl-1", Type: workload.TypeService, Ready: 5, Status: "running"}}
 	if err := r.FillStatus(tenant.WithTenant(context.Background(), "t-acme"), wls); err != nil {
 		t.Fatalf("nil clientset should no-op: %v", err)
@@ -113,7 +113,7 @@ func TestK8sStatusReader_NilAndNoTenant(t *testing.T) {
 	}
 	// 无租户上下文 -> no-op（fail-closed）
 	cs := fake.NewSimpleClientset()
-	r2 := NewK8sStatusReader(cs, "paas")
+	r2 := NewK8sStatusReader(cs)
 	wls2 := []workload.Workload{{ID: "wl-1", Type: workload.TypeService, Ready: 5, Status: "running"}}
 	if err := r2.FillStatus(context.Background(), wls2); err != nil {
 		t.Fatalf("no tenant should no-op: %v", err)
@@ -127,11 +127,11 @@ func TestK8sStatusReader_TenantIsolation(t *testing.T) {
 	// 跨租户：t-acme 查不到 t-globex 的 Deployment（label selector 限定本租户）
 	cs := fake.NewSimpleClientset(
 		&appsv1.Deployment{
-			ObjectMeta: metav1.ObjectMeta{Name: "wl-g", Namespace: "paas", Labels: paasLabels("t-globex")},
+			ObjectMeta: metav1.ObjectMeta{Name: "wl-g", Namespace: tenant.Namespace("t-globex"), Labels: paasLabels("t-globex")},
 			Status:     appsv1.DeploymentStatus{Replicas: 2, ReadyReplicas: 2},
 		},
 	)
-	r := NewK8sStatusReader(cs, "paas")
+	r := NewK8sStatusReader(cs)
 	wls := []workload.Workload{{ID: "wl-g", TenantID: "t-acme", Type: workload.TypeService, Replicas: 2, Ready: 0, Status: "deploying"}}
 	_ = r.FillStatus(tenant.WithTenant(context.Background(), "t-acme"), wls)
 	if wls[0].Ready != 0 {
@@ -149,7 +149,7 @@ func podLabels(tid, wlID string) map[string]string {
 func TestK8sStatusReader_Instances(t *testing.T) {
 	cs := fake.NewSimpleClientset(
 		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: "wl-1-aaa", Namespace: "paas", Labels: podLabels("t-acme", "wl-1")},
+			ObjectMeta: metav1.ObjectMeta{Name: "wl-1-aaa", Namespace: tenant.Namespace("t-acme"), Labels: podLabels("t-acme", "wl-1")},
 			Spec:       corev1.PodSpec{NodeName: "kb2"},
 			Status: corev1.PodStatus{
 				Phase:  corev1.PodRunning,
@@ -162,7 +162,7 @@ func TestK8sStatusReader_Instances(t *testing.T) {
 			},
 		},
 		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: "wl-1-bbb", Namespace: "paas", Labels: podLabels("t-acme", "wl-1")},
+			ObjectMeta: metav1.ObjectMeta{Name: "wl-1-bbb", Namespace: tenant.Namespace("t-acme"), Labels: podLabels("t-acme", "wl-1")},
 			Spec:       corev1.PodSpec{NodeName: "kb3"},
 			Status: corev1.PodStatus{
 				Phase: corev1.PodPending,
@@ -175,11 +175,11 @@ func TestK8sStatusReader_Instances(t *testing.T) {
 		},
 		// 跨租户 + 跨 workload：不应出现在 wl-1/t-acme 的实例列表
 		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: "wl-2-xxx", Namespace: "paas", Labels: podLabels("t-globex", "wl-2")},
+			ObjectMeta: metav1.ObjectMeta{Name: "wl-2-xxx", Namespace: tenant.Namespace("t-globex"), Labels: podLabels("t-globex", "wl-2")},
 			Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 		},
 	)
-	r := NewK8sStatusReader(cs, "paas")
+	r := NewK8sStatusReader(cs)
 	ins, err := r.Instances(tenant.WithTenant(context.Background(), "t-acme"), "wl-1")
 	if err != nil {
 		t.Fatalf("Instances: %v", err)
@@ -202,12 +202,12 @@ func TestK8sStatusReader_Instances(t *testing.T) {
 
 func TestK8sStatusReader_InstancesDegrade(t *testing.T) {
 	// 无 clientset / 无租户上下文 -> 空切片（降级，不报错）
-	r := NewK8sStatusReader(nil, "paas")
+	r := NewK8sStatusReader(nil)
 	ins, err := r.Instances(context.Background(), "wl-1")
 	if err != nil || len(ins) != 0 {
 		t.Errorf("nil clientset 应返空, got ins=%v err=%v", ins, err)
 	}
-	r2 := NewK8sStatusReader(fake.NewSimpleClientset(), "paas")
+	r2 := NewK8sStatusReader(fake.NewSimpleClientset())
 	ins2, _ := r2.Instances(context.Background(), "wl-1") // 无 tenant
 	if len(ins2) != 0 {
 		t.Errorf("无租户上下文应返空, got %d", len(ins2))
@@ -218,11 +218,11 @@ func TestK8sStatusReader_PodLogsAuthz(t *testing.T) {
 	// Pod 归属 t-globex/wl-g；t-acme 越权请求 -> 拒绝（不泄漏，统一 not found 语义）
 	cs := fake.NewSimpleClientset(
 		&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: "wl-g-p1", Namespace: "paas", Labels: podLabels("t-globex", "wl-g")},
+			ObjectMeta: metav1.ObjectMeta{Name: "wl-g-p1", Namespace: tenant.Namespace("t-globex"), Labels: podLabels("t-globex", "wl-g")},
 			Status:     corev1.PodStatus{Phase: corev1.PodRunning},
 		},
 	)
-	r := NewK8sStatusReader(cs, "paas")
+	r := NewK8sStatusReader(cs)
 	// 同租户同 workload：可取（fake client Logs 返空流，仅验证不报越权错误）
 	if _, err := r.PodLogs(tenant.WithTenant(context.Background(), "t-globex"), "wl-g", "wl-g-p1", 100, false); err != nil {
 		t.Errorf("同租户应允许取日志, got err=%v", err)

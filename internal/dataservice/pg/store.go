@@ -18,6 +18,7 @@ import (
 
 	"github.com/aitoys/paas/internal/dataservice"
 	storagepg "github.com/aitoys/paas/internal/storage/pg"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // Store 是 dataservice.Repository 的 PostgreSQL 实现。
@@ -45,13 +46,16 @@ func NewStore(db *storagepg.DB, opts ...Option) *Store {
 	return s
 }
 
-func (s *Store) namespace() string {
-	if s.nsResolver != nil {
-		if ns := s.nsResolver.Namespace(); ns != "" {
-			return ns
-		}
+// namespace 返回租户数据面 namespace（按 tid 派生 paas-<tenant>）。
+// 注入 resolver 优先；未注入兜底 tenant.Namespace。
+func (s *Store) namespace(tid string) string {
+	if tid == "" {
+		return dataservice.DefaultNamespace // 异常兜底（不应发生，Create 以 ctx 租户为准）
 	}
-	return dataservice.DefaultNamespace
+	if s.nsResolver != nil {
+		return s.nsResolver.Namespace(tid)
+	}
+	return tenant.Namespace(tid)
 }
 
 // dsCols 与 model.DataService 字段顺序对齐（scan 列顺序必须一致）。
@@ -216,7 +220,7 @@ func (s *Store) Create(ctx context.Context, d dataservice.DataService) (dataserv
 	}
 	// managed：生成凭证 + 平台 FQDN；external：保留用户填的连接信息，不重生。
 	if !dataservice.IsExternal(d.Source) {
-		d.FillConnection(s.namespace())
+		d.FillConnection(s.namespace(d.TenantID))
 	}
 	specBytes, err := marshalSpec(d.Spec)
 	if err != nil {
@@ -291,7 +295,7 @@ func (s *Store) Update(ctx context.Context, d dataservice.DataService) (dataserv
 	// spec 改后重算 connection（凭证保留，host/port/uri 按 ns+engine 重算；与内存一致）。
 	// external 模式跳过：连接信息是用户填的真实外部地址，不能被平台 FQDN 覆盖。
 	if ex.Connection != nil && !dataservice.IsExternal(ex.Source) {
-		ex.FillConnection(s.namespace())
+		ex.FillConnection(s.namespace(ex.TenantID))
 	}
 	// 合并后复校验，防止 PUT 用空 spec 清空 Create 时强制的必填字段。
 	if err := ex.Validate(); err != nil {

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/aitoys/paas/pkg/labels"
+	"github.com/aitoys/paas/pkg/tenant"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -19,25 +20,28 @@ const restartedAtKey = labels.KeyRestartedAt
 // annotation（restarted-at=<nonce>），触发滚动重建。STS 名 = 数据服务 ID（与 reconciler 一致）。
 //
 // 实例名（STS）由 reconciler 用 DataService CRD 名（= 数据服务 ID），故 Restart(id) 直接定位 STS。
-// namespace 取注入值（PAAS_K8S_NAMESPACE），与 reconciler/applier 同源。
+// ns 从 ctx tenant 派生（paas-<tenant>），与 reconciler/applier 同源；写前 EnsureNamespace。
 type DSRestarter struct {
 	client.Client
-	namespace string
 }
 
-// NewDSRestarter 创建重启控制器。namespace 为空则 default（与 NewDataServiceK8sApplier 一致）。
-func NewDSRestarter(cl client.Client, namespace string) *DSRestarter {
-	if namespace == "" {
-		namespace = "default"
-	}
-	return &DSRestarter{Client: cl, namespace: namespace}
+// NewDSRestarter 创建重启控制器。ns 按租户派生（Restart 从 ctx 取 tenant）。
+func NewDSRestarter(cl client.Client) *DSRestarter {
+	return &DSRestarter{Client: cl}
 }
 
 // Restart patch STS template annotation 触发 Pod 滚动重建。
-// 用 GenerateOnce 用作 nonce（reconciler 进程内单调，避免 Date.now 依赖；每次调用递增保证变化）。
+// nonce 用 RFC3339Nano（每次调用保证变化，触发 STS controller 重建 Pod）。
 // STS 不存在 -> 明确错误（reconciler 尚未建，调用方收 500 提示先创建/启动）。
 func (r *DSRestarter) Restart(ctx context.Context, id string) error {
-	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: id, Namespace: r.namespace}}
+	tid, ok := tenant.TenantFrom(ctx)
+	if !ok || tid == "" {
+		return fmt.Errorf("无租户上下文，无法定位数据服务 namespace")
+	}
+	if err := EnsureNamespace(ctx, r.Client, tid); err != nil {
+		return fmt.Errorf("ensure namespace: %w", err)
+	}
+	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: id, Namespace: tenant.Namespace(tid)}}
 	patchBase := client.MergeFrom(sts.DeepCopy())
 	if sts.ObjectMeta.Annotations == nil {
 		sts.ObjectMeta.Annotations = map[string]string{}

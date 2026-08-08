@@ -374,7 +374,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		apiroute.Perm("model:read"), apiroute.WithResp(nil))
 	// 共享 K8s 状态读取器：workload handler（List 回填真实 Ready/Status）+ 应用 handler
 	// （派生 Replicas/Status）复用同一实例。clientset nil（非集群部署）时 no-op 降级透传 store 原值。
-	statusReader := controller.NewK8sStatusReader(appliers.clientset, appliers.namespace)
+	statusReader := controller.NewK8sStatusReader(appliers.clientset)
 	// 应用为主线 REST API：方法级权限由 handler 内部按 application:*/binding:write 校验
 	// 横切配额拦截：创建应用前调 billing.CheckAndInc，超限回 429（stores.Billing 共享用量真源）。
 	// WithWorkloadStats 派生应用 Replicas/Status（从真实工作负载聚合，覆盖 seed 假值）。
@@ -460,7 +460,6 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// （非集群部署 clientset=nil，/dp/instances 降级返空，与现状一致不破坏）。
 	dpHandler := dataplane.NewHandler(
 		dataplane.NewEndpointsReader(appliers.clientset),
-		appliers.namespace,
 		stores.Governance,
 	)
 	mux.Handle("/dp/", auth(dpHandler))
@@ -514,7 +513,6 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		dataservice.WithAdminQuota(quotaCheckFn(stores.Billing)),
 		dataservice.WithAdminAudit(&identityAuditAdapter{store: stores.Security}),
 		dataservice.WithAdminTenants(tenantChecker{repo: stores.Identity}),
-		dataservice.WithAdminNamespace(appliers.namespace),
 		dataservice.WithAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
 	}
 	if appliers.dsRestarter != nil {

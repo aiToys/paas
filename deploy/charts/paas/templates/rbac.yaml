@@ -1,7 +1,7 @@
 {{/*
 K8s 数据面：core 以 ServiceAccount 身份在集群内纳管 Workload/DataService CRD，
-并落地为 Deployment/StatefulSet/Job/CronJob + Service。Cluster 范围 RBAC（落地 namespace
-由 PAAS_K8S_NAMESPACE 限定，但 watch/reconcile 需集群级 list 权限）。
+并落地为 Deployment/StatefulSet/Job/CronJob + Service。Cluster 范围 RBAC（数据面 ns
+按租户派生 paas-<tenant>，reconcile 集群级 watch + EnsureNamespace 创建租户 ns）。
 */}}
 apiVersion: v1
 kind: ServiceAccount
@@ -49,6 +49,10 @@ rules:
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["create", "patch"]
+  # Namespace：applier 写 CRD 前 EnsureNamespace 创建租户数据面 ns（paas-<tenant>，按租户隔离）。
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create"]
   # DevOps 构建Job：core 取 Job Pod 日志解析 digest（builder.K8sJob，PAAS_DEVOPS_BUILDER=k8s）。
   - apiGroups: [""]
     resources: ["pods/log"]

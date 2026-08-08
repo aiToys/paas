@@ -223,7 +223,11 @@ func (r *WorkloadReconciler) applyService(ctx context.Context, w *v1alpha1.Workl
 	if w.Spec.Type != "service" || w.Spec.Port <= 0 {
 		return nil
 	}
-	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: w.Name, Namespace: w.Namespace}}
+	svcName := w.Spec.Name
+	if svcName == "" {
+		svcName = w.Name
+	}
+	svc := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: svcName, Namespace: w.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, svc, func() error {
 		labels := labelsFor(w)
 		svc.SetLabels(labels)

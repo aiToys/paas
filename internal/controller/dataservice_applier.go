@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"log"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -10,21 +11,19 @@ import (
 
 	"github.com/aitoys/paas/api/core/v1alpha1"
 	"github.com/aitoys/paas/internal/dataservice"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // DataServiceK8sApplier 把 dataservice.DataService（领域）投影为 v1alpha1.DataService CRD（期望状态）。
 // 实现 dataservice.Applier；由 ApplyRepo 在 PG/memory 写成功后调用。与 K8sApplier 同构。
+// 落地 namespace 按租户派生（paas-<tenantID>），写 CRD 前 EnsureNamespace。
 type DataServiceK8sApplier struct {
 	client.Client
-	namespace string
 }
 
-// NewDataServiceK8sApplier 创建 applier。namespace 为空则 default。
-func NewDataServiceK8sApplier(cl client.Client, namespace string) *DataServiceK8sApplier {
-	if namespace == "" {
-		namespace = "default"
-	}
-	return &DataServiceK8sApplier{Client: cl, namespace: namespace}
+// NewDataServiceK8sApplier 创建 applier。ns 按租户派生（保留 namespace 参数向后兼容，未使用）。
+func NewDataServiceK8sApplier(cl client.Client, _ ...string) *DataServiceK8sApplier {
+	return &DataServiceK8sApplier{Client: cl}
 }
 
 // Apply CreateOrUpdate DataService CRD（期望状态）。
@@ -33,7 +32,14 @@ func (a *DataServiceK8sApplier) Apply(ctx context.Context, d dataservice.DataSer
 	if dataservice.IsExternal(d.Source) {
 		return nil // external：平台不部署，连接信息仅存控制面供应用绑定注入
 	}
-	crd := &v1alpha1.DataService{ObjectMeta: metav1.ObjectMeta{Name: d.ID, Namespace: a.namespace}}
+	if d.TenantID == "" {
+		return fmt.Errorf("dataservice tenantID 为空，无法派生数据面 namespace")
+	}
+	if err := EnsureNamespace(ctx, a.Client, d.TenantID); err != nil {
+		return fmt.Errorf("ensure namespace: %w", err)
+	}
+	ns := tenant.Namespace(d.TenantID)
+	crd := &v1alpha1.DataService{ObjectMeta: metav1.ObjectMeta{Name: d.ID, Namespace: ns}}
 	_, err := controllerutil.CreateOrUpdate(ctx, a.Client, crd, func() error {
 		crd.Spec = v1alpha1.DataServiceSpec{
 			TenantID:   d.TenantID,
@@ -63,8 +69,14 @@ func (a *DataServiceK8sApplier) Apply(ctx context.Context, d dataservice.DataSer
 	return nil
 }
 
-// Delete 删 DataService CRD（级联清 K8s 资源）。external 模式无 CRD -> 忽略 NotFound。
+// Delete 删 DataService CRD（级联清 K8s 资源）。ns 从 ctx tenant 派生（与 Apply 同源）。
+// external 模式无 CRD -> 忽略 NotFound。ctx 无 tenant（异常）记日志跳过（K8sApplier.Delete 同款）。
 func (a *DataServiceK8sApplier) Delete(ctx context.Context, id string) error {
-	err := a.Client.Delete(ctx, &v1alpha1.DataService{ObjectMeta: metav1.ObjectMeta{Name: id, Namespace: a.namespace}})
-	return client.IgnoreNotFound(err)
+	tid, ok := tenant.TenantFrom(ctx)
+	if !ok || tid == "" {
+		log.Printf("[ds-applier] Delete 跳过（ctx 无 tenant）id=%s", id)
+		return nil
+	}
+	ns := tenant.Namespace(tid)
+	return client.IgnoreNotFound(a.Client.Delete(ctx, &v1alpha1.DataService{ObjectMeta: metav1.ObjectMeta{Name: id, Namespace: ns}}))
 }

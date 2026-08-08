@@ -50,7 +50,7 @@ func (s *fakeSvcStore) ListAllServices(ctx context.Context) ([]governance.Servic
 }
 
 func TestListInstances(t *testing.T) {
-	h := NewHandler(fakeReader{insts: []Instance{{ID: "a", IP: "10.0.0.1", Port: 8080}}}, "paas", &fakeSvcStore{})
+	h := NewHandler(fakeReader{insts: []Instance{{ID: "a", IP: "10.0.0.1", Port: 8080}}}, &fakeSvcStore{})
 	req := httptest.NewRequest(http.MethodGet, "/dp/instances?service=user-svc", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -73,7 +73,7 @@ func TestListInstances(t *testing.T) {
 
 func TestListInstancesDegradedNoCluster(t *testing.T) {
 	// reader=nil + ns=""（非集群）：instances 返空切片，不报错。
-	h := NewHandler(nil, "", &fakeSvcStore{})
+	h := NewHandler(nil, &fakeSvcStore{})
 	req := httptest.NewRequest(http.MethodGet, "/dp/instances?service=user-svc", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -90,7 +90,7 @@ func TestListInstancesDegradedNoCluster(t *testing.T) {
 }
 
 func TestListInstancesMissingService(t *testing.T) {
-	h := NewHandler(nil, "paas", &fakeSvcStore{})
+	h := NewHandler(nil, &fakeSvcStore{})
 	req := httptest.NewRequest(http.MethodGet, "/dp/instances", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -101,7 +101,7 @@ func TestListInstancesMissingService(t *testing.T) {
 
 func TestRegisterCreatesService(t *testing.T) {
 	store := &fakeSvcStore{}
-	h := NewHandler(nil, "", store)
+	h := NewHandler(nil, store)
 	req := httptest.NewRequest(http.MethodPost, "/dp/register",
 		strings.NewReader(`{"name":"user-svc","protocol":"http"}`))
 	rec := httptest.NewRecorder()

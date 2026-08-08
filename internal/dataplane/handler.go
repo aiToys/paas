@@ -11,6 +11,7 @@ import (
 
 	"github.com/aitoys/paas/internal/governance"
 	"github.com/aitoys/paas/internal/httputil"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // Handler 暴露数据面 SDK 接入 API（/dp/），供 zeus 等数据面 SDK 发现服务。
@@ -27,13 +28,13 @@ import (
 //	PUT    /dp/heartbeat                心跳（兼容保留；K8s readiness 是存活真源）
 type Handler struct {
 	reader   EndpointsReader         // K8s Endpoints reader（nil=非集群降级）
-	ns       string                  // PAAS_K8S_NAMESPACE（本期单 ns；多租户 ns 隔离留后续）
 	services governance.ServiceStore // 服务元信息（控制面声明）
 }
 
 // NewHandler 创建数据面 handler。reader 可为 nil（非集群，instances 返空）。
-func NewHandler(reader EndpointsReader, ns string, services governance.ServiceStore) *Handler {
-	return &Handler{reader: reader, ns: ns, services: services}
+// 数据面 ns 按租户派生（paas-<tenant>），从请求 ctx 取 tenant，无需注入固定 ns。
+func NewHandler(reader EndpointsReader, services governance.ServiceStore) *Handler {
+	return &Handler{reader: reader, services: services}
 }
 
 // ServeHTTP 按 method+path 分发 /dp/ 子路由。
@@ -57,8 +58,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) listServices(w http.ResponseWriter, r *http.Request) {
-	// 非集群部署（无 reader/ns）：从 governance 表返服务元信息（无 K8s 实例）。
-	if h.reader == nil || h.ns == "" {
+	// 非集群部署（无 reader）：从 governance 表返服务元信息（无 K8s 实例）。
+	if h.reader == nil {
 		svcs, err := h.services.ListServices(r.Context(), "", "")
 		if err != nil {
 			httputil.WriteInternalError(w, err)
@@ -71,7 +72,8 @@ func (h *Handler) listServices(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteJSON(w, http.StatusOK, map[string]any{"services": out})
 		return
 	}
-	svcs, err := h.reader.Services(r.Context(), h.ns)
+	tid, _ := tenant.TenantFrom(r.Context())
+	svcs, err := h.reader.Services(r.Context(), tenant.Namespace(tid))
 	if err != nil {
 		httputil.WriteInternalError(w, err)
 		return
@@ -86,8 +88,9 @@ func (h *Handler) listInstances(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	insts := []Instance{}
-	if h.reader != nil && h.ns != "" {
-		is, err := h.reader.Instances(r.Context(), h.ns, name)
+	if h.reader != nil {
+		tid, _ := tenant.TenantFrom(r.Context())
+		is, err := h.reader.Instances(r.Context(), tenant.Namespace(tid), name)
 		if err != nil {
 			// Endpoints 不存在等错误降级返空（不 5xx，数据面 SDK 容错）。
 			insts = []Instance{}

@@ -186,10 +186,10 @@ type DataService struct {
 	Image     string `json:"image,omitempty"`
 }
 
-// NamespaceResolver 提供 K8s namespace（控制面生成 FQDN 用）。由 cmd/core 注入 PAAS_K8S_NAMESPACE。
-// 未注入时 store 兜底用 DefaultNamespace（connection.go）。
+// NamespaceResolver 提供 K8s namespace（控制面生成 FQDN 用）。按租户派生（paas-<tenant>）。
+// 由 cmd/core 注入（包装 tenant.Namespace）；未注入时 store 兜底直接用 tenant.Namespace。
 type NamespaceResolver interface {
-	Namespace() string
+	Namespace(tid string) string
 }
 
 // EngineOf 返回 ds 的引擎（spec.engine 非空用之，否则按 Kind 默认，与 KindMetas Default 对齐）。

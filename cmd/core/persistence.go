@@ -73,11 +73,11 @@ import (
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
-// envNamespaceResolver 实现 dataservice.NamespaceResolver，读 PAAS_K8S_NAMESPACE 供数据服务 FQDN 生成。
-// cluster 部署时 = paas（Service 落地 namespace）；dev 本地空 → store 兜底 DefaultNamespace。
-type envNamespaceResolver struct{ ns string }
+// envNamespaceResolver 实现 dataservice.NamespaceResolver，按租户派生数据面 ns（paas-<tenant>）。
+// 数据服务 FQDN 的 ns 随租户走，与 applier/reconciler 落地 ns 同源。
+type envNamespaceResolver struct{}
 
-func (r envNamespaceResolver) Namespace() string { return r.ns }
+func (envNamespaceResolver) Namespace(tid string) string { return tenant.Namespace(tid) }
 
 // Stores 聚合全 11 模块 store，由 buildAllStores 构造（PG 或内存两路径统一形态）。
 // 字段类型为各模块 Repository 接口；handler 注入点对后端透明。
@@ -115,7 +115,7 @@ type Stores struct {
 // 两路径下注入的 workload store 与 wlHandler 共享同一实例（用量/编排真源唯一）。
 func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(), error) {
 	devopsPipeline := newDevOpsPipeline(appliers)                           // PAAS_DEVOPS_BUILDER 选 k8s/process/mock
-	nsResolver := envNamespaceResolver{ns: os.Getenv("PAAS_K8S_NAMESPACE")} // 数据服务连接 FQDN 用
+	nsResolver := envNamespaceResolver{} // 数据服务连接 FQDN 用，按租户派生 ns
 	if dsn := os.Getenv("PAAS_DB_URL"); dsn != "" {
 		db, err := storagepg.Open(ctx, dsn)
 		if err != nil {
@@ -278,11 +278,10 @@ func newDevOpsPipeline(appliers k8sAppliers) builder.Pipeline {
 			log.Printf("DevOps: PAAS_DEVOPS_BUILDER=k8s 但 K8s clientset 不可用，降级为 Mock")
 			return nil
 		}
-		log.Printf("DevOps: K8s Job 构建流水线已启用（namespace=%s, builderImage=%s）",
-			appliers.namespace, builderImageEnv())
+		log.Printf("DevOps: K8s Job 构建流水线已启用（构建 Job 落地按租户派生 ns paas-<tenant>, builderImage=%s）",
+			builderImageEnv())
 		return &builder.K8sJob{
 			Clientset:    appliers.clientset,
-			Namespace:    appliers.namespace,
 			BuilderImage: builderImageEnv(),
 			Registry:     os.Getenv("PAAS_REGISTRY"),
 			GitToken:     os.Getenv("PAAS_GIT_TOKEN"),

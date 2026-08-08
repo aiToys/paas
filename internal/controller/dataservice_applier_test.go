@@ -10,12 +10,13 @@ import (
 
 	"github.com/aitoys/paas/api/core/v1alpha1"
 	"github.com/aitoys/paas/internal/dataservice"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 func TestDataServiceK8sApplierApplyAndDelete(t *testing.T) {
 	scheme := newScheme(t)
 	cl := clientfake.NewClientBuilder().WithScheme(scheme).Build()
-	a := NewDataServiceK8sApplier(cl, "")
+	a := NewDataServiceK8sApplier(cl)
 
 	d := dataservice.DataService{
 		ID: "ds-2", TenantID: "t-acme", Kind: dataservice.KindCache, Name: "ds-2", EnvID: "env-1",
@@ -25,7 +26,7 @@ func TestDataServiceK8sApplierApplyAndDelete(t *testing.T) {
 		t.Fatalf("apply 失败: %v", err)
 	}
 	var crd v1alpha1.DataService
-	if err := cl.Get(context.Background(), types.NamespacedName{Name: "ds-2", Namespace: "default"}, &crd); err != nil {
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "ds-2", Namespace: tenant.Namespace("t-acme")}, &crd); err != nil {
 		t.Fatalf("应创建 DataService CRD: %v", err)
 	}
 	if crd.Spec.Engine != "valkey" {
@@ -40,10 +41,10 @@ func TestDataServiceK8sApplierApplyAndDelete(t *testing.T) {
 		t.Fatalf("幂等 apply 失败: %v", err)
 	}
 
-	if err := a.Delete(context.Background(), "ds-2"); err != nil {
+	if err := a.Delete(tenant.WithTenant(context.Background(), "t-acme"), "ds-2"); err != nil {
 		t.Fatalf("delete 失败: %v", err)
 	}
-	if err := cl.Get(context.Background(), types.NamespacedName{Name: "ds-2", Namespace: "default"}, &crd); err == nil {
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "ds-2", Namespace: tenant.Namespace("t-acme")}, &crd); err == nil {
 		t.Fatalf("删除后 CRD 应不存在")
 	}
 }

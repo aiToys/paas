@@ -59,7 +59,6 @@ type AdminHandler struct {
 	quota      QuotaCheckFunc
 	audit      AdminAuditRecorder
 	tenants    TenantChecker
-	namespace  string // K8s 命名空间（读实例），空则不读
 	actorOf    func(*http.Request) string
 }
 
@@ -89,9 +88,6 @@ func WithAdminAudit(a AdminAuditRecorder) AdminHandlerOpt { return func(h *Admin
 
 // WithAdminTenants 注入租户校验器。
 func WithAdminTenants(c TenantChecker) AdminHandlerOpt { return func(h *AdminHandler) { h.tenants = c } }
-
-// WithAdminNamespace 注入 K8s namespace（读实例）。
-func WithAdminNamespace(ns string) AdminHandlerOpt { return func(h *AdminHandler) { h.namespace = ns } }
 
 // WithAdminActor 注入 actor 提取器（取 super_admin UserID 作审计 actor）。
 func WithAdminActor(f func(*http.Request) string) AdminHandlerOpt {
@@ -201,9 +197,9 @@ func (h *AdminHandler) serveDetail(w http.ResponseWriter, r *http.Request, d Dat
 	out := map[string]any{
 		"resource": maskDS(d),
 	}
-	if h.instances != nil && h.namespace != "" && !IsExternal(d.Source) {
+	if h.instances != nil && !IsExternal(d.Source) {
 		ctx, _ := tenantCtx(r, d.TenantID)
-		ins, err := h.instances.Instances(ctx, h.namespace, d.ID)
+		ins, err := h.instances.Instances(ctx, tenant.Namespace(d.TenantID), d.ID)
 		if err == nil {
 			out["instances"] = ins
 		} else {

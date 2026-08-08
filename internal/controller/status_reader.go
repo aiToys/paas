@@ -25,15 +25,11 @@ import (
 // clientset 为 nil 时 no-op（降级：非集群部署，handler 透传 store 原值）。
 type K8sStatusReader struct {
 	clientset kubernetes.Interface
-	namespace string
 }
 
-// NewK8sStatusReader 构造 reader。namespace 为空则 default。
-func NewK8sStatusReader(cs kubernetes.Interface, namespace string) *K8sStatusReader {
-	if namespace == "" {
-		namespace = "default"
-	}
-	return &K8sStatusReader{clientset: cs, namespace: namespace}
+// NewK8sStatusReader 构造 reader。ns 按租户派生（FillStatus/Instances/PodLogs 从 ctx tenant 取）。
+func NewK8sStatusReader(cs kubernetes.Interface) *K8sStatusReader {
+	return &K8sStatusReader{clientset: cs}
 }
 
 // FillStatus 批量回填工作负载 Ready/Status（按租户 label 查 K8s 资源，按 ID 匹配）。
@@ -46,16 +42,17 @@ func (r *K8sStatusReader) FillStatus(ctx context.Context, wls []workload.Workloa
 		// fail-closed：无租户上下文不回填，保持 store 原值（防跨租户误回填）。
 		return nil
 	}
+	ns := tenant.Namespace(tid)
 	labelSel := "app.kubernetes.io/managed-by=paas,paas.aitoys/tenant=" + tid
-	deploys, err := r.clientset.AppsV1().Deployments(r.namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSel})
+	deploys, err := r.clientset.AppsV1().Deployments(ns).List(ctx, metav1.ListOptions{LabelSelector: labelSel})
 	if err != nil {
 		return fmt.Errorf("list deployments: %w", err)
 	}
-	jobs, err := r.clientset.BatchV1().Jobs(r.namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSel})
+	jobs, err := r.clientset.BatchV1().Jobs(ns).List(ctx, metav1.ListOptions{LabelSelector: labelSel})
 	if err != nil {
 		return fmt.Errorf("list jobs: %w", err)
 	}
-	crons, err := r.clientset.BatchV1().CronJobs(r.namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSel})
+	crons, err := r.clientset.BatchV1().CronJobs(ns).List(ctx, metav1.ListOptions{LabelSelector: labelSel})
 	if err != nil {
 		return fmt.Errorf("list cronjobs: %w", err)
 	}
@@ -150,7 +147,7 @@ func (r *K8sStatusReader) Instances(ctx context.Context, workloadID string) ([]w
 		return []workload.Instance{}, nil
 	}
 	labelSel := fmt.Sprintf("app.kubernetes.io/managed-by=paas,paas.aitoys/tenant=%s,paas.aitoys/workload=%s", tid, workloadID)
-	pods, err := r.clientset.CoreV1().Pods(r.namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSel})
+	pods, err := r.clientset.CoreV1().Pods(tenant.Namespace(tid)).List(ctx, metav1.ListOptions{LabelSelector: labelSel})
 	if err != nil {
 		return []workload.Instance{}, nil // 降级：查询失败返空，详情页不 5xx
 	}
@@ -208,7 +205,7 @@ func (r *K8sStatusReader) PodLogs(ctx context.Context, workloadID, podName strin
 		return nil, fmt.Errorf("无租户上下文")
 	}
 	// 越权校验：取 Pod 确认其 label 同时含本租户 + 本 workload，否则拒绝（不泄漏存在性，统一 not found）。
-	pod, err := r.clientset.CoreV1().Pods(r.namespace).Get(ctx, podName, metav1.GetOptions{})
+	pod, err := r.clientset.CoreV1().Pods(tenant.Namespace(tid)).Get(ctx, podName, metav1.GetOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("Pod 不存在: %s", podName)
 	}
@@ -222,7 +219,7 @@ func (r *K8sStatusReader) PodLogs(ctx context.Context, workloadID, podName strin
 		tl := tailLines
 		opts.TailLines = &tl
 	}
-	return r.clientset.CoreV1().Pods(r.namespace).GetLogs(podName, opts).Stream(ctx)
+	return r.clientset.CoreV1().Pods(tenant.Namespace(tid)).GetLogs(podName, opts).Stream(ctx)
 }
 
 // 编译期断言：K8sStatusReader 实现 workload.StatusReader。

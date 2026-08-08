@@ -63,7 +63,6 @@ func newAdminForTest(t *testing.T) (*dataservice.AdminHandler, *fakeAudit, *fake
 	q := &fakeQuota{}
 	h := dataservice.NewAdminHandler(repo,
 		dataservice.WithAdminInstances(fakeInstances{list: []dataservice.InstanceInfo{{Name: "ds-1-0", IP: "10.0.0.1", Port: 5432}}}),
-		dataservice.WithAdminNamespace("paas"),
 		dataservice.WithAdminAudit(au),
 		dataservice.WithAdminQuota(q.check),
 	)

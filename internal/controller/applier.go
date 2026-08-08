@@ -12,6 +12,7 @@ import (
 
 	"github.com/aitoys/paas/api/core/v1alpha1"
 	"github.com/aitoys/paas/internal/workload"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // clampInt32 把领域 int 安全收敛到 K8s int32（防负值/溢出，gosec G115）。
@@ -29,23 +30,29 @@ func clampInt32(n int) int32 {
 
 // K8sApplier 把 workload.Workload（领域）投影为 v1alpha1.Workload CRD（期望状态）。
 // 实现 workload.Applier；由 ApplyRepo 在 PG 写成功后调用。
+//
+// 落地 namespace 按租户派生（paas-<tenantID>，见 tenant.Namespace），不再用固定 ns——
+// 控制面/数据面 + 租户级 ns 隔离。写 CRD 前 EnsureNamespace 确保目标 ns 存在。
 type K8sApplier struct {
 	client.Client
-	namespace string // CRD 落地 namespace（PAAS_K8S_NAMESPACE，默认 default）
 }
 
-// NewK8sApplier 创建 applier。namespace 为空则 default。
-func NewK8sApplier(cl client.Client, namespace string) *K8sApplier {
-	if namespace == "" {
-		namespace = "default"
-	}
-	return &K8sApplier{Client: cl, namespace: namespace}
+// NewK8sApplier 创建 applier。ns 按租户派生，无需注入固定 namespace（保留参数向后兼容，未使用）。
+func NewK8sApplier(cl client.Client, _ ...string) *K8sApplier {
+	return &K8sApplier{Client: cl}
 }
 
 // Apply CreateOrUpdate Workload CRD（期望状态）。
 func (a *K8sApplier) Apply(ctx context.Context, w workload.Workload) error {
-	log.Printf("[applier] Apply w.ID=%s name=%s port=%d cport=%d tenant=%s img=%s", w.ID, w.Name, w.Port, w.ContainerPort, w.TenantID, w.Image)
-	crd := &v1alpha1.Workload{ObjectMeta: metav1.ObjectMeta{Name: w.ID, Namespace: a.namespace}}
+	if w.TenantID == "" {
+		return fmt.Errorf("workload tenantID 为空，无法派生数据面 namespace")
+	}
+	if err := EnsureNamespace(ctx, a.Client, w.TenantID); err != nil {
+		return fmt.Errorf("ensure namespace: %w", err)
+	}
+	ns := tenant.Namespace(w.TenantID)
+	log.Printf("[applier] Apply w.ID=%s ns=%s name=%s port=%d cport=%d tenant=%s img=%s", w.ID, ns, w.Name, w.Port, w.ContainerPort, w.TenantID, w.Image)
+	crd := &v1alpha1.Workload{ObjectMeta: metav1.ObjectMeta{Name: w.ID, Namespace: ns}}
 	_, err := controllerutil.CreateOrUpdate(ctx, a.Client, crd, func() error {
 		crd.Spec = v1alpha1.WorkloadSpec{
 			TenantID:      w.TenantID,
@@ -70,7 +77,15 @@ func (a *K8sApplier) Apply(ctx context.Context, w workload.Workload) error {
 	return nil
 }
 
-// Delete 删 Workload CRD（级联清 K8s 资源）。
+// Delete 删 Workload CRD（级联清 K8s 资源）。ns 从 ctx tenant 派生（与 Apply 同源）。
+// ctx 无 tenant（异常）记日志跳过——控制面 Delete 已成功，CRD 孤儿风险低（正常路径 ctx 均含 tenant：
+// 用户操作经身份 ctx，admin 跨租户删经 tenant.WithTenant 派生目标租户 ctx）。
 func (a *K8sApplier) Delete(ctx context.Context, id string) error {
-	return a.Client.Delete(ctx, &v1alpha1.Workload{ObjectMeta: metav1.ObjectMeta{Name: id, Namespace: a.namespace}})
+	tid, ok := tenant.TenantFrom(ctx)
+	if !ok || tid == "" {
+		log.Printf("[applier] Delete 跳过（ctx 无 tenant）id=%s", id)
+		return nil
+	}
+	ns := tenant.Namespace(tid)
+	return client.IgnoreNotFound(a.Client.Delete(ctx, &v1alpha1.Workload{ObjectMeta: metav1.ObjectMeta{Name: id, Namespace: ns}}))
 }

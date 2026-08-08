@@ -11,9 +11,12 @@ import (
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
+
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // K8sJob 把构建执行体下沉到独立 K8s Job Pod（DooD：挂节点 docker.sock，复用节点 daemon，
@@ -24,7 +27,6 @@ import (
 // pods/log 子资源，故用 client-go kubernetes.Interface。
 type K8sJob struct {
 	Clientset    kubernetes.Interface
-	Namespace    string // Job 落地 namespace（PAAS_K8S_NAMESPACE）
 	BuilderImage string // 默认 docker:git；内网 hub.wang.dd:5000/library/docker:git
 	// 凭证/仓库（Params 字段为空时回退，与 Real 同款语义）。
 	Registry     string
@@ -66,11 +68,12 @@ func (k K8sJob) Build(ctx context.Context, p Params) (result Result, err error) 
 	tag := p.Branch + "-" + safeShort(tagCommit, 8)
 	ref := ImageRef(p, tag)
 
-	jobName := sanitizeK8sName("paas-build-" + p.BuildID)
-	ns := k.Namespace
-	if ns == "" {
-		ns = "default"
+	// 构建 Job 落地租户数据面 ns（paas-<tenant>），写前 ensure。
+	if err := ensureBuildNamespace(k.Clientset, p.TenantID); err != nil {
+		return Result{}, fmt.Errorf("ensure build namespace: %w", err)
 	}
+	jobName := sanitizeK8sName("paas-build-" + p.BuildID)
+	ns := tenant.Namespace(p.TenantID)
 	image := k.BuilderImage
 	if image == "" {
 		image = "docker:git"
@@ -131,6 +134,31 @@ func (k K8sJob) deleteJob(ctx context.Context, ns, name string) {
 	_ = k.Clientset.BatchV1().Jobs(ns).Delete(ctx, name, metav1.DeleteOptions{
 		PropagationPolicy: ptr.To(metav1.DeletePropagationBackground),
 	})
+}
+
+// ensureBuildNamespace 幂等创建租户数据面 ns（paas-<tenant>）供构建 Job 落地。
+// clientset 版（builder 不持有 controller-runtime client）；与 controller.EnsureNamespace 同语义。
+// 用 context.Background（ns 创建是基础设施，不应随构建请求取消）。
+func ensureBuildNamespace(cs kubernetes.Interface, tid string) error {
+	if tid == "" {
+		return fmt.Errorf("build Params tenantID 为空，无法派生 namespace")
+	}
+	ns := tenant.Namespace(tid)
+	if _, err := cs.CoreV1().Namespaces().Get(context.Background(), ns, metav1.GetOptions{}); err == nil {
+		return nil
+	} else if !apierrors.IsNotFound(err) {
+		return err
+	}
+	_, err := cs.CoreV1().Namespaces().Create(context.Background(), &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: ns,
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "paas",
+				"paas.aitoys/tenant":           tid,
+			},
+		},
+	}, metav1.CreateOptions{})
+	return err
 }
 
 // podLogs 取 Job 关联 Pod 的容器日志（找 job-name=<jobName> 标签的 Pod）。

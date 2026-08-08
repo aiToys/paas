@@ -11,7 +11,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
@@ -30,7 +29,6 @@ type k8sAppliers struct {
 	dataservice   dataservice.Applier
 	dsRestarter   *controller.DSRestarter // 数据服务实例滚动重启（patch STS），nil=集群外降级
 	clientset     kubernetes.Interface    // 供 builder.K8sJob（create Job + pods/log）；nil=K8s 不可用
-	namespace     string                  // Job 落地 namespace（PAAS_K8S_NAMESPACE）
 	wlReconciler  *controller.WorkloadReconciler
 }
 
@@ -70,16 +68,13 @@ func startManager() (k8sAppliers, context.CancelFunc) {
 	if metricsAddr == "" {
 		metricsAddr = ":8081"
 	}
-	ns := os.Getenv("PAAS_K8S_NAMESPACE") // CRD 落地 + cache 限定 namespace
 	mgrOpts := ctrl.Options{
 		Scheme:  scheme,
 		Metrics: metricsserver.Options{BindAddress: metricsAddr},
 	}
-	// 限定 cache namespace（ns 非空时），防 watch 全集群 CRD + 收敛数据面到本 ns（多租户隔离加固）。
-	// ns 空（本地 dev 未设）则不限定，兼容全命名空间。
-	if ns != "" {
-		mgrOpts.Cache = cache.Options{DefaultNamespaces: map[string]cache.Config{ns: {}}}
-	}
+	// cache 集群级 watch（不限定 namespace）：数据面 CRD 按租户落在 paas-<tenant> 多 ns，
+	// 限定单 ns 会 watch 不到其他租户的 CRD 导致 reconcile 漏掉。控制面 ns（paas）与数据面 ns
+	// 一并 watch。集群级 CRD 数量可控（仅 Workload+DataService），watch 负载可接受。
 	mgr, err := ctrl.NewManager(cfg, mgrOpts)
 	if err != nil {
 		log.Printf("K8s 数据面: 启动 manager 失败（降级为无 K8s）: %v", err)
@@ -102,7 +97,7 @@ func startManager() (k8sAppliers, context.CancelFunc) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
-		log.Printf("K8s 数据面: manager 启动（Workload+DataService Reconciler 运行，namespace=%s)", os.Getenv("PAAS_K8S_NAMESPACE"))
+		log.Printf("K8s 数据面: manager 启动（Workload+DataService Reconciler 集群级 watch，数据面 ns 按租户派生 paas-<tenant>）")
 		if err := mgr.Start(ctx); err != nil {
 			log.Printf("K8s 数据面: manager 退出: %v", err)
 		}
@@ -116,11 +111,10 @@ func startManager() (k8sAppliers, context.CancelFunc) {
 		clientset = cs
 	}
 	return k8sAppliers{
-		workload:     controller.NewK8sApplier(mgr.GetClient(), ns),
-		dataservice:  controller.NewDataServiceK8sApplier(mgr.GetClient(), ns),
-		dsRestarter:  controller.NewDSRestarter(mgr.GetClient(), ns),
+		workload:     controller.NewK8sApplier(mgr.GetClient()),
+		dataservice:  controller.NewDataServiceK8sApplier(mgr.GetClient()),
+		dsRestarter:  controller.NewDSRestarter(mgr.GetClient()),
 		clientset:    clientset,
-		namespace:    ns,
 		wlReconciler: wlReconciler,
 	}, cancel
 }
