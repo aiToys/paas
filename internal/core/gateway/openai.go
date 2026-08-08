@@ -19,15 +19,20 @@ type chatReq struct {
 	Stream      bool               `json:"stream"`
 	Temperature *float64           `json:"temperature,omitempty"`
 	MaxTokens   *int               `json:"max_tokens,omitempty"`
+	// Tools 暴露给 LLM 的工具定义（OpenAI 兼容 function calling）；空表示不启用工具调用。
+	// 透传给 provider.Chat，上游模型决定调用时在流末返回 tool_calls（见 serveStream 透传）。
+	Tools []provider.ToolDef `json:"tools,omitempty"`
 	// User 是 OpenAI 标准软标签字段：应用内多 agent 归因细分（如 "researcher"/"coder"）。
 	// 不做配额、仅看板聚合；与 AppID（强制计费维度）正交。
 	User string `json:"user,omitempty"`
 }
 
 type deltaMessage struct {
-	Role             string `json:"role,omitempty"`
-	Content          string `json:"content,omitempty"`
-	ReasoningContent string `json:"reasoning_content,omitempty"` // 推理模型思考过程（透传给前端）
+	Role             string             `json:"role,omitempty"`
+	Content          string             `json:"content,omitempty"`
+	ReasoningContent string             `json:"reasoning_content,omitempty"` // 推理模型思考过程（透传给前端）
+	// ToolCalls 流式工具调用增量（finish_reason=tool_calls 时透传给客户端，OpenAI 兼容）。
+	ToolCalls []provider.ToolCall `json:"tool_calls,omitempty"`
 }
 
 type chatChoice struct {
@@ -91,6 +96,7 @@ func ChatCompletions(gw *Gateway, meter *Meter, agents *AgentDispatcherHolder) h
 			stream, chatErr := impl.Chat(r.Context(), provider.ChatRequest{
 				Model: req.Model, Messages: req.Messages, Stream: true,
 				Temperature: req.Temperature, MaxTokens: req.MaxTokens,
+				Tools: req.Tools,
 			})
 			if chatErr != nil {
 				// 按错误类型降级：offline 类（配置/凭证）不重试本通道，degraded 类可 failover。
@@ -169,6 +175,11 @@ loop:
 			if chunk.Content != "" {
 				tokens += len([]rune(chunk.Content))
 				writeSSE(w, chatChoice{Delta: deltaMessage{Content: chunk.Content}})
+			}
+			// 工具调用（流末聚合）：LLM 决定调用工具时透传 tool_calls 给客户端，
+			// 供 runtime（如 AI 客服）执行工具后续轮。OpenAI 兼容 delta.tool_calls。
+			if len(chunk.ToolCalls) > 0 {
+				writeSSE(w, chatChoice{Delta: deltaMessage{ToolCalls: chunk.ToolCalls}})
 			}
 			if flusher != nil {
 				flusher.Flush()
