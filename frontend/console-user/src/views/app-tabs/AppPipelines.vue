@@ -9,6 +9,7 @@ import {
   listPipelines, createPipeline, deletePipeline, listTemplates, triggerRun,
 } from '@/api/pipeline'
 import { useEnvStore } from '@/stores/env'
+import { confirmDangerous } from '@/composables/useDangerConfirm'
 import PipelineDesigner from './PipelineDesigner.vue'
 import PipelineRunView from './PipelineRunView.vue'
 
@@ -27,6 +28,12 @@ const createForm = ref<{ name: string; kind: 'ci' | 'cd'; templateId: string }>(
 // 设计器 / 运行视图抽屉
 const designerPid = ref<string | null>(null)
 const runViewId = ref<string | null>(null)
+
+// CD 运行对话框（收集 version + branch；CI 直接默认 branch 触发）
+const cdRunDlg = ref(false)
+const cdRunForm = ref<{ pipeline: Pipeline | null; branch: string; version: string }>({
+  pipeline: null, branch: 'main', version: '',
+})
 
 const ciPipelines = computed(() => pipelines.value.filter((p) => p.kind === 'ci'))
 const cdPipelines = computed(() => pipelines.value.filter((p) => p.kind === 'cd'))
@@ -97,10 +104,38 @@ async function remove(p: Pipeline) {
   }
 }
 
-// 触发运行（Task 5 增强 CD 版本选择 + 生产确认；本任务简化：默认 branch=main）
+// 触发运行：CI 直接默认 branch；CD 弹对话框收集 version（baseline 写入用）+ branch。
+// 含 prod deploy 的流水线二次确认（生产误触发风险）。
 async function run(p: Pipeline) {
+  if (p.kind === 'cd') {
+    cdRunForm.value = { pipeline: p, branch: p.trigger.branch || 'main', version: '' }
+    cdRunDlg.value = true
+    return
+  }
+  await doTriggerRun(p, p.trigger.branch || 'main')
+}
+
+async function confirmCdRun() {
+  const p = cdRunForm.value.pipeline
+  if (!p) return
+  if (!cdRunForm.value.branch.trim()) {
+    ElMessage.error('请填写分支')
+    return
+  }
+  cdRunDlg.value = false
+  await doTriggerRun(p, cdRunForm.value.branch.trim(), cdRunForm.value.version.trim() || undefined)
+}
+
+async function doTriggerRun(p: Pipeline, branch: string, version?: string) {
+  // 含 prod deploy -> 生产二次确认（防误触发生产发布）
+  if (hasProdDeploy(p)) {
+    const ok = await confirmDangerous({
+      action: '运行流水线', target: p.name, isProd: true,
+    })
+    if (!ok) return
+  }
   try {
-    const r = await triggerRun(props.appId, p.id, { branch: p.trigger.branch || 'main' })
+    const r = await triggerRun(props.appId, p.id, { branch, version })
     runViewId.value = r.id
     ElMessage.success('已触发运行')
   } catch (e: any) {
@@ -196,6 +231,24 @@ const statusTag = (s?: string) => {
       <template #footer>
         <el-button @click="createDlg = false">取消</el-button>
         <el-button type="primary" :loading="creating" @click="doCreate">创建</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- CD 运行对话框：收集 version（baseline 写入）+ branch -->
+    <el-dialog v-model="cdRunDlg" :title="`运行发布流水线：${cdRunForm.pipeline?.name || ''}`" width="460px">
+      <el-alert v-if="cdRunForm.pipeline && hasProdDeploy(cdRunForm.pipeline)" type="warning" :closable="false"
+                title="⚠️ 该流水线含生产环境部署，确认后需再次二次确认。" style="margin-bottom: 12px;" />
+      <el-form label-width="80px">
+        <el-form-item label="分支">
+          <el-input v-model="cdRunForm.branch" placeholder="如 main" />
+        </el-form-item>
+        <el-form-item label="版本">
+          <el-input v-model="cdRunForm.version" placeholder="如 v1.2.0（留空则不写基线版本）" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="cdRunDlg = false">取消</el-button>
+        <el-button type="primary" @click="confirmCdRun">运行</el-button>
       </template>
     </el-dialog>
 
