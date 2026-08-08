@@ -29,6 +29,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/aitoys/paas/internal/storage/pg"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // pgStore 三仓储的 PostgreSQL 实现。db 必须已完成迁移（含 0018_pipeline）。
@@ -475,13 +476,11 @@ func (s *pgStore) GetTemplate(ctx context.Context, id string) (PipelineTemplate,
 	return t, nil
 }
 
-// CreateTemplate 模板特判：平台预置（tenant_id=""）写 NULL，不受租户拦截（仍需 ctx 持租户）。
+// CreateTemplate 模板特判：平台预置（tenant_id=""）不要求 ctx 租户（admin 平台级 seed）。
 // 跨租户注入（!="" && !=tid）锁定为本租户（防越权写）。
 func (s *pgStore) CreateTemplate(ctx context.Context, in PipelineTemplate) (PipelineTemplate, error) {
-	tid, err := tenantOrErr(ctx)
-	if err != nil {
-		return PipelineTemplate{}, err
-	}
+	// 平台预置（in.TenantID=""）不要求 ctx 租户；租户自定义需 ctx 租户。
+	tid, _ := tenant.TenantFrom(ctx)
 	if in.TenantID != "" && in.TenantID != tid {
 		in.TenantID = tid // 锁定为本租户
 	}

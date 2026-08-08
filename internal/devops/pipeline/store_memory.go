@@ -313,10 +313,8 @@ func (s *memoryStore) GetTemplate(ctx context.Context, id string) (PipelineTempl
 // CreateTemplate 模板特判：平台预置（tenant_id="")不受 tenantOrErr 拦截，
 // 但仍需 ctx 持有租户（调用方为平台 admin）。
 func (s *memoryStore) CreateTemplate(ctx context.Context, t PipelineTemplate) (PipelineTemplate, error) {
-	tid, err := tenantOrErr(ctx)
-	if err != nil {
-		return PipelineTemplate{}, err
-	}
+	// 平台预置（t.TenantID=""）不要求 ctx 租户（admin 平台级 seed）；租户自定义需 ctx 租户。
+	tid, _ := tenant.TenantFrom(ctx)
 	// 模板特判：tenant_id=""（平台预置）或 =本租户（自定义）允许；
 	// 跨租户注入（!="" && !=tid）一律拒并锁定为本租户（防越权写）。
 	if t.TenantID != "" && t.TenantID != tid {

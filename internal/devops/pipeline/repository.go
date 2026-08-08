@@ -41,3 +41,11 @@ type TemplateRepository interface {
 	GetTemplate(ctx context.Context, id string) (PipelineTemplate, error)
 	CreateTemplate(ctx context.Context, t PipelineTemplate) (PipelineTemplate, error)
 }
+
+// Store 聚合 Pipeline 三仓储接口（memoryStore/pgStore 同一实例实现全部）。
+// cmd/core 装配时存 Stores.Pipeline，handler 按需类型断言取子接口。
+type Store interface {
+	Repository
+	RunRepository
+	TemplateRepository
+}

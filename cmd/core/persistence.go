@@ -53,6 +53,7 @@ import (
 	"github.com/aitoys/paas/internal/devops/builder"
 	devopsmemory "github.com/aitoys/paas/internal/devops/memory"
 	devopspg "github.com/aitoys/paas/internal/devops/pg"
+	"github.com/aitoys/paas/internal/devops/pipeline"
 	"github.com/aitoys/paas/internal/environment"
 	envmemory "github.com/aitoys/paas/internal/environment/memory"
 	envpg "github.com/aitoys/paas/internal/environment/pg"
@@ -106,6 +107,7 @@ type Stores struct {
 	Prompt         prompt.Repository
 	Agent          agent.Repository
 	Eval           eval.Repository
+	Pipeline       pipeline.Store
 }
 
 // buildAllStores 选择持久化后端、构造全模块 store 并完成 seed。
@@ -155,11 +157,16 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		evalRepo := evalpg.NewStore(db)
 		msgRepo := messaging.Repository(msgmemory.NewStore())
 		bkRepo := backup.Repository(bkmemory.NewStore())
+		pipelineStore := pipeline.NewPGStore(db.Pool())
 
 		seedPGAllIfEmpty(ctx, idb, appRepo, envRepo, appcfgRepo, rawDs, rawWl,
 			devopsRepo, govRepo, ccRepo, billingRepo, secRepo)
 		seedMaasCatalog(ctx, maasRepo, secRepo)
 		seedEnginesIfEmpty(ctx, rawDs)
+		// 平台预置流水线模板（全租户共享，不门控 demo seed，生产也需预置）
+		if err := pipeline.SeedTemplates(ctx, pipelineStore); err != nil {
+			log.Printf("[seed] pipeline 模板失败: %v", err)
+		}
 		// workload seed 用 ApplyRepo（wlRepo 已装饰：写 PG + 投影 CRD），让 seed 工作负载真实落地
 		// K8s（Deployment + nginx Pod）。seedPGAllIfEmpty 用 rawWl 不投影，故单独 seed；表空才灌（幂等）。
 		if n, err := rawWl.WorkloadsCount(ctx); err != nil {
@@ -193,6 +200,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 			Prompt:         promptRepo,
 			Agent:          agentRepo,
 			Eval:           evalRepo,
+			Pipeline:       pipelineStore,
 		}
 		return stores, db.Close, nil
 	}
@@ -227,6 +235,11 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 	agentRepo := agentmemory.NewStore()
 	msgRepo := messaging.Repository(msgmemory.NewStore())
 	bkRepo := backup.Repository(bkmemory.NewStore())
+	pipelineStore := pipeline.NewMemoryStore()
+	// 平台预置流水线模板（全租户共享，不门控 demo seed，生产也需预置）
+	if err := pipeline.SeedTemplates(ctx, pipelineStore); err != nil {
+		log.Printf("[seed] pipeline 模板失败: %v", err)
+	}
 	log.Println("持久化后端: 内存（dev/echo 路径，零依赖）")
 
 	stores := &Stores{
@@ -253,6 +266,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		Prompt:         promptRepo,
 		Agent:          agentRepo,
 		Eval:           evalmemory.NewStore(),
+		Pipeline:       pipelineStore,
 	}
 	return stores, nil, nil
 }
