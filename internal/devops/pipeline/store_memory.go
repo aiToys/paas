@@ -228,7 +228,7 @@ func (s *memoryStore) CreateRun(ctx context.Context, r PipelineRun) (PipelineRun
 		}
 	}
 	if _, exists := s.runs[r.ID]; exists {
-		return PipelineRun{}, ErrActiveRunExists
+		return PipelineRun{}, ErrRunExists
 	}
 	s.runs[r.ID] = r
 	return cloneRun(r), nil
