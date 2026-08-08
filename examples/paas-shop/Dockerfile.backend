@@ -1,0 +1,13 @@
+# paas-shop 后端通用 Dockerfile：ARG SERVICE 指定服务（product/recommend/chatbot/bff）。
+# 用 vendor（go mod vendor 生成），docker build 不需网络。
+# 在 examples/ 目录 build：docker build -f examples/paas-shop/Dockerfile.backend --build-arg SERVICE=product -t <img> .
+FROM docker.m.daocloud.io/library/golang:1.26-alpine AS builder
+WORKDIR /app
+COPY . .
+ARG SERVICE
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -mod=vendor -o /svc ./paas-shop/${SERVICE}
+
+FROM docker.m.daocloud.io/library/alpine:3.20
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /svc /svc
+ENTRYPOINT ["/svc"]
