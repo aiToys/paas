@@ -344,3 +344,53 @@ func TestReleaseVersionRoundTrip(t *testing.T) {
 		t.Fatalf("Version=%s, want v1.2.3", got.Version)
 	}
 }
+
+// TestCreateReleaseUsesLane 验证 CreateRelease 按 (env,app,lane) 找/建基线 Workload：
+// ① LaneID 空（默认）-> 复用 wlmemory seed 的 wl-cs-api（default lane）；
+// ② LaneID=feature-x -> 新建 feature-x 泳道 Workload（不复用 default）；
+// Release.LaneID 填充正确。
+func TestCreateReleaseUsesLane(t *testing.T) {
+	wl := wlmemory.NewStore()
+	s := NewStore(wl)
+	ctx := acmeCtx()
+	seedImage(s, "img-lane-test", "t-acme", "app-cs")
+
+	// 1. 默认 lane：应复用 wlmemory seed 的 wl-cs-api（app-cs/env-acme-test/default/service）
+	relDefault, err := s.CreateRelease(ctx, devops.ReleaseInput{
+		AppID: "app-cs", EnvID: "env-acme-test", ImageID: "img-lane-test",
+	})
+	if err != nil {
+		t.Fatalf("CreateRelease default: %v", err)
+	}
+	if relDefault.LaneID != "default" {
+		t.Errorf("默认发布 Release.LaneID=%q, want default", relDefault.LaneID)
+	}
+	if relDefault.WorkloadID != "wl-cs-api" {
+		t.Errorf("默认 lane 应复用 wl-cs-api，得 %s", relDefault.WorkloadID)
+	}
+
+	// 2. feature-x lane：应新建独立 Workload，不复用 default
+	relLane, err := s.CreateRelease(ctx, devops.ReleaseInput{
+		AppID: "app-cs", EnvID: "env-acme-test", LaneID: "feature-x", ImageID: "img-lane-test",
+	})
+	if err != nil {
+		t.Fatalf("CreateRelease lane: %v", err)
+	}
+	if relLane.LaneID != "feature-x" {
+		t.Errorf("泳道发布 Release.LaneID=%q, want feature-x", relLane.LaneID)
+	}
+	if relLane.WorkloadID == "wl-cs-api" {
+		t.Error("feature-x 泳道不应复用 default 的 wl-cs-api")
+	}
+
+	// feature-x 泳道应建 1 个 Workload（且 LaneID=feature-x）
+	wls, err := wl.List(ctx, "env-acme-test", "app-cs", "feature-x", "service")
+	if err != nil {
+		t.Fatalf("List feature-x: %v", err)
+	}
+	if len(wls) != 1 {
+		t.Errorf("feature-x 泳道应建 1 个 Workload，得 %d", len(wls))
+	} else if wls[0].LaneID != "feature-x" {
+		t.Errorf("新建 Workload.LaneID=%q, want feature-x", wls[0].LaneID)
+	}
+}

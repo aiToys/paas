@@ -239,6 +239,7 @@ type Release struct {
 type ReleaseInput struct {
 	AppID     string `json:"appId"`
 	EnvID     string `json:"envId"`
+	LaneID    string `json:"laneId,omitempty"` // 部署到的泳道（空=default 基线，向后兼容）
 	ImageID   string `json:"imageId"`
 	Strategy  string `json:"strategy"`
 	CreatedBy string `json:"-"` // handler 从身份 ctx 注入，非用户提交

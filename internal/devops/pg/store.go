@@ -16,9 +16,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -78,9 +80,9 @@ func (s *Store) baseCtxOrBg() context.Context {
 // 列常量与各 struct 字段顺序严格对齐（scan 列序必须一致）。
 const (
 	repoCols    = `id, tenant_id, app_id, git_url, branch, dockerfile, build_context, status, created_at, source, gitea_owner, gitea_repo, clone_url`
-	buildCols   = `id, tenant_id, app_id, repo_id, trigger, commit, branch, message, status, image_id, log, started_at, finished_at`
+	buildCols   = `id, tenant_id, app_id, repo_id, trigger, commit, branch, message, status, image_id, log, build_args, started_at, finished_at`
 	imageCols   = `id, tenant_id, app_id, registry, tag, digest, source, branch, build_run_id, built_at, status`
-	releaseCols = `id, tenant_id, app_id, env_id, image_id, image_digest, strategy, status, workload_id, previous_image_id, is_rollback, created_at, created_by, promoted_from, version`
+	releaseCols = `id, tenant_id, app_id, env_id, image_id, image_digest, strategy, status, workload_id, previous_image_id, is_rollback, created_at, created_by, promoted_from, version, lane_id, source_run_id`
 )
 
 // ---------- CodeRepoRepository ----------
@@ -263,9 +265,39 @@ func (s *Store) GetBuildRun(ctx context.Context, id string) (devops.BuildRun, er
 
 // scanBuild 通过 pg.RowScanner 抽象 QueryRow 与 Row 两种来源。
 func scanBuild(r pg.RowScanner, b *devops.BuildRun) error {
-	return r.Scan(
+	var buildArgs []byte
+	if err := r.Scan(
 		&b.ID, &b.TenantID, &b.AppID, &b.RepoID, &b.Trigger, &b.Commit, &b.Branch,
-		&b.Message, &b.Status, &b.ImageID, &b.Log, &b.StartedAt, &b.FinishedAt)
+		&b.Message, &b.Status, &b.ImageID, &b.Log, &buildArgs, &b.StartedAt, &b.FinishedAt); err != nil {
+		return err
+	}
+	b.BuildArgs = unmarshalStrMap(buildArgs)
+	return nil
+}
+
+// marshalStrMap 把 map[string]string 序列化为 JSONB 字节；nil/空 -> '{}'（与列 DEFAULT 一致）。
+func marshalStrMap(m map[string]string) []byte {
+	if len(m) == 0 {
+		return []byte("{}")
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return []byte("{}")
+	}
+	return b
+}
+
+// unmarshalStrMap 反序列化 JSONB 为 map[string]string；nil/空/null/无效 -> 空 map（非 nil，nil 安全）。
+func unmarshalStrMap(raw []byte) map[string]string {
+	m := map[string]string{}
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" || s == "{}" {
+		return m
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return map[string]string{} // 容错：单行坏数据不阻塞整个 List
+	}
+	return m
 }
 
 // CreateBuildRun 触发一次构建。校验仓库归属后置 pending，启动 mock CI runner 异步流转并产出 Image。
@@ -306,9 +338,9 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) (devops.B
 		b.Trigger = devops.TriggerManual
 	}
 	_, err = s.db.Pool().Exec(ctx,
-		`INSERT INTO build_runs (`+buildCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		`INSERT INTO build_runs (`+buildCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
 		b.ID, b.TenantID, b.AppID, b.RepoID, b.Trigger, b.Commit, b.Branch, b.Message,
-		b.Status, b.ImageID, b.Log, b.StartedAt, b.FinishedAt)
+		b.Status, b.ImageID, b.Log, marshalStrMap(b.BuildArgs), b.StartedAt, b.FinishedAt)
 	if err != nil {
 		return devops.BuildRun{}, err
 	}
@@ -322,7 +354,7 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) (devops.B
 	}
 	go s.runBuild(s.baseCtxOrBg(), builder.Params{
 		TenantID: tid, AppID: b.AppID, BuildID: b.ID, Commit: b.Commit, Branch: b.Branch,
-		GitURL: gitURL, Dockerfile: repo.Dockerfile, BuildContext: repo.BuildContext,
+		GitURL: gitURL, Dockerfile: repo.Dockerfile, BuildContext: repo.BuildContext, BuildArgs: b.BuildArgs,
 	}) //nolint:gosec // G118 误报：后台构建任务须脱离请求生命周期，不持 request ctx 是有意为之
 	return b, nil
 }
@@ -576,7 +608,7 @@ func scanRelease(r pg.RowScanner, rel *devops.Release) error {
 	return r.Scan(
 		&rel.ID, &rel.TenantID, &rel.AppID, &rel.EnvID, &rel.ImageID, &rel.ImageDigest,
 		&rel.Strategy, &rel.Status, &rel.WorkloadID, &rel.PreviousImageID, &rel.IsRollback,
-		&rel.CreatedAt, &rel.CreatedBy, &rel.PromotedFrom, &rel.Version)
+		&rel.CreatedAt, &rel.CreatedBy, &rel.PromotedFrom, &rel.Version, &rel.LaneID, &rel.SourceRunID)
 }
 
 // SetReleaseVersion 回填版本号（baseline stage 打版本）。
@@ -634,8 +666,15 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 
 	display := img.Registry + ":" + img.Tag
 
-	// 2. 找目标环境基线 Workload（锁外调 workload 仓储，避免跨仓储持锁）—— 对齐内存版 step 2
-	wls, err := s.workload.List(ctx, input.EnvID, input.AppID, workload.TypeService)
+	// 泳道归一化：空串 -> 默认基线（向后兼容历史调用方）。
+	lane := input.LaneID
+	if lane == "" {
+		lane = workload.LaneDefault
+	}
+
+	// 2. 找目标环境某泳道的基线 Workload（同 app×env×lane 唯一）（锁外调 workload 仓储，避免跨仓储持锁）
+	// —— 对齐内存版 step 2
+	wls, err := s.workload.List(ctx, input.EnvID, input.AppID, lane, workload.TypeService)
 	if err != nil {
 		return devops.Release{}, err
 	}
@@ -652,13 +691,18 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 		}
 	} else {
 		// 无基线 Workload -> 创建（基线 service，Replicas=1）—— 对齐内存版
+		// Name 规则：default 用 `<app>-svc`（兼容现有 seed），非 default 用 `<app>-svc-<lane>`。
+		name := input.AppID + "-svc"
+		if lane != workload.LaneDefault {
+			name = input.AppID + "-svc-" + lane
+		}
 		wl = workload.Workload{
 			ID:        newID("wl"),
 			AppID:     input.AppID,
 			EnvID:     input.EnvID,
-			LaneID:    workload.LaneDefault,
+			LaneID:    lane,
 			Type:      workload.TypeService,
-			Name:      input.AppID + "-svc",
+			Name:      name,
 			Image:     display,
 			ImageRef:  img.Digest,
 			Replicas:  1,
@@ -689,12 +733,13 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 		CreatedBy:       input.CreatedBy,
 		CreatedAt:       time.Now(),
 		Version:         "", // 初始为空，由 baseline stage 写入
+		LaneID:          lane,
 	}
 	_, err = s.db.Pool().Exec(ctx,
-		`INSERT INTO releases (`+releaseCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+		`INSERT INTO releases (`+releaseCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
 		rel.ID, rel.TenantID, rel.AppID, rel.EnvID, rel.ImageID, rel.ImageDigest,
 		rel.Strategy, rel.Status, rel.WorkloadID, rel.PreviousImageID, rel.IsRollback,
-		rel.CreatedAt, rel.CreatedBy, rel.PromotedFrom, rel.Version)
+		rel.CreatedAt, rel.CreatedBy, rel.PromotedFrom, rel.Version, rel.LaneID, rel.SourceRunID)
 	if err != nil {
 		// 补偿事务：workload 已切新镜像但 release 记录未落库 -> 回滚 workload 到发布前状态，
 		// 防丢失 PreviousImageID 回滚指针（best-effort，补偿失败不掩盖主错误）。
@@ -799,10 +844,10 @@ func (s *Store) RollbackRelease(ctx context.Context, releaseID string) (devops.R
 		return devops.Release{}, err
 	}
 	if _, err = tx.Exec(ctx,
-		`INSERT INTO releases (`+releaseCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+		`INSERT INTO releases (`+releaseCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
 		rb.ID, rb.TenantID, rb.AppID, rb.EnvID, rb.ImageID, rb.ImageDigest,
 		rb.Strategy, rb.Status, rb.WorkloadID, rb.PreviousImageID, rb.IsRollback,
-		rb.CreatedAt, rb.CreatedBy, rb.PromotedFrom, rb.Version); err != nil {
+		rb.CreatedAt, rb.CreatedBy, rb.PromotedFrom, rb.Version, rb.LaneID, rb.SourceRunID); err != nil {
 		return devops.Release{}, err
 	}
 	if err = tx.Commit(ctx); err != nil {

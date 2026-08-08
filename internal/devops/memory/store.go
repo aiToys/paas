@@ -457,8 +457,10 @@ func (s *Store) SetReleaseVersion(ctx context.Context, id, version string) error
 	return nil
 }
 
-// CreateRelease 编排发布：取镜像 -> 找/建目标环境基线 Workload -> 更新镜像 -> 记录回滚指针 -> 存发布单。
-// 策略非 rolling 也走 rolling 编排（mock 期无真实流量切分），Release.Strategy 记录请求策略。
+// CreateRelease 编排发布：取镜像 -> 找/建目标环境某泳道的基线 Workload -> 更新镜像 -> 记录回滚指针 -> 存发布单。
+// 泳道由 input.LaneID 决定（空=默认基线 workload.LaneDefault）；同一 (app,env,lane) 共享一个基线 Workload，
+// 不同 lane 各自独立（联调/灰度场景）。策略非 rolling 也走 rolling 编排（mock 期无真实流量切分），
+// Release.Strategy 记录请求策略。
 func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (devops.Release, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {
@@ -476,13 +478,19 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 
 	display := img.Registry + ":" + img.Tag
 
+	// 泳道归一化：空串 -> 默认基线（向后兼容历史调用方）。
+	lane := input.LaneID
+	if lane == "" {
+		lane = workload.LaneDefault
+	}
+
 	// 2-3. 持 s.mu 覆盖 List→UpdateImage→存 release 临界区，防并发发布丢失更新（回滚指针链断裂）。
 	// 跨仓储嵌套 devops.mu → workload.mu 单向（workload 不调 devops），无死锁；CreateRelease 低频可接受串行化。
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 2. 找目标环境基线 Workload（Task 2 暂传 lane="" 保持原行为；Task 3 接入 lane 参数）
-	wls, err := s.workload.List(ctx, input.EnvID, input.AppID, "", workload.TypeService)
+	// 2. 找目标环境某泳道的基线 Workload（同 app×env×lane 唯一）
+	wls, err := s.workload.List(ctx, input.EnvID, input.AppID, lane, workload.TypeService)
 	if err != nil {
 		return devops.Release{}, err
 	}
@@ -499,13 +507,18 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 		}
 	} else {
 		// 无基线 Workload -> 创建（基线 service，Replicas=1）
+		// Name 规则：default 用 `<app>-svc`（兼容现有 seed），非 default 用 `<app>-svc-<lane>`（同 app×env×lane 唯一）。
+		name := input.AppID + "-svc"
+		if lane != workload.LaneDefault {
+			name = input.AppID + "-svc-" + lane
+		}
 		wl = workload.Workload{
 			ID:        newID("wl"),
 			AppID:     input.AppID,
 			EnvID:     input.EnvID,
-			LaneID:    workload.LaneDefault,
+			LaneID:    lane,
 			Type:      workload.TypeService,
-			Name:      input.AppID + "-svc",
+			Name:      name,
 			Image:     display,
 			ImageRef:  img.Digest,
 			Replicas:  1,
@@ -536,6 +549,7 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 		CreatedBy:       input.CreatedBy,
 		CreatedAt:       time.Now(),
 		Version:         "", // 初始为空，由 baseline stage 写入
+		LaneID:          lane,
 	}
 	s.releases[rel.ID] = rel // 已在 s.mu 临界区内（step2-3 持锁）
 	return rel, nil
