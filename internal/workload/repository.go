@@ -5,8 +5,9 @@ import "context"
 // Repository 是工作负载持久化抽象。
 // 实现必须在所有查询中从 ctx 取租户并强制过滤（缺失即拒，跨租户 not found）。
 type Repository interface {
-	// List 按租户过滤；envID 空串表示所有环境；appID 空串表示跨应用；wtype 空串表示所有类型。
-	List(ctx context.Context, envID, appID, wtype string) ([]Workload, error)
+	// List 按租户过滤；envID 空串表示所有环境；appID 空串表示跨应用；
+	// laneID 空串表示所有泳道（含 default 基线）；wtype 空串表示所有类型。
+	List(ctx context.Context, envID, appID, laneID, wtype string) ([]Workload, error)
 	// ListAll 跨租户列出全部工作负载（admin 平台总览，不过滤 tenant；返回对象带 TenantID）。
 	ListAll(ctx context.Context) ([]Workload, error)
 	Get(ctx context.Context, id string) (Workload, error)

@@ -481,8 +481,8 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 2. 找目标环境基线 Workload
-	wls, err := s.workload.List(ctx, input.EnvID, input.AppID, workload.TypeService)
+	// 2. 找目标环境基线 Workload（Task 2 暂传 lane="" 保持原行为；Task 3 接入 lane 参数）
+	wls, err := s.workload.List(ctx, input.EnvID, input.AppID, "", workload.TypeService)
 	if err != nil {
 		return devops.Release{}, err
 	}

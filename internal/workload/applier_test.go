@@ -13,7 +13,7 @@ type fakeRepo struct {
 	createErr error
 }
 
-func (f *fakeRepo) List(ctx context.Context, envID, appID, wtype string) ([]Workload, error) {
+func (f *fakeRepo) List(ctx context.Context, envID, appID, laneID, wtype string) ([]Workload, error) {
 	return nil, nil
 }
 func (f *fakeRepo) ListAll(ctx context.Context) ([]Workload, error) { return nil, nil }

@@ -96,7 +96,7 @@ func TestWLCreateListGet(t *testing.T) {
 		t.Fatalf("Replicas=2 Ready=1, got %d/%d", got.Replicas, got.Ready)
 	}
 
-	list, err := s.List(ctx, "", "", "")
+	list, err := s.List(ctx, "", "", "", "")
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestWLListFiltersCombination(t *testing.T) {
 	}
 
 	// envID + type 组合：env-test + service → 仅 wl-a。
-	got, err := s.List(ctx, "env-test", "", workload.TypeService)
+	got, err := s.List(ctx, "env-test", "", "", workload.TypeService)
 	if err != nil {
 		t.Fatalf("List env+type: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestWLListFiltersCombination(t *testing.T) {
 	}
 
 	// envID + appID 组合：env-test + app-1 → wl-a, wl-b。
-	got, err = s.List(ctx, "env-test", "app-1", "")
+	got, err = s.List(ctx, "env-test", "app-1", "", "")
 	if err != nil {
 		t.Fatalf("List env+app: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestWLListFiltersCombination(t *testing.T) {
 	}
 
 	// 单 type 过滤：cronjob → wl-b。
-	got, err = s.List(ctx, "", "", workload.TypeCronJob)
+	got, err = s.List(ctx, "", "", "", workload.TypeCronJob)
 	if err != nil {
 		t.Fatalf("List type: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestWLListFiltersCombination(t *testing.T) {
 	}
 
 	// 全空过滤 → 3 条。
-	got, err = s.List(ctx, "", "", "")
+	got, err = s.List(ctx, "", "", "", "")
 	if err != nil {
 		t.Fatalf("List all: %v", err)
 	}

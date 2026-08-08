@@ -20,7 +20,7 @@ type appCascadeDeleter struct {
 // CascadeDelete 删除指定应用下的全部工作负载与应用配置。
 // 工作负载删除成功后回收 workload 维度配额（与 workload handler Delete 对齐）。
 func (c appCascadeDeleter) CascadeDelete(ctx context.Context, appID string) error {
-	wls, lErr := c.wl.List(ctx, "", appID, "")
+	wls, lErr := c.wl.List(ctx, "", appID, "", "")
 	if lErr != nil {
 		return lErr
 	}

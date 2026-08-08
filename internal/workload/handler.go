@@ -161,7 +161,7 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		envID := r.URL.Query().Get("envId")
-		list, err := h.repo.List(r.Context(), envID, appID, "")
+		list, err := h.repo.List(r.Context(), envID, appID, "", "")
 		if err != nil {
 			httputil.WriteInternalError(w, err)
 			return
@@ -230,7 +230,7 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 		}
 		wtype := r.URL.Query().Get("type")
 		envID := r.URL.Query().Get("envId")
-		list, err := h.repo.List(r.Context(), envID, "", wtype)
+		list, err := h.repo.List(r.Context(), envID, "", "", wtype)
 		if err != nil {
 			httputil.WriteInternalError(w, err)
 			return

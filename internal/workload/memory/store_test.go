@@ -17,7 +17,7 @@ func globexCtx() context.Context { return tenant.WithTenant(context.Background()
 func TestListByType(t *testing.T) {
 	s := NewStore()
 	// acme: cs-api/rec-svc(service) + batch-recall(job) + daily-report(cronjob)；globex: etl-nightly(cronjob)/etl-backfill(job)/agent-gw(service)
-	svcs, err := s.List(acmeCtx(), "", "", workload.TypeService)
+	svcs, err := s.List(acmeCtx(), "", "", "", workload.TypeService)
 	require.NoError(t, err)
 	require.Len(t, svcs, 2)
 	for _, w := range svcs {
@@ -28,8 +28,8 @@ func TestListByType(t *testing.T) {
 
 func TestListIsolatedByTenant(t *testing.T) {
 	s := NewStore()
-	acme, _ := s.List(acmeCtx(), "", "", "")
-	globex, _ := s.List(globexCtx(), "", "", "")
+	acme, _ := s.List(acmeCtx(), "", "", "", "")
+	globex, _ := s.List(globexCtx(), "", "", "", "")
 	for _, w := range acme {
 		assert.Equal(t, "t-acme", w.TenantID)
 	}
@@ -45,7 +45,7 @@ func TestListIsolatedByTenant(t *testing.T) {
 func TestListByApp(t *testing.T) {
 	s := NewStore()
 	// app-etl 属 globex，挂 cronjob + job
-	got, err := s.List(globexCtx(), "", "app-etl", "")
+	got, err := s.List(globexCtx(), "", "app-etl", "", "")
 	require.NoError(t, err)
 	require.Len(t, got, 2)
 }
@@ -53,7 +53,7 @@ func TestListByApp(t *testing.T) {
 func TestListByEnv(t *testing.T) {
 	s := NewStore()
 	// env-acme-test 下应只有 acme 的 4 条（cs-api/rec-svc/batch-recall/daily-report）
-	got, err := s.List(acmeCtx(), "env-acme-test", "", "")
+	got, err := s.List(acmeCtx(), "env-acme-test", "", "", "")
 	require.NoError(t, err)
 	require.Len(t, got, 4)
 	for _, w := range got {
@@ -123,7 +123,7 @@ func TestDelete(t *testing.T) {
 
 func TestMissingTenantRejected(t *testing.T) {
 	s := NewStore()
-	_, err := s.List(context.Background(), "", "", "")
+	_, err := s.List(context.Background(), "", "", "", "")
 	assert.Error(t, err)
 }
 
@@ -133,4 +133,36 @@ func TestCronJobRequiresSchedule(t *testing.T) {
 		ID: "wl-c", AppID: "app-cs", Type: workload.TypeCronJob, Name: "c", Image: "img",
 	})
 	assert.Error(t, err, "cronjob 须有 schedule")
+}
+
+// TestListFilterByLane 验证 List 的 laneID 参数：空串=不过滤（返全部泳道），
+// 非空=只返回该泳道。为 deploy/release 分离 + 泳道支持（L1）铺路。
+func TestListFilterByLane(t *testing.T) {
+	s := NewStore()
+	ctx := tenant.WithTenant(context.Background(), "t1")
+	require.NoError(t, s.Create(ctx, workload.Workload{
+		ID: "wl-1", AppID: "a", EnvID: "e", LaneID: workload.LaneDefault,
+		Type: workload.TypeService, Name: "a-svc", Image: "img",
+	}))
+	require.NoError(t, s.Create(ctx, workload.Workload{
+		ID: "wl-2", AppID: "a", EnvID: "e", LaneID: "feature-x",
+		Type: workload.TypeService, Name: "a-svc-x", Image: "img",
+	}))
+
+	// lane="" 返回全部
+	all, err := s.List(ctx, "e", "a", "", workload.TypeService)
+	require.NoError(t, err)
+	assert.Len(t, all, 2)
+
+	// lane=feature-x 只返该泳道
+	feature, err := s.List(ctx, "e", "a", "feature-x", workload.TypeService)
+	require.NoError(t, err)
+	require.Len(t, feature, 1)
+	assert.Equal(t, "wl-2", feature[0].ID)
+
+	// lane=default 只返基线
+	base, err := s.List(ctx, "e", "a", workload.LaneDefault, workload.TypeService)
+	require.NoError(t, err)
+	require.Len(t, base, 1)
+	assert.Equal(t, "wl-1", base[0].ID)
 }

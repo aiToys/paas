@@ -50,7 +50,7 @@ func tenantOrErr(ctx context.Context) (string, error) {
 	return tid, nil
 }
 
-func (s *Store) List(ctx context.Context, envID, appID, wtype string) ([]workload.Workload, error) {
+func (s *Store) List(ctx context.Context, envID, appID, laneID, wtype string) ([]workload.Workload, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {
 		return nil, err
@@ -66,6 +66,10 @@ func (s *Store) List(ctx context.Context, envID, appID, wtype string) ([]workloa
 			continue
 		}
 		if appID != "" && w.AppID != appID {
+			continue
+		}
+		// laneID 空串=不过滤（返所有泳道）；非空只匹配该泳道
+		if laneID != "" && w.LaneID != laneID {
 			continue
 		}
 		if wtype != "" && w.Type != wtype {

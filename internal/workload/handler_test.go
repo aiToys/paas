@@ -23,7 +23,7 @@ type stubRepo struct {
 	updatedID string
 }
 
-func (s *stubRepo) List(context.Context, string, string, string) ([]Workload, error) {
+func (s *stubRepo) List(context.Context, string, string, string, string) ([]Workload, error) {
 	return s.list, nil
 }
 func (s *stubRepo) ListAll(context.Context) ([]Workload, error) { return s.list, nil }

@@ -35,9 +35,10 @@ func scanWL(r pg.RowScanner, w *workload.Workload) error {
 	)
 }
 
-// List 按租户 + 可选 envID/appID/wtype 过滤；空串表示该维度不过滤（与内存语义一致）。
-// 动态拼 WHERE：固定 tenant_id=$1，envID/appID/wtype 非空各追加 AND col=$N。
-func (s *Store) List(ctx context.Context, envID, appID, wtype string) ([]workload.Workload, error) {
+// List 按租户 + 可选 envID/appID/laneID/wtype 过滤；空串表示该维度不过滤（与内存语义一致）。
+// 动态拼 WHERE：固定 tenant_id=$1，envID/appID/laneID/wtype 非空各追加 AND col=$N。
+// laneID 用 `AND ($N = '' OR lane_id = $N)` 形式（与空串语义对齐），保持参数顺序。
+func (s *Store) List(ctx context.Context, envID, appID, laneID, wtype string) ([]workload.Workload, error) {
 	tid, err := pg.TenantOrErr(ctx)
 	if err != nil {
 		return nil, err
@@ -51,6 +52,10 @@ func (s *Store) List(ctx context.Context, envID, appID, wtype string) ([]workloa
 	if appID != "" {
 		args = append(args, appID)
 		q += fmt.Sprintf(` AND app_id=$%d`, len(args))
+	}
+	if laneID != "" {
+		args = append(args, laneID)
+		q += fmt.Sprintf(` AND lane_id=$%d`, len(args))
 	}
 	if wtype != "" {
 		args = append(args, wtype)
