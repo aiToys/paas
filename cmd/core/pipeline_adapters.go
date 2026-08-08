@@ -11,9 +11,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/aitoys/paas/internal/core/application"
 	"github.com/aitoys/paas/internal/devops"
 	"github.com/aitoys/paas/internal/devops/gitea"
 	"github.com/aitoys/paas/internal/devops/pipeline"
@@ -217,5 +219,69 @@ func promoteTargetTypeBridge(envs environment.Repository) pipeline.PromoteTarget
 			return "", err
 		}
 		return target.Type, nil
+	}
+}
+
+// paramResolverBridge 桥接 pipeline.ParamResolver -> environment（按 app 租户查 type 环境）+ codeRepo（internal repo）。
+// 用于模板占位符 {{app.env.test}}/{{app.env.prod}}/{{app.repo}} 解析。
+type paramResolverBridge struct {
+	apps application.Repository
+	envs environment.Repository
+	repos devops.CodeRepoRepository
+}
+
+// EnvByType 返回 app 租户内指定 type 的环境 ID（多个取 promoteOrder 最小；无返错）。
+func (p *paramResolverBridge) EnvByType(ctx context.Context, appID, envType string) (string, error) {
+	app, err := p.apps.Get(ctx, appID)
+	if err != nil {
+		return "", err
+	}
+	// environment store 按 ctx tenant 过滤，需切到 app 所属租户
+	ctx = tenant.WithTenant(ctx, app.TenantID)
+	envs, err := p.envs.List(ctx)
+	if err != nil {
+		return "", err
+	}
+	var best *environment.Environment
+	for i := range envs {
+		e := &envs[i]
+		if e.Type != envType {
+			continue
+		}
+		if best == nil || e.PromoteOrder < best.PromoteOrder {
+			best = e
+		}
+	}
+	if best == nil {
+		return "", fmt.Errorf("应用租户无 %s 环境（app=%s）", envType, appID)
+	}
+	return best.ID, nil
+}
+
+// InternalRepoID 返回 app 绑定的 internal CodeRepo ID（无则空串，build stage 失败提示）。
+func (p *paramResolverBridge) InternalRepoID(ctx context.Context, appID string) (string, error) {
+	return (&repoResolverBridge{repos: p.repos}).ResolveInternalRepo(ctx, appID)
+}
+
+var _ pipeline.ParamResolver = (*paramResolverBridge)(nil)
+
+// defaultPipelineBinder 建 app 时自动建默认流水线绑定（tpl-ci/tpl-cd），best-effort。
+// 同名已存在（ErrPipelineExists）忽略（幂等）；模板缺失跳过。
+func defaultPipelineBinder(pipes pipeline.Repository, templates pipeline.TemplateRepository) func(context.Context, string) error {
+	return func(ctx context.Context, appID string) error {
+		for _, tplID := range []string{"tpl-ci", "tpl-cd"} {
+			tpl, err := templates.GetTemplate(ctx, tplID)
+			if err != nil {
+				continue // 模板不存在跳过（dev 未 seed 或生产门控）
+			}
+			_, err = pipes.CreatePipeline(ctx, pipeline.Pipeline{
+				AppID: appID, Name: appID + "-" + tpl.Kind, Kind: tpl.Kind, TemplateID: tplID,
+				Trigger: pipeline.PipelineTrigger{Type: "manual", Branch: "main"},
+			})
+			if err != nil && !errors.Is(err, pipeline.ErrPipelineExists) {
+				return err
+			}
+		}
+		return nil
 	}
 }

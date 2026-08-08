@@ -8,10 +8,9 @@ func TestPipelineValidate(t *testing.T) {
 		p       Pipeline
 		wantErr bool
 	}{
-		{"ok", Pipeline{Name: "p", AppID: "a", Kind: KindCI, Stages: []StageDef{{Name: "build", Type: StageBuild}}}, false},
-		{"emptyStages", Pipeline{Name: "p", AppID: "a", Kind: KindCI}, true},
-		{"badKind", Pipeline{Name: "p", AppID: "a", Kind: "x", Stages: []StageDef{{Name: "b", Type: StageBuild}}}, true},
-		{"badStageType", Pipeline{Name: "p", AppID: "a", Kind: KindCI, Stages: []StageDef{{Name: "b", Type: "x"}}}, true},
+		{"ok", Pipeline{Name: "p", AppID: "a", Kind: KindCI, TemplateID: "tpl-x"}, false},
+		{"emptyTemplateID", Pipeline{Name: "p", AppID: "a", Kind: KindCI}, true}, // 绑定模型：TemplateID 必填
+		{"badKind", Pipeline{Name: "p", AppID: "a", Kind: "x", TemplateID: "tpl-x"}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -20,5 +19,18 @@ func TestPipelineValidate(t *testing.T) {
 				t.Fatalf("err=%v wantErr=%v", err, c.wantErr)
 			}
 		})
+	}
+}
+
+// TestStageDefValidate 单独校验 StageDef（绑定模型下 Pipeline.Validate 不再调用它）。
+func TestStageDefValidate(t *testing.T) {
+	if err := (StageDef{Name: "b", Type: StageBuild}).validate(); err != nil {
+		t.Fatalf("valid stage got %v", err)
+	}
+	if err := (StageDef{Name: "b", Type: "x"}).validate(); err != ErrInvalidStageType {
+		t.Fatalf("bad type want ErrInvalidStageType got %v", err)
+	}
+	if err := (StageDef{Type: StageBuild}).validate(); err != errStageNameRequired {
+		t.Fatalf("missing name want errStageNameRequired got %v", err)
 	}
 }

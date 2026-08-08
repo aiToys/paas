@@ -44,6 +44,9 @@ type Handler struct {
 	// CascadeDelete 跨 store 关联资源级联清理（可选）；nil 跳过。由 cmd/core 桥接
 	// workload/appconfig/devops 等 store，删应用前清该 appID 下孤儿资源（best-effort，失败仅记日志不阻断）。
 	CascadeDelete func(ctx context.Context, appID string) error
+	// OnAppCreate 应用创建成功后置 hook（可选）；nil 跳过。由 cmd/core 桥接建默认资源
+	// （如默认流水线绑定 tpl-ci/tpl-cd）。best-effort，失败仅记日志不阻断应用创建。
+	OnAppCreate func(ctx context.Context, appID string) error
 	// stats 工作负载聚合统计（可选）；注入后 List 派生真实 Replicas/Status（覆盖 seed 假值）。
 	// nil 透传 seed 原值（降级：无 workload repo 可查）。
 	stats WorkloadStats
@@ -55,6 +58,11 @@ type HandlerOpt func(*Handler)
 // WithWorkloadStats 注入工作负载聚合统计，List 时派生应用 Replicas/Status（真实化）。
 func WithWorkloadStats(s WorkloadStats) HandlerOpt {
 	return func(h *Handler) { h.stats = s }
+}
+
+// WithOnAppCreate 注入应用创建后置 hook（建默认资源，如默认流水线绑定）。
+func WithOnAppCreate(f func(ctx context.Context, appID string) error) HandlerOpt {
+	return func(h *Handler) { h.OnAppCreate = f }
 }
 
 // NewHandler 创建应用 API handler。
@@ -132,6 +140,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			httputil.WriteServiceError(w, http.StatusConflict, err)
 			return
+		}
+		// 应用创建成功后置 hook：建默认资源（如默认流水线绑定），best-effort 不阻断应用创建。
+		if h.OnAppCreate != nil {
+			if err := h.OnAppCreate(r.Context(), a.ID); err != nil {
+				log.Printf("OnAppCreate 失败（不阻断应用创建）: app=%s: %v", a.ID, err) //nolint:gosec // G706 误报：日志格式化输出，非注入
+			}
 		}
 		w.WriteHeader(http.StatusCreated)
 		httputil.WriteData(w, a)

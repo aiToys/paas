@@ -127,22 +127,10 @@ func (e *Engine) Advance(ctx context.Context, runID string) error {
 		if run.Status != RunRunning {
 			return nil // paused/failed/aborted/succeeded 都停
 		}
-		pipe, err := e.Pipelines.GetPipeline(ctx, run.PipelineID)
-		if err != nil {
-			return e.markFailed(ctx, run, fmt.Errorf("加载 pipeline 失败: %w", err))
-		}
-		if run.CurrentStage >= len(pipe.Stages) {
+		// stages 已在触发时实例化到 run.StageRuns（Input=resolved params）。
+		// 绑定模型：Pipeline 无 Stages，运行时用 run.StageRuns（不再加载 Pipeline 实体）。
+		if run.CurrentStage >= len(run.StageRuns) {
 			return e.markSucceeded(ctx, run)
-		}
-		stage := pipe.Stages[run.CurrentStage]
-		// run.StageRuns 可能少于 pipe.Stages（恢复场景）；按需扩容。
-		// 按 Index 取对应 stage 的 Type/Name（而非循环外缓存的当前 stage），避免极端恢复场景
-		// （CurrentStage 跳过中间 stage）批量填补错类型/错名。
-		for len(run.StageRuns) <= run.CurrentStage {
-			s := pipe.Stages[len(run.StageRuns)]
-			run.StageRuns = append(run.StageRuns, StageRun{
-				Index: len(run.StageRuns), Type: s.Type, Name: s.Name, Status: StagePending,
-			})
 		}
 		sr := &run.StageRuns[run.CurrentStage]
 		// 跳过已完成的 stage（恢复场景）
@@ -153,6 +141,7 @@ func (e *Engine) Advance(ctx context.Context, runID string) error {
 			}
 			continue
 		}
+		stage := StageDef{Type: sr.Type, Name: sr.Name, Params: sr.Input}
 		finished, err := e.execStage(ctx, &run, stage, sr)
 		if err != nil {
 			sr.Status = StageFailed // execStage 已写 sr.Error，此处补 stage 终态

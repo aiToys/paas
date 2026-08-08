@@ -4,7 +4,6 @@ package pipeline
 
 import (
 	"errors"
-	"fmt"
 	"time"
 )
 
@@ -18,6 +17,8 @@ var (
 	errStageNameRequired = errors.New("stage name required")
 	ErrNotPaused         = errors.New("run not paused")
 	ErrStageNotCurrent   = errors.New("stage not current")
+	ErrTemplateRequired  = errors.New("templateId required")
+	ErrTemplateNotFound  = errors.New("pipeline template not found")
 )
 
 // Kind 流水线分类（UI 分组 + 职责划分）。
@@ -76,6 +77,14 @@ type StageDef struct {
 	Params map[string]any `json:"params,omitempty"`
 }
 
+// ParamDef 模板参数声明（admin 模板编辑器文档化；运行时靠占位符解析，此字段非必填）。
+type ParamDef struct {
+	Name        string `json:"name"`
+	Type        string `json:"type,omitempty"`        // string|env|repo
+	Default     any    `json:"default,omitempty"`     // 默认值（可含占位符 {{app.env.test}} 等）
+	Description string `json:"description,omitempty"`
+}
+
 // PipelineTrigger 流水线触发配置（Plan 1 只实现 manual；webhook/cron 占位 Plan 3）。
 type PipelineTrigger struct {
 	Type     string   `json:"type"`              // manual|webhook|cron（Plan 1: manual）
@@ -93,21 +102,23 @@ type PipelineTemplate struct {
 	Kind        string     `json:"kind"`
 	Description string     `json:"description,omitempty"`
 	Stages      []StageDef `json:"stages"`
+	Params      []ParamDef `json:"params,omitempty"` // 参数声明（文档化；运行时占位符解析）
 	Builtin     bool       `json:"builtin,omitempty"`
 }
 
-// Pipeline 应用绑定的流水线（主线实体，Application 1:N）。
+// Pipeline 应用绑定的流水线（绑定模板 + 参数覆盖，非 per-app 复制 stages）。
+// Stages 运行时从 Template 解析（ResolveStages），模板升级自动传播到此绑定的后续 run。
 type Pipeline struct {
-	ID         string           `json:"id"`
-	TenantID   string           `json:"tenantId"`
-	AppID      string           `json:"appId"`
-	Name       string           `json:"name"`
-	Kind       string           `json:"kind"`
-	TemplateID string           `json:"templateId,omitempty"`
-	Stages     []StageDef       `json:"stages"`
-	Trigger    PipelineTrigger  `json:"trigger"`
-	Disabled   bool             `json:"disabled,omitempty"`
-	CreatedAt  time.Time        `json:"createdAt"`
+	ID             string          `json:"id"`
+	TenantID       string          `json:"tenantId"`
+	AppID          string          `json:"appId"`
+	Name           string          `json:"name"`
+	Kind           string           `json:"kind"`
+	TemplateID     string           `json:"templateId,omitempty"`
+	ParamOverrides map[string]any  `json:"paramOverrides,omitempty"` // app 覆盖模板默认参数
+	Trigger        PipelineTrigger `json:"trigger"`
+	Disabled       bool            `json:"disabled,omitempty"`
+	CreatedAt      time.Time       `json:"createdAt"`
 }
 
 // PipelineRun 一次运行（异步状态机载体）。
@@ -151,7 +162,7 @@ const (
 	OutMergeSHA      = "mergeSha"
 )
 
-// Validate Pipeline 基本校验。
+// Validate Pipeline 基本校验（绑定模型：校验 TemplateID，不校验 Stages--运行时从模板解析）。
 func (p Pipeline) Validate() error {
 	if p.Name == "" {
 		return errNameRequired
@@ -165,13 +176,8 @@ func (p Pipeline) Validate() error {
 	default:
 		return ErrInvalidKind
 	}
-	if len(p.Stages) == 0 {
-		return ErrNoStages
-	}
-	for i, s := range p.Stages {
-		if err := s.validate(); err != nil {
-			return fmt.Errorf("stage %d: %w", i, err)
-		}
+	if p.TemplateID == "" {
+		return ErrTemplateRequired
 	}
 	return nil
 }

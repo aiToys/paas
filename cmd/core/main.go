@@ -465,9 +465,12 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		pipeline.WithEnvType(envTypeBridge(stores.Environment)),
 		pipeline.WithPromoteTargetType(promoteTargetTypeBridge(stores.Environment)),
 		pipeline.WithRepoResolver(&repoResolverBridge{repos: stores.DevOpsRepos}),
+		pipeline.WithParamResolver(&paramResolverBridge{apps: stores.Application, envs: stores.Environment, repos: stores.DevOpsRepos}),
 		pipeline.WithAudit(&identityAuditAdapter{store: stores.Security}),
 		pipeline.WithActorFn(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
 	)
+	// 应用创建后置 hook：自动建默认流水线绑定（tpl-ci/tpl-cd），best-effort。
+	appHandler.OnAppCreate = defaultPipelineBinder(stores.Pipeline, stores.Pipeline)
 
 	// 应用配置（工作负载级 env/Secret）：注入 environment store（prod 写校验）。
 	// Secret 后端明文存储，API 返回固定掩码；与配置中心（服务治理，运行时动态）严格区分。

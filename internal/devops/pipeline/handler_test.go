@@ -48,8 +48,8 @@ func TestPipelineCreateFromTemplate(t *testing.T) {
 	if resp.Data.Kind != KindCI {
 		t.Fatalf("从 tpl-ci 创建 kind 期望 ci，got %s", resp.Data.Kind)
 	}
-	if len(resp.Data.Stages) == 0 {
-		t.Fatal("从模板创建 stages 期望非空（复制自模板）")
+	if resp.Data.TemplateID != "tpl-ci" {
+		t.Fatalf("从模板创建 TemplateID 期望 tpl-ci，got %q", resp.Data.TemplateID)
 	}
 	if resp.Data.AppID != "app-1" {
 		t.Fatalf("appId 期望 app-1（路径），got %s", resp.Data.AppID)
@@ -61,25 +61,31 @@ func TestPipelineCreateFromTemplate(t *testing.T) {
 
 func TestPipelineCreateValidation(t *testing.T) {
 	s := NewMemoryStore()
+	ctx := acmeCtxEngine()
+	// 预建 tpl-x（createPipeline 先查模板存在再 Validate，故缺 name 用例需模板存在以触达 Validate）
+	_, _ = s.CreateTemplate(ctx, PipelineTemplate{
+		ID: "tpl-x", Name: "X", Kind: KindCI,
+		Stages: []StageDef{{Name: "构建", Type: StageBuild}},
+	})
 	h := NewHandler(s, s, s, nil)
 	h.Authorize = allowAll
 
-	// 缺 name -> 400
+	// 缺 name -> 400（模板存在，进 CreatePipeline -> Validate 报 errNameRequired）
 	req := acmeReq(http.MethodPost, "/api/applications/app-1/pipelines",
-		`{"kind":"ci","stages":[{"name":"b","type":"build"}]}`)
+		`{"kind":"ci","templateId":"tpl-x"}`)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("缺 name 期望 400，got %d body %s", rec.Code, rec.Body.String())
 	}
 
-	// 空 stages -> 400
+	// 缺 templateId -> 400（绑定模型：TemplateID 必填，Validate 返 ErrTemplateRequired）
 	req = acmeReq(http.MethodPost, "/api/applications/app-1/pipelines",
-		`{"name":"p1","kind":"ci","stages":[]}`)
+		`{"name":"p1","kind":"ci"}`)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("空 stages 期望 400，got %d", rec.Code)
+		t.Fatalf("缺 templateId 期望 400，got %d", rec.Code)
 	}
 }
 
@@ -87,8 +93,7 @@ func TestPipelineCrossTenantIsolation(t *testing.T) {
 	s := NewMemoryStore()
 	acmeCtx := tenant.WithTenant(context.Background(), "t-acme")
 	_, _ = s.CreatePipeline(acmeCtx, Pipeline{
-		Name: "p-acme", AppID: "app-1", Kind: KindCI,
-		Stages: []StageDef{{Name: "b", Type: StageBuild}},
+		Name: "p-acme", AppID: "app-1", Kind: KindCI, TemplateID: "tpl-test",
 	})
 
 	h := NewHandler(s, s, s, nil)
@@ -124,7 +129,7 @@ func TestPipelineCRUDPermissionDenied(t *testing.T) {
 		t.Fatalf("GET 拒绝期望 403，got %d", rec.Code)
 	}
 	// POST -> 403
-	req = acmeReq(http.MethodPost, "/api/applications/app-1/pipelines", `{"name":"p","kind":"ci","stages":[{"name":"b","type":"build"}]}`)
+	req = acmeReq(http.MethodPost, "/api/applications/app-1/pipelines", `{"name":"p","kind":"ci","templateId":"tpl-x"}`)
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusForbidden {
@@ -136,15 +141,14 @@ func TestPipelineUpdateDelete(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := acmeCtxEngine()
 	p, _ := s.CreatePipeline(ctx, Pipeline{
-		Name: "p1", AppID: "app-1", Kind: KindCI,
-		Stages: []StageDef{{Name: "b", Type: StageBuild}},
+		Name: "p1", AppID: "app-1", Kind: KindCI, TemplateID: "tpl-ci",
 	})
 
 	h := NewHandler(s, s, s, nil)
 	h.Authorize = allowAll
 
-	// PUT 更新（加 deploy stage）
-	body := `{"name":"p1-renamed","kind":"ci","stages":[{"name":"b","type":"build"},{"name":"d","type":"deploy","params":{"envId":"e1"}}]}`
+	// PUT 更新（改名 + 换模板 + 加 ParamOverrides）
+	body := `{"name":"p1-renamed","kind":"ci","templateId":"tpl-cd","paramOverrides":{"0.envId":"env-x"}}`
 	req := acmeReq(http.MethodPut, "/api/applications/app-1/pipelines/"+p.ID, body)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -158,8 +162,11 @@ func TestPipelineUpdateDelete(t *testing.T) {
 	if updated.Data.Name != "p1-renamed" {
 		t.Fatalf("更新后 name 期望 p1-renamed，got %s", updated.Data.Name)
 	}
-	if len(updated.Data.Stages) != 2 {
-		t.Fatalf("更新后 stages 期望 2，got %d", len(updated.Data.Stages))
+	if updated.Data.TemplateID != "tpl-cd" {
+		t.Fatalf("更新后 TemplateID 期望 tpl-cd，got %q", updated.Data.TemplateID)
+	}
+	if updated.Data.ParamOverrides["0.envId"] != "env-x" {
+		t.Fatalf("更新后 ParamOverrides.0.envId 期望 env-x，got %v", updated.Data.ParamOverrides["0.envId"])
 	}
 	if updated.Data.TenantID != "t-acme" {
 		t.Fatalf("更新应保留 TenantID，got %s", updated.Data.TenantID)
@@ -251,12 +258,16 @@ func waitRun(t *testing.T, s *memoryStore, ctx context.Context, runID, want stri
 func TestRunManualTriggerAndAdvance(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := acmeCtxEngine()
-	p, _ := s.CreatePipeline(ctx, Pipeline{
-		Name: "p-ci", AppID: "app-ci", Kind: KindCI,
+	// 预建模板（triggerRun 从模板解析 stages -> StageRuns.Input）
+	_, _ = s.CreateTemplate(ctx, PipelineTemplate{
+		ID: "tpl-ci-test", Name: "测试CI", Kind: KindCI,
 		Stages: []StageDef{
 			{Name: "构建", Type: StageBuild},
 			{Name: "部署", Type: StageDeploy, Params: map[string]any{"envId": "env-dev", "imageSource": ImagePriorBuild}},
 		},
+	})
+	p, _ := s.CreatePipeline(ctx, Pipeline{
+		Name: "p-ci", AppID: "app-ci", Kind: KindCI, TemplateID: "tpl-ci-test",
 	})
 	eng := &Engine{
 		Pipelines: s, Runs: s,
@@ -294,14 +305,18 @@ func TestRunManualTriggerAndAdvance(t *testing.T) {
 func TestRunApproveFlow(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := acmeCtxEngine()
-	p, _ := s.CreatePipeline(ctx, Pipeline{
-		Name: "p-cd", AppID: "app-cd", Kind: KindCD,
+	// 预建模板：审批 -> 部署 dev（triggerRun 从模板解析 stages -> StageRuns.Input）
+	_, _ = s.CreateTemplate(ctx, PipelineTemplate{
+		ID: "tpl-cd-test", Name: "测试CD", Kind: KindCD,
 		Stages: []StageDef{
 			{Name: "审批", Type: StageApprove},
 			{Name: "部署", Type: StageDeploy, Params: map[string]any{
 				"envId": "env-dev", "imageSource": ImageSelected, "imageId": "img-1",
 			}},
 		},
+	})
+	p, _ := s.CreatePipeline(ctx, Pipeline{
+		Name: "p-cd", AppID: "app-cd", Kind: KindCD, TemplateID: "tpl-cd-test",
 	})
 	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: &fakeReleaser{}}
 	h := NewHandler(s, s, s, eng)
@@ -342,13 +357,17 @@ func TestRunApproveFlow(t *testing.T) {
 func TestRunProdWriteGuard(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := acmeCtxEngine()
-	p, _ := s.CreatePipeline(ctx, Pipeline{
-		Name: "p-prod", AppID: "app-prod", Kind: KindCD,
+	// 预建模板：部署 prod（triggerRun allowProdFlow 拦截）
+	_, _ = s.CreateTemplate(ctx, PipelineTemplate{
+		ID: "tpl-prod-test", Name: "测试Prod部署", Kind: KindCD,
 		Stages: []StageDef{
 			{Name: "部署", Type: StageDeploy, Params: map[string]any{
 				"envId": "env-prod", "imageSource": ImageSelected, "imageId": "img-1",
 			}},
 		},
+	})
+	p, _ := s.CreatePipeline(ctx, Pipeline{
+		Name: "p-prod", AppID: "app-prod", Kind: KindCD, TemplateID: "tpl-prod-test",
 	})
 	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: &fakeReleaser{}}
 	h := NewHandler(s, s, s, eng)
@@ -375,14 +394,18 @@ func TestRunProdWriteGuard(t *testing.T) {
 func TestRunPromoteProdGuard(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := acmeCtxEngine()
-	p, _ := s.CreatePipeline(ctx, Pipeline{
-		Name: "p-promote", AppID: "app-promote", Kind: KindCD,
+	// 预建模板：部署测试 -> promote（triggerRun allowProdFlow 扫描 promote 目标=prod 拦截）
+	_, _ = s.CreateTemplate(ctx, PipelineTemplate{
+		ID: "tpl-promote-test", Name: "测试Promote", Kind: KindCD,
 		Stages: []StageDef{
 			{Name: "部署测试", Type: StageDeploy, Params: map[string]any{
 				"envId": "env-test", "imageSource": ImageSelected, "imageId": "img-1",
 			}},
 			{Name: "提升", Type: StagePromote},
 		},
+	})
+	p, _ := s.CreatePipeline(ctx, Pipeline{
+		Name: "p-promote", AppID: "app-promote", Kind: KindCD, TemplateID: "tpl-promote-test",
 	})
 	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: &fakeReleaser{}}
 	h := NewHandler(s, s, s, eng)
@@ -414,13 +437,17 @@ func TestRunPromoteProdGuard(t *testing.T) {
 func TestRunDeployMissingEnvId(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := acmeCtxEngine()
-	p, _ := s.CreatePipeline(ctx, Pipeline{
-		Name: "p-noenv", AppID: "app-noenv", Kind: KindCD,
+	// 预建模板：deploy stage 缺 envId（triggerRun validateDeployEnvs fail-fast 400）
+	_, _ = s.CreateTemplate(ctx, PipelineTemplate{
+		ID: "tpl-noenv-test", Name: "测试无envId", Kind: KindCD,
 		Stages: []StageDef{
 			{Name: "部署", Type: StageDeploy, Params: map[string]any{ // 缺 envId
 				"imageSource": ImageSelected, "imageId": "img-1",
 			}},
 		},
+	})
+	p, _ := s.CreatePipeline(ctx, Pipeline{
+		Name: "p-noenv", AppID: "app-noenv", Kind: KindCD, TemplateID: "tpl-noenv-test",
 	})
 	h := NewHandler(s, s, s, &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: &fakeReleaser{}})
 	h.Authorize = allowAll
@@ -436,9 +463,13 @@ func TestRunDeployMissingEnvId(t *testing.T) {
 func TestRunSingleInstance(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := acmeCtxEngine()
-	p, _ := s.CreatePipeline(ctx, Pipeline{
-		Name: "p-si", AppID: "app-si", Kind: KindCI,
+	// 预建模板：单 build stage（triggerRun 需模板解析 stages 才能到 HasActiveRun 检查）
+	_, _ = s.CreateTemplate(ctx, PipelineTemplate{
+		ID: "tpl-si-test", Name: "测试单实例", Kind: KindCI,
 		Stages: []StageDef{{Name: "构建", Type: StageBuild}},
+	})
+	p, _ := s.CreatePipeline(ctx, Pipeline{
+		Name: "p-si", AppID: "app-si", Kind: KindCI, TemplateID: "tpl-si-test",
 	})
 	// 已有 running run
 	_, _ = s.CreateRun(ctx, PipelineRun{
@@ -461,14 +492,18 @@ func TestRunSingleInstance(t *testing.T) {
 func TestRunAbort(t *testing.T) {
 	s := NewMemoryStore()
 	ctx := acmeCtxEngine()
-	p, _ := s.CreatePipeline(ctx, Pipeline{
-		Name: "p-abort", AppID: "app-abort", Kind: KindCD,
+	// 预建模板：审批 -> 部署 dev（triggerRun 异步推进到 approve 暂停）
+	_, _ = s.CreateTemplate(ctx, PipelineTemplate{
+		ID: "tpl-abort-test", Name: "测试Abort", Kind: KindCD,
 		Stages: []StageDef{
 			{Name: "审批", Type: StageApprove},
 			{Name: "部署", Type: StageDeploy, Params: map[string]any{
 				"envId": "env-dev", "imageSource": ImageSelected, "imageId": "img-1",
 			}},
 		},
+	})
+	p, _ := s.CreatePipeline(ctx, Pipeline{
+		Name: "p-abort", AppID: "app-abort", Kind: KindCD, TemplateID: "tpl-abort-test",
 	})
 	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: &fakeReleaser{}}
 	h := NewHandler(s, s, s, eng)

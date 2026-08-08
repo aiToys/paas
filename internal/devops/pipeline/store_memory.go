@@ -342,7 +342,7 @@ func (s *memoryStore) CreateTemplate(ctx context.Context, t PipelineTemplate) (P
 
 func clonePipeline(p Pipeline) Pipeline {
 	cp := p
-	cp.Stages = cloneStages(p.Stages)
+	cp.ParamOverrides = cloneStringAnyMap(p.ParamOverrides)
 	cp.Trigger.Events = cloneStrings(p.Trigger.Events)
 	return cp
 }

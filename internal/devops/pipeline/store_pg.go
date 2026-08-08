@@ -3,7 +3,7 @@
 // 与 memoryStore 同构：同一 pgStore 实例实现三接口；所有方法强制按 ctx 租户过滤；
 // Create 以 ctx 租户为准忽略请求体；跨租户访问统一 NotFound 不泄漏存在性。
 //
-// JSONB 字段（Pipeline.Stages/Trigger、PipelineTemplate.Stages、StageRun.Input/Output）用
+// JSONB 字段（Pipeline.ParamOverrides/Trigger、PipelineTemplate.Stages、StageRun.Input/Output）用
 // []byte marshal/unmarshal；多值字段不另起子表（stage_runs 除外，因其随 UpdateRun 全量重写）。
 //
 // 单实例串行靠 `ux_pipeline_runs_active` 部分唯一索引（同 pipeline 仅允许一个 running/paused），
@@ -43,7 +43,7 @@ func NewPGStore(db *pgxpool.Pool) *pgStore { return &pgStore{db: db} }
 // 列常量与 struct 字段顺序严格对齐（scan 列序必须一致）。
 // runCols 含 repo_id（build stage 解析 app 绑定的 internal CodeRepo 用，与内存版字段对齐）。
 const (
-	pipeCols = `id, tenant_id, app_id, name, kind, template_id, stages, trigger, disabled, created_at`
+	pipeCols = `id, tenant_id, app_id, name, kind, template_id, param_overrides, trigger, disabled, created_at`
 	runCols  = `id, tenant_id, app_id, pipeline_id, branch, commit, repo_id, trigger, trigger_ref, status, current_stage, version, created_at, finished_at`
 	tplCols  = `id, tenant_id, name, kind, description, stages, builtin`
 )
@@ -84,13 +84,13 @@ func (s *pgStore) ListPipelines(ctx context.Context, appID string) ([]Pipeline, 
 	out := make([]Pipeline, 0)
 	for rows.Next() {
 		var p Pipeline
-		var stagesB, trigB []byte
+		var overridesB, trigB []byte
 		if err = rows.Scan(&p.ID, &p.TenantID, &p.AppID, &p.Name, &p.Kind, &p.TemplateID,
-			&stagesB, &trigB, &p.Disabled, &p.CreatedAt); err != nil {
+			&overridesB, &trigB, &p.Disabled, &p.CreatedAt); err != nil {
 			return nil, err
 		}
-		if len(stagesB) > 0 {
-			_ = json.Unmarshal(stagesB, &p.Stages)
+		if len(overridesB) > 0 {
+			_ = json.Unmarshal(overridesB, &p.ParamOverrides)
 		}
 		if len(trigB) > 0 {
 			_ = json.Unmarshal(trigB, &p.Trigger)
@@ -107,19 +107,19 @@ func (s *pgStore) GetPipeline(ctx context.Context, id string) (Pipeline, error) 
 		return Pipeline{}, err
 	}
 	var p Pipeline
-	var stagesB, trigB []byte
+	var overridesB, trigB []byte
 	err = s.db.QueryRow(ctx,
 		`SELECT `+pipeCols+` FROM pipelines WHERE id=$1 AND tenant_id=$2`, id, tid).
 		Scan(&p.ID, &p.TenantID, &p.AppID, &p.Name, &p.Kind, &p.TemplateID,
-			&stagesB, &trigB, &p.Disabled, &p.CreatedAt)
+			&overridesB, &trigB, &p.Disabled, &p.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Pipeline{}, ErrPipelineNotFound
 		}
 		return Pipeline{}, err
 	}
-	if len(stagesB) > 0 {
-		_ = json.Unmarshal(stagesB, &p.Stages)
+	if len(overridesB) > 0 {
+		_ = json.Unmarshal(overridesB, &p.ParamOverrides)
 	}
 	if len(trigB) > 0 {
 		_ = json.Unmarshal(trigB, &p.Trigger)
@@ -143,9 +143,9 @@ func (s *pgStore) CreatePipeline(ctx context.Context, in Pipeline) (Pipeline, er
 	if in.CreatedAt.IsZero() {
 		in.CreatedAt = time.Now()
 	}
-	stagesB, err := json.Marshal(in.Stages)
+	overridesB, err := json.Marshal(in.ParamOverrides)
 	if err != nil {
-		return Pipeline{}, fmt.Errorf("序列化 stages 失败: %w", err)
+		return Pipeline{}, fmt.Errorf("序列化 param_overrides 失败: %w", err)
 	}
 	trigB, err := json.Marshal(in.Trigger)
 	if err != nil {
@@ -153,7 +153,7 @@ func (s *pgStore) CreatePipeline(ctx context.Context, in Pipeline) (Pipeline, er
 	}
 	_, err = s.db.Exec(ctx,
 		`INSERT INTO pipelines (`+pipeCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-		in.ID, in.TenantID, in.AppID, in.Name, in.Kind, in.TemplateID, stagesB, trigB, in.Disabled, in.CreatedAt)
+		in.ID, in.TenantID, in.AppID, in.Name, in.Kind, in.TemplateID, overridesB, trigB, in.Disabled, in.CreatedAt)
 	if err != nil {
 		if classifyPipelineErr(err) == ErrPipelineExists {
 			return Pipeline{}, ErrPipelineExists
@@ -173,18 +173,18 @@ func (s *pgStore) UpdatePipeline(ctx context.Context, in Pipeline) (Pipeline, er
 		return Pipeline{}, err
 	}
 	in.TenantID = tid
-	stagesB, err := json.Marshal(in.Stages)
+	overridesB, err := json.Marshal(in.ParamOverrides)
 	if err != nil {
-		return Pipeline{}, fmt.Errorf("序列化 stages 失败: %w", err)
+		return Pipeline{}, fmt.Errorf("序列化 param_overrides 失败: %w", err)
 	}
 	trigB, err := json.Marshal(in.Trigger)
 	if err != nil {
 		return Pipeline{}, fmt.Errorf("序列化 trigger 失败: %w", err)
 	}
 	tag, err := s.db.Exec(ctx,
-		`UPDATE pipelines SET app_id=$1, name=$2, kind=$3, template_id=$4, stages=$5, trigger=$6, disabled=$7
+		`UPDATE pipelines SET app_id=$1, name=$2, kind=$3, template_id=$4, param_overrides=$5, trigger=$6, disabled=$7
 		 WHERE id=$8 AND tenant_id=$9`,
-		in.AppID, in.Name, in.Kind, in.TemplateID, stagesB, trigB, in.Disabled, in.ID, tid)
+		in.AppID, in.Name, in.Kind, in.TemplateID, overridesB, trigB, in.Disabled, in.ID, tid)
 	if err != nil {
 		if classifyPipelineErr(err) == ErrPipelineExists {
 			return Pipeline{}, ErrPipelineExists

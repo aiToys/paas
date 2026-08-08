@@ -15,7 +15,7 @@ import (
 // ci 模板（开发流水线）：git push 触发 -> 构建 -> 部署 dev -> 冒烟测试 -> 写基线（合并主干）。
 // cd 模板（发布流水线）：手动触发 -> 审批 -> 部署 prod -> 写版本（不自动合并主干）。
 //
-// deploy.envId 留空，用户从模板创建 Pipeline 时填本租户环境 ID。
+// deploy.envId 用占位符 {{app.env.test}}/{{app.env.prod}}，触发时自动解析 app 租户环境（零操作）。
 // cd 的 baseline.mainBranch="" 表示 prod 发布只打版本不自动 merge（与 ci 的"合并主干"区分）。
 func BuiltinTemplates() []PipelineTemplate {
 	return []PipelineTemplate{
@@ -28,7 +28,7 @@ func BuiltinTemplates() []PipelineTemplate {
 			Stages: []StageDef{
 				{Name: "构建", Type: StageBuild},
 				{Name: "部署到开发环境", Type: StageDeploy, Params: map[string]any{
-					"envId":       "", // 用户创建时填本租户 dev 环境 ID
+					"envId":       "{{app.env.test}}", // 占位符：触发时解析 app 租户的 test 环境 ID
 					"imageSource": ImagePriorBuild,
 					"strategy":    "rolling",
 				}},
@@ -54,7 +54,7 @@ func BuiltinTemplates() []PipelineTemplate {
 					"message": "确认发布到生产环境",
 				}},
 				{Name: "部署到生产", Type: StageDeploy, Params: map[string]any{
-					"envId":       "", // 用户创建时填本租户 prod 环境 ID
+					"envId":       "{{app.env.prod}}", // 占位符：触发时解析 app 租户的 prod 环境 ID
 					"imageSource": ImageLatestReady,
 					"strategy":    "rolling",
 				}},

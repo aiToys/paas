@@ -15,10 +15,10 @@ func TestPipelineCRUDMultiTenant(t *testing.T) {
 
 	// Create
 	p, err := s.CreatePipeline(ctxA, Pipeline{
-		Name:   "p1",
-		AppID:  "a1",
-		Kind:   KindCI,
-		Stages: []StageDef{{Name: "build", Type: StageBuild}},
+		Name:       "p1",
+		AppID:      "a1",
+		Kind:       KindCI,
+		TemplateID: "tpl-test",
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -26,8 +26,8 @@ func TestPipelineCRUDMultiTenant(t *testing.T) {
 	if p.ID == "" {
 		t.Fatal("no id assigned")
 	}
-	if len(p.Stages) != 1 {
-		t.Fatalf("stages len=%d", len(p.Stages))
+	if p.TemplateID != "tpl-test" {
+		t.Fatalf("TemplateID 期望 tpl-test，got %q", p.TemplateID)
 	}
 
 	// Get
@@ -56,10 +56,10 @@ func TestPipelineCRUDMultiTenant(t *testing.T) {
 
 	// 同 (tenant,app,name) 唯一
 	if _, err := s.CreatePipeline(ctxA, Pipeline{
-		Name:   "p1",
-		AppID:  "a1",
-		Kind:   KindCI,
-		Stages: []StageDef{{Name: "b", Type: StageBuild}},
+		Name:       "p1",
+		AppID:      "a1",
+		Kind:       KindCI,
+		TemplateID: "tpl-test",
 	}); !errors.Is(err, ErrPipelineExists) {
 		t.Fatalf("dup want Exists got %v", err)
 	}
@@ -154,8 +154,7 @@ func TestPipelineCRUDMultiTenant(t *testing.T) {
 
 	// 跨租户 Delete 拒绝（重建一个）
 	p2, _ := s.CreatePipeline(ctxA, Pipeline{
-		Name: "p2", AppID: "a1", Kind: KindCI,
-		Stages: []StageDef{{Name: "build", Type: StageBuild}},
+		Name: "p2", AppID: "a1", Kind: KindCI, TemplateID: "tpl-test",
 	})
 	if err := s.DeletePipeline(ctxB, p2.ID); !errors.Is(err, ErrPipelineNotFound) {
 		t.Fatalf("cross-tenant delete want NotFound got %v", err)
@@ -167,8 +166,7 @@ func TestPipelineRunListFilter(t *testing.T) {
 	ctxA := tenant.WithTenant(context.Background(), "t-acme")
 
 	p, _ := s.CreatePipeline(ctxA, Pipeline{
-		Name: "p", AppID: "a", Kind: KindCI,
-		Stages: []StageDef{{Name: "b", Type: StageBuild}},
+		Name: "p", AppID: "a", Kind: KindCI, TemplateID: "tpl-test",
 	})
 	r1, _ := s.CreateRun(ctxA, PipelineRun{AppID: "a", PipelineID: p.ID, Trigger: "manual", Status: RunSucceeded})
 	r2, _ := s.CreateRun(ctxA, PipelineRun{AppID: "a", PipelineID: p.ID, Trigger: "manual", Status: RunFailed})
@@ -283,21 +281,18 @@ func TestPipelineDeepCopy(t *testing.T) {
 	s := NewMemoryStore()
 	ctxA := tenant.WithTenant(context.Background(), "t-acme")
 
+	// Pipeline 现含 ParamOverrides（绑定模型下替代 Stages 的可变字段，深拷贝防 race）
 	p, _ := s.CreatePipeline(ctxA, Pipeline{
-		Name: "p", AppID: "a", Kind: KindCI,
-		Stages: []StageDef{{Name: "build", Type: StageBuild, Params: map[string]any{"k": "v"}}},
+		Name: "p", AppID: "a", Kind: KindCI, TemplateID: "tpl-test",
+		ParamOverrides: map[string]any{"0.k": "v"},
 	})
 
 	got, _ := s.GetPipeline(ctxA, p.ID)
-	got.Stages[0].Params["k"] = "mutated"
-	got.Stages[0].Name = "mutated"
+	got.ParamOverrides["0.k"] = "mutated"
 
 	again, _ := s.GetPipeline(ctxA, p.ID)
-	if again.Stages[0].Name != "build" {
-		t.Fatalf("deep copy failed: stage name=%q", again.Stages[0].Name)
-	}
-	if again.Stages[0].Params["k"] != "v" {
-		t.Fatalf("deep copy failed: param k=%v", again.Stages[0].Params["k"])
+	if again.ParamOverrides["0.k"] != "v" {
+		t.Fatalf("ParamOverrides 深拷贝失败: got %v", again.ParamOverrides["0.k"])
 	}
 
 	// run stageRuns 深拷贝

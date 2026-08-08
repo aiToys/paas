@@ -102,15 +102,13 @@ func (g *fakeGiteaMerger) Merge(ctx context.Context, owner, repo, head, base, mo
 func acmeCtxEngine() context.Context { return tenant.WithTenant(context.Background(), "t-acme") }
 
 // seedBuildDeployPipeline 建 pipeline [build, deploy(priorBuild)] + run，返 runID。
+// 绑定模型：Pipeline 不带 Stages（运行时从模板解析）；engine 用 run.StageRuns[i].Input 作 stage.Params，
+// 故 deploy StageRun 显式存 Input=deployParams（build stage 无 params，Input 空）。
 func seedBuildDeployPipeline(t *testing.T, s *memoryStore, deployParams map[string]any) (string, PipelineRun) {
 	t.Helper()
 	ctx := acmeCtxEngine()
 	p, err := s.CreatePipeline(ctx, Pipeline{
-		Name: "p-eng", AppID: "app-eng", Kind: KindCI,
-		Stages: []StageDef{
-			{Name: "构建", Type: StageBuild},
-			{Name: "部署", Type: StageDeploy, Params: deployParams},
-		},
+		Name: "p-eng", AppID: "app-eng", Kind: KindCI, TemplateID: "tpl-test",
 	})
 	if err != nil {
 		t.Fatalf("CreatePipeline 失败: %v", err)
@@ -120,7 +118,7 @@ func seedBuildDeployPipeline(t *testing.T, s *memoryStore, deployParams map[stri
 		Trigger: "manual", Status: RunRunning, CurrentStage: 0,
 		StageRuns: []StageRun{
 			{Index: 0, Type: StageBuild, Name: "构建", Status: StagePending},
-			{Index: 1, Type: StageDeploy, Name: "部署", Status: StagePending},
+			{Index: 1, Type: StageDeploy, Name: "部署", Status: StagePending, Input: deployParams},
 		},
 	})
 	if err != nil {
@@ -311,19 +309,22 @@ func TestStrOrAndGetStringMap(t *testing.T) {
 	}
 }
 
-// seedPipeline 建 pipeline + run（stages 由调用方传），返 run。
+// seedPipeline 建 pipeline + run（stages 由调用方传，用于构造 StageRuns），返 run。
+// 绑定模型：Pipeline 不带 Stages（用占位 TemplateID="tpl-test"）；StageRuns 显式存 Input=stages[i].Params，
+// engine.Advance 用 run.StageRuns[i].Input 作 stage.Params（不再读 Pipeline.Stages）。
+// 测试直接调 CreateRun 不走 triggerRun，故模板无需真实存在。
 func seedPipeline(t *testing.T, s *memoryStore, name, appID, kind string, stages []StageDef) PipelineRun {
 	t.Helper()
 	ctx := acmeCtxEngine()
 	p, err := s.CreatePipeline(ctx, Pipeline{
-		Name: name, AppID: appID, Kind: kind, Stages: stages,
+		Name: name, AppID: appID, Kind: kind, TemplateID: "tpl-test",
 	})
 	if err != nil {
 		t.Fatalf("CreatePipeline 失败: %v", err)
 	}
 	stageRuns := make([]StageRun, len(stages))
 	for i, st := range stages {
-		stageRuns[i] = StageRun{Index: i, Type: st.Type, Name: st.Name, Status: StagePending}
+		stageRuns[i] = StageRun{Index: i, Type: st.Type, Name: st.Name, Status: StagePending, Input: st.Params}
 	}
 	r, err := s.CreateRun(ctx, PipelineRun{
 		PipelineID: p.ID, AppID: p.AppID, Branch: "main", Commit: "abc123", RepoID: "repo-1",

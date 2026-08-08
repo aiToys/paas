@@ -67,6 +67,8 @@ type Handler struct {
 	promoteTargetType PromoteTargetTypeResolver
 	// repos 解析 app 绑定的 internal CodeRepo（nil 时 repoID 空）。
 	repos RepoResolver
+	// paramResolver 解析模板占位符 {{app.env.*}}/{{app.repo}}（nil 时占位符原样，测试场景）。
+	paramResolver ParamResolver
 	// audit 审计记录器（nil 跳过）。
 	audit   AuditRecorder
 	actorFn func(r *http.Request) string
@@ -93,6 +95,11 @@ func WithPromoteTargetType(f PromoteTargetTypeResolver) HandlerOpt {
 // WithRepoResolver 注入 CodeRepo 解析器。
 func WithRepoResolver(r RepoResolver) HandlerOpt {
 	return func(h *Handler) { h.repos = r }
+}
+
+// WithParamResolver 注入模板占位符解析器（{{app.env.*}}/{{app.repo}}）。
+func WithParamResolver(p ParamResolver) HandlerOpt {
+	return func(h *Handler) { h.paramResolver = p }
 }
 
 // WithAudit 注入审计记录器。
@@ -215,17 +222,17 @@ func (h *Handler) serveAppPipelines(w http.ResponseWriter, r *http.Request) {
 }
 
 // createPipeline POST /api/applications/{id}/pipelines。
-// 支持从模板创建（templateId 非空时 GetTemplate 复制 stages，用户可后续改）。
+// 支持从模板创建（templateId 非空时校验模板存在 + 继承 Kind；stages 运行时从模板解析，不复制）。
 func (h *Handler) createPipeline(w http.ResponseWriter, r *http.Request, appID string) {
 	if !h.allow(w, r, PermPipelineWrite) {
 		return
 	}
 	var body struct {
-		Name       string          `json:"name"`
-		Kind       string          `json:"kind"`
-		TemplateID string          `json:"templateId"`
-		Stages     []StageDef      `json:"stages"`
-		Trigger    PipelineTrigger `json:"trigger"`
+		Name           string          `json:"name"`
+		Kind           string          `json:"kind"`
+		TemplateID     string          `json:"templateId"`
+		ParamOverrides map[string]any  `json:"paramOverrides"`
+		Trigger        PipelineTrigger `json:"trigger"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httputil.WriteError(w, http.StatusBadRequest, "invalid body")
@@ -233,19 +240,16 @@ func (h *Handler) createPipeline(w http.ResponseWriter, r *http.Request, appID s
 	}
 	p := Pipeline{
 		AppID: appID, Name: body.Name, Kind: body.Kind, TemplateID: body.TemplateID,
-		Stages: body.Stages, Trigger: body.Trigger,
+		ParamOverrides: body.ParamOverrides, Trigger: body.Trigger,
 	}
-	// 从模板创建：templateId 非空时 GetTemplate 复制 stages（用户可后续改）
+	// 从模板创建：templateId 非空时校验存在 + 继承 Kind（stages 运行时解析，不复制）
 	if body.TemplateID != "" {
 		tpl, err := h.templates.GetTemplate(r.Context(), body.TemplateID)
 		if err != nil {
-			httputil.WriteServiceError(w, toHTTPStatus(err), err)
+			httputil.WriteError(w, http.StatusNotFound, "pipeline template not found")
 			return
 		}
 		p.Kind = tpl.Kind
-		if len(body.Stages) == 0 {
-			p.Stages = cloneStages(tpl.Stages)
-		}
 	}
 	created, err := h.pipes.CreatePipeline(r.Context(), p)
 	if err != nil {
@@ -413,14 +417,26 @@ func (h *Handler) triggerRun(w http.ResponseWriter, r *http.Request, appID, pid 
 		httputil.WriteServiceError(w, toHTTPStatus(err), err)
 		return
 	}
-	// deploy stage envId 必填校验（fail-fast，避免注定失败的 run 占住单实例串行槽位）
-	if msg := validateDeployEnvs(p.Stages); msg != "" {
+	// 从模板解析 stages（占位符 {{app.env.*}}/{{app.repo}} + ParamOverrides 实例化）。
+	tpl, terr := h.templates.GetTemplate(r.Context(), p.TemplateID)
+	if terr != nil {
+		httputil.WriteError(w, http.StatusNotFound, "pipeline template not found")
+		return
+	}
+	resolved, rerr := ResolveStages(r.Context(), tpl.Stages, p.ParamOverrides, h.paramResolver, appID)
+	if rerr != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "参数解析失败: "+rerr.Error())
+		return
+	}
+	// deploy stage envId 必填校验（fail-fast，避免注定失败的 run 占住单实例串行槽位）。
+	// 占位符解析后 envId 仍空（app 无对应环境）则拒。
+	if msg := validateDeployEnvs(resolved); msg != "" {
 		httputil.WriteError(w, http.StatusBadRequest, msg)
 		return
 	}
 	// prod:write 校验：deploy stage 目标环境为 prod，或 promote stage 目标环境（前序 deploy envId
 	// 的下一阶）为 prod 时，要求调用者持 prod:write（防 developer 经 [deploy test, promote] 绕过）
-	if !h.allowProdFlow(w, r, p.Stages) {
+	if !h.allowProdFlow(w, r, resolved) {
 		return
 	}
 	// 单实例串行：已有 running/paused run 拒绝
@@ -440,10 +456,10 @@ func (h *Handler) triggerRun(w http.ResponseWriter, r *http.Request, appID, pid 
 			repoID = rid
 		}
 	}
-	// 初始化 stage_runs
-	stageRuns := make([]StageRun, len(p.Stages))
-	for i, s := range p.Stages {
-		stageRuns[i] = StageRun{Index: i, Type: s.Type, Name: s.Name, Status: StagePending}
+	// 初始化 stage_runs（Input 存 resolved params，engine 用 sr.Input 取 stage.Params）
+	stageRuns := make([]StageRun, len(resolved))
+	for i, s := range resolved {
+		stageRuns[i] = StageRun{Index: i, Type: s.Type, Name: s.Name, Status: StagePending, Input: s.Params}
 	}
 	run := PipelineRun{
 		PipelineID: pid, AppID: appID, Branch: body.Branch, Commit: body.Commit,

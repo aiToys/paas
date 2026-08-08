@@ -32,8 +32,9 @@ export interface Pipeline {
   name: string
   kind: 'ci' | 'cd'
   templateId?: string
-  stages: StageDef[]
+  paramOverrides?: Record<string, unknown>
   trigger: PipelineTrigger
+  disabled?: boolean
   createdAt: string
 }
 
@@ -44,6 +45,14 @@ export interface PipelineTemplate {
   builtin: boolean
   description?: string
   stages: StageDef[]
+  params?: ParamDef[]
+}
+
+export interface ParamDef {
+  name: string
+  type?: string
+  default?: unknown
+  description?: string
 }
 
 export interface StageRun {
@@ -82,7 +91,7 @@ const getPipeline = (appId: string, pid: string) =>
   fetchJSON<Pipeline>(`/api/applications/${appId}/pipelines/${pid}`)
 
 async function createPipeline(appId: string, body: {
-  name: string; kind: 'ci' | 'cd'; templateId?: string; stages?: StageDef[]; trigger?: PipelineTrigger
+  name: string; kind: 'ci' | 'cd'; templateId?: string; paramOverrides?: Record<string, unknown>; trigger?: PipelineTrigger
 }): Promise<Pipeline> {
   const resp = await fetchAuth(`/api/applications/${appId}/pipelines`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),

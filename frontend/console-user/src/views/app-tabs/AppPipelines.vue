@@ -5,7 +5,7 @@ import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchAuth } from '@/api'
 import {
-  type Pipeline, type PipelineTemplate, type PipelineRun,
+  type Pipeline, type PipelineTemplate, type PipelineRun, type StageDef,
   listPipelines, createPipeline, deletePipeline, listTemplates, triggerRun,
 } from '@/api/pipeline'
 import { useEnvStore } from '@/stores/env'
@@ -77,22 +77,6 @@ async function doCreate() {
   }
 }
 
-// 微服务快捷：一次建 ci + cd 两条
-async function createMicroservice() {
-  const { value: name } = await ElMessageBox.prompt('微服务名（用作 ci/cd 流水线名前缀）', '新建微服务流水线', {
-    confirmButtonText: '创建 ci+cd', cancelButtonText: '取消', inputPlaceholder: '如 product',
-  }).catch(() => ({ value: '' }))
-  if (!name) return
-  try {
-    const ci = await createPipeline(props.appId, { name: `${name}-ci`, kind: 'ci', templateId: 'tpl-ci' })
-    const cd = await createPipeline(props.appId, { name: `${name}-cd`, kind: 'cd', templateId: 'tpl-cd' })
-    pipelines.value.push(ci, cd)
-    ElMessage.success(`已创建 ${name}-ci + ${name}-cd`)
-  } catch (e: any) {
-    ElMessage.error(e.message || '创建失败')
-  }
-}
-
 async function remove(p: Pipeline) {
   try {
     await ElMessageBox.confirm(`删除流水线「${p.name}」？此操作不可逆。`, '删除确认', { type: 'warning' })
@@ -143,10 +127,16 @@ async function doTriggerRun(p: Pipeline, branch: string, version?: string) {
   }
 }
 
-// 流水线是否含 prod deploy（卡片标红警示）
+// 流水线是否含 prod deploy（卡片标红警示）。binding 无 stages，从模板解析。
 function hasProdDeploy(p: Pipeline): boolean {
-  return p.stages.some((s) => s.type === 'deploy' &&
+  return templateStages(p.templateId).some((s) => s.type === 'deploy' &&
     envStore.envs.find((e) => e.id === s.params?.envId)?.type === 'prod')
+}
+
+// 从模板缓存取 stages（binding 无 stages 字段，运行时从模板解析；列表 stage chips 用）
+function templateStages(tid?: string): StageDef[] {
+  if (!tid) return []
+  return templates.value.find((t) => t.id === tid)?.stages ?? []
 }
 
 // 最近一次运行状态（卡片角标）
@@ -175,8 +165,7 @@ const statusTag = (s?: string) => {
     <div class="cross-link"><a @click="$router.push('/devops')">查看跨应用流水线总览 →</a></div>
 
     <div class="actions">
-      <el-button type="primary" @click="openCreate">＋ 新建流水线</el-button>
-      <el-button @click="createMicroservice">微服务（ci+cd）</el-button>
+      <el-button type="primary" @click="openCreate">＋ 添加流水线</el-button>
       <el-button text @click="load">刷新</el-button>
     </div>
 
@@ -194,7 +183,7 @@ const statusTag = (s?: string) => {
               </el-tag>
             </div>
             <div class="pipe-stages">
-              <span v-for="(s, i) in p.stages" :key="i" class="stage-chip">{{ s.name }}</span>
+              <span v-for="(s, i) in templateStages(p.templateId)" :key="i" class="stage-chip">{{ s.name }}</span>
             </div>
             <div class="pipe-actions">
               <el-button size="small" @click="designerPid = p.id">编辑</el-button>
