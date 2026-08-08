@@ -47,6 +47,9 @@ type Workload struct {
 	// Port 是 Service 对外暴露端口（service 类型且 >0 时建 K8s Service，让其他 Pod 能 DNS 解析）。
 	Port          int       `json:"port,omitempty"`
 	ContainerPort int       `json:"containerPort,omitempty"` // Pod 监听端口；0 时取 Port
+	// Domain 是对外暴露域名（service 类型且非空时，reconciler 自动建 Ingress，host=Domain -> Service:Port）。
+	// 让平台用户经「工作负载 spec.domain」声明应用域名，无需手写 Ingress yaml。
+	Domain        string    `json:"domain,omitempty"`
 	CreatedAt     time.Time `json:"createdAt"`
 }
 

@@ -51,7 +51,7 @@ func (a *K8sApplier) Apply(ctx context.Context, w workload.Workload) error {
 		return fmt.Errorf("ensure namespace: %w", err)
 	}
 	ns := tenant.Namespace(w.TenantID)
-	log.Printf("[applier] Apply w.ID=%s ns=%s name=%s port=%d cport=%d tenant=%s img=%s", w.ID, ns, w.Name, w.Port, w.ContainerPort, w.TenantID, w.Image)
+	log.Printf("[applier] Apply w.ID=%s ns=%s name=%s port=%d cport=%d domain=%s tenant=%s img=%s", w.ID, ns, w.Name, w.Port, w.ContainerPort, w.Domain, w.TenantID, w.Image)
 	crd := &v1alpha1.Workload{ObjectMeta: metav1.ObjectMeta{Name: w.ID, Namespace: ns}}
 	_, err := controllerutil.CreateOrUpdate(ctx, a.Client, crd, func() error {
 		crd.Spec = v1alpha1.WorkloadSpec{
@@ -66,6 +66,7 @@ func (a *K8sApplier) Apply(ctx context.Context, w workload.Workload) error {
 			Replicas:      clampInt32(w.Replicas),
 			Port:          clampInt32(w.Port),          // 端口投影，驱动 reconciler 建 Service + readiness probe
 			ContainerPort: clampInt32(w.ContainerPort), // 0 时不建 Service（向后兼容）
+			Domain:        w.Domain,                    // 域名投影，驱动 reconciler 建 Ingress（host -> Service:Port）
 			Schedule:      w.Schedule,
 			Command:       w.Command,
 		}

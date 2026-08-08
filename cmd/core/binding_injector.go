@@ -53,7 +53,8 @@ func llmBaseURL() string {
 		}
 		return v + "/v1"
 	}
-	return "http://paas-core.paas.svc.cluster.local:8080/v1"
+	// paas-core Service port=80（targetPort=http 即 Pod:8080）；集群内访问用 :80，非 Pod 直连 :8080。
+	return "http://paas-core.paas.svc.cluster.local/v1"
 }
 
 // randHex 生成 n 字节随机十六进制串（API Key / ID 生成，crypto/rand 防可预测）。
@@ -281,9 +282,9 @@ func (b dsBindingInjector) unbindModel(ctx context.Context, appID string) error 
 	return nil
 }
 
-// bindKB 知识库绑定时注入 KB_ID + KB_API_BASE（"default" 桶，跨环境共享；TypeSecret 复用 upsert，
+// bindKB 知识库绑定时注入 PAAS_KB_ID + PAAS_KB_API_BASE（"default" 桶，跨环境共享；TypeSecret 复用 upsert，
 // 实际非敏感但应用启动注入明文 env 即可）。应用据此调用 retrieve 端点：
-// {KB_API_BASE}/api/knowledgebases/{KB_ID}/retrieve。
+// {PAAS_KB_API_BASE}/api/knowledgebases/{PAAS_KB_ID}/retrieve。
 // 应用级 API Key（kb:read）留后续，MVP 用户用自身 Key 调用。
 func (b dsBindingInjector) bindKB(ctx context.Context, appID, name string) error {
 	if b.kbRepo == nil || b.cfgRepo == nil {
@@ -294,8 +295,8 @@ func (b dsBindingInjector) bindKB(ctx context.Context, appID, name string) error
 		return err
 	}
 	b.upsert(ctx, appID, appconfig.DefaultEnv, []struct{ Key, Value string }{
-		{"KB_ID", kb.ID},
-		{"KB_API_BASE", kbBaseURL()},
+		{"PAAS_KB_ID", kb.ID},
+		{"PAAS_KB_API_BASE", kbBaseURL()},
 	})
 	return nil
 }
@@ -317,7 +318,7 @@ func (b dsBindingInjector) resolveKB(ctx context.Context, nameOrID string) (know
 	return knowledgebase.KnowledgeBase{}, fmt.Errorf("知识库不存在: %s", nameOrID)
 }
 
-// unbindKB 解绑知识库：删 appconfig 的 KB_ID/KB_API_BASE（"default" 桶）。
+// unbindKB 解绑知识库：删 appconfig 的 PAAS_KB_ID/PAAS_KB_API_BASE（"default" 桶）。
 func (b dsBindingInjector) unbindKB(ctx context.Context, appID string) error {
 	if b.cfgRepo == nil {
 		return nil
@@ -326,7 +327,7 @@ func (b dsBindingInjector) unbindKB(ctx context.Context, appID string) error {
 	if err != nil {
 		return err
 	}
-	want := map[string]bool{"KB_ID": true, "KB_API_BASE": true}
+	want := map[string]bool{"PAAS_KB_ID": true, "PAAS_KB_API_BASE": true}
 	for _, it := range items {
 		if want[it.Key] {
 			if err := b.cfgRepo.Delete(ctx, it.ID); err != nil {
@@ -345,5 +346,5 @@ func kbBaseURL() string {
 		}
 		return v
 	}
-	return "http://paas-core.paas.svc.cluster.local:8080"
+	return "http://paas-core.paas.svc.cluster.local"
 }

@@ -1,6 +1,7 @@
 // Command mcp-server 是平台 AI 工具示例的 MCP（Model Context Protocol）server。
 //
-// 提供两个工具供 Agent FunctionCalling 调用：
+// 提供三个工具供 Agent FunctionCalling 调用：
+//   - query_product：查询商品详情（调 product 服务 GET /products/{id}）
 //   - query_order：查询订单状态（订单号 -> 详情）
 //   - refund_order：对订单发起退款（演示：标记为处理中）
 //
@@ -16,8 +17,10 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 )
 
@@ -50,9 +53,15 @@ var (
 		"ORD-1004": {"orderId": "ORD-1004", "status": "shipped", "amount": 4599.0, "items": []string{"笔记本电脑"}},
 	}
 	refunds = map[string]string{} // orderId -> 退款状态
+
+	// productURL 是 product 服务地址（query_product 工具调用目标）。
+	productURL = "http://paas-shop-product:8081"
 )
 
 func main() {
+	if v := os.Getenv("PRODUCT_SERVICE_URL"); v != "" {
+		productURL = v
+	}
 	http.HandleFunc("/mcp", handleMCP)
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -111,6 +120,17 @@ func handleMCP(w http.ResponseWriter, r *http.Request) {
 							"required": []string{"orderId", "reason"},
 						},
 					},
+					{
+						"name":        "query_product",
+						"description": "查询商品详情（按商品 ID 返回名称/价格/库存）",
+						"inputSchema": map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"productId": map[string]any{"type": "string", "description": "商品 ID，如 1"},
+							},
+							"required": []string{"productId"},
+						},
+					},
 				},
 			},
 		})
@@ -133,6 +153,10 @@ func handleMCP(w http.ResponseWriter, r *http.Request) {
 }
 
 func callTool(name string, args map[string]any) string {
+	// query_product 调外部 product 服务，不持 orders/refunds 锁。
+	if name == "query_product" {
+		return queryProduct(args)
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	switch name {
@@ -158,6 +182,24 @@ func callTool(name string, args map[string]any) string {
 	default:
 		return "未知工具: " + name
 	}
+}
+
+// queryProduct 调 product 服务查商品详情（GET /products/{id}）。
+func queryProduct(args map[string]any) string {
+	pid, _ := args["productId"].(string)
+	if pid == "" {
+		return "参数 productId 缺失"
+	}
+	resp, err := http.Get(productURL + "/products/" + pid)
+	if err != nil {
+		return fmt.Sprintf("查询商品失败: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Sprintf("商品服务返回 %d: %s", resp.StatusCode, string(body))
+	}
+	return "商品详情: " + string(body)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

@@ -7,6 +7,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -28,6 +29,9 @@ func newScheme(t *testing.T) *runtime.Scheme {
 		t.Fatal(err)
 	}
 	if err := corev1.AddToScheme(s); err != nil {
+		t.Fatal(err)
+	}
+	if err := networkingv1.AddToScheme(s); err != nil {
 		t.Fatal(err)
 	}
 	return s
@@ -181,6 +185,62 @@ func TestReconcileServiceNoPortSkipsService(t *testing.T) {
 	var svc corev1.Service
 	if err := cl.Get(context.Background(), types.NamespacedName{Name: "wl-noport", Namespace: "default"}, &svc); err == nil {
 		t.Fatalf("Port=0 不应建 Service")
+	}
+}
+
+// TestReconcileServiceWithDomainCreatesIngress 验证 service + Port>0 + Domain 非空时建 Ingress（应用域名->自动暴露）。
+func TestReconcileServiceWithDomainCreatesIngress(t *testing.T) {
+	scheme := newScheme(t)
+	w := &v1alpha1.Workload{
+		ObjectMeta: metav1.ObjectMeta{Name: "wl-svc", Namespace: "default"},
+		Spec: v1alpha1.WorkloadSpec{Type: "service", Name: "wl-svc", Image: "nginx", Replicas: 1,
+			Port: 80, ContainerPort: 8080, Domain: "shop.example.com"},
+	}
+	cl := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(w).WithStatusSubresource(&v1alpha1.Workload{}).Build()
+	r := &WorkloadReconciler{Client: cl, Scheme: scheme, IngressClass: "hermes"}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "wl-svc", Namespace: "default"}}); err != nil {
+		t.Fatalf("reconcile 失败: %v", err)
+	}
+	var ing networkingv1.Ingress
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "wl-svc", Namespace: "default"}, &ing); err != nil {
+		t.Fatalf("应创建 Ingress: %v", err)
+	}
+	if ing.Spec.IngressClassName == nil || *ing.Spec.IngressClassName != "hermes" {
+		t.Fatalf("ingressClassName 应为 hermes，实际 %v", ing.Spec.IngressClassName)
+	}
+	if len(ing.Spec.Rules) != 1 || ing.Spec.Rules[0].Host != "shop.example.com" {
+		t.Fatalf("Ingress host 应为 shop.example.com，实际 %v", ing.Spec.Rules)
+	}
+	path := ing.Spec.Rules[0].HTTP.Paths[0]
+	if path.Path != "/" {
+		t.Fatalf("Ingress path 应为 /，实际 %s", path.Path)
+	}
+	if path.PathType == nil || *path.PathType != networkingv1.PathTypePrefix {
+		t.Fatalf("pathType 应为 Prefix，实际 %v", path.PathType)
+	}
+	if path.Backend.Service == nil || path.Backend.Service.Name != "wl-svc" || path.Backend.Service.Port.Number != 80 {
+		t.Fatalf("backend 应指向 wl-svc:80，实际 %v", path.Backend.Service)
+	}
+	if len(ing.GetOwnerReferences()) != 1 || ing.GetOwnerReferences()[0].Name != "wl-svc" {
+		t.Fatalf("Ingress OwnerRef 应指向 Workload CR")
+	}
+}
+
+// TestReconcileServiceNoDomainSkipsIngress 验证 Domain 空时不建 Ingress（仅集群内 DNS 可达）。
+func TestReconcileServiceNoDomainSkipsIngress(t *testing.T) {
+	scheme := newScheme(t)
+	w := &v1alpha1.Workload{
+		ObjectMeta: metav1.ObjectMeta{Name: "wl-nohost", Namespace: "default"},
+		Spec:       v1alpha1.WorkloadSpec{Type: "service", Name: "wl-nohost", Image: "nginx", Replicas: 1, Port: 80},
+	}
+	cl := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(w).WithStatusSubresource(&v1alpha1.Workload{}).Build()
+	r := &WorkloadReconciler{Client: cl, Scheme: scheme, IngressClass: "hermes"}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "wl-nohost", Namespace: "default"}}); err != nil {
+		t.Fatalf("reconcile 失败: %v", err)
+	}
+	var ing networkingv1.Ingress
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "wl-nohost", Namespace: "default"}, &ing); err == nil {
+		t.Fatalf("Domain 空不应建 Ingress")
 	}
 }
 

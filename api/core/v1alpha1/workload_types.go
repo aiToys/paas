@@ -35,6 +35,10 @@ type WorkloadSpec struct {
 	// 并据此给容器声明 containerPort + readiness probe（TCP，零侵入）。
 	// +kubebuilder:validation:Minimum=1
 	ContainerPort int32 `json:"containerPort,omitempty"`
+	// Domain 是工作负载对外暴露的域名（service 类型且非空时，reconciler 自动建 networkingv1.Ingress，
+	// host=Domain，path / -> 本工作负载 Service:Port）。空则不建 Ingress（仅集群内 DNS 可达）。
+	// ingressClassName 取 reconciler.IngressClass（env PAAS_INGRESS_CLASS，默认 hermes）。
+	Domain string `json:"domain,omitempty"`
 }
 
 // WorkloadStatus 是 reconcile 后的实际状态（reconciler 回写）。

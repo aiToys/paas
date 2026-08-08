@@ -51,6 +51,9 @@ spec:
             # 无需 PAAS_KUBECONFIG。落地 namespace = release namespace；metrics server 禁用避端口冲突。
             - name: PAAS_K8S_NAMESPACE
               value: {{ .Release.Namespace | quote }}
+            # 应用域名->自动 Ingress：workload spec.domain 非空时 reconciler 建 Ingress 的 ingressClassName。
+            - name: PAAS_INGRESS_CLASS
+              value: {{ .Values.ingress.className | default "hermes" | quote }}
             - name: PAAS_METRICS_ADDR
               value: "0"
             # DevOps 构建流水线（PAAS_DEVOPS_BUILDER：k8s=Job Pod 构建；process=in-process docker；空=Mock）。

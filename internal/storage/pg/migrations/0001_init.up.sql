@@ -143,6 +143,7 @@ CREATE TABLE IF NOT EXISTS workloads (
     command        TEXT NOT NULL DEFAULT '',
     port           INTEGER NOT NULL DEFAULT 0,        -- Service 对外端口（>0 才建 Service）
     container_port INTEGER NOT NULL DEFAULT 0,        -- Pod 监听端口（0 取 port）
+    domain         TEXT NOT NULL DEFAULT '',         -- 对外域名（非空时建 Ingress，host=domain -> Service:port）
     created_at     TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_wl_lookup ON workloads(tenant_id, env_id, app_id, type);

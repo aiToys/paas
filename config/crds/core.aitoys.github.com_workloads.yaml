@@ -50,6 +50,12 @@ spec:
                 format: int32
                 minimum: 1
                 type: integer
+              domain:
+                description: |-
+                  Domain 是工作负载对外暴露的域名（service 类型且非空时，reconciler 自动建 networkingv1.Ingress，
+                  host=Domain，path / -> 本工作负载 Service:Port）。空则不建 Ingress（仅集群内 DNS 可达）。
+                  ingressClassName 取 reconciler.IngressClass（env PAAS_INGRESS_CLASS，默认 hermes）。
+                type: string
               envId:
                 type: string
               gpu:

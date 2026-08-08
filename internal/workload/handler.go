@@ -305,14 +305,19 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var body struct {
-			Replicas int    `json:"replicas"`
-			Status   string `json:"status"`
+			Replicas *int   `json:"replicas,omitempty"`
+			Status   string `json:"status,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
-		w0, err := h.repo.Update(r.Context(), id, body.Replicas, body.Status)
+		// replicas 缺省时保留当前值（防 body 漏 replicas 致意外缩容到 0，与 admin scale 对齐）。
+		replicas := existing.Replicas
+		if body.Replicas != nil {
+			replicas = *body.Replicas
+		}
+		w0, err := h.repo.Update(r.Context(), id, replicas, body.Status)
 		if err != nil {
 			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return

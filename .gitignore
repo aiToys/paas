@@ -37,3 +37,4 @@ dist/
 # 本地 AI 辅助开发工作区（superpowers sdd ledger/briefs 等），勿提交
 .superpowers/
 /core
+.tmp-build/

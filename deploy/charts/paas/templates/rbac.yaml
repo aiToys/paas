@@ -34,6 +34,10 @@ rules:
   - apiGroups: [""]
     resources: ["services", "pods"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Ingress（workload spec.domain 非空时 reconciler 自动建 Ingress，host=Domain -> Service:Port）。
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Endpoints：数据面 /dp/instances 从 Endpoints 读 ready 实例（zeus 服务发现真源）。
   - apiGroups: [""]
     resources: ["endpoints"]

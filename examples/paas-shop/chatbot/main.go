@@ -1,11 +1,11 @@
-// paas-shop AI 客服服务：演示「MaaS 推理 + 知识库 RAG + Function Calling 工具」。
+// paas-shop AI 客服服务：演示「MaaS 推理 + 平台知识库 RAG + Function Calling 工具」。
 //
 // 平台能力组合：
 //   - MaaS：调平台 /v1/chat/completions（airouter 真实推理，流式 SSE）
-//   - 知识库：dataservice shop-kb(qdrant) 存 FAQ，RAG 检索作上下文
+//   - 知识库：调平台 /api/knowledgebases/{id}/retrieve（真向量检索 + score 排序，airouter embedding）
 //   - 工具：function calling 定义 get_product，LLM 决策调用 -> 调 product 服务
 //
-// 调用链路：bff -> chatbot -> MaaS(平台 airouter) + qdrant(kb) + product(工具)。
+// 调用链路：bff -> chatbot -> MaaS(平台 airouter) + 平台 KB(检索) + product(工具)。
 package main
 
 import (
@@ -27,24 +27,24 @@ import (
 )
 
 var (
-	gatewayURL   string // 平台 /v1/chat/completions 入口（paas-core）
+	gatewayURL   string // 平台 /v1/chat/completions + /api/knowledgebases 入口（paas-core）
 	apiKey        string // 平台 API Key
-	qdrantURL    string // qdrant 知识库
+	kbID         string // 平台知识库 ID（PAAS_KB_ID），空则 RAG 降级
 	productURL   string // product 服务（工具调用目标）
 	httpClient   = observ.NewClient()
 	streamClient = observ.NewStreamingClient() // 调平台 gateway 用（airouter 长 reasoning 超 10s）
 	model        string
 )
 
-const collection = "shop_kb"
-
+// FAQ 是本地兜底种子（仅当平台 KB 未配时作 memory 上下文，不再直连 qdrant）。
 type FAQ struct {
 	Question string   `json:"question"`
 	Answer   string   `json:"answer"`
-	Keywords []string  `json:"keywords"`
+	Keywords []string `json:"keywords"`
 }
 
-var seedFAQs = []FAQ{
+// fallbackFAQ 是平台 KB 不可用时的降级上下文（演示连续性，非真 RAG）。
+var fallbackFAQ = []FAQ{
 	{Question: "退货政策是什么", Answer: "支持 7 天无理由退货，商品需保持完好。", Keywords: []string{"退货", "退", "return"}},
 	{Question: "发货时间", Answer: "下单后 24 小时内发货，顺丰包邮。", Keywords: []string{"发货", "物流", "快递"}},
 	{Question: "保修政策", Answer: "整机保修 1 年，外设保修 6 个月。", Keywords: []string{"保修", "维修", "售后"}},
@@ -58,13 +58,21 @@ func main() {
 
 	gatewayURL = os.Getenv("PAAS_GATEWAY_URL")
 	if gatewayURL == "" {
-		gatewayURL = "http://paas-core.paas.svc.cluster.local:8080"
+		// 模型绑定注入的 PAAS_LLM_BASE_URL（可能含 /v1 后缀，规整去尾，chatbot 统一调 gatewayURL+"/v1/..."）
+		gatewayURL = strings.TrimSuffix(os.Getenv("PAAS_LLM_BASE_URL"), "/v1")
+		gatewayURL = strings.TrimSuffix(gatewayURL, "/")
 	}
-	apiKey = os.Getenv("PAAS_API_KEY")
-	qdrantURL = os.Getenv("QDRANT_URL")
-	if qdrantURL == "" {
-		qdrantURL = "http://paas-shop-kb:6333"
+	if gatewayURL == "" {
+		// paas-core Service port=80（非 Pod 直连 :8080）；集群内访问用默认 :80。
+		gatewayURL = "http://paas-core.paas.svc.cluster.local"
 	}
+	// 优先应用级 Key（模型绑定注入，gateway meter 据此把 token 用量归因到应用）；
+	// PAAS_API_KEY（租户级）仅兜底，归因不到具体应用。
+	apiKey = os.Getenv("PAAS_LLM_API_KEY")
+	if apiKey == "" {
+		apiKey = os.Getenv("PAAS_API_KEY")
+	}
+	kbID = os.Getenv("PAAS_KB_ID") // 平台知识库 ID（空则 RAG 降级为 fallback 上下文）
 	productURL = os.Getenv("PRODUCT_SERVICE_URL")
 	if productURL == "" {
 		productURL = "http://paas-shop-product:8081"
@@ -82,7 +90,7 @@ func main() {
 		slog.Error("知识库初始化失败", "err", err)
 		os.Exit(1)
 	}
-	slog.Info("chatbot 服务就绪", "gateway", gatewayURL, "model", model, "kb", qdrantURL, "product", productURL)
+	slog.Info("chatbot 服务就绪", "gateway", gatewayURL, "model", model, "kbId", kbID, "product", productURL)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthz)
@@ -121,9 +129,8 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 		req.UserID = "anon"
 	}
 
-	// 1. RAG 检索知识库
-	faqs := searchFAQ(r.Context(), req.Message)
-	kbContext := buildKBContext(faqs)
+	// 1. RAG 检索平台知识库（真向量检索；未配 KB 降级为 fallback 上下文）
+	kbContext := retrieveKB(r.Context(), req.Message)
 
 	// 2. 构造 messages（system 含客服人设 + 知识库上下文）
 	system := "你是 PaasShop 智能客服，友好专业。只回答商品、订单、售后相关问题。" +
@@ -413,91 +420,83 @@ func parseToolCallsFromContent(content string) []ToolCall {
 	return out
 }
 
-// --- 知识库（qdrant）---
+// --- 知识库（平台 KB retrieve API）---
 
+// ensureKB 校验 KB 配置。kbID 空则降级（fallback 上下文），非空记日志。
 func ensureKB(ctx context.Context) error {
-	if qdrantURL == "" {
+	_ = ctx
+	if kbID == "" {
+		slog.Warn("PAAS_KB_ID 未设置，RAG 降级为 fallback 上下文（非真向量检索）")
 		return nil
 	}
-	// 1. 创建 collection（幂等，vectors size=1 占位，实际用 payload 检索）
-	colBody := `{"vectors":{"size":1,"distance":"Cosine"}}`
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPut, qdrantURL+"/collections/"+collection, bytes.NewReader([]byte(colBody)))
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("create collection: %w", err)
-	}
-	resp.Body.Close()
-	slog.Info("qdrant collection 就绪", "collection", collection)
-
-	// 2. seed FAQ points（如果空）
-	points := make([]map[string]any, 0, len(seedFAQs))
-	for i, f := range seedFAQs {
-		points = append(points, map[string]any{
-			"id":      i + 1,
-			"payload": map[string]any{"question": f.Question, "answer": f.Answer, "keywords": f.Keywords},
-		})
-	}
-	seedBody, _ := json.Marshal(map[string]any{"points": points})
-	req2, _ := http.NewRequestWithContext(ctx, http.MethodPut, qdrantURL+"/collections/"+collection+"/points?wait=true", bytes.NewReader(seedBody))
-	req2.Header.Set("Content-Type", "application/json")
-	resp2, err := httpClient.Do(req2)
-	if err != nil {
-		return fmt.Errorf("seed points: %w", err)
-	}
-	resp2.Body.Close()
-	slog.Info("qdrant seed 完成", "count", len(points))
+	slog.Info("KB RAG 就绪", "kbId", kbID, "retrieve", gatewayURL+"/api/knowledgebases/"+kbID+"/retrieve")
 	return nil
 }
 
-// searchFAQ 检索知识库（scroll 全量 + 关键词匹配，简化 RAG）。
-func searchFAQ(ctx context.Context, query string) []FAQ {
-	if qdrantURL == "" {
-		return nil
+// retrieveKB 调平台 /api/knowledgebases/{id}/retrieve（真向量检索 + score 排序）。
+// 失败/未配 KB 降级为 fallback 上下文（演示连续性，chatbot 仍可推理）。
+func retrieveKB(ctx context.Context, query string) string {
+	if kbID == "" {
+		return buildFallbackContext(query)
 	}
-	body := `{"limit":100,"with_payload":true}`
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, qdrantURL+"/collections/"+collection+"/points/scroll", bytes.NewReader([]byte(body)))
+	body, _ := json.Marshal(map[string]string{"query": query})
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, gatewayURL+"/api/knowledgebases/"+kbID+"/retrieve", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		slog.Warn("qdrant scroll 失败", "err", err)
-		return nil
+		slog.Warn("KB retrieve 失败，降级 fallback", "err", err)
+		return buildFallbackContext(query)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		slog.Warn("KB retrieve 非 200，降级 fallback", "status", resp.StatusCode)
+		return buildFallbackContext(query)
+	}
 	var out struct {
-		Result struct {
-			Points []struct {
-				Payload struct {
-					Question string   `json:"question"`
-					Answer   string   `json:"answer"`
-					Keywords []string `json:"keywords"`
-				} `json:"payload"`
-			} `json:"points"`
-		} `json:"result"`
+		Data []struct {
+			Chunk struct {
+				Content string `json:"content"`
+			} `json:"chunk"`
+			Score float32 `json:"score"`
+		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil
+		return buildFallbackContext(query)
 	}
+	var b strings.Builder
+	for _, h := range out.Data {
+		if strings.TrimSpace(h.Chunk.Content) != "" {
+			fmt.Fprintf(&b, "- %s\n", h.Chunk.Content)
+		}
+	}
+	if b.Len() == 0 {
+		return "（无匹配知识库条目）"
+	}
+	return b.String()
+}
+
+// buildFallbackContext 在平台 KB 不可用时用本地 fallback FAQ 关键词匹配作降级上下文。
+func buildFallbackContext(query string) string {
 	q := strings.ToLower(query)
-	var matched []FAQ
-	for _, p := range out.Result.Points {
-		for _, kw := range p.Payload.Keywords {
-			if strings.Contains(q, strings.ToLower(kw)) {
-				matched = append(matched, FAQ{Question: p.Payload.Question, Answer: p.Payload.Answer, Keywords: p.Payload.Keywords})
+	var b strings.Builder
+	matched := false
+	for _, f := range fallbackFAQ {
+		kws := append([]string{strings.ToLower(f.Question)}, f.Keywords...)
+		hit := false
+		for _, k := range kws {
+			if k != "" && strings.Contains(q, strings.ToLower(k)) {
+				hit = true
 				break
 			}
 		}
+		if hit {
+			fmt.Fprintf(&b, "Q: %s\nA: %s\n\n", f.Question, f.Answer)
+			matched = true
+		}
 	}
-	return matched
-}
-
-func buildKBContext(faqs []FAQ) string {
-	if len(faqs) == 0 {
+	if !matched {
 		return "（无匹配知识库条目）"
-	}
-	var b strings.Builder
-	for _, f := range faqs {
-		fmt.Fprintf(&b, "Q: %s\nA: %s\n\n", f.Question, f.Answer)
 	}
 	return b.String()
 }

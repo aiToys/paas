@@ -86,6 +86,9 @@ func startManager() (k8sAppliers, context.CancelFunc) {
 		// token 来自 PAAS_DP_TOKEN env（helm values dataplane.token），空则不注入。
 		DPToken:    os.Getenv("PAAS_DP_TOKEN"),
 		DPEndpoint: os.Getenv("PAAS_DP_ENDPOINT_DEFAULT"),
+		// 应用域名->自动 Ingress 的 ingressClassName（env PAAS_INGRESS_CLASS，默认 hermes）。
+		// workload spec.domain 非空时 reconciler 建 Ingress，host=domain -> Service:port。
+		IngressClass: ingressClassFromEnv(),
 	}
 	if err := wlReconciler.SetupWithManager(mgr); err != nil {
 		log.Printf("K8s 数据面: 注册 WorkloadReconciler 失败（降级为无 K8s）: %v", err)
@@ -117,4 +120,14 @@ func startManager() (k8sAppliers, context.CancelFunc) {
 		clientset:    clientset,
 		wlReconciler: wlReconciler,
 	}, cancel
+}
+
+// ingressClassFromEnv 解析应用域名->自动 Ingress 的 ingressClassName。
+// env PAAS_INGRESS_CLASS（helm values ingress.className）覆盖，默认 hermes（dev 集群 ingress controller）。
+// 空串显式表示不设 ingressClassName（集群默认 IngressController 接管）。
+func ingressClassFromEnv() string {
+	if v := os.Getenv("PAAS_INGRESS_CLASS"); v != "" {
+		return v
+	}
+	return "hermes"
 }

@@ -11,6 +11,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -32,6 +33,9 @@ type WorkloadReconciler struct {
 	DPToken string
 	// DPEndpoint 数据面 API 地址（覆盖默认 http://paas-core.paas.svc.cluster.local/dp）。
 	DPEndpoint string
+	// IngressClass 是 applyIngress 建的 Ingress 的 ingressClassName（env PAAS_INGRESS_CLASS，
+	// 默认 hermes）。空则不设 ingressClassName（集群默认 IngressController 接管）。
+	IngressClass string
 	// Configs 应用配置查找（依赖倒置）：注入应用×环境级 appconfig（含数据服务连接 + 模型 LLM 凭证）
 	// 到 Pod env，让"绑定资源"真正生效。nil 则不注入（dev/无 K8s 场景）。桥接在 cmd/core。
 	Configs AppConfigLookup
@@ -89,8 +93,9 @@ func labelsFor(w *v1alpha1.Workload) map[string]string {
 // podSpec 构造容器 Pod 模板（含 GPU resource + 反亲和）。
 func podSpec(w *v1alpha1.Workload) corev1.PodSpec {
 	container := corev1.Container{
-		Name:  "main",
-		Image: w.Spec.Image,
+		Name:            "main",
+		Image:           w.Spec.Image,
+		ImagePullPolicy: corev1.PullAlways, // 同 tag 更新镜像时强制拉新（防 IfNotPresent 缓存旧镜像，与 dataservice STS 一致）
 	}
 	if w.Spec.Command != "" {
 		// Command 含空格（如 "nginx -v"）用 /bin/sh -c 执行（K8s Command 是 exec form，
@@ -204,6 +209,13 @@ func (r *WorkloadReconciler) applyDeployment(ctx context.Context, w *v1alpha1.Wo
 		_ = r.Status().Update(ctx, w)
 		return fmt.Errorf("apply service: %w", serr)
 	}
+	// 建 Ingress（service 类型且声明 Domain 时）：host=Domain -> Service:Port。
+	// 失败 best-effort 回写 failed + 返 error 触发重试（CreateOrUpdate 幂等）。
+	if ierr := r.applyIngress(ctx, w); ierr != nil {
+		w.Status.Status = "failed"
+		_ = r.Status().Update(ctx, w)
+		return fmt.Errorf("apply ingress: %w", ierr)
+	}
 	// 回写 status.ready（从 Deployment 实际 ready 副本）。
 	w.Status.Ready = dep.Status.ReadyReplicas
 	w.Status.Status = "running"
@@ -243,6 +255,47 @@ func (r *WorkloadReconciler) applyService(ctx context.Context, w *v1alpha1.Workl
 			Port: w.Spec.Port, TargetPort: intstr.FromInt32(cport), Protocol: corev1.ProtocolTCP,
 		}}
 		return controllerutil.SetControllerReference(w, svc, r.Scheme)
+	})
+	return err
+}
+
+// applyIngress CreateOrUpdate networkingv1.Ingress（仅 type=service 且 Port>0 且 Domain 非空）。
+// Ingress 名 = Workload 名（与 Service 同名）；host=Domain，path / -> Service:Port，pathType Prefix。
+// ingressClassName 取 r.IngressClass（env PAAS_INGRESS_CLASS，默认 hermes）。
+// OwnerRef 设 CR，删 CR 级联清 Ingress。Domain 空则跳过（仅集群内 DNS 可达，不对外暴露）。
+func (r *WorkloadReconciler) applyIngress(ctx context.Context, w *v1alpha1.Workload) error {
+	if w.Spec.Type != "service" || w.Spec.Port <= 0 || w.Spec.Domain == "" {
+		return nil
+	}
+	svcName := w.Spec.Name
+	if svcName == "" {
+		svcName = w.Name
+	}
+	ing := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: svcName, Namespace: w.Namespace}}
+	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, ing, func() error {
+		labels := labelsFor(w)
+		ing.SetLabels(labels)
+		pathType := networkingv1.PathTypePrefix
+		rule := networkingv1.IngressRule{
+			Host: w.Spec.Domain,
+			IngressRuleValue: networkingv1.IngressRuleValue{
+				HTTP: &networkingv1.HTTPIngressRuleValue{
+					Paths: []networkingv1.HTTPIngressPath{{
+						Path:     "/",
+						PathType: &pathType,
+						Backend: networkingv1.IngressBackend{Service: &networkingv1.IngressServiceBackend{
+							Name: svcName,
+							Port: networkingv1.ServiceBackendPort{Number: w.Spec.Port},
+						}},
+					}},
+				},
+			},
+		}
+		ing.Spec.Rules = []networkingv1.IngressRule{rule}
+		if r.IngressClass != "" {
+			ing.Spec.IngressClassName = &r.IngressClass
+		}
+		return controllerutil.SetControllerReference(w, ing, r.Scheme)
 	})
 	return err
 }
@@ -342,5 +395,6 @@ func (r *WorkloadReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&batchv1.Job{}).
 		Owns(&batchv1.CronJob{}).
 		Owns(&corev1.Service{}).
+		Owns(&networkingv1.Ingress{}).
 		Complete(r)
 }

@@ -1,0 +1,1 @@
+ALTER TABLE workloads DROP COLUMN IF EXISTS domain;
