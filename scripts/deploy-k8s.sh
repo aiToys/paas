@@ -61,9 +61,10 @@ fi
 
 echo ""
 echo "▶ 1/4 构建镜像（多阶段：前端 build + Go 交叉编译 amd64 + alpine runtime）..."
-# DOCKER_BUILDKIT=0 走 legacy builder：base 镜像用本地（node/golang/alpine 经 daocloud 中转
-# retag 到本地同名），不查 remote registry metadata（避免 docker.io/gcr 拉取超时）。
-DOCKER_BUILDKIT=0 docker build -t "$IMAGE" -f Dockerfile .
+# DOCKER_BUILDKIT=1 走 buildkit：builder 用 --platform=$BUILDPLATFORM 跑本地架构（arm64 Mac），
+# Go 交叉编译到 amd64，避 QEMU 全栈模拟（Go http2/TLS 在 QEMU amd64 下 SIGSEGV 致 go mod
+# download 必 crash）。buildkit 内置 frontend 支持 $BUILDPLATFORM（不加 # syntax= 不拉远程）。
+DOCKER_BUILDKIT=1 docker build -t "$IMAGE" -f Dockerfile .
 
 push_image() {
   # 优先 docker push（daemon 已配 insecure registry）；失败 fallback crane 直推（不经 dockerd）。

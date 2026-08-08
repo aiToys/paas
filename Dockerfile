@@ -41,7 +41,12 @@ RUN pnpm --filter ./console-user build && \
     pnpm --filter ./landing build
 
 # ---------- 2. Go 构建阶段 ----------
-FROM ${BASE_REGISTRY}/golang:1.26-alpine AS builder
+# builder 跑本地架构（$BUILDPLATFORM，如 arm64 Mac）避 QEMU 全栈模拟——Go http2/TLS 在
+# QEMU amd64 模拟下必 SIGSEGV（fault in http2Framer.ReadFrame），go mod download 直接 crash。
+# 用 buildkit（DOCKER_BUILDKIT=1）+ --platform=$BUILDPLATFORM 让 builder 跑 host 架构，
+# Go 经 GOARCH=amd64 交叉编译到目标架构（runtime 仍 linux/amd64）。需 buildkit 内置 frontend
+# （不加 # syntax= 指令，不拉远程 frontend）。
+FROM --platform=$BUILDPLATFORM ${BASE_REGISTRY}/golang:1.26-alpine AS builder
 # 国内 Go 代理（外网受限环境必需）；海外构建可 --build-arg GOPROXY=https://proxy.golang.org,direct 覆盖。
 ARG GOPROXY=https://goproxy.cn,direct
 ENV GOPROXY=${GOPROXY}
