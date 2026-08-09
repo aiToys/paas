@@ -4,6 +4,7 @@
 //   - {{app.env.test}} -> app 租户内 type=test 的环境 ID（多个取 promoteOrder 最小）
 //   - {{app.env.prod}} -> type=prod 的环境 ID
 //   - {{app.repo}}     -> app 绑定的 internal CodeRepo ID（build stage 用）
+//   - {{run.branch}}   -> 触发 run 的分支名（deploy/build stage 指定分支跑，支持分支独立泳道）
 //
 // Pipeline.ParamOverrides 覆盖模板默认（key 格式 "<stageIdx>.<paramKey>"，扁平）。
 // 设计：模板定义 + 实例引用 + 参数化（参考 Argo WorkflowTemplate / Tekton Pipeline），
@@ -25,9 +26,10 @@ type ParamResolver interface {
 }
 
 // ResolveStages 解析模板 stages：占位符替换 + ParamOverrides 覆盖。
-// tplStages 来自模板定义；overrides 来自 Pipeline.ParamOverrides；appID 用于占位符解析。
+// tplStages 来自模板定义；overrides 来自 Pipeline.ParamOverrides；appID 用于占位符解析；
+// branch 为触发 run 的分支名（{{run.branch}} 占位符用）。
 // 返回 resolved stages（实例化快照，供 PipelineRun.StageRuns.Input 填充）。
-func ResolveStages(ctx context.Context, tplStages []StageDef, overrides map[string]any, resolver ParamResolver, appID string) ([]StageDef, error) {
+func ResolveStages(ctx context.Context, tplStages []StageDef, overrides map[string]any, resolver ParamResolver, appID, branch string) ([]StageDef, error) {
 	if resolver == nil {
 		// 无 resolver（测试/降级）：占位符原样返回，仅应用 overrides。
 		return applyOverridesToStages(tplStages, overrides), nil
@@ -36,7 +38,7 @@ func ResolveStages(ctx context.Context, tplStages []StageDef, overrides map[stri
 	for i, s := range tplStages {
 		params := make(map[string]any, len(s.Params))
 		for k, v := range s.Params {
-			rv, err := resolveValue(ctx, v, resolver, appID)
+			rv, err := resolveValue(ctx, v, resolver, appID, branch)
 			if err != nil {
 				return nil, fmt.Errorf("stage %d (%s) param %s: %w", i, s.Name, k, err)
 			}
@@ -49,7 +51,7 @@ func ResolveStages(ctx context.Context, tplStages []StageDef, overrides map[stri
 }
 
 // resolveValue 解析单个 param 值：字符串占位符查 resolver，其他原样返回。
-func resolveValue(ctx context.Context, v any, resolver ParamResolver, appID string) (any, error) {
+func resolveValue(ctx context.Context, v any, resolver ParamResolver, appID, branch string) (any, error) {
 	s, ok := v.(string)
 	if !ok {
 		return v, nil
@@ -61,6 +63,9 @@ func resolveValue(ctx context.Context, v any, resolver ParamResolver, appID stri
 		return resolver.EnvByType(ctx, appID, "prod")
 	case "{{app.repo}}":
 		return resolver.InternalRepoID(ctx, appID)
+	case "{{run.branch}}":
+		// branch 由调用方传入（触发 run 时已确定）；为空时替换为空串。
+		return branch, nil
 	default:
 		return s, nil
 	}

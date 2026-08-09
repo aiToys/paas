@@ -423,7 +423,7 @@ func (h *Handler) triggerRun(w http.ResponseWriter, r *http.Request, appID, pid 
 		httputil.WriteError(w, http.StatusNotFound, "pipeline template not found")
 		return
 	}
-	resolved, rerr := ResolveStages(r.Context(), tpl.Stages, p.ParamOverrides, h.paramResolver, appID)
+	resolved, rerr := ResolveStages(r.Context(), tpl.Stages, p.ParamOverrides, h.paramResolver, appID, body.Branch)
 	if rerr != nil {
 		httputil.WriteError(w, http.StatusBadRequest, "参数解析失败: "+rerr.Error())
 		return
