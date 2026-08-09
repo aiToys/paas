@@ -23,8 +23,8 @@ var (
 
 // Kind 流水线分类（UI 分组 + 职责划分）。
 const (
-	KindCI     = "ci"     // 开发测试流水线：build→deploy(dev)→test→baseline(merge)
-	KindCD     = "cd"     // 生产发布流水线：approve→deploy(prod)→baseline(版本)
+	KindCI     = "ci"     // 测试联调流水线：build→deploy(test 泳道)→test（无版本、无合并）
+	KindCD     = "cd"     // 上线发布流水线：approve→deploy(prod 基线)→release(版本)→baseline(合并主干)
 	KindCustom = "custom"
 )
 

@@ -12,56 +12,59 @@ import (
 
 // BuiltinTemplates 平台预置流水线模板（固定 ID，幂等 seed 不重建）。
 //
-// ci 模板（开发流水线）：git push 触发 -> 构建 -> 部署 dev -> 冒烟测试 -> 写基线（合并主干）。
-// cd 模板（发布流水线）：手动触发 -> 审批 -> 部署 prod -> 写版本（不自动合并主干）。
+// 语义对齐 plan 2026-08-09（deploy release lane 重构）：
+//   - ci 模板（测试联调流水线）：变更验证用，构建 -> 部署到测试环境的分支泳道（lane=run.branch）
+//     -> 冒烟联调。不打版本、不合并主干（CI 只验证，不上线）。
+//   - cd 模板（上线发布流水线）：正式上线用，审批 -> 部署到生产基线（lane=default）
+//     -> 打版本号（release stage）-> 合并主干。
 //
 // deploy.envId 用占位符 {{app.env.test}}/{{app.env.prod}}，触发时自动解析 app 租户环境（零操作）。
-// cd 的 baseline.mainBranch="" 表示 prod 发布只打版本不自动 merge（与 ci 的"合并主干"区分）。
+// release stage 独立承担"打版本号"（git tag + Image.version），与 baseline（合并主干）解耦；
+// cd baseline.mainBranch="main" 表示上线后合并主干，ci 无 baseline（CI 不动主干）。
 func BuiltinTemplates() []PipelineTemplate {
 	return []PipelineTemplate{
 		{
 			ID:          "tpl-ci",
-			Name:        "开发流水线",
+			Name:        "测试联调流水线",
 			Kind:        KindCI,
 			Builtin:     true,
-			Description: "git push 触发：构建 -> 部署 dev -> 冒烟测试 -> 合并主干",
+			Description: "变更验证：构建 -> 部署到测试环境的分支泳道 -> 冒烟联调（不打版本、不合并主干）",
 			Stages: []StageDef{
 				{Name: "构建", Type: StageBuild},
-				{Name: "部署到开发环境", Type: StageDeploy, Params: map[string]any{
+				{Name: "部署到测试泳道", Type: StageDeploy, Params: map[string]any{
 					"envId":       "{{app.env.test}}", // 占位符：触发时解析 app 租户的 test 环境 ID
+					"lane":        "{{run.branch}}",   // 占位符：触发时取运行分支名作泳道（联调隔离）
 					"imageSource": ImagePriorBuild,
 					"strategy":    "rolling",
 				}},
-				{Name: "冒烟测试", Type: StageTest, Params: map[string]any{
+				{Name: "冒烟联调", Type: StageTest, Params: map[string]any{
 					"mode": TestSmoke,
 					"path": "/livez",
-				}},
-				{Name: "写基线", Type: StageBaseline, Params: map[string]any{
-					"mainBranch":       "main",
-					"versionStrategy":  "auto-increment",
-					"mergeMode":        "squash",
 				}},
 			},
 		},
 		{
 			ID:          "tpl-cd",
-			Name:        "发布流水线",
+			Name:        "上线发布流水线",
 			Kind:        KindCD,
 			Builtin:     true,
-			Description: "手动触发：审批 -> 部署 prod -> 写版本",
+			Description: "正式上线：部署到生产基线 -> 打版本号 -> 合并主干",
 			Stages: []StageDef{
 				{Name: "上线审批", Type: StageApprove, Params: map[string]any{
 					"message": "确认发布到生产环境",
 				}},
 				{Name: "部署到生产", Type: StageDeploy, Params: map[string]any{
 					"envId":       "{{app.env.prod}}", // 占位符：触发时解析 app 租户的 prod 环境 ID
-					"imageSource": ImageLatestReady,
+					"lane":        LaneDefault,        // 生产基线（无泳道）
+					"imageSource": ImageLatestReady,   // CD 消费 CI 产物（app 最新 ready Image）
 					"strategy":    "rolling",
 				}},
-				{Name: "写版本", Type: StageBaseline, Params: map[string]any{
-					"mainBranch":      "", // cd 不自动合并主干（prod 发布只打版本）
-					"versionStrategy": "auto-increment",
-					"mergeMode":       "ff",
+				{Name: "发布版本", Type: StageRelease, Params: map[string]any{
+					"versionStrategy": "auto-increment", // git tag + Image.version，不部署
+				}},
+				{Name: "合并主干", Type: StageBaseline, Params: map[string]any{
+					"mainBranch": "main",
+					"mergeMode":  "squash",
 				}},
 			},
 		},

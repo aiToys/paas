@@ -47,10 +47,10 @@ func TestBuiltinTemplatesContent(t *testing.T) {
 	if ci.ID != "tpl-ci" || ci.Kind != KindCI || !ci.Builtin {
 		t.Fatalf("ci 模板元数据错: %+v", ci)
 	}
-	if len(ci.Stages) != 4 {
-		t.Fatalf("ci want 4 stages，got %d", len(ci.Stages))
+	if len(ci.Stages) != 3 {
+		t.Fatalf("ci want 3 stages（build/deploy/test），got %d", len(ci.Stages))
 	}
-	wantCITypes := []string{StageBuild, StageDeploy, StageTest, StageBaseline}
+	wantCITypes := []string{StageBuild, StageDeploy, StageTest}
 	for i, s := range ci.Stages {
 		if s.Type != wantCITypes[i] {
 			t.Fatalf("ci stage %d want %s，got %s", i, wantCITypes[i], s.Type)
@@ -61,10 +61,10 @@ func TestBuiltinTemplatesContent(t *testing.T) {
 	if cd.ID != "tpl-cd" || cd.Kind != KindCD || !cd.Builtin {
 		t.Fatalf("cd 模板元数据错: %+v", cd)
 	}
-	if len(cd.Stages) != 3 {
-		t.Fatalf("cd want 3 stages，got %d", len(cd.Stages))
+	if len(cd.Stages) != 4 {
+		t.Fatalf("cd want 4 stages（approve/deploy/release/baseline），got %d", len(cd.Stages))
 	}
-	wantCDTypes := []string{StageApprove, StageDeploy, StageBaseline}
+	wantCDTypes := []string{StageApprove, StageDeploy, StageRelease, StageBaseline}
 	for i, s := range cd.Stages {
 		if s.Type != wantCDTypes[i] {
 			t.Fatalf("cd stage %d want %s，got %s", i, wantCDTypes[i], s.Type)
@@ -77,12 +77,66 @@ func TestBuiltinTemplatesContent(t *testing.T) {
 	if ci.Stages[1].Params["imageSource"] != ImagePriorBuild {
 		t.Fatalf("ci deploy imageSource 期望 %s，got %v", ImagePriorBuild, ci.Stages[1].Params["imageSource"])
 	}
-	// cd baseline mainBranch="" 表示 prod 不自动合并主干
-	if cd.Stages[2].Params["mainBranch"] != "" {
-		t.Fatalf("cd baseline mainBranch 期望空（不合并），got %v", cd.Stages[2].Params["mainBranch"])
+	// cd baseline mainBranch="main"（上线后合并主干），ci 无 baseline（CI 不动主干）
+	if cd.Stages[3].Params["mainBranch"] != "main" {
+		t.Fatalf("cd baseline mainBranch 期望 main，got %v", cd.Stages[3].Params["mainBranch"])
 	}
-	if ci.Stages[3].Params["mainBranch"] != "main" {
-		t.Fatalf("ci baseline mainBranch 期望 main，got %v", ci.Stages[3].Params["mainBranch"])
+}
+
+// findTpl 在模板切片中按 ID 查找（测试 helper）。
+func findTpl(tpls []PipelineTemplate, id string) PipelineTemplate {
+	for _, t := range tpls {
+		if t.ID == id {
+			return t
+		}
+	}
+	return PipelineTemplate{}
+}
+
+// findStage 在模板中按 StageType 查找首个匹配 stage（测试 helper）。
+func findStage(tpl PipelineTemplate, stageType string) StageDef {
+	for _, s := range tpl.Stages {
+		if s.Type == stageType {
+			return s
+		}
+	}
+	return StageDef{}
+}
+
+// hasStage 判断模板是否含指定 StageType（测试 helper）。
+func hasStage(tpl PipelineTemplate, stageType string) bool {
+	for _, s := range tpl.Stages {
+		if s.Type == stageType {
+			return true
+		}
+	}
+	return false
+}
+
+// TestBuiltinTemplatesSemantics 验证 ci/cd 在 release/lane 维度的语义区分：
+//   - ci 不含 release（测试不打版本）；ci 的 deploy 用 lane={{run.branch}}（分支泳道联调）
+//   - cd 含 release（上线打版本）；cd 的 deploy 用 lane=default（生产基线）
+func TestBuiltinTemplatesSemantics(t *testing.T) {
+	tpls := BuiltinTemplates()
+	ci := findTpl(tpls, "tpl-ci")
+	cd := findTpl(tpls, "tpl-cd")
+	// ci 不含 release stage
+	if hasStage(ci, StageRelease) {
+		t.Error("ci 模板不应含 release（测试不打版本）")
+	}
+	// ci 的 deploy 含 lane 占位符
+	dep := findStage(ci, StageDeploy)
+	if dep.Params["lane"] != "{{run.branch}}" {
+		t.Errorf("ci deploy lane 应为 {{run.branch}}，得 %v", dep.Params["lane"])
+	}
+	// cd 含 release stage
+	if !hasStage(cd, StageRelease) {
+		t.Error("cd 模板应含 release（上线打版本）")
+	}
+	// cd 的 deploy lane=default
+	cdDep := findStage(cd, StageDeploy)
+	if cdDep.Params["lane"] != LaneDefault {
+		t.Errorf("cd deploy lane 应为 default，得 %v", cdDep.Params["lane"])
 	}
 }
 
