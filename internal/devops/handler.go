@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/aitoys/paas/internal/devops/builder"
 	"github.com/aitoys/paas/internal/devops/gitea"
 	"github.com/aitoys/paas/internal/devops/registry"
 	"github.com/aitoys/paas/internal/environment"
@@ -62,6 +66,8 @@ type Handler struct {
 	giteaClient *gitea.Client
 	// registryClient 镜像库 v2 客户端；nil 时 registry 实时视图不可用（降级 503）。
 	registryClient *registry.Client
+	// logStreamer 构建实时日志流（k8s Pod logs follow）；nil 时 /logs/stream 降级 503。
+	logStreamer builder.BuildLogStreamer
 	// Authorize 校验当前请求是否持有权限；nil 跳过（测试场景）。
 	Authorize func(r *http.Request, perm string) bool
 	// UserIDFrom 从身份 ctx 取用户 ID（填 Release.CreatedBy）；nil 则空。
@@ -103,6 +109,11 @@ func WithGiteaClient(c *gitea.Client) HandlerOpt {
 // WithRegistryClient 注入镜像库 v2 客户端，启用 registry 实时视图（catalog/tags）。
 func WithRegistryClient(c *registry.Client) HandlerOpt {
 	return func(h *Handler) { h.registryClient = c }
+}
+
+// WithBuildLogStreamer 注入构建实时日志流（k8s Pod logs follow）；nil 时 /logs/stream 降级 503。
+func WithBuildLogStreamer(s builder.BuildLogStreamer) HandlerOpt {
+	return func(h *Handler) { h.logStreamer = s }
 }
 
 func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) bool {
@@ -503,12 +514,120 @@ func (h *Handler) serveBuildDetail(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
+	// /api/buildruns/{id}/logs/stream → SSE 实时日志（构建中 follow Pod logs）
+	if strings.HasSuffix(id, "/logs/stream") {
+		h.serveBuildLogsStream(w, r, strings.TrimSuffix(id, "/logs/stream"))
+		return
+	}
 	b, err := h.builds.GetBuildRun(r.Context(), id)
 	if err != nil {
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
 	httputil.WriteData(w, b)
+}
+
+// serveBuildLogsStream 处理 GET /api/buildruns/{id}/logs/stream（SSE 实时构建日志）。
+//
+// 越权：先 GetBuildRun 校验本租户（防跨租户枚举 buildID 读他人构建日志，泄漏源码/凭证）。
+// 终态（success/failed）：返 BuildRun.Log 全量后关流（Job 可能已 TTL 清理，不再 follow Pod）。
+// 运行中（running/pending）：logStreamer follow Pod logs 逐块 flush SSE；Pod 未 ready 发心跳等 30s。
+// logStreamer=nil（集群外）：降级 503。
+func (h *Handler) serveBuildLogsStream(w http.ResponseWriter, r *http.Request, id string) {
+	b, err := h.builds.GetBuildRun(r.Context(), id)
+	if err != nil {
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
+		return
+	}
+	flusher, _ := w.(http.Flusher)
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no") // 防 nginx/ingress 缓冲（与 gateway serveStream 同款）
+	w.WriteHeader(http.StatusOK)
+	if flusher != nil {
+		flusher.Flush()
+	}
+	writeSSE := func(line string) {
+		// SSE data 行：日志内的换行需转义为多 data 行（SSE 规范，事件以空行结尾）
+		for _, l := range strings.Split(line, "\n") {
+			fmt.Fprintf(w, "data: %s\n", l)
+		}
+		fmt.Fprint(w, "\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+
+	// 终态：返全量日志后关流
+	if b.Status == BuildSuccess || b.Status == BuildFailed {
+		if b.Log != "" {
+			writeSSE(b.Log)
+		}
+		fmt.Fprint(w, "event: end\ndata: terminal\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return
+	}
+
+	// 运行中：follow Pod logs
+	if h.logStreamer == nil {
+		fmt.Fprint(w, "event: error\ndata: 实时日志不可用（非集群部署）\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return
+	}
+	ctx := r.Context()
+	// Pod 可能还在 ContainerCreating，循环等最多 30s（期间发心跳保连接）
+	deadlineWait := time.Now().Add(30 * time.Second)
+	var stream io.ReadCloser
+	for {
+		stream, err = h.logStreamer.StreamBuildLogs(ctx, id, b.TenantID)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, builder.ErrNoBuildPod) {
+			fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return
+		}
+		if time.Now().After(deadlineWait) {
+			fmt.Fprint(w, "event: error\ndata: 构建 Pod 未就绪（超时）\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return
+		}
+		fmt.Fprint(w, ": heartbeat\n\n") // SSE 注释行保连接
+		if flusher != nil {
+			flusher.Flush()
+		}
+		select {
+		case <-time.After(2 * time.Second):
+		case <-ctx.Done():
+			return
+		}
+	}
+	defer stream.Close()
+	// 逐块读 + SSE 转发（每行一个 data）
+	buf := make([]byte, 4096)
+	for {
+		n, readErr := stream.Read(buf)
+		if n > 0 {
+			writeSSE(string(buf[:n]))
+		}
+		if readErr != nil {
+			// 流结束（Pod 完成/断连）：发 end 事件，前端转轮询拉终态全量
+			fmt.Fprint(w, "event: end\ndata: stream-closed\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return
+		}
+	}
 }
 
 // ---------- 镜像 ----------

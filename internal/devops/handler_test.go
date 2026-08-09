@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -339,5 +340,68 @@ func TestHandlerTenantIsolation(t *testing.T) {
 	}
 	if len(decodeList(t, w.Body.Bytes())) != 0 {
 		t.Fatal("acme 不应见到 globex 应用的仓库")
+	}
+}
+
+// TestHandlerBuildLogsStream 验证 /api/buildruns/{id}/logs/stream：
+// 终态返全量日志 + streamer=nil 降级 + 跨租户 404 不泄漏。
+func TestHandlerBuildLogsStream(t *testing.T) {
+	wl := wlmemory.NewStore()
+	env := envmemory.NewStore()
+	s := devopsmemory.NewStore(wl)
+	h := devops.NewHandler(s, s, s, s, devops.WithEnvResolver(env), devops.WithEnvPromoter(env))
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+
+	// 建一个 success 终态 BuildRun（含 Log）
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	if err := s.CreateRepo(ctx, devops.CodeRepo{
+		ID: "repo-1", TenantID: "t-acme", AppID: "app-cs",
+		GitURL: "https://github.com/x/y.git", Branch: "main",
+	}); err != nil {
+		t.Fatalf("CreateRepo: %v", err)
+	}
+	br, err := s.CreateBuildRun(ctx, devops.BuildRun{
+		AppID: "app-cs", RepoID: "repo-1", TenantID: "t-acme",
+		Branch: "main", Status: devops.BuildSuccess, Log: "Step 1: build\nStep 2: push done",
+	})
+	if err != nil {
+		t.Fatalf("CreateBuildRun: %v", err)
+	}
+	// CreateBuildRun 异步流转（pending→running→success），等终态
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		got, _ := s.GetBuildRun(ctx, br.ID)
+		if got.Status == devops.BuildSuccess || got.Status == devops.BuildFailed {
+			br = got
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// 终态：返全量 Log + end 事件
+	req := httptest.NewRequest(http.MethodGet, "/api/buildruns/"+br.ID+"/logs/stream", nil)
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("期望 200，got %d", rec.Code)
+	}
+	body := rec.Body.String()
+	// 终态应返 BuildRun.Log 全量（mock builder 日志逐行 SSE）+ end 事件
+	if !strings.Contains(body, "[mock]") || !strings.Contains(body, "event: end") {
+		t.Fatalf("终态应返全量日志 + end 事件，got %s", body)
+	}
+	if !strings.Contains(rec.Header().Get("Content-Type"), "text/event-stream") {
+		t.Fatalf("Content-Type 应 text/event-stream，got %s", rec.Header().Get("Content-Type"))
+	}
+
+	// 跨租户：globex 访问 acme 的 BuildRun → GetBuildRun 404（不泄漏）
+	ctxGlobex := tenant.WithTenant(context.Background(), "t-globex")
+	req = httptest.NewRequest(http.MethodGet, "/api/buildruns/"+br.ID+"/logs/stream", nil)
+	req = req.WithContext(ctxGlobex)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("跨租户期望 404，got %d", rec.Code)
 	}
 }

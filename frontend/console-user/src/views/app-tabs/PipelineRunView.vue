@@ -118,9 +118,13 @@ function startPolling() {
 }
 function stopPolling() {
   if (timer) { clearInterval(timer); timer = null }
+  closeBuildLogStream() // 轮询停时一并关实时流（run 终态/组件卸载）
 }
 
 watch(() => props.runId, async () => {
+  closeBuildLogStream()
+  expandedIdx.value = null
+  logCache.value = {}
   await load()
   if (!isTerminal.value) startPolling()
 })
@@ -133,34 +137,84 @@ onUnmounted(stopPolling)
 
 // stage 展开日志区：同一时间只展开一个 stage（KISS）。
 // expandedIdx=当前展开的 stage.index；logCache 缓存已拉取的日志（key=stage.index）。
-// build stage 展开时若 input.buildRunId 存在，调 getBuildRun 拉全量 BuildRun.Log（覆盖 stage.log）。
+// build stage 展开时：终态拉 BuildRun.Log 全量；运行中开 EventSource 实时流（SSE follow Pod logs）。
 const expandedIdx = ref<number | null>(null)
 const logLoading = ref(false)
 const logCache = ref<Record<number, string>>({})
 const logBoxRef = ref<HTMLDivElement | null>(null)
+// build 实时日志 EventSource（构建中 follow Pod logs；折叠/切走/卸载时 close 防泄漏）
+let buildLogES: EventSource | null = null
+
+function closeBuildLogStream() {
+  if (buildLogES) {
+    buildLogES.close()
+    buildLogES = null
+  }
+}
 
 async function toggleExpand(s: StageRun) {
   if (expandedIdx.value === s.index) {
     expandedIdx.value = null
+    closeBuildLogStream()
     return
   }
+  // 切到新 stage，先关旧流
+  closeBuildLogStream()
   expandedIdx.value = s.index
-  // build stage：有 buildRunId 时拉全量日志（仅首次，结果缓存）。
+  // build stage：有 buildRunId 时拉日志（运行中开 EventSource 实时流；终态拉全量）
   const bid = buildRunIdOf(s)
   if (s.type === 'build' && bid && logCache.value[s.index] === undefined) {
     logLoading.value = true
     try {
       const br = await getBuildRun(bid)
-      logCache.value[s.index] = br.log || ''
+      const terminal = br.status === 'success' || br.status === 'failed'
+      if (terminal) {
+        logCache.value[s.index] = br.log || ''
+        logLoading.value = false
+        await scrollLogToBottom()
+      } else {
+        // 运行中：开 SSE 实时流逐行追加
+        logCache.value[s.index] = ''
+        logLoading.value = false
+        startBuildLogStream(bid, s.index)
+      }
     } catch {
       logCache.value[s.index] = '' // 失败 fallback stage.log
-    } finally {
       logLoading.value = false
-      await scrollLogToBottom()
     }
   } else {
     await scrollLogToBottom()
   }
+}
+
+// startBuildLogStream 开 EventSource 拉 /api/buildruns/{id}/logs/stream（SSE follow）。
+// onmessage 逐行 append + 自动滚底；event:end 时关流 + 拉终态全量（Pod 完成后 Log 落库）。
+function startBuildLogStream(bid: string, stageIdx: number) {
+  closeBuildLogStream()
+  const es = new EventSource(`/api/buildruns/${bid}/logs/stream`)
+  buildLogES = es
+  es.onmessage = (ev) => {
+    const cur = logCache.value[stageIdx] ?? ''
+    logCache.value[stageIdx] = cur + ev.data + '\n'
+    scrollLogToBottom()
+  }
+  es.addEventListener('end', () => {
+    closeBuildLogStream()
+    // 流结束：拉终态全量日志（覆盖实时片段，保证完整）
+    getBuildRun(bid).then((br) => {
+      logCache.value[stageIdx] = br.log || logCache.value[stageIdx] || ''
+      scrollLogToBottom()
+    }).catch(() => { /* 保留已收到的实时片段 */ })
+  })
+  es.addEventListener('error', (ev) => {
+    // EventSource error：降级提示（保留已收到的片段）；不重连（避免构建已完成还反复重连）
+    if (es.readyState === EventSource.CLOSED) return
+    // 非集群部署/超时返 error 事件 -> 关流 + 提示
+    closeBuildLogStream()
+    if (!logCache.value[stageIdx]) {
+      logCache.value[stageIdx] = '（实时日志不可用，显示已有片段；构建完成后可刷新拉全量）'
+    }
+  })
 }
 
 async function scrollLogToBottom() {
@@ -177,11 +231,7 @@ function logTextOf(s: StageRun): string {
   return s.log || '（暂无日志）'
 }
 
-// run 切换 / stageRuns 变化时清缓存（避免展示上一次 run 的日志）。
-watch(() => props.runId, () => {
-  expandedIdx.value = null
-  logCache.value = {}
-})
+// run 切换时清缓存（已在上方 watch 内处理：closeBuildLogStream + 清 expandedIdx/logCache）
 
 // stage 输出已知 key 的中文标签
 const OUTPUT_LABELS: Record<string, string> = {

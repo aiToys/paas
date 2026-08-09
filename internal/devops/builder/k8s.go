@@ -72,7 +72,7 @@ func (k K8sJob) Build(ctx context.Context, p Params) (result Result, err error) 
 	if err := ensureBuildNamespace(k.Clientset, p.TenantID); err != nil {
 		return Result{}, fmt.Errorf("ensure build namespace: %w", err)
 	}
-	jobName := sanitizeK8sName("paas-build-" + p.BuildID)
+	jobName := BuildJobName(p.BuildID)
 	ns := tenant.Namespace(p.TenantID)
 	image := k.BuilderImage
 	if image == "" {
@@ -284,6 +284,12 @@ func parseDigest(logs string) (string, error) {
 }
 
 // sanitizeK8sName 把任意字符串规整为合法 K8s 资源名（DNS-1123 label：小写字母数字-，≤63）。
+// BuildJobName 返回构建 Job 的 K8s 名（paas-build-<buildID> 经 sanitize）。
+// K8sJob.Build 与 BuildLogStreamer.StreamBuildLogs 共用，保证 Pod label 一致可查。
+func BuildJobName(buildID string) string {
+	return sanitizeK8sName("paas-build-" + buildID)
+}
+
 func sanitizeK8sName(s string) string {
 	s = strings.ToLower(s)
 	var b strings.Builder

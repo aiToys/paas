@@ -38,6 +38,7 @@ import (
 	"github.com/aitoys/paas/internal/dataplane"
 	"github.com/aitoys/paas/internal/dataservice"
 	"github.com/aitoys/paas/internal/devops"
+	"github.com/aitoys/paas/internal/devops/builder"
 	"github.com/aitoys/paas/internal/devops/gitea"
 	"github.com/aitoys/paas/internal/devops/pipeline"
 	"github.com/aitoys/paas/internal/devops/registry"
@@ -444,6 +445,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		devops.WithUserIDFrom(gateway.UserIDFrom),
 		devops.WithGiteaClient(giteaClient),
 		devops.WithRegistryClient(registryClient),
+		devops.WithBuildLogStreamer(builder.NewK8sBuildLogStreamer(appliers.clientset)),
 	)
 	devopsHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
@@ -908,6 +910,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("POST", "/api/applications/{id}/releases", apiroute.Tags("DevOps"), apiroute.Summary("创建发布（编排基线 Workload + 更新镜像）"), apiroute.Perm("release:write"), apiroute.WithReqBody(devops.ReleaseInput{}), apiroute.WithResp(devops.Release{}))
 	reg.Operation("GET", "/api/buildruns", apiroute.Tags("DevOps"), apiroute.Summary("跨应用构建列表"), apiroute.Perm("build:read"), apiroute.WithResp([]devops.BuildRun{}))
 	reg.Operation("GET", "/api/buildruns/{id}", apiroute.Tags("DevOps"), apiroute.Summary("构建详情（含日志）"), apiroute.Perm("build:read"), apiroute.WithResp(devops.BuildRun{}))
+	reg.Operation("GET", "/api/buildruns/{id}/logs/stream", apiroute.Tags("DevOps"), apiroute.Summary("构建实时日志（SSE follow，构建中逐行流式）"), apiroute.Perm("build:read"))
 	reg.Operation("GET", "/api/images", apiroute.Tags("DevOps"), apiroute.Summary("跨应用镜像列表"), apiroute.Perm("image:read"), apiroute.WithResp([]devops.Image{}))
 	reg.Operation("GET", "/api/images/{id}", apiroute.Tags("DevOps"), apiroute.Summary("镜像详情"), apiroute.Perm("image:read"), apiroute.WithResp(devops.Image{}))
 	reg.Operation("GET", "/api/applications/{id}/repositories/{rid}/tree", apiroute.Tags("DevOps"), apiroute.Summary("内置仓库文件树（Gitea）"), apiroute.Perm("repository:read"), apiroute.WithResp([]gitea.TreeNode{}))
