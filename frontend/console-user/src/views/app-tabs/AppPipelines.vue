@@ -12,7 +12,6 @@ import {
 import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import PipelineDesigner from './PipelineDesigner.vue'
-import PipelineRunView from './PipelineRunView.vue'
 
 const props = defineProps<{ appId: string }>()
 const router = useRouter()
@@ -27,9 +26,8 @@ const createDlg = ref(false)
 const creating = ref(false)
 const createForm = ref<{ name: string; kind: 'ci' | 'cd'; templateId: string }>({ name: '', kind: 'ci', templateId: 'tpl-ci' })
 
-// 设计器 / 运行视图抽屉
+// 设计器抽屉（运行详情走独立页 /devops/runs/:id，不再用嵌入式抽屉）
 const designerPid = ref<string | null>(null)
-const runViewId = ref<string | null>(null)
 
 // CD 运行对话框（收集 version + branch；CI 直接默认 branch 触发）
 const cdRunDlg = ref(false)
@@ -122,7 +120,6 @@ async function doTriggerRun(p: Pipeline, branch: string, version?: string) {
   }
   try {
     const r = await triggerRun(props.appId, p.id, { branch, version })
-    runViewId.value = r.id
     ElMessage.success('已触发运行')
     // 触发即跳运行详情页（GitHub Actions 式全屏看实时进度，闭环）
     router.push(`/devops/runs/${r.id}`)
@@ -182,7 +179,8 @@ const statusTag = (s?: string) => {
             <div class="pipe-head">
               <span class="pipe-name">{{ p.name }}</span>
               <el-tag v-if="statusTag(latestRuns[p.id]?.status)" size="small"
-                      :type="statusTag(latestRuns[p.id]?.status)!.type">
+                      :type="statusTag(latestRuns[p.id]?.status)!.type"
+                      class="run-tag" @click="latestRuns[p.id] && router.push(`/devops/runs/${latestRuns[p.id].id}`)">
                 {{ statusTag(latestRuns[p.id]?.status)!.label }}
               </el-tag>
             </div>
@@ -192,6 +190,8 @@ const statusTag = (s?: string) => {
             <div class="pipe-actions">
               <el-button size="small" @click="designerPid = p.id">编辑</el-button>
               <el-button size="small" type="primary" @click="run(p)">运行</el-button>
+              <el-button v-if="latestRuns[p.id]" size="small" text type="primary"
+                         @click="router.push(`/devops/runs/${latestRuns[p.id].id}`)">查看运行</el-button>
               <el-button size="small" text type="danger" @click="remove(p)">删除</el-button>
             </div>
             <div v-if="hasProdDeploy(p)" class="prod-badge">⚠️ 含生产环境</div>
@@ -249,10 +249,6 @@ const statusTag = (s?: string) => {
     <el-drawer v-model="designerPid" size="60%" title="流水线设计器" @close="designerPid = null">
       <PipelineDesigner v-if="designerPid" :app-id="appId" :pid="designerPid" @saved="load" />
     </el-drawer>
-    <!-- 运行视图抽屉 -->
-    <el-drawer v-model="runViewId" size="50%" title="运行视图" @close="runViewId = null">
-      <PipelineRunView v-if="runViewId" :run-id="runViewId" />
-    </el-drawer>
   </div>
 </template>
 
@@ -267,6 +263,7 @@ const statusTag = (s?: string) => {
 .pipe-card.prod-warn { border-color: var(--el-color-danger); }
 .pipe-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .pipe-name { font-weight: 600; }
+.run-tag { cursor: pointer; }
 .pipe-stages { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
 .stage-chip { background: var(--el-fill-color-light); padding: 2px 8px; border-radius: 10px; font-size: 12px; }
 .pipe-actions { display: flex; gap: 8px; }
