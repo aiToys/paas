@@ -209,7 +209,7 @@ func (a dsInstanceReader) Instances(ctx context.Context, ns, svc string) ([]data
 	if a.r == nil {
 		return nil, nil
 	}
-	list, err := a.r.Instances(ctx, ns, svc)
+	list, err := a.r.Instances(ctx, ns, svc, "") // 数据服务实例无泳道概念，传空走基线
 	if err != nil {
 		return nil, err
 	}

@@ -87,10 +87,11 @@ func (h *Handler) listInstances(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, http.StatusBadRequest, "missing service")
 		return
 	}
+	lane := r.URL.Query().Get("lane") // 可选：L2 跨泳道降级发现（空/default=基线）
 	insts := []Instance{}
 	if h.reader != nil {
 		tid, _ := tenant.TenantFrom(r.Context())
-		is, err := h.reader.Instances(r.Context(), tenant.Namespace(tid), name)
+		is, err := h.reader.Instances(r.Context(), tenant.Namespace(tid), name, lane)
 		if err != nil {
 			// Endpoints 不存在等错误降级返空（不 5xx，数据面 SDK 容错）。
 			insts = []Instance{}

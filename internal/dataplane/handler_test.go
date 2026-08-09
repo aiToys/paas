@@ -21,7 +21,7 @@ type fakeReader struct {
 	instErr error
 }
 
-func (f fakeReader) Instances(context.Context, string, string) ([]Instance, error) {
+func (f fakeReader) Instances(context.Context, string, string, string) ([]Instance, error) {
 	return f.insts, f.instErr
 }
 func (f fakeReader) Services(context.Context, string) ([]ServiceInfo, error) {
@@ -124,12 +124,15 @@ func TestEndpointsToInstancesReadyOnly(t *testing.T) {
 		NotReadyAddresses: []corev1.EndpointAddress{{IP: "10.0.0.2"}}, // not-ready，应排除
 		Ports:             []corev1.EndpointPort{{Port: 8080, Name: "http"}},
 	}}
-	insts := endpointsToInstances(ep)
+	insts := endpointsToInstances(ep, LaneDefault)
 	if len(insts) != 1 {
 		t.Fatalf("应只返 1 个 ready 实例（排除 not-ready），实际 %d", len(insts))
 	}
 	if insts[0].IP != "10.0.0.1" || insts[0].Port != 8080 || insts[0].Cluster != "default" {
 		t.Fatalf("实例字段错误: %+v", insts[0])
+	}
+	if insts[0].LaneID != LaneDefault {
+		t.Fatalf("LaneID 应为 default，实际 %q", insts[0].LaneID)
 	}
 }
 
