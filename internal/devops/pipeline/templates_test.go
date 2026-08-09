@@ -36,6 +36,76 @@ func TestSeedTemplatesIdempotent(t *testing.T) {
 	}
 }
 
+// TestSeedTemplatesUpgradesBuiltinOnVersionBump 验证 builtin 模板版本升级覆盖：
+// 模拟已部署旧版本 builtin（Version=0 + 旧 stages），seed 后代码 Version=1 > DB Version=0，
+// 应覆盖 stages/name/description/version。解决 dogfooding 痛点（改代码后 PG 旧记录不更新）。
+func TestSeedTemplatesUpgradesBuiltinOnVersionBump(t *testing.T) {
+	s := NewMemoryStore()
+	seedCtx := context.Background() // 平台级 seed
+
+	// 模拟已部署旧版本 builtin 模板（Version=0，stages 与代码不同）
+	oldTpl := PipelineTemplate{
+		ID:          "tpl-ci",
+		Name:        "旧CI模板名",
+		Kind:        KindCI,
+		Builtin:     true,
+		Version:     0,
+		Description: "旧描述",
+		Stages:      []StageDef{{Name: "旧阶段", Type: StageBuild}},
+	}
+	if _, err := s.CreateTemplate(seedCtx, oldTpl); err != nil {
+		t.Fatalf("注入旧 builtin 模板失败: %v", err)
+	}
+
+	// seed：代码 Version=1 > DB Version=0，应触发覆盖
+	if err := SeedTemplates(seedCtx, s); err != nil {
+		t.Fatalf("seed 失败: %v", err)
+	}
+
+	got, err := s.GetTemplate(seedCtx, "tpl-ci")
+	if err != nil {
+		t.Fatalf("GetTemplate 失败: %v", err)
+	}
+	if got.Version != 1 {
+		t.Errorf("Version 升级 want 1，got %d", got.Version)
+	}
+	if got.Name != "测试联调流水线" {
+		t.Errorf("Name 覆盖 want 测试联调流水线，got %s", got.Name)
+	}
+	if got.Description != "变更验证：构建 -> 部署到测试环境的分支泳道 -> 冒烟联调（不打版本、不合并主干）" {
+		t.Errorf("Description 覆盖失败，got %s", got.Description)
+	}
+	if len(got.Stages) != 3 {
+		t.Errorf("Stages 覆盖 want 3 阶段，got %d", len(got.Stages))
+	}
+}
+
+// TestSeedTemplatesSameVersionNoOverwrite 验证同 Version 不覆盖：
+// 已部署 builtin Version=1（与代码一致），seed 后保持用户/旧值不被误覆盖（幂等）。
+func TestSeedTemplatesSameVersionNoOverwrite(t *testing.T) {
+	s := NewMemoryStore()
+	seedCtx := context.Background()
+
+	// 先正常 seed 灌入代码版本（Version=1）
+	if err := SeedTemplates(seedCtx, s); err != nil {
+		t.Fatalf("首次 seed 失败: %v", err)
+	}
+	orig, _ := s.GetTemplate(seedCtx, "tpl-ci")
+
+	// 二次 seed
+	if err := SeedTemplates(seedCtx, s); err != nil {
+		t.Fatalf("二次 seed 失败: %v", err)
+	}
+	got, _ := s.GetTemplate(seedCtx, "tpl-ci")
+
+	if got.Version != orig.Version {
+		t.Errorf("同 Version 不应改变，orig=%d got=%d", orig.Version, got.Version)
+	}
+	if len(got.Stages) != len(orig.Stages) {
+		t.Errorf("同 Version stages 不应变，orig=%d got=%d", len(orig.Stages), len(got.Stages))
+	}
+}
+
 // TestBuiltinTemplatesContent 验证预置模板的 stages 类型序列与 Kind。
 func TestBuiltinTemplatesContent(t *testing.T) {
 	tpls := BuiltinTemplates()

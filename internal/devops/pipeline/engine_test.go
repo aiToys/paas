@@ -958,3 +958,44 @@ func TestEngineRetryGuards(t *testing.T) {
 		t.Fatalf("succeeded run retry 期望 ErrNotFailed，got %v", err)
 	}
 }
+
+// TestAbortClearsRunningStage 验证 Abort 清理残留 running 的 stage_runs 标 StageAborted。
+// 场景：run=running 且某 stage=running 时 abort，该 stage 应标 aborted（数据一致），
+// 已终态 stage（success）不动。修复第 18 轮「abort 后 stage_runs 残留 running」数据不一致。
+func TestAbortClearsRunningStage(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := acmeCtxEngine()
+	tpl, _ := s.CreateTemplate(ctx, PipelineTemplate{
+		ID: "tpl-abort-clear", Name: "AbortClear测试", Kind: KindCI,
+		Stages: []StageDef{{Name: "构建", Type: StageBuild}, {Name: "部署", Type: StageDeploy}},
+	})
+	p, _ := s.CreatePipeline(ctx, Pipeline{Name: "p-abort-clear", AppID: "app-clear", Kind: KindCI, TemplateID: tpl.ID})
+	// 注入 running 状态的 run：stage0 已 success，stage1 正 running
+	run, err := s.CreateRun(ctx, PipelineRun{
+		PipelineID: p.ID, AppID: "app-clear", Status: RunRunning, CurrentStage: 1,
+		StageRuns: []StageRun{
+			{Index: 0, Name: "构建", Type: StageBuild, Status: StageSuccess},
+			{Index: 1, Name: "部署", Type: StageDeploy, Status: StageRunning},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun 失败: %v", err)
+	}
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: &fakeReleaser{}}
+	if err := eng.Abort(ctx, run.ID); err != nil {
+		t.Fatalf("Abort 失败: %v", err)
+	}
+	got, _ := s.GetRun(ctx, run.ID)
+	if got.Status != RunAborted {
+		t.Errorf("run status want aborted，got %s", got.Status)
+	}
+	if len(got.StageRuns) != 2 {
+		t.Fatalf("StageRuns want 2，got %d", len(got.StageRuns))
+	}
+	if got.StageRuns[0].Status != StageSuccess {
+		t.Errorf("已终态 stage 不应变，want success，got %s", got.StageRuns[0].Status)
+	}
+	if got.StageRuns[1].Status != StageAborted {
+		t.Errorf("残留 running stage 应标 aborted，got %s", got.StageRuns[1].Status)
+	}
+}

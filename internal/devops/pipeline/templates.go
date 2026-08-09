@@ -28,6 +28,7 @@ func BuiltinTemplates() []PipelineTemplate {
 			Name:        "测试联调流水线",
 			Kind:        KindCI,
 			Builtin:     true,
+			Version:     1, // 破坏性改动 +1（存量经 migration 0025 回填为 1）
 			Description: "变更验证：构建 -> 部署到测试环境的分支泳道 -> 冒烟联调（不打版本、不合并主干）",
 			Stages: []StageDef{
 				{Name: "构建", Type: StageBuild},
@@ -48,6 +49,7 @@ func BuiltinTemplates() []PipelineTemplate {
 			Name:        "上线发布流水线",
 			Kind:        KindCD,
 			Builtin:     true,
+			Version:     1, // 破坏性改动 +1（存量经 migration 0025 回填为 1）
 			Description: "正式上线：部署到生产基线 -> 打版本号 -> 合并主干",
 			Stages: []StageDef{
 				{Name: "上线审批", Type: StageApprove, Params: map[string]any{
@@ -71,16 +73,34 @@ func BuiltinTemplates() []PipelineTemplate {
 	}
 }
 
-// SeedTemplates 幂等灌入平台预置模板。
-// 已存在（同 ID 或同 (tenant,name)）-> ErrTemplateExists 跳过；其他错误返出。
+// SeedTemplates 幂等灌入平台预置模板，并按 Version 升级已部署的 builtin 模板。
+//
+// 升级语义：已存在同 ID builtin 模板时，若代码 Version > DB Version，覆盖 stages/name/description/version
+// （绕过 builtin 拒改保护，平台级发版升级路径）。同 Version 或 DB 更高（用户手动？不可能，builtin 拒改）
+// 不覆盖。这解决了「改 BuiltinTemplates() 代码后已部署 PG 仍是旧记录」的 dogfooding 痛点
+// （此前每次改 builtin 要手写 migration UPDATE 补救，如 0020）。
+//
 // 不门控 demo seed（生产也需预置模板，与演示凭证门控独立）。
 func SeedTemplates(ctx context.Context, repo TemplateRepository) error {
 	for _, tpl := range BuiltinTemplates() {
-		if _, err := repo.CreateTemplate(ctx, tpl); err != nil {
-			if errors.Is(err, ErrTemplateExists) {
-				continue
+		_, err := repo.CreateTemplate(ctx, tpl)
+		if err == nil {
+			continue // 新建成功
+		}
+		if !errors.Is(err, ErrTemplateExists) {
+			return err // 其他错误返出
+		}
+		// 已存在：比对 Version，代码更高则覆盖升级
+		current, getErr := repo.GetTemplate(ctx, tpl.ID)
+		if getErr != nil {
+			// 平台预置模板 tenant_id=NULL 跨租户可见，GetTemplate 不会因 tenant 拒；
+			// 真不存在的极端情况（并发删）跳过本次，下次启动再升。
+			continue
+		}
+		if tpl.Version > current.Version {
+			if replaceErr := repo.ReplaceBuiltinTemplate(ctx, tpl); replaceErr != nil {
+				return replaceErr
 			}
-			return err
 		}
 	}
 	return nil

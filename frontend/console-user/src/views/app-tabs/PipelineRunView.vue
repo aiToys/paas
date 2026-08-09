@@ -25,11 +25,11 @@ const runStatusType = (s?: string): string => {
   return m[s || ''] || 'info'
 }
 const stageStatusType = (s: string): string => {
-  const m: Record<string, string> = { succeeded: 'success', failed: 'danger', running: 'warning', waiting: 'warning', pending: 'info', skipped: 'info' }
+  const m: Record<string, string> = { succeeded: 'success', failed: 'danger', aborted: 'info', running: 'warning', waiting: 'warning', pending: 'info', skipped: 'info' }
   return m[s] || 'info'
 }
 const stageIcon = (s: string): string => {
-  const m: Record<string, string> = { succeeded: '✓', failed: '✗', running: '◌', pending: '·', waiting: '⏸', skipped: '–' }
+  const m: Record<string, string> = { succeeded: '✓', failed: '✗', aborted: '⏹', running: '◌', pending: '·', waiting: '⏸', skipped: '–' }
   return m[s] || '·'
 }
 
@@ -206,10 +206,10 @@ function startBuildLogStream(bid: string, stageIdx: number) {
       scrollLogToBottom()
     }).catch(() => { /* 保留已收到的实时片段 */ })
   })
-  es.addEventListener('error', (ev) => {
-    // EventSource error：降级提示（保留已收到的片段）；不重连（避免构建已完成还反复重连）
-    if (es.readyState === EventSource.CLOSED) return
-    // 非集群部署/超时返 error 事件 -> 关流 + 提示
+  es.addEventListener('error', () => {
+    // EventSource error：统一关流 + 降级提示（保留已收到的实时片段）。
+    // 不判 readyState：无论 CLOSED（503 终态）还是 CONNECTING（抖动重连中）都应降级，
+    // 因为 closeBuildLogStream 会 es.close() 停止自动重连（避免构建已完成还反复重连）。
     closeBuildLogStream()
     if (!logCache.value[stageIdx]) {
       logCache.value[stageIdx] = '（实时日志不可用，显示已有片段；构建完成后可刷新拉全量）'

@@ -101,6 +101,7 @@ func (e *Engine) releaseCancel(runID string) {
 
 // Abort 终止 run：标 aborted + cancel 进行中的 advance（PollBuildRun 因 ctx.Done 退出）。
 // 仅 running/paused 可 abort；已终态（succeeded/failed/aborted）返 ErrNotRunning。
+// 清理残留 StageRunning 的 stage_runs 标 StageAborted（数据一致：否则 run=aborted 但 stage=running）。
 func (e *Engine) Abort(ctx context.Context, runID string) error {
 	run, err := e.Runs.GetRun(ctx, runID)
 	if err != nil {
@@ -111,6 +112,13 @@ func (e *Engine) Abort(ctx context.Context, runID string) error {
 	}
 	run.Status = RunAborted
 	run.FinishedAt = time.Now()
+	// 清理残留 running 的 stage_runs（advance 退出时未标终态的那个）
+	for i := range run.StageRuns {
+		if run.StageRuns[i].Status == StageRunning {
+			run.StageRuns[i].Status = StageAborted
+			run.StageRuns[i].FinishedAt = time.Now()
+		}
+	}
 	if _, err := e.Runs.UpdateRun(ctx, run); err != nil {
 		return err
 	}

@@ -45,7 +45,7 @@ func NewPGStore(db *pgxpool.Pool) *pgStore { return &pgStore{db: db} }
 const (
 	pipeCols = `id, tenant_id, app_id, name, kind, template_id, param_overrides, trigger, disabled, created_at`
 	runCols  = `id, tenant_id, app_id, pipeline_id, branch, commit, repo_id, trigger, trigger_ref, status, current_stage, version, created_at, finished_at`
-	tplCols  = `id, tenant_id, name, kind, description, stages, builtin`
+	tplCols  = `id, tenant_id, name, kind, description, stages, builtin, version`
 )
 
 // stageRunCols 不含 BIGSERIAL 的 id（重写时按 (pipeline_run_id, stage_index) 排序读回）。
@@ -459,15 +459,13 @@ func (s *pgStore) ListTemplates(ctx context.Context) ([]PipelineTemplate, error)
 }
 
 // GetTemplate 取单个。平台预置（tenant_id IS NULL）跨租户可见；租户自定义跨租户 NotFound。
+// 无租户 ctx（平台级 seed 升级路径）仅可访问平台预置（tid="" 时 SQL tenant_id='' 不匹配租户自定义）。
 func (s *pgStore) GetTemplate(ctx context.Context, id string) (PipelineTemplate, error) {
-	tid, err := tenantOrErr(ctx)
-	if err != nil {
-		return PipelineTemplate{}, err
-	}
+	tid, _ := tenant.TenantFrom(ctx)
 	var t PipelineTemplate
 	row := s.db.QueryRow(ctx,
 		`SELECT `+tplCols+` FROM pipeline_templates WHERE id=$1 AND (tenant_id IS NULL OR tenant_id=$2)`, id, tid)
-	if err = scanTemplate(row, &t); err != nil {
+	if err := scanTemplate(row, &t); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return PipelineTemplate{}, ErrPipelineNotFound
 		}
@@ -499,8 +497,8 @@ func (s *pgStore) CreateTemplate(ctx context.Context, in PipelineTemplate) (Pipe
 		return PipelineTemplate{}, fmt.Errorf("序列化 stages 失败: %w", err)
 	}
 	_, err = s.db.Exec(ctx,
-		`INSERT INTO pipeline_templates (`+tplCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-		in.ID, tenantArg, in.Name, in.Kind, in.Description, stagesB, in.Builtin)
+		`INSERT INTO pipeline_templates (`+tplCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		in.ID, tenantArg, in.Name, in.Kind, in.Description, stagesB, in.Builtin, in.Version)
 	if err != nil {
 		if classifyTemplateErr(err) == ErrTemplateExists {
 			return PipelineTemplate{}, ErrTemplateExists
@@ -510,8 +508,9 @@ func (s *pgStore) CreateTemplate(ctx context.Context, in PipelineTemplate) (Pipe
 	return in, nil
 }
 
-// UpdateTemplate 更新自定义模板。builtin 拒（防误改致新应用默认 binding 漂移）。
-// 平台预置（tenant_id NULL）admin 可改；租户自定义需 ctx 租户匹配（GetTemplate 已过滤）。
+// UpdateTemplate 更新自定义模板。builtin 拒（防误改致新应用默认 binding 漂移，builtin 升级走代码发版经 ReplaceBuiltinTemplate）。
+// 平台预置（tenant_id NULL）super_admin 可改；租户自定义仅本租户可改--super_admin 亦不跨租户管租户自定义
+// （跨租户写越权风险高，资源运维仍在租户内；GetTemplate 已过滤跨租户访问返 NotFound 不泄漏）。
 func (s *pgStore) UpdateTemplate(ctx context.Context, t PipelineTemplate) (PipelineTemplate, error) {
 	ex, err := s.GetTemplate(ctx, t.ID) // 复用：存在 + 本租户/平台预置可见校验
 	if err != nil {
@@ -550,6 +549,29 @@ func (s *pgStore) DeleteTemplate(ctx context.Context, id string) error {
 	}
 	tag, err := s.db.Exec(ctx,
 		`DELETE FROM pipeline_templates WHERE id=$1 AND builtin=false`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrPipelineNotFound
+	}
+	return nil
+}
+
+// ReplaceBuiltinTemplate 平台级 seed 专用：覆盖 builtin 模板的 stages/name/description/version。
+// 绕过 UpdateTemplate 的 builtin 拒改保护（builtin 升级走代码发版，非 admin UI）。
+// 仅 builtin=true 生效（WHERE builtin=true 拦截租户自定义模板）；不存在或非 builtin RowsAffected=0 返 ErrPipelineNotFound。
+// 注意：不更新 kind（CI/CD 不应跨类变更）与 tenant_id（平台预置恒 NULL）。
+func (s *pgStore) ReplaceBuiltinTemplate(ctx context.Context, t PipelineTemplate) error {
+	stagesB, err := json.Marshal(t.Stages)
+	if err != nil {
+		return fmt.Errorf("序列化 stages 失败: %w", err)
+	}
+	tag, err := s.db.Exec(ctx,
+		`UPDATE pipeline_templates
+		 SET name=$1, description=$2, stages=$3, version=$4
+		 WHERE id=$5 AND builtin=true`,
+		t.Name, t.Description, stagesB, t.Version, t.ID)
 	if err != nil {
 		return err
 	}
@@ -598,7 +620,7 @@ func loadStageRuns(ctx context.Context, db *pgxpool.Pool, r *PipelineRun) error 
 func scanTemplate(r pg.RowScanner, t *PipelineTemplate) error {
 	var stagesB []byte
 	var tenantID *string
-	if err := r.Scan(&t.ID, &tenantID, &t.Name, &t.Kind, &t.Description, &stagesB, &t.Builtin); err != nil {
+	if err := r.Scan(&t.ID, &tenantID, &t.Name, &t.Kind, &t.Description, &stagesB, &t.Builtin, &t.Version); err != nil {
 		return err
 	}
 	if tenantID != nil {

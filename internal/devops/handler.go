@@ -612,7 +612,9 @@ func (h *Handler) serveBuildLogsStream(w http.ResponseWriter, r *http.Request, i
 		}
 	}
 	defer stream.Close()
-	// 逐块读 + SSE 转发（每行一个 data）
+	// 逐块读 + SSE 转发（每行一个 data）。
+	// stream.Read 阻塞，ctx 取消时 client-go Stream 内部使 Read 返 error（依赖此机制退出）。
+	// 区分「客户端断连」（ctx.Err!=nil，静默退出不发 end，避免对已断连连接 Write）与「流正常结束」（发 end）。
 	buf := make([]byte, 4096)
 	for {
 		n, readErr := stream.Read(buf)
@@ -620,7 +622,11 @@ func (h *Handler) serveBuildLogsStream(w http.ResponseWriter, r *http.Request, i
 			writeSSE(string(buf[:n]))
 		}
 		if readErr != nil {
-			// 流结束（Pod 完成/断连）：发 end 事件，前端转轮询拉终态全量
+			if ctx.Err() != nil {
+				// 客户端断连/请求取消：静默退出（end 事件无处可发）
+				return
+			}
+			// 流结束（Pod 完成/上游断连）：发 end 事件，前端转轮询拉终态全量
 			fmt.Fprint(w, "event: end\ndata: stream-closed\n\n")
 			if flusher != nil {
 				flusher.Flush()

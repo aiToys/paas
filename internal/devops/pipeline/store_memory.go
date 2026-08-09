@@ -293,10 +293,8 @@ func (s *memoryStore) ListTemplates(ctx context.Context) ([]PipelineTemplate, er
 }
 
 func (s *memoryStore) GetTemplate(ctx context.Context, id string) (PipelineTemplate, error) {
-	tid, err := tenantOrErr(ctx)
-	if err != nil {
-		return PipelineTemplate{}, err
-	}
+	// 无租户 ctx（平台级 seed 升级路径）仅可访问平台预置（TenantID=""）；有租户 ctx 校验本租户。
+	tid, _ := tenant.TenantFrom(ctx)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	t, ok := s.templates[id]
@@ -389,6 +387,26 @@ func (s *memoryStore) DeleteTemplate(ctx context.Context, id string) error {
 		return ErrPipelineNotFound
 	}
 	delete(s.templates, id)
+	return nil
+}
+
+// ReplaceBuiltinTemplate 平台级 seed 专用：覆盖 builtin 模板的 stages/name/description/version。
+// 绕过 UpdateTemplate 的 builtin 拒改保护（builtin 升级走代码发版，非 admin UI）。
+// 仅 builtin=true 生效；不存在或非 builtin 返 ErrPipelineNotFound。
+func (s *memoryStore) ReplaceBuiltinTemplate(ctx context.Context, t PipelineTemplate) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ex, ok := s.templates[t.ID]
+	if !ok || !ex.Builtin {
+		return ErrPipelineNotFound
+	}
+	// 保留 ID/TenantID/Builtin/Kind/CreatedAt，覆盖可变字段
+	ex.Name = t.Name
+	ex.Description = t.Description
+	ex.Stages = cloneStages(t.Stages)
+	ex.Params = cloneParamDefs(t.Params)
+	ex.Version = t.Version
+	s.templates[t.ID] = ex
 	return nil
 }
 

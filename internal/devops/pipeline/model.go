@@ -46,6 +46,7 @@ const (
 	StageFailed  = "failed"
 	StageWaiting = "waiting" // 等 approve
 	StageSkipped = "skipped"
+	StageAborted = "aborted" // run 被 Abort 时，残留 running 的 stage 标此（数据一致）
 )
 
 // LaneDefault 泳道默认值（基线）。与 workload.LaneDefault 同值；
@@ -110,6 +111,10 @@ type PipelineTemplate struct {
 	Stages      []StageDef `json:"stages"`
 	Params      []ParamDef `json:"params,omitempty"` // 参数声明（文档化；运行时占位符解析）
 	Builtin     bool       `json:"builtin,omitempty"`
+	// Version builtin 模板版本号（破坏性改动 +1）。seed 时若代码 Version > DB Version，
+	// 覆盖 stages/name/description/params（绕过 builtin 拒改保护，平台级发版升级路径）。
+	// 租户自定义模板 Version 恒 0（不参与升级）。存量 builtin 经 migration 0025 回填为 1。
+	Version int `json:"version,omitempty"`
 }
 
 // Pipeline 应用绑定的流水线（绑定模板 + 参数覆盖，非 per-app 复制 stages）。

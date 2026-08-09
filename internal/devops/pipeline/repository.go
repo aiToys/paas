@@ -45,6 +45,11 @@ type TemplateRepository interface {
 	UpdateTemplate(ctx context.Context, t PipelineTemplate) (PipelineTemplate, error)
 	// DeleteTemplate 删除自定义模板；builtin 模板拒（ErrTemplateBuiltin）。
 	DeleteTemplate(ctx context.Context, id string) error
+	// ReplaceBuiltinTemplate 平台级 seed 专用：覆盖 builtin 模板的 stages/name/description/version。
+	// 绕过 UpdateTemplate 的 builtin 拒改保护（builtin 升级走代码发版，非 admin UI）。
+	// 仅当目标 builtin=true 时生效；不存在或非 builtin 返 ErrPipelineNotFound。
+	// 租户自定义模板不受影响（WHERE builtin=true 拦截）。
+	ReplaceBuiltinTemplate(ctx context.Context, t PipelineTemplate) error
 }
 
 // Store 聚合 Pipeline 三仓储接口（memoryStore/pgStore 同一实例实现全部）。

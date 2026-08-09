@@ -500,8 +500,24 @@ P1-P4 admin 跨租户管理代码 5 轮深度审查（每轮独立 agent 视角�
 - **typed-nil 装箱陷阱（Important）**：`NewK8sBuildLogStreamer` 原返 `*K8sBuildLogStreamer`，cs nil 时 `(*T)(nil)` 装箱为非 nil 接口 → handler `h.logStreamer != nil` 误判 → 降级分支不触发，非集群部署前端等 30s 才收到「Pod 未就绪」而非「非集群部署」。改返 `BuildLogStreamer` 接口，cs nil 时返真 nil 接口（与第 4 轮 admin dataservice restarter typed-nil 同类陷阱，Go 接口装箱语义）。
 - **pipeline Retry deploy 必失败（Important）**：`execDeploy`/`execBuild` 用 `sr.Input = map{...}` 整覆盖 Input，丢初始解析参数（envId/buildArgs/branchOverride）。deploy 在 PollWorkloadReady 失败后 run failed，Retry 不重置 Input → 重新执行 execDeploy 时 envId 为空 → fail-fast「deploy stage 缺 envId 参数」。改**合并而非覆盖**：保留初始 Input 供 retry，追加运行时产物（imageId 供 priorBuild 链/前端、buildRunId 供前端拉日志），releaseId 走 Output。补 `TestEngineRetryDeployAfterPollFail` 回归（fakeReleaser 加 pollErr 字段）。
 - **configcenter CreateNamespace 悬挂引用（Important）**：POST namespace 不校验 ServiceID 归属，可创建指向不存在/已删/跨租户 serviceID 的脏数据。加 `ServiceLookup` 接口（依赖倒置，避免 configcenter→governance import），handler CreateNamespace 时校验非空 ServiceID 存在+属本租户，cmd/core `ccServiceLookup` 桥接 `governance.GetService`（按 ctx tenant 过滤，跨租户/不存在返 false 不泄漏）。补 `TestCreateNamespaceRejectsDanglingServiceID`。
-- **Minor（记录留后）**：① pipeline store_pg「租户自定义需 ctx 租户匹配」注释措辞误导 super_admin 跨租户语义（实际 super_admin 不跨租户管自定义模板，设计选择）；② governance UpdateRoute PUT 全字段绑定 bool 覆盖（部分更新模式会误清，文档化 PUT 全量替换语义）；③ SSE 读循环无显式 ctx.Done 分支（依赖 client-go Stream ctx 取消，健壮性 Minor）；④ PipelineRunView readyState 判定冗余。
+- **Minor（第 18 轮已修）**：① pipeline store_pg「租户自定义需 ctx 租户匹配」注释措辞误导 super_admin 跨租户语义 -> 改明确「super_admin 亦不跨租户管租户自定义（资源运维在租户内）」；② governance UpdateRoute PUT 全字段绑定 -> 加方法头注释文档化混合语义（必填字段非空才覆盖防误清，可清空字段直接覆盖）；③ SSE 读循环无显式 ctx.Done 分支 -> 加 `ctx.Err()!=nil` 区分「客户端断连静默退出」与「流正常结束发 end」；④ PipelineRunView readyState 判定冗余 -> 移除，error 统一走 close+降级提示。
 - **确认无问题项**：builtin 模板双重保护（memory 显式拒 + PG WHERE builtin=false 兜底）✓；POST/PUT 强制 Builtin=false 防伪造 ✓；4 admin 端点 super_admin 守卫全挂载 ✓；Route.Host/Namespace.ServiceID SQL 列序严格对齐 ✓；migration 幂等（ADD COLUMN IF NOT EXISTS）✓；多租户隔离全路径 tenant_id 过滤 ✓；OpenAPI 全登记 ✓；{data:T} 契约统一 ✓；SSE 越权（本租户校验）/ctx 传播/defer close/EventSource 生命周期/SSE 缓冲（X-Accel-Buffering:no + Flusher）全正确。
+
+
+### 深度检测第 18 轮（builtin 模板版本升级 + 第 17 轮 Minor 收口，2026-08-09）
+
+承接第 17 轮留后续，补齐 dogfooding 暴露的 builtin 模板升级机制（生产升级路径实质缺口）+ 收口 4 个 Minor：
+
+- **builtin 模板版本升级机制（Important）**：第 17 轮 dogfooding 暴露「`BuiltinTemplates()` 改了但 PG seed 幂等不覆盖已有记录」，此前每次改 builtin 要手写 migration UPDATE 补救（如 0020）。修复：
+  - `PipelineTemplate.Version int` 字段（破坏性改动 +1）；`BuiltinTemplates()` tpl-ci/tpl-cd 标 `Version:1`。
+  - `TemplateRepository.ReplaceBuiltinTemplate(ctx, t)` 接口方法（平台级 seed 专用，UPDATE WHERE builtin=true 绕过 builtin 拒改保护，仅覆盖 stages/name/description/version，不动 kind/tenant_id）；memory + pg 双实现。
+  - `SeedTemplates` 版本比对：CreateTemplate 返 ErrTemplateExists 时 GetTemplate 比对，代码 Version > DB Version 则 ReplaceBuiltinTemplate 覆盖；同 Version 不动。
+  - `GetTemplate` 放宽：无租户 ctx（平台级 seed）仅可访问平台预置（`tenant.TenantFrom` 取 tid，tid="" 时 SQL `tenant_id IS NULL` 只匹配平台预置，租户自定义 NotFound 不泄漏）；memory + pg 同步。此前 tenantOrErr 硬拦截致 seed 升级路径 GetTemplate 永失败 -> 版本升级永不触发（被 continue 吃掉）。
+  - migration 0025：`ADD COLUMN version INT NOT NULL DEFAULT 0` + `UPDATE WHERE builtin=true AND version=0 SET version=1`（存量 builtin 回填为 1，与代码 Version=1 对齐，启动不误覆盖）。
+  - 测试：`TestSeedTemplatesUpgradesBuiltinOnVersionBump`（旧 v0 -> 代码 v1 覆盖 stages/name/description/version）+ `TestSeedTemplatesSameVersionNoOverwrite`（同 v1 不动）。下次破坏性改 builtin 只需 `Version: 2`，启动自动覆盖。
+- **第 17 轮 Minor 收口（4 项）**：① pipeline store_pg `UpdateTemplate` 注释改明确「super_admin 亦不跨租户管租户自定义（资源运维在租户内，GetTemplate 已过滤跨租户 NotFound 不泄漏）」；② governance `UpdateRoute` 加方法头注释文档化混合语义（必填字段 Path/ServiceID/Methods 非空才覆盖防误清，可清空字段 StripPath/Enabled/Host 直接覆盖允许清空）；③ devops SSE 读循环加 `ctx.Err()!=nil` 区分「客户端断连静默退出不发 end」与「流正常结束发 end」（避免对已断连连接 Write）；④ `PipelineRunView.vue` 移除 `readyState===CLOSED` 冗余判定，EventSource error 统一走 close+降级提示。
+- **abort 后 stage_runs 残留 running 修复（数据一致）**：`Engine.Abort` 原只标 run=aborted + cancel，不清理残留 StageRunning 的 stage_runs -> run=aborted 但某 stage=running 数据不一致。加 `StageAborted` 常量 + Abort 时遍历 stage_runs 把 StageRunning 标 StageAborted + FinishedAt（已终态 stage 不动）+ 前端 `stageStatusType`/`stageIcon` 加 aborted case（info/⏹）。补 `TestAbortClearsRunningStage` 回归。
+- **构建验证**：`go test ./...` 全绿（含 2 新测试）+ 三套 `pnpm build` 通过。
 
 
 ### DevOps 发布体验改造（指挥台 + 发布流水线 + 一键发布，2026-08-06）
@@ -546,8 +562,8 @@ DevOps 中心从「只读监控大屏」升级为「CI/CD 指挥台」，补齐�
   - **实时日志**：`StageRun.Log` 字段（engine 各 stage `logf(sr, fmt, args...)` append 关键事件：构建提交/部署 env×lane/Workload 就绪/探活/打 tag/合并）；build 全量日志走独立 `GET /api/buildruns/{id}`（不重复存 StageRun.Log 避免膨胀）。前端 stage 卡片可展开日志区。PG migration 0022（releases lane_id/source_run_id + images version + stage_runs log）。
   - **Releaser 接口扩展**（`pipeline_adapters.go`）：`Deploy(ctx, appID, envID, lane, imageID, sourceRunID) (Release, domain, err)` 找/建基线 Workload + UpdateImage + 产部署记录；`Publish(ctx, appID, imageID, version, commit) (tagSha, err)` 打 tag + Image.Version；`SetVersion(releaseIDs [], version)` 批量回填；`MarkSourceRun(id, runID)` 部署记录追溯。PromoteRelease 隐式走基线 lane（CreateRelease 空 lane 兜底 LaneDefault）。
   - **dogfooding 验证（2026-08-09 paas-shop CI 端到端）**：build（k8s 真实构建产 digest）→ deploy（PollWorkloadReady 读实时 Ready，Workload 就绪 + domain）闭环成功，logf 日志完整透传 env/lane/Workload/domain，lane=main（`{{run.branch}}` 解析）+ 无 release stage（测试不打版本）全过。**dogfooding 暴露并修复 4 个既有数据面 bug**（均 L1 首次新建 lane Workload + 从头建 Deployment 才暴露，之前 default lane Workload 已存在未触发）：①`builder.Result` 不回传 Registry（Build 值传递修改副本，store 用 RegistryOrDefault(p) 拿默认 registry.paas.local）→ Image.Registry 与实际 push 不一致，commit 541c0f8 加 Result.Registry 回传；②Image.Registry 缺 repo 段（reconciler 拼 `<registry>:<tag>` 缺 `/appID` 致 InvalidImageName）→ store 拼 `res.Registry + "/" + p.AppID`（与 seed `registry.paas.local/app-cs` + ImageRef 对齐）；③PollWorkloadReady 读 PG Repository Ready（反向同步留后续）永远 0 → 注入 workload.StatusReader 用 FillStatus 读 K8s 实时 Deployment readyReplicas（commit d5d435c）；④FillStatus 值语义 bug（`FillStatus([]Workload{wl})` 传含 wl 副本的 slice，原地改 slice 元素不影响外层 wl）→ `wls:=[]Workload{wl}; FillStatus(wls); wl=wls[0]` 读回（commit eb74b30）。test 探活失败归 paas-shop 应用配置（Workload port=0 无 Service + tpl-ci test path=/livez vs 应用 /healthz 不匹配），非 L1 代码缺陷。
-  - **builtin 模板升级不传播**（留后续）：`BuiltinTemplates()` 改了但 PG seed 幂等不覆盖已有记录 → 已部署 PG 的 tpl-ci/tpl-cd 仍旧版（dogfooding 需手动 DELETE + restart reseed）。生产升级路径需补「builtin 模板版本号 + 升级覆盖」机制。
-- **留后续**：abort 后 stage_runs 残留 running 数据不一致（非功能 bug）；内存路径 `PollWorkloadReady` 必超时（dev trade-off，仅 K8s 可端到端 CD 闭环）；webhook/cron 触发器（现 manual）；租户自定义模板编辑器（现从 builtin 复制）；promote 跨级跳迁；流水线运行历史分页；Vendor 改配置后存量 binding 自动同步；**L2 泳道联调**（数据面染色降级 + 跨泳道服务发现，独立 spec）；build 日志流式追加（现首次展开拉取缓存，不随构建进度刷新）；release stage 独立「版本发布记录」实体（含 changelog/artifacts，现用 Image.Version + PipelineRun.version + git tag 表达）。
+  - **builtin 模板版本升级机制（第 18 轮已实现）**：`PipelineTemplate.Version` 字段 + `ReplaceBuiltinTemplate` 接口方法（平台级 seed 专用，绕过 builtin 拒改保护）+ `SeedTemplates` 版本比对（代码 Version > DB Version 时覆盖 stages/name/description/version）+ `GetTemplate` 放宽无租户 ctx 仅访问平台预置（seed 升级路径）+ migration 0025（version 列 + 存量 builtin 回填 1）。下次破坏性改 builtin 只需 `Version: 2`，启动自动覆盖，无需手写 migration UPDATE（0020 那种补救方式退役）。
+- **留后续**：内存路径 `PollWorkloadReady` 必超时（dev trade-off，仅 K8s 可端到端 CD 闭环）；webhook/cron 触发器（现 manual）；租户自定义模板编辑器（现从 builtin 复制）；promote 跨级跳迁；流水线运行历史分页；Vendor 改配置后存量 binding 自动同步；**L2 泳道联调**（数据面染色降级 + 跨泳道服务发现，独立 spec）；build 日志流式追加（现首次展开拉取缓存，不随构建进度刷新）；release stage 独立「版本发布记录」实体（含 changelog/artifacts，现用 Image.Version + PipelineRun.version + git tag 表达）。（abort 后 stage_runs 残留 running 已修，见第 18 轮。）
 
 ### DevOps CI/CD（代码->构建->镜像->发布->回滚）
 
@@ -771,7 +787,7 @@ internal/dataservice/  领域(DataService + 6 Kind 常量 + KindMeta 表单元�
 
 **Phase B 模板 CRUD（admin 后台）**：
 - **Repository 补全**：`TemplateRepository` 加 `UpdateTemplate/DeleteTemplate`（L1 已有 Builtin 字段/TenantID/migration 0018 builtin 列/seed Builtin=true，本期仅补 CRUD 缺口）。
-- **builtin 保护**：`ErrTemplateBuiltin` sentinel；builtin 模板（tpl-ci/tpl-cd）拒改删（防误改致新应用 OnAppCreate 默认 binding 漂移）。改 builtin 走代码发版。
+- **builtin 保护**：`ErrTemplateBuiltin` sentinel；builtin 模板（tpl-ci/tpl-cd）拒改删（防误改致新应用 OnAppCreate 默认 binding 漂移）。改 builtin 走代码发版 + `Version` 版本号升级覆盖（见下「builtin 模板版本升级机制」，第 18 轮）。
 - **admin 端点**：`/api/admin/pipeline-templates` CRUD（super_admin，`WithPlatformAdmin` 注入 `gateway.IsPlatformAdmin`）；POST 强制 `Builtin=false`（防伪造）；ErrTemplateBuiltin->409。OpenAPI 4 操作。
 - **console-admin 管理页**：`modules/pipeline-template/`（api.ts + List.vue + TemplateFormDrawer.vue），菜单「流水线模板」（推理服务分组）。**表单化 stage 编辑器**（每行 type select + name + params key-value 动态增删，与 PipelineDesigner 覆盖表单同款风格）；builtin 模板只读 + 锁提示。
 
@@ -781,7 +797,7 @@ internal/dataservice/  领域(DataService + 6 Kind 常量 + KindMeta 表单元�
 - **前端 EventSource 消费**（`PipelineRunView.vue`）：build stage 展开 + 运行中 -> `new EventSource('/api/buildruns/{bid}/logs/stream')` -> onmessage 逐行 append + 自动滚底；`event:end` 关流 + 拉终态全量（覆盖实时片段保证完整）；error 降级提示保留片段；折叠/切走/卸载 close 防泄漏（合并 watch runId 清缓存）。终态走 `getBuildRun` 全量。
 - **越权**：拉 Pod 日志前 `GetBuildRun` 校验 `TenantID == ctx tenant`，跨租户枚举 buildID 读他人构建日志 404 不泄漏（与 workload PodLogs 同语义）。
 - **非 k8s 模式降级**：mock/process 模式无 Pod 日志，端点返 503 event（前端降级提示）；process 模式构建中实时日志要 builder 边构建边写 buffer（大改，留后续）。
-- **留后续**：租户自定义模板（可视化编辑器 + 租户隔离）、builtin 模板版本号 + 升级覆盖机制（dogfooding 暴露的 seed 不覆盖问题）、process/mock 模式构建中实时日志、日志全文搜索/过滤、follow 流多副本/ingress 缓冲深度验证。
+- **留后续**：租户自定义模板（可视化编辑器 + 租户隔离）、process/mock 模式构建中实时日志、日志全文搜索/过滤、follow 流多副本/ingress 缓冲深度验证。（builtin 模板版本号 + 升级覆盖机制已实现，见流水线 deploy/release 章节「builtin 模板版本升级机制」。）
 
 ### 流水线运行详情独立页 + DevOps 中心闭环（2026-08-09）
 
