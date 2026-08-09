@@ -493,6 +493,17 @@ P1-P4 admin 跨租户管理代码 5 轮深度审查（每轮独立 agent 视角�
 
 验证：go test ./... -race 全绿（含回归测试 security TestAdminDeletePlatformSecret / billing TestAdminSetQuotaRejectsUnknownTenant / dataservice TestAdminItemMethodNotAllowed + environment TestAdminEnvironmentDetail）+ 前端 console-admin build 通过 + k8s e2e 全通过。
 
+### 深度检测第 17 轮（构建日志 SSE + 模板 CRUD + 治理契约两路审计，2026-08-09）
+
+两路 agent 深审近期改动（构建日志 SSE 资源泄漏 / 模板 CRUD + governance Route.Host + configcenter Namespace.ServiceID 契约），修 3 Important + 记录 4 Minor：
+
+- **typed-nil 装箱陷阱（Important）**：`NewK8sBuildLogStreamer` 原返 `*K8sBuildLogStreamer`，cs nil 时 `(*T)(nil)` 装箱为非 nil 接口 → handler `h.logStreamer != nil` 误判 → 降级分支不触发，非集群部署前端等 30s 才收到「Pod 未就绪」而非「非集群部署」。改返 `BuildLogStreamer` 接口，cs nil 时返真 nil 接口（与第 4 轮 admin dataservice restarter typed-nil 同类陷阱，Go 接口装箱语义）。
+- **pipeline Retry deploy 必失败（Important）**：`execDeploy`/`execBuild` 用 `sr.Input = map{...}` 整覆盖 Input，丢初始解析参数（envId/buildArgs/branchOverride）。deploy 在 PollWorkloadReady 失败后 run failed，Retry 不重置 Input → 重新执行 execDeploy 时 envId 为空 → fail-fast「deploy stage 缺 envId 参数」。改**合并而非覆盖**：保留初始 Input 供 retry，追加运行时产物（imageId 供 priorBuild 链/前端、buildRunId 供前端拉日志），releaseId 走 Output。补 `TestEngineRetryDeployAfterPollFail` 回归（fakeReleaser 加 pollErr 字段）。
+- **configcenter CreateNamespace 悬挂引用（Important）**：POST namespace 不校验 ServiceID 归属，可创建指向不存在/已删/跨租户 serviceID 的脏数据。加 `ServiceLookup` 接口（依赖倒置，避免 configcenter→governance import），handler CreateNamespace 时校验非空 ServiceID 存在+属本租户，cmd/core `ccServiceLookup` 桥接 `governance.GetService`（按 ctx tenant 过滤，跨租户/不存在返 false 不泄漏）。补 `TestCreateNamespaceRejectsDanglingServiceID`。
+- **Minor（记录留后）**：① pipeline store_pg「租户自定义需 ctx 租户匹配」注释措辞误导 super_admin 跨租户语义（实际 super_admin 不跨租户管自定义模板，设计选择）；② governance UpdateRoute PUT 全字段绑定 bool 覆盖（部分更新模式会误清，文档化 PUT 全量替换语义）；③ SSE 读循环无显式 ctx.Done 分支（依赖 client-go Stream ctx 取消，健壮性 Minor）；④ PipelineRunView readyState 判定冗余。
+- **确认无问题项**：builtin 模板双重保护（memory 显式拒 + PG WHERE builtin=false 兜底）✓；POST/PUT 强制 Builtin=false 防伪造 ✓；4 admin 端点 super_admin 守卫全挂载 ✓；Route.Host/Namespace.ServiceID SQL 列序严格对齐 ✓；migration 幂等（ADD COLUMN IF NOT EXISTS）✓；多租户隔离全路径 tenant_id 过滤 ✓；OpenAPI 全登记 ✓；{data:T} 契约统一 ✓；SSE 越权（本租户校验）/ctx 传播/defer close/EventSource 生命周期/SSE 缓冲（X-Accel-Buffering:no + Flusher）全正确。
+
+
 ### DevOps 发布体验改造（指挥台 + 发布流水线 + 一键发布，2026-08-06）
 
 DevOps 中心从「只读监控大屏」升级为「CI/CD 指挥台」，补齐发布流水线逐级提升，发布点击数从 6+ 降到 2：
@@ -771,6 +782,16 @@ internal/dataservice/  领域(DataService + 6 Kind 常量 + KindMeta 表单元�
 - **越权**：拉 Pod 日志前 `GetBuildRun` 校验 `TenantID == ctx tenant`，跨租户枚举 buildID 读他人构建日志 404 不泄漏（与 workload PodLogs 同语义）。
 - **非 k8s 模式降级**：mock/process 模式无 Pod 日志，端点返 503 event（前端降级提示）；process 模式构建中实时日志要 builder 边构建边写 buffer（大改，留后续）。
 - **留后续**：租户自定义模板（可视化编辑器 + 租户隔离）、builtin 模板版本号 + 升级覆盖机制（dogfooding 暴露的 seed 不覆盖问题）、process/mock 模式构建中实时日志、日志全文搜索/过滤、follow 流多副本/ingress 缓冲深度验证。
+
+### 流水线运行详情独立页 + DevOps 中心闭环（2026-08-09）
+
+承接流水线完善，解决用户反馈的产品设计缺陷（操作不闭环、入口错乱、菜单分组错）：
+
+- **运行详情独立页（GitHub Actions 式）**：新增路由 `/devops/runs/:runId` → `PipelineRunPage.vue` 全屏渲染 `PipelineRunView`（stage 时间线 + 节点日志 + build SSE 实时流），页面壳负责返回导航 + 应用归属（fetchAuth 拉应用名）。`PipelineRunView` 单一真源复用（DRY，应用详情抽屉 + 独立页同源）。此前运行详情只能在应用详情抽屉看，无独立路由，DevOps 中心运行记录点不进去。
+- **DevOps 中心闭环**：默认 tab 从「流水线（旧 promote 矩阵）」改为「运行记录」（新 pipeline 引擎）；运行记录行加「查看详情」→ `/devops/runs/:id`（此前只跳应用列表，断链）；旧 promote 矩阵 tab 改名「发布提升」（区分「流水线运行」与「环境逐级晋升」两概念，避免混淆）。
+- **触发即跳转**：`AppPipelines.vue` 触发流水线成功后 `router.push('/devops/runs/' + runId)` 看实时进度（不再留在原地）。
+- **菜单分组修正**（console-admin）：流水线模板从「推理服务」移到「资源总览 → DevOps 链路」（与构建/镜像/发布并列），流水线是 DevOps 概念非推理服务；图标 Files（撞应用）→ Stopwatch（全局唯一）；mock menu.ts 同步补 pipeline-template（保持 dev 与生产零漂移）。
+
 
 ### 服务治理完善：网关对外域名 + 服务配置中心关联（2026-08-09）
 
