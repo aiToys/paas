@@ -21,8 +21,11 @@ export interface StageDef {
 }
 
 export interface PipelineTrigger {
-  type?: string // 'manual' | 'webhook' | 'cron'（webhook/cron 留 Plan 3）
-  branch?: string
+  type?: string // 'manual' | 'webhook'
+  branch?: string // webhook: 分支 glob（如 'main' 或 'feature-*'；空=全部）
+  events?: string[]
+  token?: string // webhook: URL token（get 返回明文，list 清空）
+  schedule?: string
 }
 
 export interface Pipeline {

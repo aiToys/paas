@@ -25,6 +25,9 @@ type Repository interface {
 	CreatePipeline(ctx context.Context, p Pipeline) (Pipeline, error)
 	UpdatePipeline(ctx context.Context, p Pipeline) (Pipeline, error)
 	DeletePipeline(ctx context.Context, id string) error
+	// GetPipelineAny 跨租户按 ID 查 pipeline（webhook 触发路径用：webhook 无 tenant ctx，
+	// token 鉴权提供安全性；token 校验在 handler 层，此方法仅按 ID 取，不做 tenant 过滤）。
+	GetPipelineAny(ctx context.Context, id string) (Pipeline, error)
 }
 
 // RunRepository PipelineRun 读写（engine 推进主要调 UpdateRun 写回 StageRuns）。

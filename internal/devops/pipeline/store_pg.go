@@ -127,6 +127,29 @@ func (s *pgStore) GetPipeline(ctx context.Context, id string) (Pipeline, error) 
 	return p, nil
 }
 
+// GetPipelineAny 跨租户按 ID 查（webhook 触发用，无 tenant 过滤；token 鉴权在 handler 层）。
+func (s *pgStore) GetPipelineAny(ctx context.Context, id string) (Pipeline, error) {
+	var p Pipeline
+	var overridesB, trigB []byte
+	err := s.db.QueryRow(ctx,
+		`SELECT `+pipeCols+` FROM pipelines WHERE id=$1`, id).
+		Scan(&p.ID, &p.TenantID, &p.AppID, &p.Name, &p.Kind, &p.TemplateID,
+			&overridesB, &trigB, &p.Disabled, &p.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Pipeline{}, ErrPipelineNotFound
+		}
+		return Pipeline{}, err
+	}
+	if len(overridesB) > 0 {
+		_ = json.Unmarshal(overridesB, &p.ParamOverrides)
+	}
+	if len(trigB) > 0 {
+		_ = json.Unmarshal(trigB, &p.Trigger)
+	}
+	return p, nil
+}
+
 // CreatePipeline 创建。同 (tenant,app,name) 唯一；ID 冲突 → ErrPipelineExists。
 func (s *pgStore) CreatePipeline(ctx context.Context, in Pipeline) (Pipeline, error) {
 	tid, err := tenantOrErr(ctx)

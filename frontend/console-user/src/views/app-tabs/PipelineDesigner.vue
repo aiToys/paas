@@ -18,9 +18,20 @@ const pipeline = ref<Pipeline | null>(null)
 const template = ref<PipelineTemplate | null>(null)
 const overrides = ref<Record<string, unknown>>({})
 const saving = ref(false)
+// 触发配置（本地编辑，save 时写回 pipeline.trigger）
+const triggerType = ref<string>('manual')
+const triggerBranch = ref<string>('')
 
 const stages = computed<StageDef[]>(() => template.value?.stages ?? [])
 const templateName = computed(() => template.value?.name ?? pipeline.value?.templateId ?? '-')
+
+// webhook URL（baseURL + /api/webhooks/pipeline/{pid}?token=<token>）；token 来自 get 响应（同租户可见）
+const webhookUrl = computed(() => {
+  if (triggerType.value !== 'webhook' || !pipeline.value) return ''
+  const token = pipeline.value.trigger?.token ?? ''
+  if (!token) return ''
+  return `${window.location.origin}/api/webhooks/pipeline/${props.pid}?token=${token}`
+})
 
 async function load() {
   try {
@@ -28,6 +39,8 @@ async function load() {
     pipeline.value = p
     template.value = tpls.find((t) => t.id === p.templateId) ?? null
     overrides.value = { ...(p.paramOverrides ?? {}) }
+    triggerType.value = p.trigger?.type ?? 'manual'
+    triggerBranch.value = p.trigger?.branch ?? ''
   } catch (e: any) {
     ElMessage.error(e?.message || '加载失败')
   }
@@ -93,13 +106,32 @@ async function save() {
   if (!pipeline.value) return
   saving.value = true
   try {
-    await updatePipeline(props.appId, props.pid, { ...pipeline.value, paramOverrides: { ...overrides.value } })
-    ElMessage.success('已保存参数覆盖')
+    // trigger：webhook 带 branch glob；manual 无需 token（后端清）。token 不传，后端保留原/生成新。
+    const trigger = triggerType.value === 'webhook'
+      ? { type: 'webhook', branch: triggerBranch.value.trim() }
+      : { type: 'manual' }
+    const updated = await updatePipeline(props.appId, props.pid, {
+      ...pipeline.value,
+      paramOverrides: { ...overrides.value },
+      trigger,
+    })
+    pipeline.value = updated // 更新含 token（webhook 时展示 URL）
+    ElMessage.success('已保存')
     emit('saved')
   } catch (e: any) {
     ElMessage.error(e?.message || '保存失败')
   } finally {
     saving.value = false
+  }
+}
+
+async function copyWebhookUrl() {
+  if (!webhookUrl.value) return
+  try {
+    await navigator.clipboard.writeText(webhookUrl.value)
+    ElMessage.success('已复制 webhook URL（含 token，请妥善保管）')
+  } catch {
+    ElMessage.warning('复制失败，请手动选择复制')
   }
 }
 
@@ -121,6 +153,29 @@ onMounted(load)
           <el-tag size="small" type="info" effect="plain">{{ s.type }}</el-tag>
         </span>
       </div>
+    </div>
+
+    <!-- 触发配置 -->
+    <div class="section">
+      <div class="section-title">触发方式</div>
+      <el-radio-group v-model="triggerType">
+        <el-radio value="manual">手动触发</el-radio>
+        <el-radio value="webhook">Webhook 自动触发（Git push）</el-radio>
+      </el-radio-group>
+      <template v-if="triggerType === 'webhook'">
+        <div class="override-label" style="margin-top: 12px;">分支匹配（glob，留空=全部分支）</div>
+        <el-input v-model="triggerBranch" placeholder="如 main 或 feature-*（留空匹配全部）" clearable style="max-width: 360px;" />
+        <div class="override-hint">push 到匹配分支时自动触发；不匹配的分支静默忽略。</div>
+        <div v-if="webhookUrl" class="webhook-url-box">
+          <div class="override-label">Webhook URL（在 Gitea/GitLab 仓库 Webhooks 配置粘贴，Content-Type: application/json）</div>
+          <el-input :model-value="webhookUrl" readonly type="textarea" :rows="2" />
+          <el-button size="small" type="primary" plain @click="copyWebhookUrl" style="margin-top: 6px;">复制 URL（含 token）</el-button>
+          <div class="override-hint">token 用于鉴权，请妥善保管。保存后此处展示完整 URL（同租户可见）。</div>
+        </div>
+        <el-alert v-else type="warning" :closable="false" style="margin-top: 8px;">
+          保存后生成 webhook URL（首次切到 webhook 会自动生成 token）。
+        </el-alert>
+      </template>
     </div>
 
     <!-- 参数覆盖表单 -->
@@ -206,5 +261,6 @@ onMounted(load)
 .buildarg-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
 .override-label { font-size: 13px; margin-bottom: 6px; color: var(--el-text-color-regular); }
 .override-hint { font-size: 12px; color: var(--el-text-color-secondary); margin-top: 4px; }
+.webhook-url-box { margin-top: 12px; padding: 12px; background: var(--el-fill-color-light); border-radius: 6px; }
 .footer { margin-top: 24px; text-align: right; }
 </style>

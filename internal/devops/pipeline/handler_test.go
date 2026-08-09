@@ -622,3 +622,103 @@ func TestAdminTemplateCRUD(t *testing.T) {
 		t.Fatalf("admin delete 期望 200，got %d", rec.Code)
 	}
 }
+
+// TestPipelineWebhookTrigger 验证 webhook 触发器：创建生成 token、get 清空 token、
+// webhook 端点正确 token+push 触发 run、错误 token 401、不匹配分支静默忽略。
+func TestPipelineWebhookTrigger(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := acmeCtxEngine()
+	// 自定义模板（无占位符，避免 paramResolver 依赖）
+	_, _ = s.CreateTemplate(ctx, PipelineTemplate{
+		ID: "tpl-wh", Name: "WH测试", Kind: KindCI,
+		Stages: []StageDef{{Name: "构建", Type: StageBuild}},
+	})
+	h := NewHandler(s, s, s, nil)
+	h.Authorize = allowAll
+
+	// 创建 webhook pipeline（应自动生成 token）
+	req := acmeReq(http.MethodPost, "/api/applications/app-wh/pipelines",
+		`{"name":"p-wh","kind":"ci","templateId":"tpl-wh","trigger":{"type":"webhook","branch":"main"}}`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("创建期望 201，got %d body %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data Pipeline `json:"data"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	pid := resp.Data.ID
+	token := resp.Data.Trigger.Token
+	if token == "" {
+		t.Fatal("webhook pipeline 应自动生成 token")
+	}
+
+	// get 返回 token（同租户可见，designer 展示 webhook URL 配 Gitea 用）
+	req = acmeReq(http.MethodGet, "/api/applications/app-wh/pipelines/"+pid, "")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	var get1 struct {
+		Data Pipeline `json:"data"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &get1)
+	if get1.Data.Trigger.Token == "" {
+		t.Fatal("get pipeline 应返回 trigger token（同租户可见）")
+	}
+
+	// webhook 触发：正确 token + Gitea push event（无 tenant ctx，模拟外部 webhook 调用）
+	pushBody := `{"ref":"refs/heads/main","after":"abc123"}`
+	req = httptest.NewRequest(http.MethodPost, "/api/webhooks/pipeline/"+pid+"?token="+token, strings.NewReader(pushBody))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("webhook 触发期望 200，got %d body %s", rec.Code, rec.Body.String())
+	}
+	runs, _ := s.ListRuns(ctx, "", pid, "")
+	if len(runs) != 1 {
+		t.Fatalf("期望 1 个 run，got %d", len(runs))
+	}
+	if runs[0].Trigger != TriggerWebhook {
+		t.Errorf("run trigger 期望 webhook，got %s", runs[0].Trigger)
+	}
+	if runs[0].Branch != "main" || runs[0].Commit != "abc123" {
+		t.Errorf("run branch/commit 错: %s/%s", runs[0].Branch, runs[0].Commit)
+	}
+
+	// 错误 token -> 401
+	req = httptest.NewRequest(http.MethodPost, "/api/webhooks/pipeline/"+pid+"?token=wrong", strings.NewReader(pushBody))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("错误 token 期望 401，got %d", rec.Code)
+	}
+
+	// 不匹配分支（Trigger.Branch=main，push other）-> 200 但不触发额外 run
+	req = httptest.NewRequest(http.MethodPost, "/api/webhooks/pipeline/"+pid+"?token="+token,
+		strings.NewReader(`{"ref":"refs/heads/other","after":"d"}`))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("不匹配分支期望 200，got %d", rec.Code)
+	}
+	runs2, _ := s.ListRuns(ctx, "", pid, "")
+	if len(runs2) != 1 {
+		t.Errorf("不匹配分支不应触发，期望仍 1 run，got %d", len(runs2))
+	}
+
+	// 非 webhook 类型 pipeline 的 webhook 端点 -> 400
+	req2 := acmeReq(http.MethodPost, "/api/applications/app-wh2/pipelines",
+		`{"name":"p-manual","kind":"ci","templateId":"tpl-wh","trigger":{"type":"manual"}}`)
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	var resp2 struct {
+		Data Pipeline `json:"data"`
+	}
+	json.Unmarshal(rec2.Body.Bytes(), &resp2)
+	req = httptest.NewRequest(http.MethodPost, "/api/webhooks/pipeline/"+resp2.Data.ID+"?token=x", strings.NewReader(pushBody))
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("非 webhook pipeline 触发期望 400，got %d", rec.Code)
+	}
+}

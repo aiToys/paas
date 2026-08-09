@@ -12,10 +12,14 @@ package pipeline
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 
@@ -155,11 +159,29 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveTemplates(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/pipelineruns"):
 		h.serveRuns(w, r) // Task 12
+	case strings.HasPrefix(r.URL.Path, "/api/webhooks/pipeline/"):
+		h.serveWebhook(w, r) // webhook 触发（token 鉴权，无 auth 中间件）
 	case strings.HasPrefix(r.URL.Path, "/api/applications/"):
 		h.serveAppPipelines(w, r)
 	default:
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
+}
+
+// serveWebhook 处理 POST /api/webhooks/pipeline/{pid}?token=<Token>（Gitea push event）。
+// 无 auth 中间件（token 鉴权）；不挂 /docs 公开契约（内部端点，webhook 源调）。
+func (h *Handler) serveWebhook(w http.ResponseWriter, r *http.Request) {
+	pid := strings.TrimPrefix(r.URL.Path, "/api/webhooks/pipeline/")
+	pid = strings.Trim(pid, "/")
+	if pid == "" || strings.Contains(pid, "/") {
+		httputil.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method != http.MethodPost {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	h.webhookTrigger(w, r, pid)
 }
 
 // serveAppPipelines 处理 /api/applications/{id}/pipelines[/{pid}]。
@@ -185,6 +207,9 @@ func (h *Handler) serveAppPipelines(w http.ResponseWriter, r *http.Request) {
 				httputil.WriteInternalError(w, err)
 				return
 			}
+			for i := range list {
+				list[i] = maskTrigger(list[i])
+			}
 			httputil.WriteData(w, list)
 		case http.MethodPost:
 			h.createPipeline(w, r, appID)
@@ -207,6 +232,7 @@ func (h *Handler) serveAppPipelines(w http.ResponseWriter, r *http.Request) {
 				httputil.WriteServiceError(w, toHTTPStatus(err), err)
 				return
 			}
+			// get 返回 token（同租户可见，designer 展示 webhook URL 配 Gitea 用；list 才 mask）
 			httputil.WriteData(w, p)
 		case http.MethodPut:
 			h.updatePipeline(w, r, appID, pid)
@@ -255,9 +281,19 @@ func (h *Handler) createPipeline(w http.ResponseWriter, r *http.Request, appID s
 		httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
+	// trigger type 校验（空默认 manual；cron 暂未实现 -> 400）
+	switch body.Trigger.Type {
+	case "", TriggerManual:
+		body.Trigger.Type = TriggerManual
+	case TriggerWebhook:
+		// webhook：normalize 时生成 token（若未提供）
+	default:
+		httputil.WriteError(w, http.StatusBadRequest, "unsupported trigger type（仅支持 manual/webhook）")
+		return
+	}
 	p := Pipeline{
 		AppID: appID, Name: body.Name, Kind: body.Kind, TemplateID: body.TemplateID,
-		ParamOverrides: body.ParamOverrides, Trigger: body.Trigger,
+		ParamOverrides: body.ParamOverrides, Trigger: normalizeTrigger(body.Trigger),
 	}
 	// 从模板创建：templateId 非空时校验存在 + 继承 Kind（stages 运行时解析，不复制）
 	if body.TemplateID != "" {
@@ -297,6 +333,22 @@ func (h *Handler) updatePipeline(w http.ResponseWriter, r *http.Request, appID, 
 	p.TenantID = existing.TenantID
 	p.AppID = appID
 	p.CreatedAt = existing.CreatedAt
+	// trigger type 校验 + token 保留（更新时前端不传 token -> 保留原 token，避免 webhook URL 失效）
+	switch p.Trigger.Type {
+	case "", TriggerManual:
+		p.Trigger.Type = TriggerManual
+		p.Trigger.Token = "" // manual 无需 token
+	case TriggerWebhook:
+		if p.Trigger.Token == "" {
+			p.Trigger.Token = existing.Trigger.Token // 保留原 token
+			if p.Trigger.Token == "" {
+				p.Trigger.Token = generateWebhookToken() // 原本也无（旧 pipeline），生成
+			}
+		}
+	default:
+		httputil.WriteError(w, http.StatusBadRequest, "unsupported trigger type（仅支持 manual/webhook）")
+		return
+	}
 	updated, err := h.pipes.UpdatePipeline(r.Context(), p)
 	if err != nil {
 		httputil.WriteServiceError(w, toHTTPStatus(err), err)
@@ -545,43 +597,151 @@ func (h *Handler) triggerRun(w http.ResponseWriter, r *http.Request, appID, pid 
 	if !h.allowProdFlow(w, r, resolved) {
 		return
 	}
-	// 单实例串行：已有 running/paused run 拒绝
-	active, err := h.runs.HasActiveRun(r.Context(), pid)
-	if err != nil {
-		httputil.WriteInternalError(w, err)
-		return
-	}
-	if active {
-		httputil.WriteServiceError(w, http.StatusConflict, ErrActiveRunExists)
-		return
-	}
-	// 解析 repoID（app 绑定的 internal CodeRepo；build stage 用）
-	repoID := ""
-	if h.repos != nil {
-		if rid, rerr := h.repos.ResolveInternalRepo(r.Context(), appID); rerr == nil {
-			repoID = rid
-		}
-	}
-	// 初始化 stage_runs（Input 存 resolved params，engine 用 sr.Input 取 stage.Params）
-	stageRuns := make([]StageRun, len(resolved))
-	for i, s := range resolved {
-		stageRuns[i] = StageRun{Index: i, Type: s.Type, Name: s.Name, Status: StagePending, Input: s.Params}
-	}
-	run := PipelineRun{
-		PipelineID: pid, AppID: appID, Branch: body.Branch, Commit: body.Commit,
-		RepoID: repoID, Version: body.Version, Trigger: "manual",
-		Status: RunRunning, CurrentStage: 0, StageRuns: stageRuns,
-	}
-	created, err := h.runs.CreateRun(r.Context(), run)
+	created, err := h.triggerRunInternal(r.Context(), appID, pid, resolved, body.Branch, body.Commit, body.Version, TriggerManual)
 	if err != nil {
 		httputil.WriteServiceError(w, toHTTPStatus(err), err)
 		return
 	}
 	h.recordAudit(r, "run", "pipeline_run", created.ID, fmt.Sprintf("pipeline=%s branch=%s", pid, body.Branch))
-	if h.engine != nil {
-		h.engine.Start(r.Context(), created.ID)
-	}
 	httputil.WriteDataCreated(w, created)
+}
+
+// triggerRunInternal 触发 run 核心：resolved stages -> 单实例校验 -> 创建 run + 启动 engine。
+// perm + prod:write 校验由调用方做（manual triggerRun 做；webhook 跳过，approve 门禁兜底 CD）。
+// 错误经 toHTTPStatus 映射：validateDeployEnvs 失败 -> 400，ErrActiveRunExists -> 409，NotFound -> 404。
+func (h *Handler) triggerRunInternal(ctx context.Context, appID, pid string, resolved []StageDef, branch, commit, version, trigger string) (PipelineRun, error) {
+	if msg := validateDeployEnvs(resolved); msg != "" {
+		return PipelineRun{}, errors.New(msg)
+	}
+	active, err := h.runs.HasActiveRun(ctx, pid)
+	if err != nil {
+		return PipelineRun{}, err
+	}
+	if active {
+		return PipelineRun{}, ErrActiveRunExists
+	}
+	repoID := ""
+	if h.repos != nil {
+		if rid, rerr := h.repos.ResolveInternalRepo(ctx, appID); rerr == nil {
+			repoID = rid
+		}
+	}
+	stageRuns := make([]StageRun, len(resolved))
+	for i, s := range resolved {
+		stageRuns[i] = StageRun{Index: i, Type: s.Type, Name: s.Name, Status: StagePending, Input: s.Params}
+	}
+	run := PipelineRun{
+		PipelineID: pid, AppID: appID, Branch: branch, Commit: commit,
+		RepoID: repoID, Version: version, Trigger: trigger,
+		Status: RunRunning, CurrentStage: 0, StageRuns: stageRuns,
+	}
+	created, err := h.runs.CreateRun(ctx, run)
+	if err != nil {
+		return PipelineRun{}, err
+	}
+	if h.engine != nil {
+		h.engine.Start(ctx, created.ID)
+	}
+	return created, nil
+}
+
+// webhookTrigger POST /api/webhooks/pipeline/{pid}?token=<Token>。
+// 接收 Gitea/GitHub push event，验证 token + 解析 branch/commit + 触发 run。
+// 无 auth 中间件（token 鉴权）；webhook 触发跳过 prod:write（CD pipeline 靠 approve 门禁兜底）。
+// 不匹配分支 glob 或非分支 push（tag）静默返 200（webhook 源不感知平台内部跳过）。
+func (h *Handler) webhookTrigger(w http.ResponseWriter, r *http.Request, pid string) {
+	ctx := r.Context()
+	// webhook 无 tenant ctx，跨租户按 ID 查 pipeline（token 鉴权提供安全性）
+	p, err := h.pipes.GetPipelineAny(ctx, pid)
+	if err != nil {
+		httputil.WriteError(w, http.StatusNotFound, "pipeline not found")
+		return
+	}
+	if p.Trigger.Type != TriggerWebhook {
+		httputil.WriteError(w, http.StatusBadRequest, "pipeline trigger is not webhook")
+		return
+	}
+	// token 常量时间比较（防时序枚举）；pipeline 未配 token 或请求无 token 拒
+	token := r.URL.Query().Get("token")
+	if p.Trigger.Token == "" || token == "" ||
+		subtle.ConstantTimeCompare([]byte(token), []byte(p.Trigger.Token)) != 1 {
+		httputil.WriteError(w, http.StatusUnauthorized, "invalid token")
+		return
+	}
+	// 解析 Gitea push event（ref/after；Gitea 与 GitHub 字段名一致）
+	var push struct {
+		Ref   string `json:"ref"`
+		After string `json:"after"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&push); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid push payload")
+		return
+	}
+	branch := strings.TrimPrefix(push.Ref, "refs/heads/")
+	if branch == push.Ref || branch == "" {
+		// 非分支引用（tag/PR 等），静默忽略（返 200 避免 webhook 源重试）
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	// 分支 glob 匹配（Trigger.Branch 空=全部分支）
+	if p.Trigger.Branch != "" && !globMatch(p.Trigger.Branch, branch) {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	// 派生 pipeline 租户 ctx（后续 GetTemplate/CreateRun 要求 tenant；webhook 触发归属 pipeline 租户）
+	wctx := tenant.WithTenant(ctx, p.TenantID)
+	// 解析模板 stages + 占位符（webhook branch 注入 {{run.branch}}）
+	tpl, terr := h.templates.GetTemplate(wctx, p.TemplateID)
+	if terr != nil {
+		httputil.WriteError(w, http.StatusNotFound, "pipeline template not found")
+		return
+	}
+	resolved, rerr := ResolveStages(wctx, tpl.Stages, p.ParamOverrides, h.paramResolver, p.AppID, branch)
+	if rerr != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "参数解析失败: "+rerr.Error())
+		return
+	}
+	created, err := h.triggerRunInternal(wctx, p.AppID, pid, resolved, branch, push.After, "", TriggerWebhook)
+	if err != nil {
+		httputil.WriteServiceError(w, toHTTPStatus(err), err)
+		return
+	}
+	// audit：webhook 无用户身份，actor="webhook"，tenant 取 pipeline 租户
+	h.recordAuditCtx(wctx, p.TenantID, "webhook", "run", "pipeline_run", created.ID, fmt.Sprintf("pipeline=%s branch=%s via webhook", pid, branch))
+	w.WriteHeader(http.StatusOK)
+}
+
+// generateWebhookToken 生成 32 字节随机 hex（webhook URL 鉴权 token）。
+func generateWebhookToken() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand failed: " + err.Error()) // 无熵优于弱 token
+	}
+	return hex.EncodeToString(b)
+}
+
+// normalizeTrigger 规范化触发配置：webhook 类型且无 token 时自动生成（创建/更新 pipeline 用）。
+func normalizeTrigger(t PipelineTrigger) PipelineTrigger {
+	if t.Type == TriggerWebhook && t.Token == "" {
+		t.Token = generateWebhookToken()
+	}
+	return t
+}
+
+// maskTrigger 清空 trigger token（get/list 返回前端时调用，防泄漏）。
+// create/update 响应保留 token（前端展示一次 webhook URL 后由用户保存）。
+func maskTrigger(p Pipeline) Pipeline {
+	if p.Trigger.Token != "" {
+		p.Trigger.Token = ""
+	}
+	return p
+}
+
+// globMatch 简单分支 glob 匹配（支持 * 通配，如 "feature-*" 匹配 "feature-x"）。
+// 用 path.Match（分支名无路径分隔符，等价于 shell glob）。
+func globMatch(pattern, name string) bool {
+	matched, err := path.Match(pattern, name)
+	return err == nil && matched
 }
 
 // validateDeployEnvs 校验每个 deploy stage 必须含 envId（fail-fast）。
@@ -677,5 +837,14 @@ func (h *Handler) recordAudit(r *http.Request, action, resourceType, resourceID,
 		actor = h.actorFn(r)
 	}
 	tid, _ := tenant.TenantFrom(r.Context())
-	_ = h.audit.Record(r.Context(), tid, actor, action, resourceType, resourceID, detail)
+	h.recordAuditCtx(r.Context(), tid, actor, action, resourceType, resourceID, detail)
+}
+
+// recordAuditCtx 记审计（ctx 版本，供 webhook 等无 *http.Request 的触发路径用）。
+// webhook 无用户身份，调用方传 actor="webhook" + pipeline 租户作 tid。
+func (h *Handler) recordAuditCtx(ctx context.Context, tid, actor, action, resourceType, resourceID, detail string) {
+	if h.audit == nil {
+		return
+	}
+	_ = h.audit.Record(ctx, tid, actor, action, resourceType, resourceID, detail)
 }

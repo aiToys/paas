@@ -92,14 +92,25 @@ type ParamDef struct {
 	Description string `json:"description,omitempty"`
 }
 
-// PipelineTrigger 流水线触发配置（Plan 1 只实现 manual；webhook/cron 占位 Plan 3）。
+// PipelineTrigger 流水线触发配置（manual / webhook / cron）。
 type PipelineTrigger struct {
-	Type     string   `json:"type"`              // manual|webhook|cron（Plan 1: manual）
-	Branch   string   `json:"branch,omitempty"`  // webhook: glob
-	Events   []string `json:"events,omitempty"`  // webhook: ["push"]
-	Token    string   `json:"-"`                 // webhook: URL token（不序列化前端）
-	Schedule string   `json:"schedule,omitempty"` // cron: 表达式
+	Type     string   `json:"type"`              // manual|webhook|cron
+	Branch   string   `json:"branch,omitempty"`  // webhook: 分支 glob（如 "main" 或 "feature-*"；空=全部分支）
+	Events   []string `json:"events,omitempty"`  // webhook: ["push"]（保留字段，当前仅处理 push）
+	Token    string   `json:"token,omitempty"`   // webhook: URL token（持久化供端点验证；get/list 时清空不返回前端）
+	Schedule string   `json:"schedule,omitempty"` // cron: 5 字段表达式（如 "0 2 * * *"）
 }
+
+// 触发类型常量。
+const (
+	TriggerManual  = "manual"
+	TriggerWebhook = "webhook"
+	TriggerCron    = "cron"
+)
+
+// WebhookPath 返回 pipeline 的 webhook 接收端点路径（不含 token；前端拼接 baseURL+token 展示）。
+// POST 此路径 + ?token=<Token> + Gitea push event body 触发 run。
+func WebhookPath(pid string) string { return "/api/webhooks/pipeline/" + pid }
 
 // PipelineTemplate 模板（平台预置 builtin + 租户自定义）。
 type PipelineTemplate struct {

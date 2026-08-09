@@ -73,6 +73,17 @@ func (s *memoryStore) GetPipeline(ctx context.Context, id string) (Pipeline, err
 	return clonePipeline(p), nil
 }
 
+// GetPipelineAny 跨租户按 ID 查（webhook 触发用，token 鉴权在 handler 层）。
+func (s *memoryStore) GetPipelineAny(ctx context.Context, id string) (Pipeline, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p, ok := s.pipes[id]
+	if !ok {
+		return Pipeline{}, ErrPipelineNotFound
+	}
+	return clonePipeline(p), nil
+}
+
 func (s *memoryStore) CreatePipeline(ctx context.Context, p Pipeline) (Pipeline, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {

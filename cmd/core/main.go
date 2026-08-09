@@ -668,6 +668,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	mux.Handle("/api/admin/pipeline-templates/", auth(pipelineHandler))
 	mux.Handle("/api/pipelineruns", auth(pipelineHandler))
 	mux.Handle("/api/pipelineruns/", auth(pipelineHandler))
+	// webhook 触发端点（无 auth 中间件，token 鉴权）：Gitea push event -> 触发 pipeline run。
+	// 用户在 Gitea 配 webhook URL = <baseURL>/api/webhooks/pipeline/<pid>?token=<token>。
+	mux.Handle("/api/webhooks/pipeline/", pipelineHandler)
 	// 镜像库实时视图（registry v2 catalog/tags），复用 devops handler 分发 + image:read 权限。
 	mux.Handle("/api/registry", auth(devopsHandler))
 	mux.Handle("/api/registry/", auth(devopsHandler))

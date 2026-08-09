@@ -520,6 +520,21 @@ P1-P4 admin 跨租户管理代码 5 轮深度审查（每轮独立 agent 视角�
 - **构建验证**：`go test ./...` 全绿（含 2 新测试）+ 三套 `pnpm build` 通过。
 
 
+### 流水线 webhook 触发器（Git push 自动触发，2026-08-10）
+
+承接「流水线功能完整」（总体目标），补齐触发器最大缺口：此前仅 manual（UI 点触发），生产需 Git push 自动触发构建。设计参考 Gitea/GitHub webhooks（push event -> 触发 CI）。
+
+- **PipelineTrigger 落地**：`Token` 字段 `json:"token,omitempty"`（持久化到 trigger JSONB 列，存量列复用无需 migration）；触发类型常量 `TriggerManual/Webhook`（cron 留后续，type 校验拒）；`WebhookPath(pid)` helper。
+- **token 生成 + 安全**：createPipeline/updatePipeline 调 `normalizeTrigger`（webhook type 无 token 时 `crypto/rand` 生成 32 字节 hex）；update 时前端不传 token -> 保留原 token（避免每次保存重置致 webhook URL 失效）；token 用 `subtle.ConstantTimeCompare` 常量时间比较（防时序枚举）。get 返回明文 token（同租户可见，designer 展示 webhook URL 配 Gitea）；list 清空 token（`maskTrigger`，列表概览不需要）。
+- **webhook 端点**（`POST /api/webhooks/pipeline/{pid}?token=<Token>`，**无 auth 中间件**，token 鉴权）：接收 Gitea/GitHub push event（`ref`/`after`），解析 branch（`refs/heads/` 前缀）+ commit sha；非分支引用（tag/PR）静默返 200（避免 webhook 源重试）；分支 glob 匹配（`path.Match`，`Trigger.Branch` 空=全部）；`GetPipelineAny`（Repository 新增方法，跨租户按 ID 查，webhook 无 tenant ctx）+ 派生 pipeline 租户 ctx（后续 GetTemplate/CreateRun 要求 tenant）；触发 run（`TriggerWebhook`）。
+- **触发逻辑复用（DRY）**：抽 `triggerRunInternal(ctx, appID, pid, resolved, branch, commit, version, trigger)` —— manual/webhook 共用核心（validateDeployEnvs + 单实例串行 + CreateRun + engine.Start）；manual 路径额外 perm + prod:write 校验（调 triggerRunInternal 前），webhook 跳过 prod:write（CD pipeline 靠 approve 门禁兜底）。
+- **审计**：webhook 无用户身份，`recordAuditCtx`（ctx 版本，webhook 专用）actor="webhook" + pipeline 租户作 tid（adapter 对空 tenant 兜底归 platform）。
+- **路由 + cmd/core**：`mux.Handle("/api/webhooks/pipeline/", pipelineHandler)`（无 auth 包装）；不登记 OpenAPI 公开契约（webhook 是接收端点，URL 在 pipeline 响应返回，非用户 curl 调）。
+- **前端**（`PipelineDesigner.vue`）：加「触发方式」section（manual/webhook radio + 分支 glob 输入）；webhook type 时展示完整 webhook URL（baseURL+token，可复制）+ Gitea 配置指引（Content-Type: application/json）；save 时 trigger 写回。创建默认 manual，designer 改 webhook（首次切自动生成 token）。
+- **测试**：`TestPipelineWebhookTrigger`（创建生成 token + get 返回 token + list 清空 + 正确 token 触发 run + 错误 token 401 + 不匹配分支静默 + 非 webhook pipeline 400）。
+- **留后续**：Gitea webhook 自动注册（创建 pipeline 时调 Gitea API 注册 webhook，免用户手动配 URL）、cron 定时触发（scheduler）、webhook secret 轮转、push event 富解析（commits message 触发 skip ci）。
+
+
 ### DevOps 发布体验改造（指挥台 + 发布流水线 + 一键发布，2026-08-06）
 
 DevOps 中心从「只读监控大屏」升级为「CI/CD 指挥台」，补齐发布流水线逐级提升，发布点击数从 6+ 降到 2：
