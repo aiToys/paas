@@ -194,3 +194,58 @@ func TestHandlerInstanceDeleteCrossService(t *testing.T) {
 		t.Fatalf("跨服务注销应 404，got %d", w.Code)
 	}
 }
+
+// TestHandlerInstanceLaneFilter 验证服务详情按 lane 过滤（L2 启用）。
+// 注册 default + feature-x 两条实例，?lane=feature-x 只返 feature；空返全部。
+func TestHandlerInstanceLaneFilter(t *testing.T) {
+	h := newHandler(true)
+	r := req(acmeCtx(), "POST", "/api/services", governance.Service{
+		Name: "lane-svc", EnvID: "env-acme-test", Protocol: governance.ProtocolHTTP, Port: 8080,
+	})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	var svc governance.Service
+	decodeData(t, w.Body.Bytes(), &svc)
+
+	// 注册 default 基线 + feature-x 泳道两条实例
+	for _, lane := range []string{"", "feature-x"} {
+		r = req(acmeCtx(), "POST", "/api/services/"+svc.ID+"/instances", governance.Instance{
+			Addr: "10.0.2.1:8080", LaneID: lane,
+		})
+		w = httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		if w.Code != http.StatusCreated {
+			t.Fatalf("注册实例应 201，got %d: %s", w.Code, w.Body.String())
+		}
+	}
+
+	// 无 lane：返全部（2 条）
+	r = req(acmeCtx(), "GET", "/api/services/"+svc.ID, nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	var all governance.ServiceDetail
+	decodeData(t, w.Body.Bytes(), &all)
+	if len(all.Instances) != 2 {
+		t.Fatalf("无 lane 应返 2 条实例，got %d", len(all.Instances))
+	}
+
+	// ?lane=feature-x：只返 feature 泳道（1 条）
+	r = req(acmeCtx(), "GET", "/api/services/"+svc.ID+"?lane=feature-x", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	var feat governance.ServiceDetail
+	decodeData(t, w.Body.Bytes(), &feat)
+	if len(feat.Instances) != 1 || feat.Instances[0].LaneID != "feature-x" {
+		t.Fatalf("?lane=feature-x 应只返 feature 实例，got %+v", feat.Instances)
+	}
+
+	// ?lane=default：只返基线
+	r = req(acmeCtx(), "GET", "/api/services/"+svc.ID+"?lane=default", nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	var base governance.ServiceDetail
+	decodeData(t, w.Body.Bytes(), &base)
+	if len(base.Instances) != 1 || base.Instances[0].LaneID != "default" {
+		t.Fatalf("?lane=default 应只返基线实例，got %+v", base.Instances)
+	}
+}

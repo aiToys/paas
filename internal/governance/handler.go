@@ -355,6 +355,17 @@ func (h *Handler) serveServiceItem(w http.ResponseWriter, r *http.Request, id st
 			httputil.WriteInternalError(w, err)
 			return
 		}
+		// lane 过滤（L2 启用）：?lane=feature-x 只看该泳道实例；空=全部（基线 + 各泳道，向后兼容）。
+		// 服务治理手动注册表按 lane 分组展示；数据面真源（跨泳道降级发现）走 /dp/instances。
+		if lane := r.URL.Query().Get("lane"); lane != "" {
+			filtered := make([]Instance, 0, len(instances))
+			for _, in := range instances {
+				if in.LaneID == lane {
+					filtered = append(filtered, in)
+				}
+			}
+			instances = filtered
+		}
 		httputil.WriteData(w, ServiceDetail{Service: s, Instances: instances})
 		return
 	}

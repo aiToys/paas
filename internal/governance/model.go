@@ -39,8 +39,8 @@ var validStatus = map[string]struct{}{
 	StatusUnhealthy: {},
 }
 
-// LaneDefault 是基线泳道标识（与 workload.LaneDefault 语义一致）。
-// 实例可带泳道标签；本期不实现路由，预留字段。
+// LaneDefault 是基线泳道标识（与 workload.LaneDefault / dataplane.LaneDefault 语义一致）。
+// L2 启用：实例注册带 LaneID，服务治理按 lane 分组展示；跨泳道降级发现走数据面 /dp/instances。
 const LaneDefault = "default"
 
 // Service 是租户内一个服务定义。挂靠应用（可选）+ 环境。
@@ -80,7 +80,7 @@ type Instance struct {
 	ServiceID string            `json:"serviceId"`
 	Addr      string            `json:"addr"`           // host:port
 	Status    string            `json:"status"`         // healthy | unhealthy
-	LaneID    string            `json:"laneId"`         // "default"=基线；其他=泳道（预留）
+	LaneID    string            `json:"laneId"`         // "default"=基线；其他=feature 泳道（L2 启用：注册可带，列表可按 lane 过滤）
 	Meta      map[string]string `json:"meta,omitempty"` // 扩展点（版本/权重等）
 	UpdatedAt time.Time         `json:"updatedAt"`
 }
