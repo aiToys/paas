@@ -399,7 +399,7 @@ func (s *Store) runBuild(ctx context.Context, p builder.Params) {
 		ID:         newID("img"),
 		TenantID:   p.TenantID,
 		AppID:      p.AppID,
-		Registry:   res.Registry,
+		Registry:   res.Registry + "/" + p.AppID, // Image.Registry 语义=registry/repo（与 seed registry.paas.local/app-cs 对齐）；builder push 到 <registry>/<appID>:tag
 		Tag:        res.Tag,
 		Digest:     res.Digest,
 		Source:     p.Commit,
