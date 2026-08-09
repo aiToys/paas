@@ -507,25 +507,29 @@ DevOps 中心从「只读监控大屏」升级为「CI/CD 指挥台」，补齐�
 - **留后续**：promote 跨级跳迁（test->prod 直达，现逐级）、蓝绿/金丝雀真实编排（耦合泳道归服务治理）、registry catalog 镜像直接发布（仓库名无 appID 反查）。（Pipeline 独立实体 + 审批门禁已落地，见下「DevOps 流水线引擎」）
 
 
-### DevOps 流水线引擎（声明式 stage 编排 + 异步状态机，2026-08-08）
+### DevOps 流水线引擎（模板+绑定：应用零操作 + 占位符自动解析，2026-08-08）
 
-承接「发布体验改造」留后续项「Pipeline 独立实体 + 审批门禁」，补齐可自定义的一键式「变更->构建->发布->部署->测试->写基线」流水线。CI 与 CD 流水线不同，每个应用可关联多条。计划见 `docs/superpowers/plans/2026-08-08-pipeline-designer.md`。
+承接「发布体验改造」留后续项「Pipeline 独立实体 + 审批门禁」，补齐可自定义的一键式「变更->构建->发布->部署->测试->写基线」流水线。**模板+绑定模型**（参考 Argo WorkflowTemplate+Workflow / Tekton Pipeline+PipelineRun / GitLab include / GitHub reusable workflow）：平台预置通用模板，应用建即自动绑定默认流水线（CI/CD 各一），应用零操作即可用；占位符参数化让同一条模板服务所有应用，避免每个应用重复创建雷同流水线。计划见 `docs/superpowers/plans/2026-08-08-pipeline-designer.md` + `docs/superpowers/plans/2026-08-08-pipeline-template-binding-refactor.md`。
 
-- **4 实体 + 声明式 stage**：`PipelineTemplate`（平台预置 builtin + 租户自定义）+ `Pipeline`（Application 1:N，主线实体）+ `PipelineRun`（一次运行，异步状态机载体）+ `StageRun`（单阶段执行记录，输出链载体）+ `StageDef`（name+type+params，模板与 Pipeline 共用）。`internal/devops/pipeline/` 包。
+- **4 实体 + 模板/绑定分离**：`PipelineTemplate`（平台预置 builtin + 租户自定义，含 `Stages []StageDef` + `Params []ParamDef` 声明占位符）+ `Pipeline`（Application 1:N，**绑定**而非复制--只存 `TemplateID` + `ParamOverrides`，不存 Stages）+ `PipelineRun`（一次运行，异步状态机载体）+ `StageRun`（单阶段执行记录，输出链载体，`Input` 存解析后的 stage.Params）。`internal/devops/pipeline/` 包。
 - **6 阶段类型**：`build`（构建镜像）/ `deploy`（发布到环境）/ `test`（smoke 自动 + manual 人工确认）/ `approve`（人工审批门禁）/ `promote`（环境晋升）/ `baseline`（写基线版本 + 合并主干）。模板 `tpl-ci`（build->deploy->test->baseline）+ `tpl-cd`（approve->deploy->baseline）开箱即用。
+- **占位符参数化**（应用零操作核心）：模板 stage params 用 `{{app.env.test}}`/`{{app.env.prod}}`/`{{app.repo}}` 占位，触发 run 时 `ResolveStages` 经 `ParamResolver` 接口（`EnvByType(appID, envType)` 取应用该类型环境 ID / `InternalRepoID(appID)` 取应用内置仓库 ID）按当前应用解析为真实值写入 `StageRun.Input`。同一条模板服务所有应用，应用无需手配环境/仓库。`ParamDef` 声明占位符类型供前端表单。
+- **engine 用 StageRuns 推进**：`Advance` 读 `run.StageRuns[run.CurrentStage].Input` 作 stage.Params（不再加载 Pipeline 实体），run 创建时已解析固化，运行期不依赖模板变更（模板改了不影响在跑的 run）。
+- **buildArgs 透传**（多服务构建）：build stage 的 `buildArgs` map（如 `{"SERVICE":"product"}`）经 `stage.Params["buildArgs"]` -> `buildBridge.CreateBuildRun` -> `devops.BuildRun.BuildArgs` -> `builder.Params.BuildArgs` -> K8s 脚本 `BUILD_ARG_FLAGS` env（`formatBuildArgs` 拼成 `--build-arg K=V`，校验 key `^[A-Za-z_][A-Za-z0-9_]*$` / value `^[A-Za-z0-9_.:/-]+$` 仅安全字符防 shell 注入，不安全字符跳过）/ Real 模式 os/exec args 数组（无需校验，参数数组无 shell 注入）。应用级覆盖经 `Pipeline.ParamOverrides["0.buildArgs"]`（key 格式 `<stageIdx>.buildArgs`，`getStringMap` 处理 JSON 反序列化的 map[string]any）。PG `build_runs.build_args` JSONB 列持久化（migration 0021，`marshalStrMap`/`unmarshalStrMap` nil 安全）。
+- **默认 binding 自动建**（OnAppCreate hook）：`application.Handler` 加 `OnAppCreate` 回调（best-effort，log 不阻断），cmd/core 装配 `defaultPipelineBinder`（建 tpl-ci/tpl-cd 两条 binding，`ErrPipelineExists` 忽略幂等）。新建 app 即得 CI/CD 两条流水线，应用零操作。已有 app 用 `scripts/seed-default-pipelines.sh` 补建。
 - **CI/CD 解耦**：deploy stage 的 `imageSource`（`priorBuild` 本流水线前序 build 产出 / `selected` 指定 imageId / `latestReady` app 最新 ready Image）--CD 消费 CI 产物，不强制重构建。
 - **异步状态机**：`RunRunning/Paused/Succeeded/Failed/Aborted` + `StagePending/Running/Success/Failed/Waiting/Skipped`；engine goroutine 推进，approve/test-manual 暂停等审批。
 - **stage 输出链**：build.Output.imageId -> deploy(priorBuild).Output.releaseId/workloadDomain -> promote/baseline。Output map 透传，前端时间线展示。
 - **单实例串行**：`ux_pipeline_runs_active` 部分唯一索引（WHERE status IN running/paused）+ `HasActiveRun` + `ErrActiveRunExists` 409，防同 pipeline 并发运行。
-- **依赖注入桥接**（cmd/core `pipeline_adapters.go`）：`BuildRunner`/`Releaser`/`GiteaMerger`/`EnvTypeResolver`/`PromoteTargetTypeResolver`/`RepoResolver`/`AuditRecorder` 接口，桥接 devops/environment/security 既有一等公民，pipeline 包零业务依赖倒置。
+- **依赖注入桥接**（cmd/core `pipeline_adapters.go`）：`ParamResolver`/`RepoResolver`/`EnvTypeResolver`/`PromoteTargetTypeResolver`/`GiteaMerger`/`BuildRunner`/`Releaser`/`AuditRecorder` 接口，桥接 application/devops/environment/security 既有一等公民，pipeline 包零业务依赖倒置。
 - **prod:write 横切**（关键安全）：deploy stage 目标 prod 或 promote stage 链路 target prod 均需 `PermProdWrite`（`allowProdFlow` 静态预演 promote 链，防 developer 经 [deploy test, promote] 绕过）。deploy envId 必填 fail-fast（400，避免注定失败的 run 占串行槽位）。
 - **REST + OpenAPI**：`/api/applications/{id}/pipelines`（CRUD + run，composite 分发）+ `/api/pipeline-templates` + `/api/pipelineruns`（list/get/approve/abort），11 operation 登记。
-- **前端设计器**（`PipelineDesigner.vue`）：stage CRUD + 排序 + 按 type 动态参数面板（deploy 选环境+imageSource / test mode+path / approve message / baseline mainBranch+mergeMode / build branchOverride / promote hint）+ 生产环境标红 + save 前 `validateDeployEnvs` 预校验。
+- **前端设计器**（`PipelineDesigner.vue` 重写为参数覆盖器）：显示模板 stages 只读 + `paramOverrides` 覆盖表单（deploy.envId select / build.branchOverride / approve.message 等）+ 生产环境标红 + save 前 `validateDeployEnvs` 预校验。应用只调覆盖参数，不重写 stage 序列（模板归平台治理）。
 - **前端运行视图**（`PipelineRunView.vue`）：stage 时间线（状态着色 + 输出链展示 imageId/releaseId/domain/version/mergeSha + error）+ 5s 轮询（终态自停）+ approve（paused+approve/test-manual 时显「批准继续」）+ abort。
 - **CD 触发增强**（`AppPipelines.vue`）：CI 直接默认 branch 触发；CD 弹窗收集 version（baseline 写入）+ branch；含 prod deploy 走 `confirmDangerous(isProd:true)` 二次确认。
 - **DevOps 运行记录 tab**（`DevOps.vue`）：跨应用最近 PipelineRun 表格（应用/状态/当前阶段/分支/版本/时间）+ 10s 轮询，点应用跳详情。
-- **e2e 验证（2026-08-08）**：CI run build failed（无 repo，预期）流转正确；CD run approve paused -> POST approve 200 -> succeeded -> deploy failed（无可用镜像，预期）-> run failed；developer 触发含 prod deploy 的 pipeline 403 forbidden prod:write。
-- **留后续**：abort 后 stage_runs 残留 running 数据不一致（非功能 bug）；内存路径 `PollWorkloadReady` 必超时（dev trade-off，仅 K8s 可端到端 CD 闭环）；webhook/cron 触发器（现 manual）；Pipeline 独立实体模板编辑器（现从 builtin 复制）；promote 跨级跳迁；流水线运行历史分页。
+- **e2e 验证（2026-08-08 模板+绑定重构）**：新建 app 自动建 2 条 binding（OnAppCreate ✓）；占位符 `{{app.env.test}}`->env-acme-test、`{{app.env.prod}}`->env-acme-prod-bj 自动解析 ✓；approve 暂停/恢复 ✓；engine 用 run.StageRuns 推进 ✓；developer 触发含 prod deploy 的 pipeline 403 forbidden prod:write ✓。
+- **留后续**：abort 后 stage_runs 残留 running 数据不一致（非功能 bug）；内存路径 `PollWorkloadReady` 必超时（dev trade-off，仅 K8s 可端到端 CD 闭环）；webhook/cron 触发器（现 manual）；租户自定义模板编辑器（现从 builtin 复制）；promote 跨级跳迁；流水线运行历史分页；Vendor 改配置后存量 binding 自动同步。
 
 ### DevOps CI/CD（代码->构建->镜像->发布->回滚）
 
