@@ -72,6 +72,8 @@ type Handler struct {
 	// audit 审计记录器（nil 跳过）。
 	audit   AuditRecorder
 	actorFn func(r *http.Request) string
+	// isPlatformAdmin 判定调用者是否平台超管（admin 模板 CRUD 用，nil 保守按 false）。
+	isPlatformAdmin func(*http.Request) bool
 }
 
 // HandlerOpt 配置 Handler。
@@ -112,6 +114,19 @@ func WithActorFn(f func(r *http.Request) string) HandlerOpt {
 	return func(h *Handler) { h.actorFn = f }
 }
 
+// WithPlatformAdmin 注入平台超管判定（admin 模板 CRUD 用）。
+func WithPlatformAdmin(f func(*http.Request) bool) HandlerOpt {
+	return func(h *Handler) { h.isPlatformAdmin = f }
+}
+
+// platformAdmin 判定调用者是否平台超管；未注入时保守按 false（最小权限）。
+func (h *Handler) platformAdmin(r *http.Request) bool {
+	if h.isPlatformAdmin == nil {
+		return false
+	}
+	return h.isPlatformAdmin(r)
+}
+
 // NewHandler 构造 Handler。engine 可选（CRUD 不用，run 推进用，Task 12）。
 func NewHandler(pipes Repository, runs RunRepository, templates TemplateRepository, engine *Engine, opts ...HandlerOpt) *Handler {
 	h := &Handler{pipes: pipes, runs: runs, templates: templates, engine: engine}
@@ -134,6 +149,8 @@ func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) boo
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	switch {
+	case strings.HasPrefix(r.URL.Path, "/api/admin/pipeline-templates"):
+		h.serveAdminTemplates(w, r) // Task B2
 	case strings.HasPrefix(r.URL.Path, "/api/pipeline-templates"):
 		h.serveTemplates(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/pipelineruns"):
@@ -303,6 +320,78 @@ func (h *Handler) serveTemplates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputil.WriteData(w, list)
+}
+
+// serveAdminTemplates 处理 /api/admin/pipeline-templates[/{id}]（super_admin CRUD 公共模板）。
+// 保护：仅 super_admin；create 强制 Builtin=false（防伪造 builtin）；update/delete 走 Repository，
+// builtin 模板由 store 层拒（ErrTemplateBuiltin→409）。模板为平台级（tenant_id=NULL）+ 全部租户自定义。
+func (h *Handler) serveAdminTemplates(w http.ResponseWriter, r *http.Request) {
+	if !h.platformAdmin(r) {
+		httputil.WriteError(w, http.StatusForbidden, "forbidden: super_admin required")
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/api/admin/pipeline-templates")
+	rest = strings.Trim(rest, "/")
+	// /api/admin/pipeline-templates（列表 / 创建）
+	if rest == "" {
+		switch r.Method {
+		case http.MethodGet:
+			list, err := h.templates.ListTemplates(r.Context())
+			if err != nil {
+				httputil.WriteInternalError(w, err)
+				return
+			}
+			httputil.WriteData(w, list)
+		case http.MethodPost:
+			var t PipelineTemplate
+			if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
+				httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+				return
+			}
+			t.Builtin = false // admin 创建必为非 builtin（builtin 走代码发版）
+			if t.TenantID == "" && t.Kind == "" {
+				// 平台级公共模板：保持 tenant_id 空（store 不强制）
+			}
+			saved, err := h.templates.CreateTemplate(r.Context(), t)
+			if err != nil {
+				httputil.WriteServiceError(w, toHTTPStatus(err), err)
+				return
+			}
+			h.recordAudit(r, "create", "pipeline_template", saved.ID, "")
+			httputil.WriteDataCreated(w, saved)
+		default:
+			httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+		return
+	}
+	// /api/admin/pipeline-templates/{id}
+	id := rest
+	switch r.Method {
+	case http.MethodPut:
+		var t PipelineTemplate
+		if err := json.NewDecoder(r.Body).Decode(&t); err != nil {
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+			return
+		}
+		t.ID = id
+		t.Builtin = false
+		updated, err := h.templates.UpdateTemplate(r.Context(), t)
+		if err != nil {
+			httputil.WriteServiceError(w, toHTTPStatus(err), err)
+			return
+		}
+		h.recordAudit(r, "update", "pipeline_template", id, "")
+		httputil.WriteData(w, updated)
+	case http.MethodDelete:
+		if err := h.templates.DeleteTemplate(r.Context(), id); err != nil {
+			httputil.WriteServiceError(w, toHTTPStatus(err), err)
+			return
+		}
+		h.recordAudit(r, "delete", "pipeline_template", id, "")
+		httputil.WriteData(w, map[string]string{"deleted": id})
+	default:
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
 }
 
 // serveRuns 处理 /api/pipelineruns[/{id}[/stages/{idx}/approve|/abort]]。
@@ -568,7 +657,7 @@ func toHTTPStatus(err error) int {
 	case errors.Is(err, ErrPipelineExists), errors.Is(err, ErrActiveRunExists),
 		errors.Is(err, ErrRunExists), errors.Is(err, ErrTemplateExists),
 		errors.Is(err, ErrNotPaused), errors.Is(err, ErrStageNotCurrent), errors.Is(err, ErrNotRunning),
-		errors.Is(err, ErrNotFailed):
+		errors.Is(err, ErrNotFailed), errors.Is(err, ErrTemplateBuiltin):
 		return http.StatusConflict
 	case errors.Is(err, ErrNoTenant):
 		return http.StatusBadRequest

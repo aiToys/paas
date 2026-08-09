@@ -543,3 +543,82 @@ func TestRunAbort(t *testing.T) {
 		t.Fatalf("已终态 abort 期望 409，got %d", rec.Code)
 	}
 }
+
+// TestAdminTemplateCRUD 验证 admin 模板 CRUD + builtin 保护 + 非 super_admin 403。
+func TestAdminTemplateCRUD(t *testing.T) {
+	s := NewMemoryStore()
+	_ = SeedTemplates(acmeCtxEngine(), s) // 灌 builtin tpl-ci/tpl-cd
+
+	// 非 super_admin → 403
+	hNoAdmin := NewHandler(s, s, s, nil)
+	hNoAdmin.Authorize = allowAll
+	req := acmeReq(http.MethodGet, "/api/admin/pipeline-templates", "")
+	rec := httptest.NewRecorder()
+	hNoAdmin.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("非 super_admin 期望 403，got %d", rec.Code)
+	}
+
+	// super_admin
+	h := NewHandler(s, s, s, nil)
+	h.Authorize = allowAll
+	h.isPlatformAdmin = func(*http.Request) bool { return true }
+
+	// 列表（含 builtin）
+	req = acmeReq(http.MethodGet, "/api/admin/pipeline-templates", "")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin list 期望 200，got %d", rec.Code)
+	}
+
+	// 创建公共模板
+	req = acmeReq(http.MethodPost, "/api/admin/pipeline-templates",
+		`{"name":"Public CI","kind":"ci","stages":[{"name":"build","type":"build"}]}`)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("admin create 期望 201，got %d body %s", rec.Code, rec.Body.String())
+	}
+	var created PipelineTemplate
+	json.Unmarshal(rec.Body.Bytes(), &struct {
+		Data *PipelineTemplate `json:"data"`
+	}{Data: &created})
+	if created.Builtin {
+		t.Fatal("admin create 必为非 builtin")
+	}
+
+	// 更新自定义模板
+	req = acmeReq(http.MethodPut, "/api/admin/pipeline-templates/"+created.ID,
+		`{"name":"Public CI v2","kind":"ci","stages":[{"name":"build","type":"build"}]}`)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin update 期望 200，got %d body %s", rec.Code, rec.Body.String())
+	}
+
+	// builtin 拒改（tpl-ci）
+	req = acmeReq(http.MethodPut, "/api/admin/pipeline-templates/tpl-ci",
+		`{"name":"hack","kind":"ci","stages":[]}`)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("builtin update 期望 409，got %d", rec.Code)
+	}
+
+	// builtin 拒删
+	req = acmeReq(http.MethodDelete, "/api/admin/pipeline-templates/tpl-ci", "")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("builtin delete 期望 409，got %d", rec.Code)
+	}
+
+	// 删自定义模板
+	req = acmeReq(http.MethodDelete, "/api/admin/pipeline-templates/"+created.ID, "")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin delete 期望 200，got %d", rec.Code)
+	}
+}

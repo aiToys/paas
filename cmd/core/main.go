@@ -472,6 +472,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		pipeline.WithParamResolver(&paramResolverBridge{apps: stores.Application, envs: stores.Environment, repos: stores.DevOpsRepos}),
 		pipeline.WithAudit(&identityAuditAdapter{store: stores.Security}),
 		pipeline.WithActorFn(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
+		pipeline.WithPlatformAdmin(func(r *http.Request) bool { return gateway.IsPlatformAdmin(r) }),
 	)
 	// 应用创建后置 hook：自动建默认流水线绑定（tpl-ci/tpl-cd），best-effort。
 	appHandler.OnAppCreate = defaultPipelineBinder(stores.Pipeline, stores.Pipeline)
@@ -659,6 +660,8 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	mux.Handle("/api/releases/", auth(devopsHandler))
 	// 流水线（平台预置模板 + run 列表/详情/审批/终止）。应用作用域 pipelines 经 composite 分发。
 	mux.Handle("/api/pipeline-templates", auth(pipelineHandler))
+	mux.Handle("/api/admin/pipeline-templates", auth(pipelineHandler))
+	mux.Handle("/api/admin/pipeline-templates/", auth(pipelineHandler))
 	mux.Handle("/api/pipelineruns", auth(pipelineHandler))
 	mux.Handle("/api/pipelineruns/", auth(pipelineHandler))
 	// 镜像库实时视图（registry v2 catalog/tags），复用 devops handler 分发 + image:read 权限。
@@ -918,6 +921,10 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/registry/tags", apiroute.Tags("DevOps"), apiroute.Summary("镜像 tag+digest（?repository=）"), apiroute.Perm("image:read"))
 	// 流水线（变更→构建→发布→部署→测试→写基线，可自定义；每应用多条）
 	reg.Operation("GET", "/api/pipeline-templates", apiroute.Tags("流水线"), apiroute.Summary("流水线模板（平台预置 + 租户自定义）"), apiroute.Perm("pipeline:read"), apiroute.WithResp([]pipeline.PipelineTemplate{}))
+	reg.Operation("GET", "/api/admin/pipeline-templates", apiroute.Tags("流水线"), apiroute.Summary("模板列表（管理员，含全部）"), apiroute.Perm("super_admin"), apiroute.WithResp([]pipeline.PipelineTemplate{}))
+	reg.Operation("POST", "/api/admin/pipeline-templates", apiroute.Tags("流水线"), apiroute.Summary("创建公共模板（super_admin）"), apiroute.Perm("super_admin"), apiroute.WithReqBody(pipeline.PipelineTemplate{}), apiroute.WithResp(pipeline.PipelineTemplate{}))
+	reg.Operation("PUT", "/api/admin/pipeline-templates/{id}", apiroute.Tags("流水线"), apiroute.Summary("更新模板（builtin 拒）"), apiroute.Perm("super_admin"), apiroute.WithReqBody(pipeline.PipelineTemplate{}), apiroute.WithResp(pipeline.PipelineTemplate{}))
+	reg.Operation("DELETE", "/api/admin/pipeline-templates/{id}", apiroute.Tags("流水线"), apiroute.Summary("删除模板（builtin 拒）"), apiroute.Perm("super_admin"))
 	reg.Operation("GET", "/api/applications/{id}/pipelines", apiroute.Tags("流水线"), apiroute.Summary("应用流水线列表"), apiroute.Perm("pipeline:read"), apiroute.WithResp([]pipeline.Pipeline{}))
 	reg.Operation("POST", "/api/applications/{id}/pipelines", apiroute.Tags("流水线"), apiroute.Summary("创建流水线（可从模板）"), apiroute.Perm("pipeline:write"), apiroute.WithReqBody(pipeline.Pipeline{}), apiroute.WithResp(pipeline.Pipeline{}))
 	reg.Operation("GET", "/api/applications/{id}/pipelines/{pid}", apiroute.Tags("流水线"), apiroute.Summary("流水线详情"), apiroute.Perm("pipeline:read"), apiroute.WithResp(pipeline.Pipeline{}))
