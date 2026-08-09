@@ -37,6 +37,12 @@ async function load() {
 const deployStages = computed(() => stages.value.map((s, i) => ({ s, i })).filter((x) => x.s.type === 'deploy'))
 // build stage 索引（可覆盖 buildArgs，如多服务 Dockerfile ARG SERVICE）
 const buildStages = computed(() => stages.value.map((s, i) => ({ s, i })).filter((x) => x.s.type === 'build'))
+// test stage 索引（smoke 探活 path / manual 人工确认 message）
+const testStages = computed(() => stages.value.map((s, i) => ({ s, i })).filter((x) => x.s.type === 'test'))
+// approve stage 索引（审批提示 message）
+const approveStages = computed(() => stages.value.map((s, i) => ({ s, i })).filter((x) => x.s.type === 'approve'))
+// release stage 索引（版本策略 versionStrategy：auto-increment/manual/tag）
+const releaseStages = computed(() => stages.value.map((s, i) => ({ s, i })).filter((x) => x.s.type === 'release'))
 
 // 覆盖 key: "<stageIdx>.<param>"
 function overrideKey(stageIdx: number, param: string): string {
@@ -144,7 +150,36 @@ onMounted(load)
         <el-button text type="primary" @click="addBuildArg(b.i)">+ 添加参数</el-button>
         <div class="override-hint">多服务构建必填（Dockerfile ARG，透传 --build-arg K=V）；留空 = 无构建参数。</div>
       </div>
-      <el-empty v-if="!deployStages.length && !buildStages.length" description="无 deploy/build 阶段可覆盖" :image-size="60" />
+      <div v-for="t in testStages" :key="t.i" class="override-item">
+        <div class="override-label">阶段「{{ t.s.name }}」测试模式</div>
+        <el-select :model-value="getOverride(t.i, 'mode')" @update:model-value="(v: string) => setOverride(t.i, 'mode', v)"
+                   placeholder="默认 smoke（HTTP 探活自动）" clearable style="width: 100%;">
+          <el-option value="smoke" label="smoke（HTTP 探活自动）" />
+          <el-option value="manual" label="manual（人工确认暂停）" />
+        </el-select>
+        <div class="override-label" style="margin-top: 12px;" v-if="getOverride(t.i, 'mode') !== 'manual'">探活路径</div>
+        <el-input v-if="getOverride(t.i, 'mode') !== 'manual'"
+                  :model-value="getOverride(t.i, 'path')" @update:model-value="(v: string) => setOverride(t.i, 'path', v)"
+                  placeholder="默认 /livez（如应用用 /healthz 在此覆盖）" clearable />
+        <div class="override-hint">smoke 模式探活前序 deploy 的 domain + path 轮询 2xx；路径需与应用真实健康端点一致。</div>
+      </div>
+      <div v-for="a in approveStages" :key="a.i" class="override-item">
+        <div class="override-label">阶段「{{ a.s.name }}」审批提示</div>
+        <el-input :model-value="getOverride(a.i, 'message')" @update:model-value="(v: string) => setOverride(a.i, 'message', v)"
+                  placeholder="默认「等待审批」（如：请确认生产发布）" clearable />
+        <div class="override-hint">审批门禁暂停时展示给确认者的提示文案。</div>
+      </div>
+      <div v-for="r in releaseStages" :key="r.i" class="override-item">
+        <div class="override-label">阶段「{{ r.s.name }}」版本策略</div>
+        <el-select :model-value="getOverride(r.i, 'versionStrategy')" @update:model-value="(v: string) => setOverride(r.i, 'versionStrategy', v)"
+                   placeholder="默认 auto-increment（分支-runID）" clearable style="width: 100%;">
+          <el-option value="auto-increment" label="auto-increment（分支-runID 自动）" />
+          <el-option value="manual" label="manual（触发时填的版本）" />
+          <el-option value="tag" label="tag（commit 短 sha）" />
+        </el-select>
+        <div class="override-hint">打版本号里程碑的策略（git tag + Image.Version）。</div>
+      </div>
+      <el-empty v-if="!deployStages.length && !buildStages.length && !testStages.length && !approveStages.length && !releaseStages.length" description="无可覆盖阶段" :image-size="60" />
     </div>
 
     <div class="footer">

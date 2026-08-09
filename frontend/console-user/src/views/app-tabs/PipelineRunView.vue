@@ -4,7 +4,7 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  getRun, approveStage, abortRun, getBuildRun,
+  getRun, approveStage, abortRun, retryRun, getBuildRun,
   type PipelineRun, type StageRun, laneOf, buildRunIdOf,
 } from '@/api/pipeline'
 
@@ -53,6 +53,8 @@ const canAbort = computed(() => {
   const s = run.value?.status
   return s === 'running' || s === 'paused'
 })
+// 失败 run 可重试（从失败 stage 重新推进，调试闭环）
+const canRetry = computed(() => run.value?.status === 'failed')
 
 async function load() {
   try {
@@ -90,6 +92,18 @@ async function abort() {
   } catch (e: any) {
     if (e === 'cancel') return
     ElMessage.error(e?.message || '中止失败')
+  }
+}
+
+async function retry() {
+  const r = run.value
+  if (!r) return
+  try {
+    await retryRun(r.id)
+    ElMessage.success('已从失败阶段重试')
+    await load()
+  } catch (e: any) {
+    ElMessage.error(e?.message || '重试失败')
   }
 }
 
@@ -211,6 +225,7 @@ function shortCommit(c?: string): string {
         <div class="summary-right">
           <span class="time">{{ new Date(run.createdAt).toLocaleString() }}</span>
           <el-button v-if="canAbort" size="small" type="danger" plain @click="abort">中止</el-button>
+          <el-button v-if="canRetry" size="small" type="warning" plain @click="retry">重试失败阶段</el-button>
           <el-button v-if="canApprove" size="small" type="primary" @click="approve">批准继续</el-button>
         </div>
       </div>

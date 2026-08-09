@@ -17,6 +17,7 @@ var (
 	errStageNameRequired = errors.New("stage name required")
 	ErrNotPaused         = errors.New("run not paused")
 	ErrStageNotCurrent   = errors.New("stage not current")
+	ErrNotFailed         = errors.New("run not failed")
 	ErrTemplateRequired  = errors.New("templateId required")
 	ErrTemplateNotFound  = errors.New("pipeline template not found")
 )

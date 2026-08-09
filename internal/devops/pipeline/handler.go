@@ -388,6 +388,23 @@ func (h *Handler) serveRuns(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteData(w, map[string]string{"aborted": id})
 		return
 	}
+	// POST /{id}/retry 重试失败 run（从失败 stage 重新推进，调试闭环）
+	if r.Method == http.MethodPost && len(parts) == 2 && parts[1] == "retry" {
+		if !h.allow(w, r, PermPipelineWrite) {
+			return
+		}
+		if h.engine == nil {
+			httputil.WriteError(w, http.StatusServiceUnavailable, "engine not configured")
+			return
+		}
+		if err := h.engine.Retry(r.Context(), id); err != nil {
+			httputil.WriteServiceError(w, toHTTPStatus(err), err)
+			return
+		}
+		h.recordAudit(r, "retry", "pipeline_run", id, "")
+		httputil.WriteData(w, map[string]string{"retried": id})
+		return
+	}
 	httputil.WriteError(w, http.StatusNotFound, "not found")
 }
 
@@ -550,7 +567,8 @@ func toHTTPStatus(err error) int {
 		return http.StatusNotFound
 	case errors.Is(err, ErrPipelineExists), errors.Is(err, ErrActiveRunExists),
 		errors.Is(err, ErrRunExists), errors.Is(err, ErrTemplateExists),
-		errors.Is(err, ErrNotPaused), errors.Is(err, ErrStageNotCurrent), errors.Is(err, ErrNotRunning):
+		errors.Is(err, ErrNotPaused), errors.Is(err, ErrStageNotCurrent), errors.Is(err, ErrNotRunning),
+		errors.Is(err, ErrNotFailed):
 		return http.StatusConflict
 	case errors.Is(err, ErrNoTenant):
 		return http.StatusBadRequest

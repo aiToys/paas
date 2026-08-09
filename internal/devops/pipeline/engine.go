@@ -122,6 +122,37 @@ func (e *Engine) Abort(ctx context.Context, runID string) error {
 	return nil
 }
 
+// Retry 重试失败的 run：从失败 stage（CurrentStage）重新推进。
+// 仅 RunFailed 可 retry；重置该 stage 状态（Status=Pending，清 Error/Output/FinishedAt）+ run.Status=Running，
+// 然后 Start 异步推进。成功/暂停/运行中的 run 拒绝（ErrNotFailed）。串行约束天然满足（failed 非 active）。
+func (e *Engine) Retry(ctx context.Context, runID string) error {
+	run, err := e.Runs.GetRun(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if run.Status != RunFailed {
+		return ErrNotFailed
+	}
+	// 重置失败 stage：CurrentStage 指向失败的那一步（markFailed 不递增 CurrentStage）。
+	idx := run.CurrentStage
+	if idx < 0 || idx >= len(run.StageRuns) {
+		return ErrStageNotCurrent
+	}
+	sr := &run.StageRuns[idx]
+	sr.Status = StagePending
+	sr.Error = ""
+	sr.Output = nil
+	sr.StartedAt = time.Time{}
+	sr.FinishedAt = time.Time{}
+	run.Status = RunRunning
+	run.FinishedAt = time.Time{}
+	if _, err := e.Runs.UpdateRun(ctx, run); err != nil {
+		return err
+	}
+	e.Start(ctx, runID)
+	return nil
+}
+
 // Advance 同步推进 runID 到终态或暂停点。返回 nil 表示 run 已到终态（succeeded/failed/paused）。
 // 测试直接调；Start 内部 go Advance。
 func (e *Engine) Advance(ctx context.Context, runID string) error {

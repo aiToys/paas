@@ -3,7 +3,7 @@
 import { fetchJSON, fetchAuth } from '@/api'
 
 // ---------- 枚举常量 ----------
-export type StageType = 'build' | 'deploy' | 'test' | 'approve' | 'promote' | 'baseline'
+export type StageType = 'build' | 'deploy' | 'test' | 'approve' | 'release' | 'promote' | 'baseline'
 export type ImageSource = 'priorBuild' | 'selected' | 'latestReady'
 export type TestMode = 'smoke' | 'manual'
 export type RunStatus = 'running' | 'paused' | 'succeeded' | 'failed' | 'aborted'
@@ -183,7 +183,16 @@ async function abortRun(runId: string): Promise<void> {
   }
 }
 
+// 重试失败 run（从失败 stage 重新推进，调试闭环）
+async function retryRun(runId: string): Promise<void> {
+  const resp = await fetchAuth(`/api/pipelineruns/${runId}/retry`, { method: 'POST' })
+  if (!resp.ok) {
+    const json = await resp.json().catch(() => ({}))
+    throw new Error(json.error || '重试失败')
+  }
+}
+
 export {
   listPipelines, getPipeline, createPipeline, updatePipeline, deletePipeline,
-  listTemplates, triggerRun, getRun, listRuns, approveStage, abortRun, getBuildRun,
+  listTemplates, triggerRun, getRun, listRuns, approveStage, abortRun, retryRun, getBuildRun,
 }

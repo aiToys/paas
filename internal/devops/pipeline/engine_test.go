@@ -835,3 +835,75 @@ func TestExecReleaseNoPriorImageSkipsPublish(t *testing.T) {
 		t.Error("SetVersion 仍应被调（回填 releaseId）")
 	}
 }
+
+// TestEngineRetry 验证失败 run 重试：从失败 stage 重新推进到成功。
+// build 先失败（fakeBuilder 失败），Retry 后换成功 builder，run 从 failed→succeeded。
+func TestEngineRetry(t *testing.T) {
+	s := NewMemoryStore()
+	runID, _ := seedBuildDeployPipeline(t, s, map[string]any{
+		"envId": "env-dev", "imageSource": ImagePriorBuild,
+	})
+
+	// 先用失败 builder 跑到 failed
+	failEng := &Engine{
+		Pipelines: s, Runs: s,
+		Builds:   fakeBuilder{buildStatus: devops.BuildFailed, imageID: ""},
+		Releases: &fakeReleaser{},
+	}
+	if err := failEng.Advance(acmeCtxEngine(), runID); err != nil {
+		t.Fatalf("Advance 失败: %v", err)
+	}
+	run, _ := s.GetRun(acmeCtxEngine(), runID)
+	if run.Status != RunFailed {
+		t.Fatalf("期望 failed，got %s", run.Status)
+	}
+
+	// Retry 拒绝非 failed 状态守卫（用一个 succeeded run）—— 此处直接测失败 run retry 成功路径
+	// 用成功 builder 重试
+	successEng := &Engine{
+		Pipelines: s, Runs: s,
+		Builds:   fakeBuilder{buildStatus: devops.BuildSuccess, imageID: "img-retry"},
+		Releases: &fakeReleaser{},
+	}
+	if err := successEng.Retry(acmeCtxEngine(), runID); err != nil {
+		t.Fatalf("Retry 失败: %v", err)
+	}
+	// Retry 起 goroutine（Start），轮询到终态
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		r, _ := s.GetRun(acmeCtxEngine(), runID)
+		if r.Status == RunSucceeded || r.Status == RunFailed {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	run, _ = s.GetRun(acmeCtxEngine(), runID)
+	if run.Status != RunSucceeded {
+		t.Fatalf("Retry 后期望 succeeded，got %s (stage0 err=%s)", run.Status, run.StageRuns[0].Error)
+	}
+	// 失败 stage 的 Error 应被清空
+	if run.StageRuns[0].Error != "" {
+		t.Fatalf("Retry 后 stage Error 应清空，got %q", run.StageRuns[0].Error)
+	}
+}
+
+// TestEngineRetryGuards 验证 Retry 仅 failed 可重试。
+func TestEngineRetryGuards(t *testing.T) {
+	s := NewMemoryStore()
+	runID, _ := seedBuildDeployPipeline(t, s, map[string]any{
+		"envId": "env-dev", "imageSource": ImagePriorBuild,
+	})
+	eng := &Engine{
+		Pipelines: s, Runs: s,
+		Builds:   fakeBuilder{buildStatus: devops.BuildSuccess, imageID: "img-x"},
+		Releases: &fakeReleaser{},
+	}
+	// 跑到 succeeded
+	if err := eng.Advance(acmeCtxEngine(), runID); err != nil {
+		t.Fatalf("Advance 失败: %v", err)
+	}
+	// succeeded run retry 应拒绝 ErrNotFailed
+	if err := eng.Retry(acmeCtxEngine(), runID); err != ErrNotFailed {
+		t.Fatalf("succeeded run retry 期望 ErrNotFailed，got %v", err)
+	}
+}
