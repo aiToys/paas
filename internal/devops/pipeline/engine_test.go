@@ -576,8 +576,8 @@ func TestEngineBaselineVersion(t *testing.T) {
 		{Name: "基线", Type: StageBaseline, Params: map[string]any{"versionStrategy": "auto-increment"}},
 	})
 
-	rel := &fakeReleaser{}
-	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: rel} // Gitea=nil 跳过 merge
+	rc := &versionCapturingReleaser{fakeReleaser: &fakeReleaser{}}
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: rc} // Gitea=nil 跳过 merge
 	if err := eng.Advance(acmeCtxEngine(), r.ID); err != nil {
 		t.Fatalf("Advance 失败: %v", err)
 	}
@@ -586,18 +586,16 @@ func TestEngineBaselineVersion(t *testing.T) {
 	if run.Status != RunSucceeded {
 		t.Fatalf("期望 succeeded，got %s", run.Status)
 	}
-	if run.Version == "" {
-		t.Fatal("run.Version 期望非空")
+	// Task 7：baseline 瘦身，不再打版本（版本归 release stage）。
+	// 兼容旧模板（baseline stage 无 mainBranch）-> 跳过合并直接 success。
+	if rc.setVersionCalled {
+		t.Error("baseline 不应再调 SetVersion（版本归 release stage）")
 	}
-	if run.StageRuns[1].Output[OutVersion] != run.Version {
-		t.Fatalf("baseline Output.version 期望 %s，got %v", run.Version, run.StageRuns[1].Output[OutVersion])
+	if run.Version != "" {
+		t.Errorf("baseline 不应写 run.Version，got %q", run.Version)
 	}
-	// SetVersion 被调，传入 deploy 的 releaseId + version
-	if len(rel.versionIDs) == 0 {
-		t.Fatal("SetVersion 应被调用")
-	}
-	if rel.versionSet != run.Version {
-		t.Fatalf("SetVersion version 期望 %s，got %s", run.Version, rel.versionSet)
+	if _, ok := run.StageRuns[1].Output[OutVersion]; ok {
+		t.Error("baseline Output 不应含 version")
 	}
 }
 
@@ -620,15 +618,118 @@ func TestEngineBaselineMergeConflict(t *testing.T) {
 	}
 
 	run, _ := s.GetRun(acmeCtxEngine(), r.ID)
-	// merge 冲突不中止，baseline 仍 success（版本已打）
+	// merge 冲突不中止，baseline 仍 success（合并可手动补）
 	if run.Status != RunSucceeded {
-		t.Fatalf("merge 冲突后 baseline 期望 success（版本已打），got %s", run.Status)
-	}
-	if run.Version == "" {
-		t.Fatal("版本应已打")
+		t.Fatalf("merge 冲突后 baseline 期望 success，got %s", run.Status)
 	}
 	if run.StageRuns[1].Error != "合并冲突，请手动解决" {
 		t.Fatalf("sr.Error 期望「合并冲突」，got %q", run.StageRuns[1].Error)
+	}
+}
+
+// versionCapturingReleaser 嵌入 fakeReleaser 复用 stub，覆盖 SetVersion 记录是否被调。
+// execBaseline 新语义（Task 7）：不应再调 SetVersion（版本归 release stage）。
+type versionCapturingReleaser struct {
+	*fakeReleaser
+	setVersionCalled bool
+}
+
+func (v *versionCapturingReleaser) SetVersion(ctx context.Context, releaseIDs []string, version string) error {
+	v.setVersionCalled = true
+	return v.fakeReleaser.SetVersion(ctx, releaseIDs, version)
+}
+
+// deployCapturingReleaser 嵌入 fakeReleaser 复用 stub，覆盖 Promote 记录入参 + 返回固定晋升 Release。
+type deployCapturingReleaser struct {
+	*fakeReleaser
+	promoteSrc string
+	promoted   devops.Release
+}
+
+func (d *deployCapturingReleaser) Promote(ctx context.Context, srcReleaseID string) (devops.Release, error) {
+	d.promoteSrc = srcReleaseID
+	if d.promoted.ID != "" {
+		return d.promoted, nil
+	}
+	return devops.Release{ID: "rel-promoted-next", EnvID: "env-prod", LaneID: LaneDefault, WorkloadID: "wl-promoted"}, nil
+}
+
+func TestExecBaselineOnlyMergesNoVersion(t *testing.T) {
+	s := NewMemoryStore()
+	rc := &versionCapturingReleaser{fakeReleaser: &fakeReleaser{}}
+	e := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: rc}
+	run := seedPipeline(t, s, "p-base2", "app-base2", KindCI, []StageDef{
+		{Type: StageBaseline, Name: "基线", Params: map[string]any{"mainBranch": "main", "mergeMode": "squash"}},
+	})
+	sr := &run.StageRuns[0]
+	finished, err := e.execBaseline(acmeCtxEngine(), &run, StageDef{Type: StageBaseline, Params: map[string]any{"mainBranch": "main", "mergeMode": "squash"}}, sr)
+	if err != nil {
+		t.Fatalf("execBaseline: %v", err)
+	}
+	if !finished {
+		t.Fatal("execBaseline 应 finished=true")
+	}
+	if rc.setVersionCalled {
+		t.Error("baseline 不应再调 SetVersion（版本归 release）")
+	}
+	if run.Version != "" {
+		t.Errorf("baseline 不应写 run.Version，got %q", run.Version)
+	}
+}
+
+func TestExecPromoteDeploysToNextEnv(t *testing.T) {
+	s := NewMemoryStore()
+	dep := &deployCapturingReleaser{fakeReleaser: &fakeReleaser{}}
+	// 通过 promoted 字段控制 Promote 返回：下一环境 env-prod + 基线泳道。
+	dep.promoted = devops.Release{ID: "rel-promoted-next", EnvID: "env-prod", LaneID: LaneDefault, WorkloadID: "wl-promoted"}
+	e := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: dep}
+	// 构造：前序 deploy（env-test，已成功，Output 含 releaseId）-> promote stage 待执行。
+	run := PipelineRun{
+		ID:           "run-promote",
+		AppID:        "app-promote",
+		Branch:       "main",
+		Commit:       "abc123def456",
+		RepoID:       "repo-1",
+		Status:       RunRunning,
+		CurrentStage: 1,
+		StageRuns: []StageRun{
+			{
+				Index:  0,
+				Type:   StageDeploy,
+				Status: StageSuccess,
+				Output: map[string]any{OutReleaseID: "rel-deployed-test"},
+			},
+			{Index: 1, Type: StagePromote, Name: "晋升", Status: StagePending},
+		},
+	}
+	sr := &run.StageRuns[1]
+	finished, err := e.execPromote(acmeCtxEngine(), &run, StageDef{Type: StagePromote}, sr)
+	if err != nil {
+		t.Fatalf("execPromote: %v", err)
+	}
+	if !finished {
+		t.Fatal("execPromote 应 finished=true")
+	}
+	// 应调 Promote（不是旧 CreateRelease 路径），传入前序 releaseId
+	if dep.promoteSrc != "rel-deployed-test" {
+		t.Errorf("Promote srcReleaseID 期望 rel-deployed-test，got %q", dep.promoteSrc)
+	}
+	// 晋升到下一环境（非 env-test）+ 基线泳道
+	if dep.promoted.EnvID == "" || dep.promoted.EnvID == "env-test" {
+		t.Errorf("promote 应部署到下一阶序环境，got envID=%q", dep.promoted.EnvID)
+	}
+	if dep.promoted.LaneID != LaneDefault {
+		t.Errorf("promote 应部署到基线泳道，got laneID=%q", dep.promoted.LaneID)
+	}
+	// Output 含新 releaseId + workloadDomain
+	if sr.Output[OutReleaseID] != dep.promoted.ID {
+		t.Errorf("Output.releaseId 期望 %s，got %v", dep.promoted.ID, sr.Output[OutReleaseID])
+	}
+	if sr.Output[OutWorkloadDomain] == "" {
+		t.Error("Output.workloadDomain 应非空")
+	}
+	if sr.Status != StageSuccess {
+		t.Errorf("promote stage 期望 success，got %s", sr.Status)
 	}
 }
 

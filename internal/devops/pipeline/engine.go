@@ -201,12 +201,14 @@ func (e *Engine) execBuild(ctx context.Context, run *PipelineRun, stage StageDef
 		sr.Error = err.Error()
 		return true, err
 	}
+	logf(sr, "构建提交 buildRunId=%s", br.ID)
 	sr.Input = map[string]any{"buildRunId": br.ID}
 	br, err = e.Builds.PollBuildRun(ctx, br.ID)
 	if err != nil {
 		sr.Error = err.Error()
 		return true, err
 	}
+	logf(sr, "构建 %s", br.Status)
 	if br.Status != devops.BuildSuccess {
 		err := fmt.Errorf("构建失败: %s", br.Status)
 		sr.Error = err.Error()
@@ -316,10 +318,12 @@ func (e *Engine) execTest(ctx context.Context, run *PipelineRun, stage StageDef,
 	}
 	path := strOr(stage.Params, "path", "/livez")
 	url := fmt.Sprintf("http://%s%s", domain, path)
+	logf(sr, "探活 %s", url)
 	if err := pollHTTP(ctx, url, 2*time.Minute); err != nil {
 		sr.Error = fmt.Sprintf("探活失败 %s: %v", url, err)
 		return true, err
 	}
+	logf(sr, "探活通过")
 	sr.Output = map[string]any{"result": "ok", "url": url}
 	sr.Status = StageSuccess
 	sr.FinishedAt = time.Now()
@@ -328,19 +332,23 @@ func (e *Engine) execTest(ctx context.Context, run *PipelineRun, stage StageDef,
 
 // execApprove 审批 stage：暂停 run 等外部 Resume（通过）或 Abort（拒绝，Task 12）。
 func (e *Engine) execApprove(ctx context.Context, run *PipelineRun, stage StageDef, sr *StageRun) (bool, error) {
+	message := strOr(stage.Params, "message", "等待审批")
+	logf(sr, "等待审批：%s", message)
 	sr.Status = StageWaiting
-	sr.Input = map[string]any{"message": strOr(stage.Params, "message", "等待审批")}
+	sr.Input = map[string]any{"message": message}
 	return false, nil
 }
 
-// execPromote 晋升 stage：取前序 deploy 的 releaseId -> Releaser.Promote 晋升到下一环境。
-// adapter 内部经 environment.NextPromoteTarget 算 target；已是最高阶返 ErrNoPromoteTarget。
+// execPromote 晋升 stage：取前序 deploy 的 releaseId -> Releaser.Promote 晋升到下一环境基线。
+// adapter 内部经 environment.NextPromoteTarget 算 target + CreateRelease(LaneDefault) 走基线泳道。
+// 已是最高阶环境 -> ErrNoPromoteTarget 标 failed。
 func (e *Engine) execPromote(ctx context.Context, run *PipelineRun, stage StageDef, sr *StageRun) (bool, error) {
 	srcReleaseID, err := resolvePriorOutput(*run, OutReleaseID)
 	if err != nil {
 		sr.Error = err.Error()
 		return true, err
 	}
+	logf(sr, "晋升发布 %s 到下一阶序环境", srcReleaseID)
 	rel, err := e.Releases.Promote(ctx, srcReleaseID)
 	if err != nil {
 		if errors.Is(err, environment.ErrNoPromoteTarget) {
@@ -350,53 +358,55 @@ func (e *Engine) execPromote(ctx context.Context, run *PipelineRun, stage StageD
 		}
 		return true, err
 	}
-	sr.Output = map[string]any{OutReleaseID: rel.ID}
+	logf(sr, "已晋升到 %s", rel.ID)
+	sr.Output = map[string]any{
+		OutReleaseID:       rel.ID,
+		OutWorkloadDomain: e.Releases.WorkloadDomain(ctx, rel.WorkloadID),
+	}
 	sr.Status = StageSuccess
 	sr.FinishedAt = time.Now()
 	return true, nil
 }
 
-// execBaseline 基线 stage：1. 打版本（回填本次 run 涉及的所有 Release.Version）+ 2. 合并主干（可选）。
-// merge 冲突不中止（版本已打），仅记 sr.Error 警告，让用户手动解决。
+// execBaseline 基线 stage：只合并主干（版本号已归 release stage）。
+// mainBranch 空 / Gitea 未注入 -> 跳过合并直接 success（兼容无 release stage 的旧模板）。
+// merge 冲突仅记 sr.Error 警告让用户手动解决，stage 仍 success 不中止 run。
 func (e *Engine) execBaseline(ctx context.Context, run *PipelineRun, stage StageDef, sr *StageRun) (bool, error) {
-	version := computeVersion(*run, stage)
-	// 收集本次 run 涉及的所有 releaseID（deploy/promote stage 输出，向前扫描）
-	var releaseIDs []string
-	for i := 0; i <= run.CurrentStage && i < len(run.StageRuns); i++ {
-		if id, ok := run.StageRuns[i].Output[OutReleaseID].(string); ok && id != "" {
-			releaseIDs = append(releaseIDs, id)
-		}
-	}
-	if len(releaseIDs) > 0 {
-		if err := e.Releases.SetVersion(ctx, releaseIDs, version); err != nil {
-			sr.Error = err.Error()
-			return true, err
-		}
-	}
-	run.Version = version
-	out := map[string]any{OutVersion: version}
-
-	// 合并主干（mainBranch 非空 + Gitea 注入才 merge）
+	out := map[string]any{}
 	mainBranch := strOr(stage.Params, "mainBranch", "")
-	if mainBranch != "" && e.Gitea != nil {
-		owner, repo, err := e.Gitea.ResolveRepo(ctx, run.AppID)
-		if err == nil {
-			mergeSHA, merr := e.Gitea.Merge(ctx, owner, repo, run.Branch, mainBranch,
-				strOr(stage.Params, "mergeMode", "squash"))
-			if merr != nil {
-				if errors.Is(merr, gitea.ErrMergeConflict) {
-					sr.Error = "合并冲突，请手动解决"
-				} else {
-					sr.Error = merr.Error()
-				}
-			} else {
-				out[OutMergeSHA] = mergeSHA
-			}
-		}
-		// ResolveRepo 失败（external repo / 无 internal repo）跳过 merge，仅打版本
+	if mainBranch == "" {
+		logf(sr, "未配 mainBranch，跳过合并")
+		sr.Output = out
+		sr.Status = StageSuccess
+		sr.FinishedAt = time.Now()
+		return true, nil
 	}
+	if e.Gitea == nil {
+		logf(sr, "未接入 Gitea，跳过合并")
+		sr.Output = out
+		sr.Status = StageSuccess
+		sr.FinishedAt = time.Now()
+		return true, nil
+	}
+	logf(sr, "合并 %s -> %s", run.Branch, mainBranch)
+	owner, repo, err := e.Gitea.ResolveRepo(ctx, run.AppID)
+	if err == nil {
+		mergeSHA, merr := e.Gitea.Merge(ctx, owner, repo, run.Branch, mainBranch,
+			strOr(stage.Params, "mergeMode", "squash"))
+		if merr != nil {
+			if errors.Is(merr, gitea.ErrMergeConflict) {
+				sr.Error = "合并冲突，请手动解决"
+			} else {
+				sr.Error = merr.Error()
+			}
+		} else {
+			out[OutMergeSHA] = mergeSHA
+			logf(sr, "已合并 %s", mergeSHA[:min(8, len(mergeSHA))])
+		}
+	}
+	// ResolveRepo 失败（external repo / 无 internal repo）跳过 merge，仅记录
 	sr.Output = out
-	sr.Status = StageSuccess // baseline 即使 merge 冲突也标 success（版本已打）
+	sr.Status = StageSuccess // 冲突也标 success（merge 可手动补）
 	sr.FinishedAt = time.Now()
 	return true, nil
 }
