@@ -1,9 +1,12 @@
 <script setup lang="ts">
-// 流水线运行视图：拉取 PipelineRun 详情 + 5s 轮询 + approve/abort。
+// 流水线运行视图：拉取 PipelineRun 详情 + 5s 轮询 + approve/abort + stage 展开日志区。
 // 轮询仅运行中/暂停时持续；终态自动停止。断连静默重试下次。
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getRun, approveStage, abortRun, type PipelineRun, type StageRun } from '@/api/pipeline'
+import {
+  getRun, approveStage, abortRun, getBuildRun,
+  type PipelineRun, type StageRun, laneOf, buildRunIdOf,
+} from '@/api/pipeline'
 
 const props = defineProps<{ runId: string }>()
 
@@ -114,6 +117,58 @@ onMounted(async () => {
 })
 onUnmounted(stopPolling)
 
+// stage 展开日志区：同一时间只展开一个 stage（KISS）。
+// expandedIdx=当前展开的 stage.index；logCache 缓存已拉取的日志（key=stage.index）。
+// build stage 展开时若 input.buildRunId 存在，调 getBuildRun 拉全量 BuildRun.Log（覆盖 stage.log）。
+const expandedIdx = ref<number | null>(null)
+const logLoading = ref(false)
+const logCache = ref<Record<number, string>>({})
+const logBoxRef = ref<HTMLDivElement | null>(null)
+
+async function toggleExpand(s: StageRun) {
+  if (expandedIdx.value === s.index) {
+    expandedIdx.value = null
+    return
+  }
+  expandedIdx.value = s.index
+  // build stage：有 buildRunId 时拉全量日志（仅首次，结果缓存）。
+  const bid = buildRunIdOf(s)
+  if (s.type === 'build' && bid && logCache.value[s.index] === undefined) {
+    logLoading.value = true
+    try {
+      const br = await getBuildRun(bid)
+      logCache.value[s.index] = br.log || ''
+    } catch {
+      logCache.value[s.index] = '' // 失败 fallback stage.log
+    } finally {
+      logLoading.value = false
+      await scrollLogToBottom()
+    }
+  } else {
+    await scrollLogToBottom()
+  }
+}
+
+async function scrollLogToBottom() {
+  await nextTick()
+  const el = logBoxRef.value
+  if (el) el.scrollTop = el.scrollHeight
+}
+
+// stage 当前应展示的日志内容。
+function logTextOf(s: StageRun): string {
+  if (s.type === 'build' && buildRunIdOf(s) && logCache.value[s.index] !== undefined) {
+    return logCache.value[s.index] || '（暂无日志）'
+  }
+  return s.log || '（暂无日志）'
+}
+
+// run 切换 / stageRuns 变化时清缓存（避免展示上一次 run 的日志）。
+watch(() => props.runId, () => {
+  expandedIdx.value = null
+  logCache.value = {}
+})
+
 // stage 输出已知 key 的中文标签
 const OUTPUT_LABELS: Record<string, string> = {
   imageId: '镜像',
@@ -166,9 +221,13 @@ function shortCommit(c?: string): string {
           :type="stageStatusType(s.status)" :hollow="s.status === 'pending' || s.status === 'skipped'"
           :timestamp="stageDuration(s)" placement="top">
           <div class="stage-card" :class="{ current: s.index === run.currentStage && !isTerminal }">
-            <div class="stage-head">
+            <div class="stage-head" @click="toggleExpand(s)">
               <span class="stage-icon">{{ stageIcon(s.status) }}</span>
+              <span class="expand-icon">{{ expandedIdx === s.index ? '▾' : '▸' }}</span>
               <span class="stage-name">{{ s.name }}</span>
+              <el-tag v-if="laneOf(s)" size="small" :type="laneOf(s) === 'default' ? 'info' : 'warning'">
+                lane: {{ laneOf(s) }}
+              </el-tag>
               <el-tag size="small" :type="stageStatusType(s.status)">{{ s.status }}</el-tag>
             </div>
             <div v-if="s.error" class="stage-error">⚠ {{ s.error }}</div>
@@ -176,6 +235,10 @@ function shortCommit(c?: string): string {
               <div v-for="[k, v] in outputEntries(s)" :key="k" class="out-item">
                 <span class="out-key">{{ k }}：</span><span class="out-val">{{ v }}</span>
               </div>
+            </div>
+            <!-- 展开日志区：build stage 拉 BuildRun 全量日志；其它 stage 用 stage.log -->
+            <div v-if="expandedIdx === s.index" class="stage-log" v-loading="logLoading && s.type === 'build'">
+              <div ref="logBoxRef" class="log-block">{{ logTextOf(s) }}</div>
             </div>
           </div>
         </el-timeline-item>
@@ -204,12 +267,21 @@ function shortCommit(c?: string): string {
   background: var(--el-bg-color);
 }
 .stage-card.current { border-color: var(--el-color-primary); box-shadow: 0 0 0 2px var(--el-color-primary-light-8); }
-.stage-head { display: flex; align-items: center; gap: 8px; }
+.stage-head { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
 .stage-icon { font-weight: 600; width: 16px; text-align: center; }
+.expand-icon { width: 12px; color: var(--el-text-color-secondary); font-size: 12px; }
 .stage-name { font-weight: 500; flex: 1; }
 .stage-error { margin-top: 6px; padding: 6px 8px; font-size: 12px; color: var(--el-color-danger); background: var(--el-color-danger-light-9); border-radius: 4px; word-break: break-all; }
 .stage-output { margin-top: 8px; padding: 8px; background: var(--el-fill-color-lighter); border-radius: 4px; }
 .out-item { font-size: 12px; line-height: 1.8; }
 .out-key { color: var(--el-text-color-secondary); }
 .out-val { font-family: monospace; color: var(--el-text-color-primary); word-break: break-all; }
+.stage-log { margin-top: 8px; }
+.log-block {
+  max-height: 320px; overflow-y: auto;
+  padding: 8px 10px; font-family: monospace; font-size: 12px; line-height: 1.6;
+  white-space: pre-wrap; word-break: break-all;
+  background: var(--el-fill-color-darker); color: var(--el-text-color-primary);
+  border-radius: 4px;
+}
 </style>

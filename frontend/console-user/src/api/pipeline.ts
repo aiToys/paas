@@ -65,6 +65,20 @@ export interface StageRun {
   input?: Record<string, unknown>
   output?: Record<string, unknown>
   error?: string
+  // 执行过程关键事件（append-only），展开日志区展示。
+  log?: string
+}
+
+// 从 stage.input 取 lane 字符串（deploy stage 透传，default=基线，其他=联调/灰度泳道）。
+export function laneOf(s: StageRun): string {
+  const v = s.input?.lane
+  return typeof v === 'string' ? v : ''
+}
+
+// 从 stage.input 取 buildRunId（build stage 执行后写入，用于拉全量 BuildRun.Log）。
+export function buildRunIdOf(s: StageRun): string {
+  const v = s.input?.buildRunId
+  return typeof v === 'string' ? v : ''
 }
 
 export interface PipelineRun {
@@ -133,6 +147,17 @@ async function triggerRun(appId: string, pid: string, body: {
 
 const getRun = (id: string) => fetchJSON<PipelineRun>(`/api/pipelineruns/${id}`)
 
+// BuildRun 详情（含全量日志），build stage 展开日志区调用。
+export interface BuildRunInfo {
+  id: string
+  log?: string
+  status?: string
+  commit?: string
+  branch?: string
+  message?: string
+}
+const getBuildRun = (id: string) => fetchJSON<BuildRunInfo>(`/api/buildruns/${id}`)
+
 const listRuns = (q: { appId?: string; pipelineId?: string; status?: string } = {}) => {
   const qs = new URLSearchParams()
   if (q.appId) qs.set('appId', q.appId)
@@ -160,5 +185,5 @@ async function abortRun(runId: string): Promise<void> {
 
 export {
   listPipelines, getPipeline, createPipeline, updatePipeline, deletePipeline,
-  listTemplates, triggerRun, getRun, listRuns, approveStage, abortRun,
+  listTemplates, triggerRun, getRun, listRuns, approveStage, abortRun, getBuildRun,
 }
