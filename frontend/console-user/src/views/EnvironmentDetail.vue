@@ -24,6 +24,7 @@ interface Workload {
   replicas: number
   ready: number
   status: string
+  laneId?: string
 }
 interface App {
   id: string
@@ -109,7 +110,13 @@ const appMatrix = computed(() => {
     const reps = wls.reduce((s, w) => s + w.replicas, 0)
     const ready = wls.reduce((s, w) => s + w.ready, 0)
     const degraded = wls.some((w) => w.ready < w.replicas || w.status === 'failed')
-    return { app, appId, count: wls.length, reps, ready, degraded }
+    // 聚合该应用在本环境的泳道（排除 default 基线，只显 feature 泳道；无 feature = 仅基线）。
+    const laneSet = new Set<string>()
+    for (const w of wls) {
+      const lane = w.laneId && w.laneId !== 'default' ? w.laneId : ''
+      if (lane) laneSet.add(lane)
+    }
+    return { app, appId, count: wls.length, reps, ready, degraded, lanes: [...laneSet] }
   })
 })
 
@@ -215,6 +222,14 @@ watch(() => route.params.id, load)
           <el-table-column label="副本就绪" width="120">
             <template #default="{ row }">
               <span class="mono" :class="{ warn: row.degraded }">{{ row.ready }}/{{ row.reps }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="泳道" min-width="140">
+            <template #default="{ row }">
+              <span v-if="!row.lanes.length" class="lane-base">基线</span>
+              <el-tag v-for="lane in row.lanes" :key="lane" type="warning" size="small" effect="plain" class="lane-tag">
+                {{ lane }}
+              </el-tag>
             </template>
           </el-table-column>
           <el-table-column label="状态" width="100">
@@ -419,5 +434,12 @@ watch(() => route.params.id, load)
   text-align: center;
   color: var(--text-faint);
   font-size: 14px;
+}
+.lane-base {
+  color: var(--text-faint);
+  font-size: 12px;
+}
+.lane-tag {
+  margin-right: 4px;
 }
 </style>

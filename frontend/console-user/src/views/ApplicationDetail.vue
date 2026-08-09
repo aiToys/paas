@@ -498,6 +498,7 @@ async function deleteApp() {
                 <div class="wl-main">
                   <span class="wl-name">{{ w.name }}</span>
                   <span class="wl-type">{{ w.type }}</span>
+                  <span v-if="w.laneId && w.laneId !== 'default'" class="wl-lane">泳道 {{ w.laneId }}</span>
                   <span class="wl-img mono">{{ w.image }}</span>
                   <span v-if="w.schedule" class="wl-sched mono">{{ w.schedule }}</span>
                 </div>
@@ -1212,6 +1213,13 @@ async function deleteApp() {
 .wl-img {
   font-size: 12px;
   color: var(--text-dim);
+}
+.wl-lane {
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(245, 158, 11, 0.12);
+  color: #f59e0b;
+  font-size: 11px;
 }
 .wl-sched {
   font-size: 12px;
