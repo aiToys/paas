@@ -741,6 +741,19 @@ internal/dataservice/  领域(DataService + 6 Kind 常量 + KindMeta 表单元�
 - **数据服务备份（backup 模块）**：`internal/backup/` 数据服务备份 CRUD（复用 `dataservice:read/write` 权限）+ `EnvTypeResolver`+`ResourceEnvResolver`（resourceID->envID->EnvType，生产数据服务备份/删除需 `prod:write`，fail-closed）+ `deterministicSize` sha256 派生 mock 大小 + Create 即 `StatusCompleted`（mock，无真实备份任务）。REST：`GET/POST /api/backups`、`DELETE /api/backups/{id}`。`cmd/core` 桥接 `dsEnvLookup`（dataservice.Repository -> ResourceEnvResolver）。
 - **留后续**：PVC 持久卷声明（数据服务重启数据丢失，dev/demo 可接受）、HA/集群/扩缩容、引擎原生 exporter（mysql_exporter 等引擎级指标）、同 Kind 多绑定 key 前缀化（`DS_<id>_<KEY>`）、异步创建流转 PG 反向同步、真实备份任务（PV 快照/逻辑备份）--接口已铺路。
 
+### 泳道联调 L2（跨泳道服务发现 + 流量染色，2026-08-09）
+
+承接 L1（流水线 deploy/release 分离 + lane 一等参数，数据模型层），解决「L1 只部署到泳道、泳道之间不会联调」痛点。L2 补齐**跨泳道服务发现 + 流量染色**：feature 泳道变更服务调用其它服务时，优先发现 feature 泳道实例（若有），缺失降级 default 基线——一次请求「变更服务走 feature、未变更服务降级 default」，无需全量部署即联调。设计见 `docs/superpowers/specs/2026-08-09-lane-federation-l2-design.md`，计划 `docs/superpowers/plans/2026-08-09-lane-federation-l2.md`。
+
+- **跨泳道降级发现（L2 核心，方案 A）**：`/dp/instances?service=<app>&lane=feature-x` 复用 L1 Service 命名派生 lane（`<app>-svc-<lane>` vs default `<app>-svc`，零额外 label）。`internal/dataplane/endpoints.go` `Instances(ctx, ns, service, lane)`：lane 空/default 返基线；lane=feature-x 先查 `<service>-<lane>` Endpoints，isNotFound 或无 ready addresses 降级查 `<service>`。**跨租户防泄漏**：两个候选 Service 名均经同名 Service 的 `paas.aitoys/tenant` label 校验归属本租户，跨租户/不存在统一返空不泄漏（`fetchInstances` + `TestK8sReaderLaneFallback` 8 测试覆盖）。
+- **流量染色透传链（SDK）**：`sdk/paas-registry/lane.go`（独立 module，不进主 go.mod）—— `LaneHeader="x-paas-lane"` 常量 + `WithLane/LaneFromCtx` ctx 携带 + `LaneMiddleware(http.Handler)` 入站 header→ctx + `ApplyLaneHeader(ctx, req)` ctx→出站 header。`registry.go` GetService 从 ctx 取 lane 加 URL `&lane=` query。应用引入 SDK middleware 即得透传能力（应用 HTTP server 挂 LaneMiddleware，调下游前 ApplyLaneHeader）。10 测试覆盖。
+- **governance Instance.LaneID 启用**：`model.go` 注释从「预留」改「启用」（字段/读写/pg lane_id 持久化/兜底 LaneDefault L1 已就绪）；`GET /api/services/{id}?lane=feature-x` 按 lane 过滤实例（空=全部，向后兼容；`TestHandlerInstanceLaneFilter`）。
+- **Workload 打 lane label**：`pkg/labels` 加 `KeyLane="paas.aitoys/lane"`（注释明确不参与跨租户校验）；reconciler `labelsFor` 加 lane（Spec.LaneID 空→default，feature 泳道带各自 lane），selector/Pod 模板/Service 同款 label 自然区分泳道（`TestReconcileLabelsLane`）。
+- **前端 lane 分组展示**：`EnvironmentDetail.vue` 应用部署矩阵加「泳道」列（feature 泳道 warning tag + 基线显「基线」）+ `ApplicationDetail.vue` 部署 tab 工作负载行显「泳道 xxx」tag（feature 才显）。Workload JSON laneId L1 已就绪，前端补展示。
+- **入口染色归 SDK（决策）**：PaaS gateway 是推理网关（→airouter），非服务网格入口；lane 入口染色归 SDK `LaneMiddleware` + 用户应用自挂，平台不替应用做入口。硬造推理网关染色违反 YAGNI（airouter 不关心 lane）。符合「服务网格入口染色是 sidecar/SDK 职责」行业规范。Playground lane 选择同理由跳过。
+- **e2e 验证**：`go test ./...` 全绿 + 三套 `pnpm build` 过 + k8s 部署，`/api/workloads` 返回 `laneId:"default"`（L1 字段生效）+ governance lane filter 200 + livez 200。
+- **留后续（L3）**：全链路 mesh（Istio/zeus sidecar 自动染色，应用零改动）、EndpointSlice + lane label selector（方案 B）、泳道自动回收（baseline 触发/闲置 TTL）、拓扑可视化（feature 泳道 + default 基线流量动画）、LaneMiddleware lane 合法性白名单校验、跨集群泳道。
+
 ## 前端架构
 
 三套独立 SPA，共享设计系统（Element Plus + 暗黑模式）：
