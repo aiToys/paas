@@ -49,7 +49,7 @@ const (
 )
 
 // stageRunCols 不含 BIGSERIAL 的 id（重写时按 (pipeline_run_id, stage_index) 排序读回）。
-const stageRunCols = `stage_index, type, name, status, input, output, started_at, finished_at, error`
+const stageRunCols = `stage_index, type, name, status, input, output, started_at, finished_at, error, log`
 
 // 约束名常量（用于错误分类）。与 migration 0018 定义对齐。
 const (
@@ -358,8 +358,8 @@ func (s *pgStore) CreateRun(ctx context.Context, in PipelineRun) (PipelineRun, e
 			return PipelineRun{}, fmt.Errorf("序列化 stage output 失败: %w", mErr)
 		}
 		if _, err = tx.Exec(ctx,
-			`INSERT INTO stage_runs (pipeline_run_id, `+stageRunCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-			in.ID, sr.Index, sr.Type, sr.Name, sr.Status, inB, outB, nullTime(sr.StartedAt), nullTime(sr.FinishedAt), sr.Error); err != nil {
+			`INSERT INTO stage_runs (pipeline_run_id, `+stageRunCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+			in.ID, sr.Index, sr.Type, sr.Name, sr.Status, inB, outB, nullTime(sr.StartedAt), nullTime(sr.FinishedAt), sr.Error, sr.Log); err != nil {
 			return PipelineRun{}, err
 		}
 	}
@@ -407,8 +407,8 @@ func (s *pgStore) UpdateRun(ctx context.Context, in PipelineRun) (PipelineRun, e
 			return PipelineRun{}, fmt.Errorf("序列化 stage output 失败: %w", mErr)
 		}
 		if _, err = tx.Exec(ctx,
-			`INSERT INTO stage_runs (pipeline_run_id, `+stageRunCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-			in.ID, sr.Index, sr.Type, sr.Name, sr.Status, inB, outB, nullTime(sr.StartedAt), nullTime(sr.FinishedAt), sr.Error); err != nil {
+			`INSERT INTO stage_runs (pipeline_run_id, `+stageRunCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+			in.ID, sr.Index, sr.Type, sr.Name, sr.Status, inB, outB, nullTime(sr.StartedAt), nullTime(sr.FinishedAt), sr.Error, sr.Log); err != nil {
 			return PipelineRun{}, err
 		}
 	}
@@ -525,7 +525,7 @@ func loadStageRuns(ctx context.Context, db *pgxpool.Pool, r *PipelineRun) error 
 		var inB, outB []byte
 		// started_at/finished_at 可空（stage 未开始/未结束），用 *time.Time 接 NULL
 		var sp, fp *time.Time
-		if err = rows.Scan(&sr.Index, &sr.Type, &sr.Name, &sr.Status, &inB, &outB, &sp, &fp, &sr.Error); err != nil {
+		if err = rows.Scan(&sr.Index, &sr.Type, &sr.Name, &sr.Status, &inB, &outB, &sp, &fp, &sr.Error, &sr.Log); err != nil {
 			return err
 		}
 		if sp != nil {

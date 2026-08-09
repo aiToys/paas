@@ -81,7 +81,7 @@ func (s *Store) baseCtxOrBg() context.Context {
 const (
 	repoCols    = `id, tenant_id, app_id, git_url, branch, dockerfile, build_context, status, created_at, source, gitea_owner, gitea_repo, clone_url`
 	buildCols   = `id, tenant_id, app_id, repo_id, trigger, commit, branch, message, status, image_id, log, build_args, started_at, finished_at`
-	imageCols   = `id, tenant_id, app_id, registry, tag, digest, source, branch, build_run_id, built_at, status`
+	imageCols   = `id, tenant_id, app_id, registry, tag, digest, source, branch, build_run_id, built_at, status, version`
 	releaseCols = `id, tenant_id, app_id, env_id, image_id, image_digest, strategy, status, workload_id, previous_image_id, is_rollback, created_at, created_by, promoted_from, version, lane_id, source_run_id`
 )
 
@@ -422,9 +422,9 @@ func (s *Store) runBuild(ctx context.Context, p builder.Params) {
 		}
 	}()
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO images (`+imageCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+		`INSERT INTO images (`+imageCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
 		img.ID, img.TenantID, img.AppID, img.Registry, img.Tag, img.Digest, img.Source,
-		img.Branch, img.BuildRunID, img.BuiltAt, img.Status); err != nil {
+		img.Branch, img.BuildRunID, img.BuiltAt, img.Status, img.Version); err != nil {
 		s.markBuildFailed(ctx, p.BuildID, "镜像落库失败: "+err.Error()+"\n"+res.Log)
 		return
 	}
@@ -521,7 +521,7 @@ func (s *Store) GetImage(ctx context.Context, id string) (devops.Image, error) {
 func scanImage(r pg.RowScanner, im *devops.Image) error {
 	return r.Scan(
 		&im.ID, &im.TenantID, &im.AppID, &im.Registry, &im.Tag, &im.Digest,
-		&im.Source, &im.Branch, &im.BuildRunID, &im.BuiltAt, &im.Status)
+		&im.Source, &im.Branch, &im.BuildRunID, &im.BuiltAt, &im.Status, &im.Version)
 }
 
 // findImageIDByDigest 在本租户镜像中按 digest 反查 ID（Release 编排取回滚指针用）。

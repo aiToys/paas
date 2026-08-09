@@ -84,9 +84,9 @@ func seedImage(t *testing.T, s *Store, ctx context.Context, id, appID, digest st
 		BuildRunID: "build-x", BuiltAt: time.Now(), Status: devops.ImageReady,
 	}
 	_, err := s.db.Pool().Exec(ctx,
-		`INSERT INTO images (`+imageCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+		`INSERT INTO images (`+imageCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
 		im.ID, im.TenantID, im.AppID, im.Registry, im.Tag, im.Digest, im.Source,
-		im.Branch, im.BuildRunID, im.BuiltAt, im.Status)
+		im.Branch, im.BuildRunID, im.BuiltAt, im.Status, im.Version)
 	if err != nil {
 		t.Fatalf("灌入镜像失败: %v", err)
 	}
@@ -636,5 +636,64 @@ func TestSeedDevOpsReuse(t *testing.T) {
 	}
 	if !acmeHit || !globexHit {
 		t.Errorf("SeedDevOps 应覆盖 acme+globex 两租户")
+	}
+}
+
+// ---------- pipeline deploy/release/lane 新列持久化（Task 10） ----------
+
+// TestPGReleaseLaneAndImageVersion 覆盖 migration 0022 引入的 3 个新列持久化：
+//   - releases.lane_id / source_run_id（Task 3 引入，MarkSourceRun 写、CreateRelease 写 lane）
+//   - images.version（Task 4 引入，SetVersion 写）
+//   - stage_runs.log（Task 1 引入，stage_runs 重写时携带）
+func TestPGReleaseLaneAndImageVersion(t *testing.T) {
+	db := newTestDB(t)
+	wlStore := workloadmemory.NewStore()
+	s := NewStore(db, wlStore)
+	ctx := acmeCtx()
+
+	// 1. 灌基线镜像（seedImage 已包含 version 列；初始 version=""）
+	im := seedImage(t, s, ctx, "img-lane", "app-lane", "sha256:lane-v1")
+
+	// 2. 发布到 feature-x 泳道（CreateRelease 写 lane_id）
+	rel, err := s.CreateRelease(ctx, devops.ReleaseInput{
+		AppID: "app-lane", EnvID: "env-test", LaneID: "feature-x", ImageID: im.ID,
+		CreatedBy: "u-acme-admin",
+	})
+	if err != nil {
+		t.Fatalf("CreateRelease: %v", err)
+	}
+	if rel.LaneID != "feature-x" {
+		t.Errorf("Release.LaneID=feature-x, got %q", rel.LaneID)
+	}
+
+	// 3. 回填 source_run_id（MarkSourceRun 写 source_run_id）
+	if err := s.MarkSourceRun(ctx, rel.ID, "run-abc"); err != nil {
+		t.Fatalf("MarkSourceRun: %v", err)
+	}
+
+	// 4. 回填镜像 version（SetVersion 写 images.version）
+	if err := s.SetVersion(ctx, im.ID, "v1.2.0"); err != nil {
+		t.Fatalf("SetVersion: %v", err)
+	}
+
+	// 5. GetRelease 验证 lane_id + source_run_id 读回
+	got, err := s.GetRelease(ctx, rel.ID)
+	if err != nil {
+		t.Fatalf("GetRelease: %v", err)
+	}
+	if got.LaneID != "feature-x" {
+		t.Errorf("PG Release.LaneID 持久化失败: want feature-x, got %q", got.LaneID)
+	}
+	if got.SourceRunID != "run-abc" {
+		t.Errorf("PG Release.SourceRunID 持久化失败: want run-abc, got %q", got.SourceRunID)
+	}
+
+	// 6. GetImage 验证 version 读回
+	gotImg, err := s.GetImage(ctx, im.ID)
+	if err != nil {
+		t.Fatalf("GetImage: %v", err)
+	}
+	if gotImg.Version != "v1.2.0" {
+		t.Errorf("PG Image.Version 持久化失败: want v1.2.0, got %q", gotImg.Version)
 	}
 }
