@@ -70,6 +70,16 @@ func (f *fakeReleaser) SetVersion(ctx context.Context, releaseIDs []string, vers
 	return nil
 }
 
+// Deploy stub（Task 5/6 集成测试覆盖真实语义；本 task 仅满足接口编译）。
+func (f *fakeReleaser) Deploy(ctx context.Context, appID, envID, lane, imageID, sourceRunID string) (devops.Release, string, error) {
+	return devops.Release{}, "", nil
+}
+
+// Publish stub（Task 5/6 集成测试覆盖真实语义；本 task 仅满足接口编译）。
+func (f *fakeReleaser) Publish(ctx context.Context, appID, imageID, version, commit string) (string, error) {
+	return "", nil
+}
+
 // fakeGiteaMerger 桥接 GiteaMerger（baseline merge 测试）。
 type fakeGiteaMerger struct {
 	owner     string

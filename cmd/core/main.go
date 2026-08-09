@@ -451,14 +451,18 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// engine 经 buildBridge/releaseBridge/giteaBridge 桥接 devops 业务包（依赖倒置破循环）；
 	// handler 注入 EnvTypeResolver（prod deploy 校验）+ RepoResolver（build stage 解析内置仓库）+
 	// identityAuditAdapter（审计，与 identity/devops 同源）+ actor（gateway.UserIDFrom）。
+	// giteaBridge 同时作为 engine.GiteaMerger（baseline merge）+ releaseBridge.gitea（release tag），
+	// 复用同一 gitea client + ResolveRepo 实现。
+	giteaBridgeInst := &giteaBridge{repos: stores.DevOpsRepos, gitea: giteaClient}
 	pipeEngine := &pipeline.Engine{
 		Pipelines: stores.Pipeline, Runs: stores.Pipeline,
 		Builds:   &buildBridge{builds: stores.DevOpsBuilds},
 		Releases: &releaseBridge{
 			releases: stores.DevOpsReleases, images: stores.DevOpsImages,
 			workloads: stores.Workload, envs: stores.Environment,
+			gitea: giteaBridgeInst,
 		},
-		Gitea: &giteaBridge{repos: stores.DevOpsRepos, gitea: giteaClient},
+		Gitea: giteaBridgeInst,
 	}
 	pipelineHandler := pipeline.NewHandler(stores.Pipeline, stores.Pipeline, stores.Pipeline, pipeEngine,
 		pipeline.WithAuthorize(func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }),

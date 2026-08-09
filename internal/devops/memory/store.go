@@ -457,6 +457,40 @@ func (s *Store) SetReleaseVersion(ctx context.Context, id, version string) error
 	return nil
 }
 
+// MarkSourceRun 给部署记录回填触发它的 pipeline run ID（deploy stage 经 Deploy 接口写入）。
+func (s *Store) MarkSourceRun(ctx context.Context, id, runID string) error {
+	tid, err := tenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.releases[id]
+	if !ok || r.TenantID != tid {
+		return fmt.Errorf("发布不存在: %s", id)
+	}
+	r.SourceRunID = runID
+	s.releases[id] = r
+	return nil
+}
+
+// SetVersion 给镜像回填正式版本号（release stage 打版本时调）。
+func (s *Store) SetVersion(ctx context.Context, id, version string) error {
+	tid, err := tenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	img, ok := s.images[id]
+	if !ok || img.TenantID != tid {
+		return fmt.Errorf("镜像不存在: %s", id)
+	}
+	img.Version = version
+	s.images[id] = img
+	return nil
+}
+
 // CreateRelease 编排发布：取镜像 -> 找/建目标环境某泳道的基线 Workload -> 更新镜像 -> 记录回滚指针 -> 存发布单。
 // 泳道由 input.LaneID 决定（空=默认基线 workload.LaneDefault）；同一 (app,env,lane) 共享一个基线 Workload，
 // 不同 lane 各自独立（联调/灰度场景）。策略非 rolling 也走 rolling 编排（mock 期无真实流量切分），

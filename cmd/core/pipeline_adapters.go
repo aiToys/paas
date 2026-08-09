@@ -37,9 +37,9 @@ const (
 type buildBridge struct{ builds devops.BuildRunRepository }
 
 // CreateBuildRun 触发构建，返回写入后的 BuildRun（含 ID，供轮询）。
-func (b *buildBridge) CreateBuildRun(ctx context.Context, appID, repoID, branch, commit string, _ map[string]string) (devops.BuildRun, error) {
+func (b *buildBridge) CreateBuildRun(ctx context.Context, appID, repoID, branch, commit string, buildArgs map[string]string) (devops.BuildRun, error) {
 	return b.builds.CreateBuildRun(ctx, devops.BuildRun{
-		AppID: appID, RepoID: repoID, Branch: branch, Commit: commit, Trigger: devops.TriggerManual,
+		AppID: appID, RepoID: repoID, Branch: branch, Commit: commit, Trigger: devops.TriggerManual, BuildArgs: buildArgs,
 	})
 }
 
@@ -63,6 +63,13 @@ func (b *buildBridge) PollBuildRun(ctx context.Context, buildID string) (devops.
 
 var _ pipeline.BuildRunner = (*buildBridge)(nil)
 
+// giteaTagger 是 releaseBridge.Publish 打 git tag 所需的最小接口（解耦 *gitea.Client 直接依赖）。
+// giteaBridge 实现此接口（已有 ResolveRepo + 新增 CreateTag 委托 gitea.Client）。
+type giteaTagger interface {
+	ResolveRepo(ctx context.Context, appID string) (owner, repo string, err error)
+	CreateTag(ctx context.Context, owner, repo, tag, commit string) (string, error)
+}
+
 // releaseBridge 桥接 pipeline.Releaser -> devops ReleaseRepository +
 // workload readiness + Image + environment promote。
 type releaseBridge struct {
@@ -70,6 +77,7 @@ type releaseBridge struct {
 	images    devops.ImageRepository
 	workloads workload.Repository
 	envs      environment.Repository
+	gitea     giteaTagger // 可选，nil 时 Publish 跳过 git tag（仅回填 Image.Version）
 }
 
 // CreateRelease 编排发布（取镜像 + 找/建基线 Workload + 更新镜像 + 回滚指针）。
@@ -148,6 +156,43 @@ func (r *releaseBridge) SetVersion(ctx context.Context, releaseIDs []string, ver
 	return nil
 }
 
+// Deploy 部署镜像到 env×lane（找/建基线 Workload + UpdateImage），产生部署记录，不打版本。
+// 内部经 CreateRelease 编排（已支持 lane），domain 经 WorkloadDomain 拼探活地址。
+// sourceRunID 非空时回填到部署记录（追溯哪次 pipeline run 触发）。
+func (r *releaseBridge) Deploy(ctx context.Context, appID, envID, lane, imageID, sourceRunID string) (devops.Release, string, error) {
+	rel, err := r.releases.CreateRelease(ctx, devops.ReleaseInput{
+		AppID: appID, EnvID: envID, LaneID: lane, ImageID: imageID,
+	})
+	if err != nil {
+		return devops.Release{}, "", err
+	}
+	if sourceRunID != "" {
+		// 回填失败仅降级（部署已成功，追溯字段非关键），不阻断 deploy。
+		// 错误透传策略：此处故意吞错，避免因 source_run_id 列未就绪（migration 0022 前）拖垮整个 deploy。
+		_ = r.releases.MarkSourceRun(ctx, rel.ID, sourceRunID)
+		rel.SourceRunID = sourceRunID
+	}
+	return rel, r.WorkloadDomain(ctx, rel.WorkloadID), nil
+}
+
+// Publish 打版本号里程碑：Image.Version 回填 + git tag（commit 非空且仓库为 internal 时）。
+// 不部署（部署是 deploy stage 的事）。返回 tagSha（未打 tag 时为空串）。
+// external repo 或未注入 gitea 时仅回填 Image.Version，跳过 tag（不报错）。
+func (r *releaseBridge) Publish(ctx context.Context, appID, imageID, version, commit string) (string, error) {
+	if err := r.images.SetVersion(ctx, imageID, version); err != nil {
+		return "", err
+	}
+	if commit == "" || r.gitea == nil {
+		return "", nil
+	}
+	owner, repo, err := r.gitea.ResolveRepo(ctx, appID)
+	if err != nil {
+		// external repo / 无 internal repo：跳过 tag，不报错（版本号已回填）
+		return "", nil
+	}
+	return r.gitea.CreateTag(ctx, owner, repo, version, commit)
+}
+
 var _ pipeline.Releaser = (*releaseBridge)(nil)
 
 // giteaBridge 桥接 pipeline.GiteaMerger -> gitea.Client + devops CodeRepo（解析 internal repo owner/name）。
@@ -178,7 +223,17 @@ func (g *giteaBridge) Merge(ctx context.Context, owner, repo, head, base, mode s
 	return g.gitea.Merge(ctx, owner, repo, head, base, mode)
 }
 
+// CreateTag 经 gitea client 在指定 commit 上打 tag（release stage 打版本号里程碑）。
+// gitea client 未配置返错（release stage 显式知道 tag 不可用，与 baseline 跳过策略区分）。
+func (g *giteaBridge) CreateTag(ctx context.Context, owner, repo, tag, commit string) (string, error) {
+	if g.gitea == nil {
+		return "", fmt.Errorf("gitea client 未配置，release tag 不可用")
+	}
+	return g.gitea.CreateTag(ctx, owner, repo, tag, commit)
+}
+
 var _ pipeline.GiteaMerger = (*giteaBridge)(nil)
+var _ giteaTagger = (*giteaBridge)(nil)
 
 // repoResolverBridge 桥接 pipeline.RepoResolver -> devops CodeRepo（解析 internal repo ID 供 build stage）。
 type repoResolverBridge struct{ repos devops.CodeRepoRepository }

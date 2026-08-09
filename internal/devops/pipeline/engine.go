@@ -42,6 +42,12 @@ type Releaser interface {
 	Promote(ctx context.Context, srcReleaseID string) (devops.Release, error)
 	// SetVersion 给本次 run 涉及的 Release 批量回填版本号（baseline stage 打版本）。
 	SetVersion(ctx context.Context, releaseIDs []string, version string) error
+	// Deploy 部署镜像到 env×lane（找/建基线 Workload + UpdateImage），产生部署记录，不打版本。
+	// sourceRunID 非空时回填到部署记录（追溯哪次 pipeline run 触发）。返回部署记录 + 探活域名。
+	Deploy(ctx context.Context, appID, envID, lane, imageID, sourceRunID string) (deployment devops.Release, domain string, err error)
+	// Publish 打版本号里程碑：Image.Version 回填 + git tag（commit 非空且仓库为 internal 时）。
+	// 不部署（部署是 deploy stage 的事）。返回 tagSha（未打 tag 时为空串）。
+	Publish(ctx context.Context, appID, imageID, version, commit string) (tagSha string, err error)
 }
 
 // GiteaMerger 桥接 gitea.Client（baseline stage 合并主干）。

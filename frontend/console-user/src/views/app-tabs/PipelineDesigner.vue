@@ -35,6 +35,8 @@ async function load() {
 
 // deploy stage 索引（可覆盖 envId 的 stage）
 const deployStages = computed(() => stages.value.map((s, i) => ({ s, i })).filter((x) => x.s.type === 'deploy'))
+// build stage 索引（可覆盖 buildArgs，如多服务 Dockerfile ARG SERVICE）
+const buildStages = computed(() => stages.value.map((s, i) => ({ s, i })).filter((x) => x.s.type === 'build'))
 
 // 覆盖 key: "<stageIdx>.<param>"
 function overrideKey(stageIdx: number, param: string): string {
@@ -46,6 +48,38 @@ function getOverride(stageIdx: number, param: string): string {
 function setOverride(stageIdx: number, param: string, val: string) {
   const k = overrideKey(stageIdx, param)
   if (val) overrides.value[k] = val
+  else delete overrides.value[k]
+}
+
+// buildArgs 覆盖（map[string]string，如 {SERVICE: product}）。key 格式 "<stageIdx>.buildArgs"。
+// 多服务构建必填（Dockerfile ARG SERVICE）；前端用动态 key-value 行编辑，提交时聚合为 map。
+function getBuildArgs(stageIdx: number): Array<{ k: string; v: string }> {
+  const m = (overrides.value[overrideKey(stageIdx, 'buildArgs')] as Record<string, string> | undefined) ?? {}
+  return Object.entries(m).map(([k, v]) => ({ k, v }))
+}
+function setBuildArg(stageIdx: number, idx: number, field: 'k' | 'v', val: string) {
+  const rows = getBuildArgs(stageIdx)
+  if (idx >= rows.length) rows.push({ k: '', v: '' })
+  rows[idx][field] = val
+  commitBuildArgs(stageIdx, rows)
+}
+function addBuildArg(stageIdx: number) {
+  const rows = getBuildArgs(stageIdx)
+  rows.push({ k: '', v: '' })
+  commitBuildArgs(stageIdx, rows)
+}
+function removeBuildArg(stageIdx: number, idx: number) {
+  const rows = getBuildArgs(stageIdx)
+  rows.splice(idx, 1)
+  commitBuildArgs(stageIdx, rows)
+}
+function commitBuildArgs(stageIdx: number, rows: Array<{ k: string; v: string }>) {
+  const m: Record<string, string> = {}
+  for (const r of rows) {
+    if (r.k) m[r.k] = r.v
+  }
+  const k = overrideKey(stageIdx, 'buildArgs')
+  if (Object.keys(m).length) overrides.value[k] = m
   else delete overrides.value[k]
 }
 
@@ -94,7 +128,19 @@ onMounted(load)
         </el-select>
         <div class="override-hint">留空 = 用模板默认占位符自动解析；选具体环境 = 覆盖。</div>
       </div>
-      <el-empty v-if="!deployStages.length" description="无 deploy 阶段可覆盖" :image-size="60" />
+      <div v-for="b in buildStages" :key="b.i" class="override-item">
+        <div class="override-label">阶段「{{ b.s.name }}」构建参数（buildArgs，如 SERVICE=product）</div>
+        <div v-for="(row, idx) in getBuildArgs(b.i)" :key="idx" class="buildarg-row">
+          <el-input :model-value="row.k" @update:model-value="(v: string) => setBuildArg(b.i, idx, 'k', v)"
+                    placeholder="参数名（如 SERVICE）" style="width: 40%;" />
+          <el-input :model-value="row.v" @update:model-value="(v: string) => setBuildArg(b.i, idx, 'v', v)"
+                    placeholder="参数值（如 product）" style="width: 40%;" />
+          <el-button text type="danger" @click="removeBuildArg(b.i, idx)">删</el-button>
+        </div>
+        <el-button text type="primary" @click="addBuildArg(b.i)">+ 添加参数</el-button>
+        <div class="override-hint">多服务构建必填（Dockerfile ARG，透传 --build-arg K=V）；留空 = 无构建参数。</div>
+      </div>
+      <el-empty v-if="!deployStages.length && !buildStages.length" description="无 deploy/build 阶段可覆盖" :image-size="60" />
     </div>
 
     <div class="footer">
@@ -118,6 +164,7 @@ onMounted(load)
   color: #fff; font-size: 11px; display: inline-flex; align-items: center; justify-content: center;
 }
 .override-item { margin-bottom: 16px; }
+.buildarg-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
 .override-label { font-size: 13px; margin-bottom: 6px; color: var(--el-text-color-regular); }
 .override-hint { font-size: 12px; color: var(--el-text-color-secondary); margin-top: 4px; }
 .footer { margin-top: 24px; text-align: right; }

@@ -628,6 +628,44 @@ func (s *Store) SetReleaseVersion(ctx context.Context, id, version string) error
 	return nil
 }
 
+// MarkSourceRun 给部署记录回填触发它的 pipeline run ID（deploy stage 经 Deploy 接口写入）。
+// 注：source_run_id 列由 migration 0022（Task 10）添加；列存在前运行时会报错，
+// 默认 go test 不跑 integration，memory 路径完全可用。
+func (s *Store) MarkSourceRun(ctx context.Context, id, runID string) error {
+	tid, err := pg.TenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	tag, err := s.db.Pool().Exec(ctx,
+		`UPDATE releases SET source_run_id=$1 WHERE id=$2 AND tenant_id=$3`, runID, id, tid)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("发布不存在: %s", id)
+	}
+	return nil
+}
+
+// SetVersion 给镜像回填正式版本号（release stage 打版本时调）。
+// 注：images.version 列由 migration 0022（Task 10）添加；列存在前运行时会报错，
+// 默认 go test 不跑 integration，memory 路径完全可用。
+func (s *Store) SetVersion(ctx context.Context, id, version string) error {
+	tid, err := pg.TenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	tag, err := s.db.Pool().Exec(ctx,
+		`UPDATE images SET version=$1 WHERE id=$2 AND tenant_id=$3`, version, id, tid)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("镜像不存在: %s", id)
+	}
+	return nil
+}
+
 // CreateRelease 编排发布：取镜像 -> 找/建目标环境基线 Workload -> 更新镜像 -> 记录回滚指针 -> 存发布单。
 // **逻辑逐行对齐内存版**（internal/devops/memory/store.go CreateRelease），仅把内存 map 操作换成 SQL。
 // 事务仅覆盖 releases 表写入；workload 侧操作经接口，失败按内存版同款回滚语义（不在 DB 层做跨 store 事务）。

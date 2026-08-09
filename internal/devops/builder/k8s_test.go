@@ -20,6 +20,7 @@ func TestBuildJobSpec(t *testing.T) {
 		BuildContext: ".",
 		RegistryUser: "u",
 		RegistryPass: "p",
+		BuildArgs:    map[string]string{"SERVICE": "product"},
 	}
 	job := buildJobSpec("docker:git", p, "paas-build-build-abc", "hub.wang.dd:5000/app-cs:main-c0ffee12", "https://x@git/repo.git")
 
@@ -69,6 +70,9 @@ func TestBuildJobSpec(t *testing.T) {
 	if envOf("REGISTRY_PASS") != "p" {
 		t.Errorf("REGISTRY_PASS env = %q", envOf("REGISTRY_PASS"))
 	}
+	if envOf("BUILD_ARG_FLAGS") != "--build-arg SERVICE=product" {
+		t.Errorf("BUILD_ARG_FLAGS env = %q, want --build-arg SERVICE=product", envOf("BUILD_ARG_FLAGS"))
+	}
 
 	// docker.sock 挂载。
 	var hasMount bool
@@ -94,6 +98,28 @@ func TestBuildJobSpec(t *testing.T) {
 	// DooD 关键断言：非 privileged。
 	if c.SecurityContext != nil && c.SecurityContext.Privileged != nil && *c.SecurityContext.Privileged {
 		t.Error("容器不应设 privileged:true（DooD 复用节点 daemon）")
+	}
+}
+
+func TestFormatBuildArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		in   map[string]string
+		want string
+	}{
+		{"nil", nil, ""},
+		{"empty", map[string]string{}, ""},
+		{"single", map[string]string{"SERVICE": "product"}, "--build-arg SERVICE=product"},
+		{"unsafe value skipped", map[string]string{"SERVICE": "product; rm -rf /", "OK": "v"}, "--build-arg OK=v"},
+		{"unsafe key skipped", map[string]string{"bad key": "v", "OK": "v"}, "--build-arg OK=v"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := formatBuildArgs(c.in)
+			if got != c.want {
+				t.Errorf("formatBuildArgs(%v) = %q, want %q", c.in, got, c.want)
+			}
+		})
 	}
 }
 

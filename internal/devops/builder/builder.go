@@ -31,6 +31,7 @@ type Params struct {
 	GitToken     string // 可选：私有仓库 HTTPS token（注入 git URL）
 	RegistryUser string // 可选：docker login 用户名
 	RegistryPass string // 可选：docker login 密码
+	BuildArgs    map[string]string // 可选：docker build --build-arg K=V（如 SERVICE=product）
 }
 
 // Result 是构建产物。Digest 是不可变真源（生产部署锁这个）。

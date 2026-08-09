@@ -27,6 +27,7 @@ if [ -n "$REGISTRY_USER" ]; then printf '%s\n' "$REGISTRY_PASS" | docker login -
 BUILD_CTX="${BUILD_CONTEXT:-.}"
 BUILD_ARGS="-t $REF"
 if [ -n "$DOCKERFILE" ]; then BUILD_ARGS="$BUILD_ARGS -f $DOCKERFILE"; fi
+if [ -n "$BUILD_ARG_FLAGS" ]; then BUILD_ARGS="$BUILD_ARGS $BUILD_ARG_FLAGS"; fi
 docker build $BUILD_ARGS "$BUILD_CTX"
 docker push "$REF"
 digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$REF")

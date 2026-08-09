@@ -108,7 +108,12 @@ func (r Real) Build(ctx context.Context, p Params) (Result, error) {
 	if !filepath.IsAbs(dockerfileAbs) {
 		dockerfileAbs = filepath.Join(dir, dockerfile)
 	}
-	if out, err := runCmd(buildCtx2, log, dir, dockerBin, "build", "-t", ref, "-f", dockerfileAbs, buildCtx); err != nil {
+	buildArgs := []string{"build", "-t", ref, "-f", dockerfileAbs}
+	for k, v := range p.BuildArgs {
+		buildArgs = append(buildArgs, "--build-arg", k+"="+v)
+	}
+	buildArgs = append(buildArgs, buildCtx)
+	if out, err := runCmd(buildCtx2, log, dir, dockerBin, buildArgs...); err != nil {
 		return Result{Log: log.String()}, fmt.Errorf("docker build 失败: %w\n%s", err, out)
 	}
 

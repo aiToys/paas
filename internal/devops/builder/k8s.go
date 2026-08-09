@@ -220,6 +220,7 @@ func buildJobSpec(builderImage string, p Params, jobName, ref, cloneURL string) 
 							{Name: "COMMIT", Value: p.Commit},
 							{Name: "DOCKERFILE", Value: p.Dockerfile},
 							{Name: "BUILD_CONTEXT", Value: p.BuildContext},
+							{Name: "BUILD_ARG_FLAGS", Value: formatBuildArgs(p.BuildArgs)},
 							{Name: "REGISTRY_USER", Value: p.RegistryUser},
 							{Name: "REGISTRY_PASS", Value: p.RegistryPass},
 						},
@@ -244,10 +245,34 @@ func buildJobSpec(builderImage string, p Params, jobName, ref, cloneURL string) 
 	}
 }
 
-// 不锚定行尾 $：Pod 日志采集常把 docker 输出紧跟在 PAAS_DIGEST 行后（换行丢失/拼接），
-// 行尾 $ 会失配致 digest 漏解析、BuildRun 误标 failed。靠 PAAS_DIGEST= 前缀 + hex 字符集
-// 自然终止（sha256 后 64 位 hex，遇非 hex 字符如 docker RepoDigest 行的 'h' 自动停）。
-var digestRe = regexp.MustCompile(`PAAS_DIGEST=(sha256:[0-9a-f]{6,})`)
+// formatBuildArgs 把 BuildArgs map 拼成 `--build-arg K=V --build-arg K2=V2` 串，供脚本无引号拼接。
+// 校验 key/value 仅安全字符（防 shell 注入：value 经脚本 word splitting 展开，含空格/特殊字符会破坏 BUILD_ARGS）。
+// key: ^[A-Za-z_][A-Za-z0-9_]*$；value: ^[A-Za-z0-9_.:/-]+$（版本号/服务名/路径等常见值）。
+// 不安全字符跳过（不阻断构建，避免恶意参数致脚本异常）。
+func formatBuildArgs(args map[string]string) string {
+	var b strings.Builder
+	for k, v := range args {
+		if !buildArgKeyRe.MatchString(k) || !buildArgValRe.MatchString(v) {
+			continue
+		}
+		b.WriteString("--build-arg ")
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(v)
+		b.WriteByte(' ')
+	}
+	return strings.TrimSpace(b.String())
+}
+
+var (
+	buildArgKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	buildArgValRe = regexp.MustCompile(`^[A-Za-z0-9_.:/-]+$`)
+
+	// 不锚定行尾 $：Pod 日志采集常把 docker 输出紧跟在 PAAS_DIGEST 行后（换行丢失/拼接），
+	// 行尾 $ 会失配致 digest 漏解析、BuildRun 误标 failed。靠 PAAS_DIGEST= 前缀 + hex 字符集
+	// 自然终止（sha256 后 64 位 hex，遇非 hex 字符如 docker RepoDigest 行的 'h' 自动停）。
+	digestRe = regexp.MustCompile(`PAAS_DIGEST=(sha256:[0-9a-f]{6,})`)
+)
 
 // parseDigest 从 Pod 日志提取 PAAS_DIGEST 行的 sha256。无匹配返错（BuildRun 记 failed）。
 func parseDigest(logs string) (string, error) {

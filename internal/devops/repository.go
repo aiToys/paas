@@ -32,6 +32,9 @@ type ImageRepository interface {
 	GetImage(ctx context.Context, id string) (Image, error)
 	// ListAllImages 跨租户列出全部镜像（admin 平台总览，不过滤 tenant，返回对象带 TenantID）。
 	ListAllImages(ctx context.Context) ([]Image, error)
+	// SetVersion 给镜像回填正式版本号（release stage 打版本时调，标记该镜像已发布为某版本）。
+	// 跨租户访问返 not found 不泄漏（与 GetImage 同源）。
+	SetVersion(ctx context.Context, id, version string) error
 }
 
 // ReleaseRepository 是发布持久化 + 编排抽象。
@@ -51,6 +54,9 @@ type ReleaseRepository interface {
 	// SetReleaseVersion 给已存在的发布单回填版本号（baseline stage 打版本时调）。
 	// 跨租户访问返 not found 不泄漏（与 GetRelease 同源）。
 	SetReleaseVersion(ctx context.Context, id, version string) error
+	// MarkSourceRun 给部署记录回填触发它的 pipeline run ID（deploy stage 经 Deploy 接口写入，
+	// 用于追溯到哪次流水线触发了此次部署）。跨租户访问返 not found 不泄漏。
+	MarkSourceRun(ctx context.Context, id, runID string) error
 	// ListAllReleases 跨租户列出全部发布（admin 平台总览，不过滤 tenant，返回对象带 TenantID）。
 	ListAllReleases(ctx context.Context) ([]Release, error)
 }

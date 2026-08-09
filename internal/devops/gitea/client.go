@@ -261,6 +261,26 @@ func pathEscape(s string) string {
 	return url.PathEscape(s)
 }
 
+// CreateTag 在指定 commit 上打 annotated tag（release stage 打版本号里程碑用）。
+// 调 Gitea git tags API：POST /repos/{owner}/{repo}/git/tags，body {tag,message,target}，
+// 返回 {sha,...}。message 固定为 "release <tag>"（tag 即版本号）。
+// 仓库不存在 -> ErrRepoNotFound；Gitea 不可达 -> ErrGiteaUnavailable。
+func (c *Client) CreateTag(ctx context.Context, owner, repo, tag, commit string) (string, error) {
+	body := map[string]any{
+		"tag":     tag,
+		"message": "release " + tag,
+		"target":  commit,
+	}
+	var out struct {
+		SHA string `json:"sha"`
+	}
+	p := fmt.Sprintf("/api/v1/repos/%s/%s/git/tags", pathEscape(owner), pathEscape(repo))
+	if err := c.doJSON(ctx, http.MethodPost, p, body, &out); err != nil {
+		return "", err
+	}
+	return out.SHA, nil
+}
+
 // Merge 把 head 分支合并到 base（baseline stage 合并主干用）。
 // 两步：创建 PR -> merge PR。mode: "ff"(merge commit) | "squash"。
 // 合并冲突（分叉且 ff 不可行）-> ErrMergeConflict；仓库不存在 -> ErrRepoNotFound；
