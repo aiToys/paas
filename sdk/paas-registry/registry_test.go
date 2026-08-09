@@ -67,6 +67,42 @@ func TestGetService(t *testing.T) {
 	}
 }
 
+func TestGetServiceWithLane(t *testing.T) {
+	var gotPath, gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"service":   "user-svc",
+			"instances": []map[string]any{},
+			"signature": "abc",
+		})
+	}))
+	defer srv.Close()
+	reg := &paasRegistry{base: srv.URL + "/dp", token: "sk-1", client: srv.Client()}
+
+	// ctx 注入 lane=feature-x → URL 应含 &lane=feature-x
+	ctx := WithLane(context.Background(), "feature-x")
+	if _, err := reg.GetService(ctx, "user-svc"); err != nil {
+		t.Fatalf("GetService 失败: %v", err)
+	}
+	if gotPath != "/dp/instances" {
+		t.Errorf("path 错误: %q", gotPath)
+	}
+	if gotQuery != "service=user-svc&lane=feature-x" {
+		t.Errorf("期望 query 含 lane，得 %q", gotQuery)
+	}
+
+	// ctx 无 lane → URL 不含 lane query（向后兼容）
+	gotQuery = ""
+	if _, err := reg.GetService(context.Background(), "user-svc"); err != nil {
+		t.Fatalf("GetService 失败: %v", err)
+	}
+	if gotQuery != "service=user-svc" {
+		t.Errorf("无 lane 时 query 应不含 lane，得 %q", gotQuery)
+	}
+}
+
 func TestRegister(t *testing.T) {
 	var gotBody dpInstance
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
