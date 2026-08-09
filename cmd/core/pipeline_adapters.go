@@ -97,9 +97,12 @@ func (r *releaseBridge) PollWorkloadReady(ctx context.Context, workloadID string
 		if err != nil {
 			return err
 		}
-		// K8s 实时状态填充 Ready（PG Ready 反向同步留后续，PollWorkloadReady 须读实时非 store 原值）
+		// K8s 实时状态填充 Ready（PG Ready 反向同步留后续，PollWorkloadReady 须读实时非 store 原值）。
+		// FillStatus 原地修改 slice 元素（值语义），须从 slice 读回填充后的 wl。
 		if r.status != nil {
-			_ = r.status.FillStatus(ctx, []workload.Workload{wl})
+			wls := []workload.Workload{wl}
+			_ = r.status.FillStatus(ctx, wls)
+			wl = wls[0]
 		}
 		if wl.Replicas > 0 && wl.Ready >= wl.Replicas {
 			return nil
