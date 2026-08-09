@@ -772,6 +772,16 @@ internal/dataservice/  领域(DataService + 6 Kind 常量 + KindMeta 表单元�
 - **非 k8s 模式降级**：mock/process 模式无 Pod 日志，端点返 503 event（前端降级提示）；process 模式构建中实时日志要 builder 边构建边写 buffer（大改，留后续）。
 - **留后续**：租户自定义模板（可视化编辑器 + 租户隔离）、builtin 模板版本号 + 升级覆盖机制（dogfooding 暴露的 seed 不覆盖问题）、process/mock 模式构建中实时日志、日志全文搜索/过滤、follow 流多副本/ingress 缓冲深度验证。
 
+### 服务治理完善：网关对外域名 + 服务配置中心关联（2026-08-09）
+
+承接流水线完善，解决两个服务治理 gap：网关 Route 无法按域名路由 + 配置中心与服务脱节。设计见 `docs/superpowers/specs/2026-08-09-governance-route-host-and-service-config-design.md`。
+
+- **需求1 governance Route 加 Host（对外域名）**：行业对标 Kong/APISIX Route（hosts+paths+service_id），域名是路由匹配维度非独立实体（YAGNI，不新增「对外域名」实体）。`Route.Host string json:"host,omitempty"`（空=不限 Host，多 Host 逗号分隔）；匹配语义 Host 非空则要求请求 Host 头匹配（数据面 SDK/zeus 消费，本期控制面只存配置）。memory `UpdateRoute` 直接覆盖语义（允许清空）；pg `routeCols`+scanRoute+CreateRoute+UpdateRoute 全链路；migration 0023 + 0001 schema 合并。前端 `ServiceRegistry.vue` Route 表单加 Host 输入 + 列表加「对外域名」列（空显「不限」）。
+- **需求2 configcenter Namespace 关联 Service + 双向显示**：`Namespace.ServiceID string`（可选关联，空=不关联）；`ListNamespaces(ctx, serviceID string)` 加过滤参数（与 governance ListRoutes(serviceID) 一致风格）；migration 0024 + 0001 schema 合并。**前端聚合避免跨模块后端耦合**（governance 不 import configcenter）：① `ConfigCenter.vue` Namespace 表单加「关联服务」select（调 /api/services 拉租户内 Service）+ 列表加关联服务列；② `ServiceDetail.vue` 加「关联配置」section（调 /api/configcenter/namespaces?serviceId=<id> + 各 ns published，显示 namespace 卡片 + active 配置项，点 ns 跳配置中心）。
+- **横切**：多租户隔离不变（Route.Host 不影响 tenant 过滤；Namespace.ServiceID 租户内引用）；Route/Namespace 均逻辑配置不接 prod:write（与现有一致）；migration 幂等 `ADD COLUMN IF NOT EXISTS`。
+- **测试**：governance pg `TestRouteHostRoundTrip`（Create/Update/清空 往返）+ configcenter pg `TestNamespaceServiceIDRoundTrip`（ServiceID 持久化 + ListNamespaces 过滤）。OpenAPI `WithReqBody(结构体)` 自动含新字段（reflector 自动生成 schema）。
+- **留后续**：Route Host 通配符匹配（`*.example.com`）、Host 数组化、实际 ingress/hermes 配置下发（数据面消费）、configcenter 配置变更通知 governance Service。
+
 ## 前端架构
 
 三套独立 SPA，共享设计系统（Element Plus + 暗黑模式）：
