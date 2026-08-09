@@ -97,13 +97,6 @@ func staticMenus() []Menu {
 					Component: "provider/views/List",
 					Meta:      MenuMeta{Title: "供应商管理", Icon: "Connection", ShowMenu: true},
 				},
-				{
-					// 流水线模板：平台级公共模板 CRUD（builtin 拒改删），super_admin 维护，应用绑定用。
-					Path:      "/pipeline-template",
-					Name:      "pipeline-template",
-					Component: "pipeline-template/views/List",
-					Meta:      MenuMeta{Title: "流水线模板", Icon: "Files", ShowMenu: true},
-				},
 			},
 		},
 		{
@@ -168,6 +161,14 @@ func staticMenus() []Menu {
 							Name:      "resReleases",
 							Component: "resources/views/Releases",
 							Meta:      MenuMeta{Title: "发布", Icon: "Promotion", ShowMenu: true},
+						},
+						{
+							// 流水线模板：平台级公共模板 CRUD（builtin 拒改删），super_admin 维护，应用绑定用。
+							// 属 DevOps 链路（构建→部署→发布编排），非推理服务。
+							Path:      "/pipeline-template",
+							Name:      "pipeline-template",
+							Component: "pipeline-template/views/List",
+							Meta:      MenuMeta{Title: "流水线模板", Icon: "Stopwatch", ShowMenu: true},
 						},
 					},
 				},

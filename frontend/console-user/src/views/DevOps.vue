@@ -1,6 +1,7 @@
 <script setup lang="ts">
-// DevOps 中心：跨应用 CI/CD 指挥台（流水线矩阵 / 运行记录 / 构建 / 镜像库 / 发布）。
-// 不止总览：构建行可重新构建、发布行/流水线格可提升（promote）、行可点跳应用详情。
+// DevOps 中心：跨应用 CI/CD 指挥台。
+// 默认 tab=运行记录（新流水线引擎：build/deploy/test/approve/promote/baseline），点行进独立运行详情页
+// （GitHub Actions 式全节点日志）。另含：发布提升（逐级 promote 矩阵）/ 构建 / 镜像库 / 发布。
 // 发布回滚/提升走 useDangerConfirm（生产按目标 env.type 显式 isProd，覆盖顶栏 scope）。
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
@@ -24,7 +25,7 @@ interface Release {
 
 const router = useRouter()
 const envStore = useEnvStore()
-const tab = ref('pipeline')
+const tab = ref('runs')
 const builds = ref<BuildRun[]>([])
 // 镜像库实时视图：registry v2 catalog（hub.wang.dd 真实镜像），展开行按需加载 tag + digest
 const registryRepos = ref<{ name: string }[]>([])
@@ -257,14 +258,54 @@ onUnmounted(() => {
     </div>
 
     <el-tabs v-model="tab" class="devops-tabs">
-      <!-- 流水线（默认）：app × env 阶序矩阵，逐级 promote -->
-      <el-tab-pane label="流水线" name="pipeline">
+      <!-- 运行记录（默认）：跨应用最近流水线运行（新 pipeline 引擎：build/deploy/test/approve/promote/baseline）。
+           点「查看详情」进独立运行详情页（/devops/runs/:id，GitHub Actions 式全节点时间线 + stage 日志）。 -->
+      <el-tab-pane label="运行记录" name="runs">
+        <p class="tab-hint">最近流水线运行，点「查看详情」进运行详情页（全节点时间线 + 日志）。运行中/等待审批自动轮询（10s）。</p>
+        <el-table :data="recentRuns" size="small" v-loading="loading" empty-text="暂无运行记录">
+          <el-table-column label="应用" width="140">
+            <template #default="{ row }">
+              <span class="mono clickable" @click="goApp(row.appId)">{{ appName(row.appId) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-tag :type="(RUN_STATUS[row.status]?.type) || 'info'" size="small">
+                {{ RUN_STATUS[row.status]?.label || row.status }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="当前阶段" min-width="120">
+            <template #default="{ row }">{{ currentStageName(row) }}</template>
+          </el-table-column>
+          <el-table-column label="分支" width="110">
+            <template #default="{ row }"><span class="mono">{{ row.branch }}</span></template>
+          </el-table-column>
+          <el-table-column label="版本" width="100">
+            <template #default="{ row }">
+              <span v-if="row.version" class="mono">{{ row.version }}</span>
+              <span v-else class="faint">-</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="开始时间" width="170">
+            <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="110">
+            <template #default="{ row }">
+              <el-button text type="primary" size="small" @click="router.push(`/devops/runs/${row.id}`)">查看详情</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-tab-pane>
+
+      <!-- 发布提升：app × env 阶序矩阵，逐级 promote（基于 Release 的环境晋升，区别于上面的流水线运行） -->
+      <el-tab-pane label="发布提升" name="pipeline">
         <p v-if="envChain.length" class="tab-hint">
-          发布流水线：<span v-for="(e, i) in envChain" :key="e.id">
+          发布提升链：<span v-for="(e, i) in envChain" :key="e.id">
             <span :class="{ 'env-prod': e.type === 'prod' }">{{ e.name }}</span><span v-if="i < envChain.length - 1"> → </span>
           </span>（逐级提升，目标生产需确认）
         </p>
-        <p v-else class="tab-hint">暂无参与流水线的环境（需配置环境阶序 promoteOrder）</p>
+        <p v-else class="tab-hint">暂无参与发布提升的环境（需配置环境阶序 promoteOrder）</p>
         <div v-loading="loading" class="pipeline-grid">
           <div v-if="!pipeline.length && !loading" class="empty-hint">暂无应用发布数据</div>
           <div v-for="row in pipeline" :key="row.appId" class="pipeline-row">
@@ -294,40 +335,6 @@ onUnmounted(() => {
             </div>
           </div>
         </div>
-      </el-tab-pane>
-
-      <!-- 运行记录：跨应用最近流水线运行（新 pipeline 引擎：build/deploy/test/approve/promote/baseline） -->
-      <el-tab-pane label="运行记录" name="runs">
-        <p class="tab-hint">最近流水线运行，点击应用跳详情。运行中/等待审批自动轮询（10s）。</p>
-        <el-table :data="recentRuns" size="small" v-loading="loading" empty-text="暂无运行记录">
-          <el-table-column label="应用" width="140">
-            <template #default="{ row }">
-              <span class="mono clickable" @click="goApp(row.appId)">{{ appName(row.appId) }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="状态" width="100">
-            <template #default="{ row }">
-              <el-tag :type="(RUN_STATUS[row.status]?.type) || 'info'" size="small">
-                {{ RUN_STATUS[row.status]?.label || row.status }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="当前阶段" min-width="120">
-            <template #default="{ row }">{{ currentStageName(row) }}</template>
-          </el-table-column>
-          <el-table-column label="分支" width="110">
-            <template #default="{ row }"><span class="mono">{{ row.branch }}</span></template>
-          </el-table-column>
-          <el-table-column label="版本" width="100">
-            <template #default="{ row }">
-              <span v-if="row.version" class="mono">{{ row.version }}</span>
-              <span v-else class="faint">-</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="开始时间" width="170">
-            <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
-          </el-table-column>
-        </el-table>
       </el-tab-pane>
 
       <!-- 构建 -->

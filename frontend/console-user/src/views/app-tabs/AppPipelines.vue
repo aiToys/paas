@@ -2,6 +2,7 @@
 // 应用详情 - 流水线 tab：按 Kind 分组卡片，新建（从模板/空白/微服务快捷）、删除、编辑、运行。
 // 设计器抽屉（PipelineDesigner）+ 运行视图抽屉（PipelineRunView）。
 import { ref, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchAuth } from '@/api'
 import {
@@ -14,6 +15,7 @@ import PipelineDesigner from './PipelineDesigner.vue'
 import PipelineRunView from './PipelineRunView.vue'
 
 const props = defineProps<{ appId: string }>()
+const router = useRouter()
 const envStore = useEnvStore()
 
 const pipelines = ref<Pipeline[]>([])
@@ -122,6 +124,8 @@ async function doTriggerRun(p: Pipeline, branch: string, version?: string) {
     const r = await triggerRun(props.appId, p.id, { branch, version })
     runViewId.value = r.id
     ElMessage.success('已触发运行')
+    // 触发即跳运行详情页（GitHub Actions 式全屏看实时进度，闭环）
+    router.push(`/devops/runs/${r.id}`)
   } catch (e: any) {
     ElMessage.error(e.message || '触发失败') // 含 403 prod:write / 409 单实例串行 / 400 envId 缺失
   }

@@ -125,6 +125,12 @@ export const ALL_MENUS = [
             name: 'resReleases',
             component: 'resources/views/Releases',
             meta: { title: '发布', icon: 'Promotion', showMenu: true }
+          },
+          {
+            path: '/pipeline-template',
+            name: 'pipeline-template',
+            component: 'pipeline-template/views/List',
+            meta: { title: '流水线模板', icon: 'Stopwatch', showMenu: true }
           }
         ]
       },

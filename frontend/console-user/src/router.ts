@@ -195,6 +195,13 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'DevOps 中心' },
   },
   {
+    // 流水线运行详情独立页（GitHub Actions 式）：全节点时间线 + stage 日志 + build SSE 实时流。
+    path: '/devops/runs/:runId',
+    name: 'pipeline-run',
+    component: () => import('@/views/PipelineRunPage.vue'),
+    meta: { title: '流水线运行' },
+  },
+  {
     path: '/playground',
     name: 'playground',
     component: () => import('@/views/Playground.vue'),
