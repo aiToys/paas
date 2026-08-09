@@ -276,6 +276,53 @@ func TestTemplateBuiltinAndCustom(t *testing.T) {
 	}
 }
 
+// TestTemplateUpdateDelete 验证模板 Update/Delete + builtin 保护 + 跨租户隔离。
+func TestTemplateUpdateDelete(t *testing.T) {
+	s := NewMemoryStore()
+	ctxA := tenant.WithTenant(context.Background(), "t-acme")
+	ctxB := tenant.WithTenant(context.Background(), "t-globex")
+
+	// builtin 模板（Builtin=true）拒改删
+	builtin, _ := s.CreateTemplate(ctxA, PipelineTemplate{
+		ID: "tpl-bi", TenantID: "", Name: "Builtin", Kind: KindCI, Builtin: true,
+		Stages: []StageDef{{Name: "build", Type: StageBuild}},
+	})
+	if _, err := s.UpdateTemplate(ctxA, PipelineTemplate{ID: builtin.ID, Name: "X"}); !errors.Is(err, ErrTemplateBuiltin) {
+		t.Fatalf("update builtin 期望 ErrTemplateBuiltin，got %v", err)
+	}
+	if err := s.DeleteTemplate(ctxA, builtin.ID); !errors.Is(err, ErrTemplateBuiltin) {
+		t.Fatalf("delete builtin 期望 ErrTemplateBuiltin，got %v", err)
+	}
+
+	// 自定义模板可改删
+	custom, _ := s.CreateTemplate(ctxA, PipelineTemplate{
+		Name: "Acme CI", TenantID: "t-acme", Kind: KindCI,
+		Stages: []StageDef{{Name: "build", Type: StageBuild}},
+	})
+	upd, err := s.UpdateTemplate(ctxA, PipelineTemplate{
+		ID: custom.ID, Name: "Acme CI v2", Kind: KindCD,
+		Stages: []StageDef{{Name: "approve", Type: StageApprove}},
+	})
+	if err != nil || upd.Name != "Acme CI v2" || upd.Kind != KindCD {
+		t.Fatalf("update 自定义失败: %v %+v", err, upd)
+	}
+	// 跨租户改/删他人自定义 not found（不泄漏）
+	if _, err := s.UpdateTemplate(ctxB, PipelineTemplate{ID: custom.ID, Name: "hack"}); !errors.Is(err, ErrPipelineNotFound) {
+		t.Fatalf("跨租户 update 期望 NotFound，got %v", err)
+	}
+	if err := s.DeleteTemplate(ctxB, custom.ID); !errors.Is(err, ErrPipelineNotFound) {
+		t.Fatalf("跨租户 delete 期望 NotFound，got %v", err)
+	}
+	// 本租户可删
+	if err := s.DeleteTemplate(ctxA, custom.ID); err != nil {
+		t.Fatalf("本租户 delete 失败: %v", err)
+	}
+	// 不存在 / 已删
+	if err := s.DeleteTemplate(ctxA, custom.ID); !errors.Is(err, ErrPipelineNotFound) {
+		t.Fatalf("删除已不存在 期望 NotFound，got %v", err)
+	}
+}
+
 // TestPipelineDeepCopy 防 race：拿到返回后修改原切片/map，store 内部不应被波及。
 func TestPipelineDeepCopy(t *testing.T) {
 	s := NewMemoryStore()

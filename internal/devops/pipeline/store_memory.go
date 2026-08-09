@@ -338,6 +338,60 @@ func (s *memoryStore) CreateTemplate(ctx context.Context, t PipelineTemplate) (P
 	return cloneTemplate(t), nil
 }
 
+// UpdateTemplate 更新自定义模板。builtin 模板拒（防误改致新应用默认 binding 漂移）。
+// 平台预置（t.TenantID=""）允许 admin 改；租户自定义需 ctx 租户匹配。
+func (s *memoryStore) UpdateTemplate(ctx context.Context, t PipelineTemplate) (PipelineTemplate, error) {
+	tid, _ := tenant.TenantFrom(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ex, ok := s.templates[t.ID]
+	if !ok {
+		return PipelineTemplate{}, ErrPipelineNotFound
+	}
+	if ex.Builtin {
+		return PipelineTemplate{}, ErrTemplateBuiltin
+	}
+	// 跨租户改他人自定义模板拒（ex.TenantID 非 "" 且 != ctx 租户）
+	if ex.TenantID != "" && ex.TenantID != tid {
+		return PipelineTemplate{}, ErrPipelineNotFound
+	}
+	// 同 (tenant, name) 唯一：改名撞同名拒
+	if t.Name != ex.Name {
+		for _, o := range s.templates {
+			if o.ID != t.ID && o.TenantID == ex.TenantID && o.Name == t.Name {
+				return PipelineTemplate{}, ErrTemplateExists
+			}
+		}
+	}
+	// 保留不可变字段（ID/TenantID/Builtin/CreatedAt），更新可变字段
+	ex.Name = t.Name
+	ex.Kind = t.Kind
+	ex.Description = t.Description
+	ex.Stages = cloneStages(t.Stages)
+	ex.Params = cloneParamDefs(t.Params)
+	s.templates[t.ID] = ex
+	return cloneTemplate(ex), nil
+}
+
+// DeleteTemplate 删除自定义模板。builtin 模板拒。
+func (s *memoryStore) DeleteTemplate(ctx context.Context, id string) error {
+	tid, _ := tenant.TenantFrom(ctx)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ex, ok := s.templates[id]
+	if !ok {
+		return ErrPipelineNotFound
+	}
+	if ex.Builtin {
+		return ErrTemplateBuiltin
+	}
+	if ex.TenantID != "" && ex.TenantID != tid {
+		return ErrPipelineNotFound
+	}
+	delete(s.templates, id)
+	return nil
+}
+
 // ---------- 深拷贝（防 race：engine 读改与 list/get 读并发时切片/map 撕裂） ----------
 
 func clonePipeline(p Pipeline) Pipeline {
@@ -356,6 +410,7 @@ func cloneRun(r PipelineRun) PipelineRun {
 func cloneTemplate(t PipelineTemplate) PipelineTemplate {
 	cp := t
 	cp.Stages = cloneStages(t.Stages)
+	cp.Params = cloneParamDefs(t.Params)
 	return cp
 }
 
@@ -368,6 +423,15 @@ func cloneStages(in []StageDef) []StageDef {
 		out[i] = s
 		out[i].Params = cloneStringAnyMap(s.Params)
 	}
+	return out
+}
+
+func cloneParamDefs(in []ParamDef) []ParamDef {
+	if in == nil {
+		return nil
+	}
+	out := make([]ParamDef, len(in))
+	copy(out, in)
 	return out
 }
 

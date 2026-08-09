@@ -19,7 +19,7 @@ var (
 	ErrStageNotCurrent   = errors.New("stage not current")
 	ErrNotFailed         = errors.New("run not failed")
 	ErrTemplateRequired  = errors.New("templateId required")
-	ErrTemplateNotFound  = errors.New("pipeline template not found")
+	ErrTemplateBuiltin   = errors.New("builtin template cannot be modified")
 )
 
 // Kind 流水线分类（UI 分组 + 职责划分）。

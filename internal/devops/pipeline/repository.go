@@ -41,6 +41,10 @@ type TemplateRepository interface {
 	ListTemplates(ctx context.Context) ([]PipelineTemplate, error)
 	GetTemplate(ctx context.Context, id string) (PipelineTemplate, error)
 	CreateTemplate(ctx context.Context, t PipelineTemplate) (PipelineTemplate, error)
+	// UpdateTemplate 更新自定义模板（Stages/Name/Kind/Description/Params）；builtin 模板拒（ErrTemplateBuiltin）。
+	UpdateTemplate(ctx context.Context, t PipelineTemplate) (PipelineTemplate, error)
+	// DeleteTemplate 删除自定义模板；builtin 模板拒（ErrTemplateBuiltin）。
+	DeleteTemplate(ctx context.Context, id string) error
 }
 
 // Store 聚合 Pipeline 三仓储接口（memoryStore/pgStore 同一实例实现全部）。

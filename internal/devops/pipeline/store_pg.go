@@ -510,6 +510,55 @@ func (s *pgStore) CreateTemplate(ctx context.Context, in PipelineTemplate) (Pipe
 	return in, nil
 }
 
+// UpdateTemplate 更新自定义模板。builtin 拒（防误改致新应用默认 binding 漂移）。
+// 平台预置（tenant_id NULL）admin 可改；租户自定义需 ctx 租户匹配（GetTemplate 已过滤）。
+func (s *pgStore) UpdateTemplate(ctx context.Context, t PipelineTemplate) (PipelineTemplate, error) {
+	ex, err := s.GetTemplate(ctx, t.ID) // 复用：存在 + 本租户/平台预置可见校验
+	if err != nil {
+		return PipelineTemplate{}, err
+	}
+	if ex.Builtin {
+		return PipelineTemplate{}, ErrTemplateBuiltin
+	}
+	stagesB, err := json.Marshal(t.Stages)
+	if err != nil {
+		return PipelineTemplate{}, fmt.Errorf("序列化 stages 失败: %w", err)
+	}
+	tag, err := s.db.Exec(ctx,
+		`UPDATE pipeline_templates SET name=$1, kind=$2, description=$3, stages=$4 WHERE id=$5 AND builtin=false`,
+		t.Name, t.Kind, t.Description, stagesB, t.ID)
+	if err != nil {
+		if classifyTemplateErr(err) == ErrTemplateExists {
+			return PipelineTemplate{}, ErrTemplateExists
+		}
+		return PipelineTemplate{}, err
+	}
+	if tag.RowsAffected() == 0 {
+		return PipelineTemplate{}, ErrPipelineNotFound // builtin=true 被 WHERE 拦或不存在
+	}
+	return s.GetTemplate(ctx, t.ID)
+}
+
+// DeleteTemplate 删除自定义模板。builtin 拒。
+func (s *pgStore) DeleteTemplate(ctx context.Context, id string) error {
+	ex, err := s.GetTemplate(ctx, id)
+	if err != nil {
+		return err
+	}
+	if ex.Builtin {
+		return ErrTemplateBuiltin
+	}
+	tag, err := s.db.Exec(ctx,
+		`DELETE FROM pipeline_templates WHERE id=$1 AND builtin=false`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrPipelineNotFound
+	}
+	return nil
+}
+
 // ---------- 辅助 ----------
 
 // loadStageRuns 读回某 run 的 stage_runs（按 stage_index 升序），填入 r.StageRuns。
