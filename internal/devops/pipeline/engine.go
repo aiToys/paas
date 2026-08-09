@@ -176,6 +176,8 @@ func (e *Engine) execStage(ctx context.Context, run *PipelineRun, stage StageDef
 		return e.execBuild(ctx, run, stage, sr)
 	case StageDeploy:
 		return e.execDeploy(ctx, run, stage, sr)
+	case StageRelease:
+		return e.execRelease(ctx, run, stage, sr)
 	case StageTest:
 		return e.execTest(ctx, run, stage, sr)
 	case StageApprove:
@@ -247,6 +249,45 @@ func (e *Engine) execDeploy(ctx context.Context, run *PipelineRun, stage StageDe
 	}
 	logf(sr, "Workload 就绪，访问地址 %s", domain)
 	sr.Output = map[string]any{OutReleaseID: deployment.ID, OutWorkloadDomain: domain}
+	sr.Status = StageSuccess
+	sr.FinishedAt = time.Now()
+	return true, nil
+}
+
+// execRelease 发布版本号里程碑：打 git tag + Image.Version + 给本 run 部署记录回填 version。
+// 不部署（部署是 deploy stage 的事）。version 缺省由 computeVersion 生成。
+func (e *Engine) execRelease(ctx context.Context, run *PipelineRun, stage StageDef, sr *StageRun) (bool, error) {
+	version := computeVersion(*run, stage)
+	logf(sr, "发布版本 %s", version)
+	// 取前序 deploy 产出的 imageId（release 标记的是这个镜像）
+	imageID, err := resolvePriorOutput(*run, OutImageID)
+	if err == nil {
+		tagSha, perr := e.Releases.Publish(ctx, run.AppID, imageID, version, run.Commit)
+		if perr != nil {
+			sr.Error = perr.Error()
+			return true, perr
+		}
+		if tagSha != "" {
+			logf(sr, "已打 git tag %s @ %s", version, tagSha[:min(8, len(tagSha))])
+		}
+	} else {
+		logf(sr, "无前序镜像，跳过 tag（仅记录版本号）")
+	}
+	// 给本 run 涉及的部署记录回填 version（复用 SetVersion）
+	var releaseIDs []string
+	for i := 0; i < run.CurrentStage && i < len(run.StageRuns); i++ {
+		if id, ok := run.StageRuns[i].Output[OutReleaseID].(string); ok && id != "" {
+			releaseIDs = append(releaseIDs, id)
+		}
+	}
+	if len(releaseIDs) > 0 {
+		if err := e.Releases.SetVersion(ctx, releaseIDs, version); err != nil {
+			sr.Error = err.Error()
+			return true, err
+		}
+	}
+	run.Version = version
+	sr.Output = map[string]any{OutVersion: version}
 	sr.Status = StageSuccess
 	sr.FinishedAt = time.Now()
 	return true, nil

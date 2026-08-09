@@ -92,6 +92,20 @@ func (f *fakeReleaser) Publish(ctx context.Context, appID, imageID, version, com
 	return "", nil
 }
 
+// publishCapturingReleaser 嵌入 fakeReleaser 复用既有 stub，仅覆盖 Publish 记录入参。
+// execRelease 主路径断言：Publish 收到 version + imageID，run.Version 被写入。
+type publishCapturingReleaser struct {
+	*fakeReleaser
+	publishVersion string
+	publishImageID string
+}
+
+func (p *publishCapturingReleaser) Publish(ctx context.Context, appID, imageID, version, commit string) (string, error) {
+	p.publishVersion = version
+	p.publishImageID = imageID
+	return "sha256:abcdef1234567890abcdef1234567890", nil
+}
+
 // fakeGiteaMerger 桥接 GiteaMerger（baseline merge 测试）。
 type fakeGiteaMerger struct {
 	owner     string
@@ -615,5 +629,108 @@ func TestEngineBaselineMergeConflict(t *testing.T) {
 	}
 	if run.StageRuns[1].Error != "合并冲突，请手动解决" {
 		t.Fatalf("sr.Error 期望「合并冲突」，got %q", run.StageRuns[1].Error)
+	}
+}
+
+// buildRunWithPriorDeploy 构造 CurrentStage 指向 release、且前序 stage 已产出 imageId + releaseId 的 run。
+// StageRuns[0]=deploy（已完成 success，Output 含 imageId/releaseId），StageRuns[1]=release（待执行）。
+func buildRunWithPriorDeploy() PipelineRun {
+	return PipelineRun{
+		ID:           "run-rel-1",
+		AppID:        "app-rel",
+		Branch:       "main",
+		Commit:       "abc123def456",
+		RepoID:       "repo-1",
+		Status:       RunRunning,
+		CurrentStage: 1,
+		StageRuns: []StageRun{
+			{
+				Index:  0,
+				Type:   StageDeploy,
+				Status: StageSuccess,
+				Output: map[string]any{OutImageID: "img-from-deploy", OutReleaseID: "rel-deployed"},
+			},
+			{Index: 1, Type: StageRelease, Name: "发布", Status: StagePending},
+		},
+	}
+}
+
+func TestExecReleasePublishesVersion(t *testing.T) {
+	run := buildRunWithPriorDeploy()
+	pub := &publishCapturingReleaser{fakeReleaser: &fakeReleaser{}}
+	e := &Engine{Pipelines: NewMemoryStore(), Runs: NewMemoryStore(), Builds: fakeBuilder{}, Releases: pub}
+
+	stage := StageDef{Type: StageRelease, Params: map[string]any{"versionStrategy": "auto-increment"}}
+	sr := &run.StageRuns[run.CurrentStage]
+	finished, err := e.execStage(acmeCtxEngine(), &run, stage, sr)
+	if err != nil {
+		t.Fatalf("execRelease: %v", err)
+	}
+	if !finished {
+		t.Fatal("execRelease 应 finished=true")
+	}
+	if pub.publishVersion == "" {
+		t.Error("Publish 未收到版本号")
+	}
+	if pub.publishImageID != "img-from-deploy" {
+		t.Errorf("Publish imageID 期望 img-from-deploy，got %q", pub.publishImageID)
+	}
+	if run.Version == "" {
+		t.Error("PipelineRun.version 未写入")
+	}
+	if run.Version != pub.publishVersion {
+		t.Errorf("run.Version(%q) != Publish 收到的 version(%q)", run.Version, pub.publishVersion)
+	}
+	if sr.Output[OutVersion] != run.Version {
+		t.Errorf("sr.Output.version 期望 %s，got %v", run.Version, sr.Output[OutVersion])
+	}
+	// SetVersion 应被调（前序 deploy 输出了 releaseId）
+	if len(pub.versionIDs) == 0 || pub.versionIDs[0] != "rel-deployed" {
+		t.Errorf("SetVersion releaseIDs 期望 [rel-deployed]，got %v", pub.versionIDs)
+	}
+	if pub.versionSet != run.Version {
+		t.Errorf("SetVersion version 期望 %s，got %s", run.Version, pub.versionSet)
+	}
+	if sr.Status != StageSuccess {
+		t.Errorf("stage 期望 success，got %s", sr.Status)
+	}
+}
+
+// 无前序 imageId 时（如纯 CD pipeline 直接发布 latestReady 经 deploy 后 deploy 必产 imageId 输出，
+// 但若 release stage 前无 deploy——异常配置——应跳过 Publish 仅记录版本号，不报错）。
+func TestExecReleaseNoPriorImageSkipsPublish(t *testing.T) {
+	run := buildRunWithPriorDeploy()
+	// 清空前序 imageId
+	delete(run.StageRuns[0].Output, OutImageID)
+
+	e := &Engine{
+		Pipelines: NewMemoryStore(), Runs: NewMemoryStore(),
+		Builds:   fakeBuilder{},
+		Releases: &publishCapturingReleaser{fakeReleaser: &fakeReleaser{}},
+	}
+	// 直接调 execRelease（不经 store），构造裸 run
+	stage := StageDef{Type: StageRelease, Params: map[string]any{"versionStrategy": "auto-increment"}}
+	sr := &run.StageRuns[run.CurrentStage]
+	pub := e.Releases.(*publishCapturingReleaser)
+
+	finished, err := e.execRelease(context.Background(), &run, stage, sr)
+	if err != nil {
+		t.Fatalf("execRelease: %v", err)
+	}
+	if !finished {
+		t.Fatal("应 finished")
+	}
+	if pub.publishVersion != "" {
+		t.Errorf("无前序镜像不应调 Publish，got version=%q", pub.publishVersion)
+	}
+	if run.Version == "" {
+		t.Error("版本号仍应写入 run.Version")
+	}
+	if !strings.Contains(sr.Log, "跳过 tag") {
+		t.Errorf("Log 应记录跳过 tag，got %q", sr.Log)
+	}
+	// SetVersion 仍应回填（releaseId 来自 deploy stage，与 imageId 解耦）
+	if len(pub.versionIDs) == 0 {
+		t.Error("SetVersion 仍应被调（回填 releaseId）")
 	}
 }
