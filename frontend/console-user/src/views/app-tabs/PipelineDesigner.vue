@@ -127,6 +127,10 @@ onMounted(load)
           <el-option v-for="e in envStore.envs" :key="e.id" :value="e.id" :label="`${e.name} (${e.type})`" />
         </el-select>
         <div class="override-hint">留空 = 用模板默认占位符自动解析；选具体环境 = 覆盖。</div>
+        <div class="override-label" style="margin-top: 12px;">阶段「{{ d.s.name }}」泳道（lane）</div>
+        <el-input :model-value="getOverride(d.i, 'lane')" @update:model-value="(v: string) => setOverride(d.i, 'lane', v)"
+                  placeholder="默认 {{run.branch}}（分支独立泳道联调）；生产填 default" clearable />
+        <div class="override-hint">留空 = 用运行期分支名作 lane（测试泳道联调）；生产基线填 default。</div>
       </div>
       <div v-for="b in buildStages" :key="b.i" class="override-item">
         <div class="override-label">阶段「{{ b.s.name }}」构建参数（buildArgs，如 SERVICE=product）</div>
