@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,8 +31,10 @@ func (f fakeBuilder) PollBuildRun(ctx context.Context, buildID string) (devops.B
 type fakeReleaser struct {
 	imageID    string // LatestReadyImage 返回
 	latestErr error
-	deployErr error // CreateRelease 错误（可选）
-	domain    string // WorkloadDomain 返回（空则默认 wl-{id}.svc.cluster.local）
+	deployErr error // Deploy 错误（可选）
+	domain    string // Deploy/WorkloadDomain 返回（空则默认 wl-{id}.svc.cluster.local)
+
+	deployLane string // Deploy 收到的 lane（断言用）
 
 	promoteRel  devops.Release // Promote 返回（空则默认 Release{ID:"rel-promoted"}）
 	promoteErr  error
@@ -70,9 +73,18 @@ func (f *fakeReleaser) SetVersion(ctx context.Context, releaseIDs []string, vers
 	return nil
 }
 
-// Deploy stub（Task 5/6 集成测试覆盖真实语义；本 task 仅满足接口编译）。
+// Deploy stub：返有效部署记录（rel-fake/wl-fake）+ 尊重 domain 字段，供 execDeploy 链路测试可控。
 func (f *fakeReleaser) Deploy(ctx context.Context, appID, envID, lane, imageID, sourceRunID string) (devops.Release, string, error) {
-	return devops.Release{}, "", nil
+	f.deployLane = lane
+	if f.deployErr != nil {
+		return devops.Release{}, "", f.deployErr
+	}
+	wlID := "wl-fake"
+	domain := f.domain
+	if domain == "" {
+		domain = wlID + ".svc.cluster.local"
+	}
+	return devops.Release{ID: "rel-fake", WorkloadID: wlID}, domain, nil
 }
 
 // Publish stub（Task 5/6 集成测试覆盖真实语义；本 task 仅满足接口编译）。
@@ -139,6 +151,47 @@ func seedBuildDeployPipeline(t *testing.T, s *memoryStore, deployParams map[stri
 
 // ---------- 测试 ----------
 
+func TestExecDeployUsesLaneAndLogs(t *testing.T) {
+	s := NewMemoryStore()
+	r := seedPipeline(t, s, "p-lane", "app-lane", KindCI, []StageDef{
+		{Name: "部署", Type: StageDeploy, Params: map[string]any{
+			"envId": "env-test", "lane": "feature-x",
+			"imageSource": ImageSelected, "imageId": "img-1",
+		}},
+	})
+
+	rel := &fakeReleaser{}
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: rel}
+	if err := eng.Advance(acmeCtxEngine(), r.ID); err != nil {
+		t.Fatalf("Advance 失败: %v", err)
+	}
+
+	run, _ := s.GetRun(acmeCtxEngine(), r.ID)
+	if run.Status != RunSucceeded {
+		t.Fatalf("期望 succeeded，got %s", run.Status)
+	}
+	sr := run.StageRuns[0]
+	// Deploy 收到 lane=feature-x
+	if rel.deployLane != "feature-x" {
+		t.Errorf("Deploy 收到 lane=%q, want feature-x", rel.deployLane)
+	}
+	// StageRun.Input.lane 记录泳道（Task 6/7 + 前端消费）
+	if sr.Input["lane"] != "feature-x" {
+		t.Errorf("StageRun.Input.lane 期望 feature-x，got %v", sr.Input["lane"])
+	}
+	// Log 含 lane 标识 + Workload 就绪事件
+	if !strings.Contains(sr.Log, "feature-x") {
+		t.Errorf("StageRun.Log 应含 lane=feature-x，got %q", sr.Log)
+	}
+	if !strings.Contains(sr.Log, "Workload 就绪") {
+		t.Errorf("StageRun.Log 应含 Workload 就绪事件，got %q", sr.Log)
+	}
+	// deploy Output 链（Task 6 release stage 依赖）
+	if sr.Output[OutReleaseID] != "rel-fake" {
+		t.Errorf("deploy Output.releaseId 期望 rel-fake，got %v", sr.Output[OutReleaseID])
+	}
+}
+
 func TestEngineBuildDeployChain(t *testing.T) {
 	s := NewMemoryStore()
 	runID, _ := seedBuildDeployPipeline(t, s, map[string]any{
@@ -168,12 +221,12 @@ func TestEngineBuildDeployChain(t *testing.T) {
 	if run.StageRuns[0].Status != StageSuccess {
 		t.Fatalf("build stage 期望 success，got %s", run.StageRuns[0].Status)
 	}
-	// deploy stage 输出 releaseId + workloadDomain
-	if run.StageRuns[1].Output[OutReleaseID] != "rel-1" {
-		t.Fatalf("deploy Output.releaseId 期望 rel-1，got %v", run.StageRuns[1].Output[OutReleaseID])
+	// deploy stage 输出 releaseId + workloadDomain（经 Releaser.Deploy）
+	if run.StageRuns[1].Output[OutReleaseID] != "rel-fake" {
+		t.Fatalf("deploy Output.releaseId 期望 rel-fake，got %v", run.StageRuns[1].Output[OutReleaseID])
 	}
-	if run.StageRuns[1].Output[OutWorkloadDomain] != "wl-1.svc.cluster.local" {
-		t.Fatalf("deploy Output.workloadDomain 期望 wl-1.svc，got %v", run.StageRuns[1].Output[OutWorkloadDomain])
+	if run.StageRuns[1].Output[OutWorkloadDomain] != "wl-fake.svc.cluster.local" {
+		t.Fatalf("deploy Output.workloadDomain 期望 wl-fake.svc，got %v", run.StageRuns[1].Output[OutWorkloadDomain])
 	}
 	// priorBuild 链：deploy Input.imageId 来自前序 build Output.imageId
 	if run.StageRuns[1].Input["imageId"] != "img-1" {

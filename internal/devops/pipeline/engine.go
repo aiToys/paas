@@ -216,7 +216,9 @@ func (e *Engine) execBuild(ctx context.Context, run *PipelineRun, stage StageDef
 	return true, nil
 }
 
-// execDeploy 部署 stage：resolveImage -> CreateRelease -> PollWorkloadReady -> Output.releaseId+workloadDomain。
+// execDeploy 部署 stage：resolveImage -> Releaser.Deploy(env×lane) -> PollWorkloadReady -> Output.releaseId+workloadDomain。
+// 与 release 解耦：deploy 只部署 + 产生部署记录，不打版本（版本归 release stage）。
+// lane 参数标识部署到哪条泳道（default=基线，其他=联调/灰度泳道），透传到 Workload.LaneID（L1 数据模型，L2 联调消费）。
 func (e *Engine) execDeploy(ctx context.Context, run *PipelineRun, stage StageDef, sr *StageRun) (bool, error) {
 	imageID, err := e.resolveImage(ctx, stage, *run)
 	if err != nil {
@@ -229,26 +231,30 @@ func (e *Engine) execDeploy(ctx context.Context, run *PipelineRun, stage StageDe
 		sr.Error = err.Error()
 		return true, err
 	}
-	rel, err := e.Releases.CreateRelease(ctx, devops.ReleaseInput{
-		AppID:    run.AppID,
-		EnvID:    envID,
-		ImageID:  imageID,
-		Strategy: strOr(stage.Params, "strategy", "rolling"),
-	})
+	lane := strOr(stage.Params, "lane", LaneDefault)
+	logf(sr, "部署镜像 %s 到 env=%s lane=%s", imageID, envID, lane)
+	// prod 环境写受 prod:write 保护（adapter 内 CreateRelease 走 EnvTypeResolver）
+	deployment, domain, err := e.Releases.Deploy(ctx, run.AppID, envID, lane, imageID, run.ID)
 	if err != nil {
 		sr.Error = err.Error()
 		return true, err
 	}
-	sr.Input = map[string]any{"releaseId": rel.ID, "imageId": imageID}
-	if err := e.Releases.PollWorkloadReady(ctx, rel.WorkloadID); err != nil {
+	sr.Input = map[string]any{"releaseId": deployment.ID, "imageId": imageID, "lane": lane}
+	logf(sr, "等待 Workload %s 就绪", deployment.WorkloadID)
+	if err := e.Releases.PollWorkloadReady(ctx, deployment.WorkloadID); err != nil {
 		sr.Error = err.Error()
 		return true, err
 	}
-	domain := e.Releases.WorkloadDomain(ctx, rel.WorkloadID)
-	sr.Output = map[string]any{OutReleaseID: rel.ID, OutWorkloadDomain: domain}
+	logf(sr, "Workload 就绪，访问地址 %s", domain)
+	sr.Output = map[string]any{OutReleaseID: deployment.ID, OutWorkloadDomain: domain}
 	sr.Status = StageSuccess
 	sr.FinishedAt = time.Now()
 	return true, nil
+}
+
+// logf 追加 stage 日志事件（append-only，前端展开查看）。时间戳前缀便于排序。
+func logf(sr *StageRun, format string, args ...any) {
+	sr.Log += time.Now().Format("15:04:05 ") + fmt.Sprintf(format, args...) + "\n"
 }
 
 // execTest 测试 stage：smoke（HTTP 探活自动）/ manual（人工确认暂停）。
