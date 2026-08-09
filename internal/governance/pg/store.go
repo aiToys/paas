@@ -42,7 +42,7 @@ func NewStore(db *storagepg.DB) *Store { return &Store{db: db} }
 const (
 	svcCols     = `id, tenant_id, name, app_id, env_id, protocol, port, "desc", updated_at`
 	instCols    = `id, tenant_id, service_id, addr, status, lane_id, meta, updated_at`
-	routeCols   = `id, tenant_id, name, path, service_id, methods, strip_path, enabled, updated_at`
+	routeCols   = `id, tenant_id, name, host, path, service_id, methods, strip_path, enabled, updated_at`
 	breakerCols = `id, tenant_id, name, service_id, strategy, threshold, min_requests, window_secs, enabled, updated_at`
 )
 
@@ -113,7 +113,7 @@ func scanInstance(r storagepg.RowScanner, in *governance.Instance) error {
 
 func scanRoute(r storagepg.RowScanner, rt *governance.Route) error {
 	var methodsRaw []byte
-	if err := r.Scan(&rt.ID, &rt.TenantID, &rt.Name, &rt.Path, &rt.ServiceID, &methodsRaw, &rt.StripPath, &rt.Enabled, &rt.UpdatedAt); err != nil {
+	if err := r.Scan(&rt.ID, &rt.TenantID, &rt.Name, &rt.Host, &rt.Path, &rt.ServiceID, &methodsRaw, &rt.StripPath, &rt.Enabled, &rt.UpdatedAt); err != nil {
 		return err
 	}
 	rt.Methods = unmarshalMethods(methodsRaw)
@@ -457,8 +457,8 @@ func (s *Store) CreateRoute(ctx context.Context, r governance.Route) (governance
 		return governance.Route{}, err
 	}
 	_, err = s.db.Pool().Exec(ctx,
-		`INSERT INTO gov_routes (`+routeCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		r.ID, r.TenantID, r.Name, r.Path, r.ServiceID, methodsBytes, r.StripPath, r.Enabled, r.UpdatedAt)
+		`INSERT INTO gov_routes (`+routeCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		r.ID, r.TenantID, r.Name, r.Host, r.Path, r.ServiceID, methodsBytes, r.StripPath, r.Enabled, r.UpdatedAt)
 	if storagepg.IsUniqueViolation(err) {
 		return governance.Route{}, fmt.Errorf("路由名已存在: %s", r.Name)
 	}
@@ -491,6 +491,7 @@ func (s *Store) UpdateRoute(ctx context.Context, r governance.Route) (governance
 	}
 	ex.StripPath = r.StripPath
 	ex.Enabled = r.Enabled
+	ex.Host = r.Host // 直接覆盖语义，允许清空（与内存版一致）
 	ex.UpdatedAt = time.Now()
 	// 合并后复校验（与内存版一致）。
 	if err := ex.Validate(); err != nil {
@@ -501,9 +502,9 @@ func (s *Store) UpdateRoute(ctx context.Context, r governance.Route) (governance
 		return governance.Route{}, err
 	}
 	tag, err := s.db.Pool().Exec(ctx,
-		`UPDATE gov_routes SET path=$1, service_id=$2, methods=$3, strip_path=$4, enabled=$5, updated_at=$6
-		 WHERE id=$7 AND tenant_id=$8`,
-		ex.Path, ex.ServiceID, methodsBytes, ex.StripPath, ex.Enabled, ex.UpdatedAt, ex.ID, tid)
+		`UPDATE gov_routes SET host=$1, path=$2, service_id=$3, methods=$4, strip_path=$5, enabled=$6, updated_at=$7
+		 WHERE id=$8 AND tenant_id=$9`,
+		ex.Host, ex.Path, ex.ServiceID, methodsBytes, ex.StripPath, ex.Enabled, ex.UpdatedAt, ex.ID, tid)
 	if err != nil {
 		return governance.Route{}, err
 	}

@@ -43,7 +43,7 @@ func tenantOrErr(ctx context.Context) (string, error) {
 
 // —— Namespace ——
 
-func (s *Store) ListNamespaces(ctx context.Context) ([]configcenter.Namespace, error) {
+func (s *Store) ListNamespaces(ctx context.Context, serviceID string) ([]configcenter.Namespace, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {
 		return nil, err
@@ -52,9 +52,13 @@ func (s *Store) ListNamespaces(ctx context.Context) ([]configcenter.Namespace, e
 	defer s.mu.RUnlock()
 	out := make([]configcenter.Namespace, 0)
 	for _, n := range s.namespaces {
-		if n.TenantID == tid {
-			out = append(out, n)
+		if n.TenantID != tid {
+			continue
 		}
+		if serviceID != "" && n.ServiceID != serviceID {
+			continue
+		}
+		out = append(out, n)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil

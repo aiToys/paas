@@ -45,7 +45,7 @@ func NewStore(db *storagepg.DB) *Store { return &Store{db: db} }
 // 列常量与各 struct 字段顺序严格对齐（scan 列序必须一致）。
 // snapshot 列读取为 []byte，由 scanPublish 转 nil 安全的 map。
 const (
-	nsCols   = `id, tenant_id, name, "desc", updated_at`
+	nsCols   = `id, tenant_id, name, service_id, "desc", updated_at`
 	itemCols = `id, tenant_id, namespace_id, key, value, type, updated_at`
 	pubCols  = `id, tenant_id, namespace_id, version, snapshot, status, created_at`
 )
@@ -79,7 +79,7 @@ func unmarshalSnapshot(raw []byte) map[string]string {
 // ---------- scan 辅助 ----------
 
 func scanNamespace(r storagepg.RowScanner, n *configcenter.Namespace) error {
-	return r.Scan(&n.ID, &n.TenantID, &n.Name, &n.Desc, &n.UpdatedAt)
+	return r.Scan(&n.ID, &n.TenantID, &n.Name, &n.ServiceID, &n.Desc, &n.UpdatedAt)
 }
 
 func scanItem(r storagepg.RowScanner, it *configcenter.ConfigItem) error {
@@ -98,13 +98,20 @@ func scanPublish(r storagepg.RowScanner, p *configcenter.Publish) error {
 // ---------- NamespaceStore ----------
 
 // ListNamespaces 列出当前租户的全部命名空间，按 Name 升序（与内存版一致）。
-func (s *Store) ListNamespaces(ctx context.Context) ([]configcenter.Namespace, error) {
+// serviceID 非空时按关联服务过滤（空=该租户全部）。
+func (s *Store) ListNamespaces(ctx context.Context, serviceID string) ([]configcenter.Namespace, error) {
 	tid, err := storagepg.TenantOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := s.db.Pool().Query(ctx,
-		`SELECT `+nsCols+` FROM cc_namespaces WHERE tenant_id=$1 ORDER BY name`, tid)
+	q := `SELECT ` + nsCols + ` FROM cc_namespaces WHERE tenant_id=$1`
+	args := []any{tid}
+	if serviceID != "" {
+		args = append(args, serviceID)
+		q += fmt.Sprintf(" AND service_id=$%d", len(args))
+	}
+	q += " ORDER BY name"
+	rows, err := s.db.Pool().Query(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -173,8 +180,8 @@ func (s *Store) CreateNamespace(ctx context.Context, n configcenter.Namespace) (
 	n.TenantID = tid
 	n.UpdatedAt = time.Now()
 	_, err = s.db.Pool().Exec(ctx,
-		`INSERT INTO cc_namespaces (`+nsCols+`) VALUES ($1,$2,$3,$4,$5)`,
-		n.ID, n.TenantID, n.Name, n.Desc, n.UpdatedAt)
+		`INSERT INTO cc_namespaces (`+nsCols+`) VALUES ($1,$2,$3,$4,$5,$6)`,
+		n.ID, n.TenantID, n.Name, n.ServiceID, n.Desc, n.UpdatedAt)
 	if storagepg.IsUniqueViolation(err) {
 		return configcenter.Namespace{}, fmt.Errorf("命名空间已存在: %s", n.Name)
 	}

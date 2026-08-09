@@ -28,10 +28,13 @@ interface Instance {
   updatedAt: string
 }
 interface Env { id: string; name: string; type: string }
+interface Published { published: boolean; version?: number; snapshot?: Record<string, string> }
+interface ConfigNs { id: string; name: string; desc?: string; published: Published }
 
 const svc = ref<Service | null>(null)
 const instances = ref<Instance[]>([])
 const envs = ref<Env[]>([])
+const configNs = ref<ConfigNs[]>([])
 const loading = ref(false)
 const showCreate = ref(false)
 const submitting = ref(false)
@@ -58,10 +61,29 @@ async function load() {
       svc.value = payload.service ?? null
       instances.value = payload.instances ?? []
     }
+    await loadConfigNs()
   } catch (e) {
     ElMessage.error('加载服务详情失败：' + (e as Error).message)
   } finally {
     loading.value = false
+  }
+}
+
+// 关联配置：拉该服务关联的 configcenter namespaces + 各自 active 配置（双向显示）。
+async function loadConfigNs() {
+  const id = route.params.id as string
+  if (!id) return
+  try {
+    const resp = await fetchAuth(`/api/configcenter/namespaces?serviceId=${id}`)
+    if (!resp.ok) return
+    const list: { id: string; name: string; desc?: string }[] = (await resp.json()).data ?? []
+    configNs.value = await Promise.all(list.map(async (ns) => {
+      const pr = await fetchAuth(`/api/configcenter/namespaces/${ns.id}/published`)
+      const pub: Published = pr.ok ? await pr.json() : { published: false }
+      return { id: ns.id, name: ns.name, desc: ns.desc, published: pub }
+    }))
+  } catch {
+    configNs.value = []
   }
 }
 
@@ -176,6 +198,30 @@ watch(() => route.params.id, load)
       </el-table-column>
     </el-table>
 
+    <!-- 关联配置（配置中心双向显示） -->
+    <section class="block">
+      <div class="block-head">
+        <span class="block-title">关联配置（配置中心）</span>
+      </div>
+      <el-empty v-if="!configNs.length" description="无关联配置命名空间" :image-size="48" />
+      <div v-else class="config-ns-list">
+        <div v-for="ns in configNs" :key="ns.id" class="config-ns-card">
+          <div class="config-ns-head">
+            <a class="link" @click="router.push(`/platform/config-center/${ns.id}`)">{{ ns.name }}</a>
+            <span v-if="ns.published.published" class="ver-tag mono">v{{ ns.published.version }}</span>
+            <span v-else class="dim">未发布</span>
+          </div>
+          <div v-if="ns.published.published && Object.keys(ns.published.snapshot || {}).length" class="kv-list">
+            <div v-for="(v, k) in ns.published.snapshot" :key="k" class="kv-row">
+              <span class="kv-key mono">{{ k }}</span>
+              <span class="kv-val mono">{{ v }}</span>
+            </div>
+          </div>
+          <div v-else class="dim" style="margin-top:6px;font-size:12px">无配置项</div>
+        </div>
+      </div>
+    </section>
+
     <el-dialog v-model="showCreate" title="注册实例" width="440px">
       <el-form label-width="80px">
         <el-form-item label="地址">
@@ -240,4 +286,18 @@ watch(() => route.params.id, load)
   font-size: 14px;
   font-weight: 600;
 }
+.block { margin-top: 24px; }
+.block-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.block-title { font-size: 14px; font-weight: 600; }
+.link { font-weight: 600; color: var(--brand); cursor: pointer; }
+.link:hover { text-decoration: underline; }
+.ver-tag { padding: 2px 8px; background: var(--success-soft); color: var(--success); border-radius: 4px; font-size: 12px; }
+.dim { color: var(--text-dim); }
+.config-ns-list { display: flex; flex-direction: column; gap: 12px; }
+.config-ns-card { padding: 12px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
+.config-ns-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.kv-list { display: flex; flex-direction: column; gap: 4px; }
+.kv-row { display: flex; gap: 16px; font-size: 12.5px; }
+.kv-key { color: var(--brand); min-width: 180px; }
+.kv-val { color: var(--text); word-break: break-all; }
 </style>

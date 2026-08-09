@@ -13,7 +13,7 @@ type Repository interface {
 
 // NamespaceStore 命名空间仓储。
 type NamespaceStore interface {
-	ListNamespaces(ctx context.Context) ([]Namespace, error)
+	ListNamespaces(ctx context.Context, serviceID string) ([]Namespace, error)
 	GetNamespace(ctx context.Context, id string) (Namespace, error)
 	CreateNamespace(ctx context.Context, n Namespace) (Namespace, error)
 	DeleteNamespace(ctx context.Context, id string) error

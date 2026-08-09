@@ -754,6 +754,24 @@ internal/dataservice/  领域(DataService + 6 Kind 常量 + KindMeta 表单元�
 - **e2e 验证**：`go test ./...` 全绿 + 三套 `pnpm build` 过 + k8s 部署，`/api/workloads` 返回 `laneId:"default"`（L1 字段生效）+ governance lane filter 200 + livez 200。
 - **留后续（L3）**：全链路 mesh（Istio/zeus sidecar 自动染色，应用零改动）、EndpointSlice + lane label selector（方案 B）、泳道自动回收（baseline 触发/闲置 TTL）、拓扑可视化（feature 泳道 + default 基线流量动画）、LaneMiddleware lane 合法性白名单校验、跨集群泳道。
 
+### 流水线完善：模板 CRUD + 构建实时日志（2026-08-09）
+
+承接 L1+L2（流水线 deploy/release 解耦 + 泳道联调），补两个用户反馈的产品 gap：①构建中看不到实时日志（仅终态全量）；②模板无法在 UI 配置（只能平台预置 builtin）。设计见 `docs/superpowers/specs/2026-08-09-pipeline-template-crud-and-stream-logs-design.md`，计划 `docs/superpowers/plans/2026-08-09-pipeline-template-crud-and-stream-logs.md`。
+
+**Phase B 模板 CRUD（admin 后台）**：
+- **Repository 补全**：`TemplateRepository` 加 `UpdateTemplate/DeleteTemplate`（L1 已有 Builtin 字段/TenantID/migration 0018 builtin 列/seed Builtin=true，本期仅补 CRUD 缺口）。
+- **builtin 保护**：`ErrTemplateBuiltin` sentinel；builtin 模板（tpl-ci/tpl-cd）拒改删（防误改致新应用 OnAppCreate 默认 binding 漂移）。改 builtin 走代码发版。
+- **admin 端点**：`/api/admin/pipeline-templates` CRUD（super_admin，`WithPlatformAdmin` 注入 `gateway.IsPlatformAdmin`）；POST 强制 `Builtin=false`（防伪造）；ErrTemplateBuiltin->409。OpenAPI 4 操作。
+- **console-admin 管理页**：`modules/pipeline-template/`（api.ts + List.vue + TemplateFormDrawer.vue），菜单「流水线模板」（推理服务分组）。**表单化 stage 编辑器**（每行 type select + name + params key-value 动态增删，与 PipelineDesigner 覆盖表单同款风格）；builtin 模板只读 + 锁提示。
+
+**Phase A 构建实时日志（SSE follow）**：
+- **BuildLogStreamer 接口**（`internal/devops/builder/logs_streamer.go`，依赖倒置）：`StreamBuildLogs(ctx, buildID, tenantID) (io.ReadCloser, error)` follow 流。`K8sBuildLogStreamer`（clientset label `job-name=<BuildJobName>` 找 Pod + `GetLogs(Follow:true, TailLines:1000)`）。`ErrNoBuildPod`（Pod 未 ready）。clientset nil 返 nil（集群外降级）。导出 `BuildJobName` helper（K8sJob.Build 与 StreamBuildLogs 共用，保证 Pod label 一致）。
+- **SSE 端点** `GET /api/buildruns/{id}/logs/stream`（`build:read` + 本租户校验防泄漏源码/凭证）：终态返 `BuildRun.Log` 全量 + `event:end`；运行中 follow Pod logs 逐块 flush（`text/event-stream` + `X-Accel-Buffering:no`，复用 gateway serveStream 同款）；Pod 未 ready loop 等 30s 发 `: heartbeat` 保连接；streamer=nil 降级 503 event。
+- **前端 EventSource 消费**（`PipelineRunView.vue`）：build stage 展开 + 运行中 -> `new EventSource('/api/buildruns/{bid}/logs/stream')` -> onmessage 逐行 append + 自动滚底；`event:end` 关流 + 拉终态全量（覆盖实时片段保证完整）；error 降级提示保留片段；折叠/切走/卸载 close 防泄漏（合并 watch runId 清缓存）。终态走 `getBuildRun` 全量。
+- **越权**：拉 Pod 日志前 `GetBuildRun` 校验 `TenantID == ctx tenant`，跨租户枚举 buildID 读他人构建日志 404 不泄漏（与 workload PodLogs 同语义）。
+- **非 k8s 模式降级**：mock/process 模式无 Pod 日志，端点返 503 event（前端降级提示）；process 模式构建中实时日志要 builder 边构建边写 buffer（大改，留后续）。
+- **留后续**：租户自定义模板（可视化编辑器 + 租户隔离）、builtin 模板版本号 + 升级覆盖机制（dogfooding 暴露的 seed 不覆盖问题）、process/mock 模式构建中实时日志、日志全文搜索/过滤、follow 流多副本/ingress 缓冲深度验证。
+
 ## 前端架构
 
 三套独立 SPA，共享设计系统（Element Plus + 暗黑模式）：

@@ -250,6 +250,7 @@ CREATE TABLE IF NOT EXISTS gov_routes (
     id         TEXT PRIMARY KEY,
     tenant_id  TEXT NOT NULL,
     name       TEXT NOT NULL,
+    host       TEXT NOT NULL DEFAULT '',            -- 对外域名（如 api.acme.com）；空=不限 Host
     path       TEXT NOT NULL,
     service_id TEXT NOT NULL DEFAULT '',
     methods    JSONB NOT NULL DEFAULT '[]'::jsonb,    -- []string (GET|POST|PUT|DELETE|ANY)
@@ -280,6 +281,7 @@ CREATE TABLE IF NOT EXISTS cc_namespaces (
     id         TEXT PRIMARY KEY,
     tenant_id  TEXT NOT NULL,
     name       TEXT NOT NULL,
+    service_id TEXT NOT NULL DEFAULT '',    -- 关联 governance Service（空=不关联，双向显示用）
     "desc"     TEXT NOT NULL DEFAULT '',
     updated_at TIMESTAMPTZ NOT NULL,
     UNIQUE (tenant_id, name)

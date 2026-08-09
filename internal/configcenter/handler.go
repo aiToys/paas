@@ -69,7 +69,7 @@ func (h *Handler) serveNamespaceCollection(w http.ResponseWriter, r *http.Reques
 		if !h.allow(w, r, PermConfigCenterRead) {
 			return
 		}
-		list, err := h.repo.ListNamespaces(r.Context())
+		list, err := h.repo.ListNamespaces(r.Context(), r.URL.Query().Get("serviceId"))
 		if err != nil {
 			httputil.WriteInternalError(w, err)
 			return

@@ -12,7 +12,8 @@ import { confirmDangerous } from '@/composables/useDangerConfirm'
 const route = useRoute()
 const router = useRouter()
 
-interface Namespace { id: string; name: string; desc?: string; updatedAt: string }
+interface Namespace { id: string; name: string; serviceId?: string; desc?: string; updatedAt: string }
+interface Service { id: string; name: string }
 interface ConfigItem { id: string; namespaceId: string; key: string; value: string; type: string; updatedAt: string }
 interface Publish {
   id: string; namespaceId: string; version: number;
@@ -21,6 +22,7 @@ interface Publish {
 interface Published { published: boolean; version?: number; snapshot?: Record<string, string>; publishId?: string }
 
 const namespaces = ref<Namespace[]>([])
+const services = ref<Service[]>([])
 const cur = ref<Namespace | null>(null)
 const items = ref<ConfigItem[]>([])
 const publishes = ref<Publish[]>([])
@@ -32,7 +34,7 @@ const itemForm = ref({ id: '', key: '', value: '', type: 'text' })
 const itemSubmitting = ref(false)
 
 const showNs = ref(false)
-const nsForm = ref({ name: '', desc: '' })
+const nsForm = ref({ name: '', serviceId: '', desc: '' })
 const nsSubmitting = ref(false)
 
 const types = [
@@ -49,6 +51,13 @@ async function loadNamespaces() {
   const resp = await fetchAuth('/api/configcenter/namespaces')
   if (resp.ok) namespaces.value = (await resp.json()).data ?? []
 }
+
+// 服务列表（关联服务下拉用，governance 租户内全部服务）。
+async function loadServices() {
+  const resp = await fetchAuth('/api/services')
+  if (resp.ok) services.value = (await resp.json()).data ?? []
+}
+const serviceName = (id: string) => services.value.find((s) => s.id === id)?.name ?? id
 
 async function loadDetail() {
   const id = route.params.nsId as string
@@ -82,7 +91,7 @@ function openNamespace(id: string) {
 }
 
 function createNamespace() {
-  nsForm.value = { name: '', desc: '' }
+  nsForm.value = { name: '', serviceId: '', desc: '' }
   showNs.value = true
 }
 
@@ -215,7 +224,9 @@ async function rollback(p: Publish) {
 
 const snapshotEntries = (snap?: Record<string, string>) => (snap ? Object.entries(snap) : [])
 
-onMounted(load)
+onMounted(async () => {
+  await Promise.all([loadServices(), load()])
+})
 watch(() => route.params.nsId, load)
 </script>
 
@@ -234,6 +245,12 @@ watch(() => route.params.nsId, load)
         <el-table-column label="命名空间" min-width="180">
           <template #default="{ row }">
             <a class="link" @click="openNamespace(row.id)">{{ row.name }}</a>
+          </template>
+        </el-table-column>
+        <el-table-column label="关联服务" min-width="140">
+          <template #default="{ row }">
+            <span v-if="row.serviceId">{{ serviceName(row.serviceId) }}</span>
+            <span v-else class="dim">-</span>
           </template>
         </el-table-column>
         <el-table-column prop="desc" label="描述" min-width="200" show-overflow-tooltip />
@@ -363,6 +380,11 @@ watch(() => route.params.nsId, load)
           <el-form-item label="名称">
             <el-input v-model="nsForm.name" placeholder="租户内唯一" />
           </el-form-item>
+          <el-form-item label="关联服务">
+            <el-select v-model="nsForm.serviceId" clearable placeholder="可选，关联 governance 服务" style="width: 100%">
+              <el-option v-for="s in services" :key="s.id" :label="s.name" :value="s.id" />
+            </el-select>
+          </el-form-item>
           <el-form-item label="描述">
             <el-input v-model="nsForm.desc" type="textarea" :rows="2" placeholder="可选" />
           </el-form-item>
@@ -385,6 +407,7 @@ watch(() => route.params.nsId, load)
 .sub { margin: 0; font-size: 12.5px; color: var(--text-dim); }
 .link { font-weight: 600; color: var(--brand); cursor: pointer; }
 .link:hover { text-decoration: underline; }
+.dim { color: var(--text-dim); }
 .back { border: none; background: transparent; color: var(--text-faint); font-family: inherit; font-size: 13px; cursor: pointer; margin-bottom: 12px; }
 .back:hover { color: var(--text); }
 .ns-head { margin-bottom: 18px; }

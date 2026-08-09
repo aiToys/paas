@@ -47,8 +47,8 @@ func TestTenantIsolation(t *testing.T) {
 	acmeID := mustCreateNs(t, s, acmeCtx(), "acme-app")
 	mustCreateNs(t, s, globexCtx(), "globex-app")
 
-	acme, _ := s.ListNamespaces(acmeCtx())
-	globex, _ := s.ListNamespaces(globexCtx())
+	acme, _ := s.ListNamespaces(acmeCtx(), "")
+	globex, _ := s.ListNamespaces(globexCtx(), "")
 	for _, n := range acme {
 		if n.TenantID != "t-acme" {
 			t.Fatalf("acme 视图泄漏: %s", n.Name)
@@ -162,7 +162,7 @@ func TestDeleteNamespaceCascade(t *testing.T) {
 // TestMissingTenant 验证缺失租户上下文即拒。
 func TestMissingTenant(t *testing.T) {
 	s := NewStore()
-	if _, err := s.ListNamespaces(context.Background()); err == nil {
+	if _, err := s.ListNamespaces(context.Background(), ""); err == nil {
 		t.Fatal("缺失租户上下文应拒绝")
 	}
 }

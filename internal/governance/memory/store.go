@@ -360,6 +360,7 @@ func (s *Store) UpdateRoute(ctx context.Context, r governance.Route) (governance
 	}
 	ex.StripPath = r.StripPath
 	ex.Enabled = r.Enabled
+	ex.Host = r.Host // 直接覆盖语义，允许清空（从有域名改回不限 Host）
 	ex.UpdatedAt = time.Now()
 	// 合并后复校验，防止 PUT 用空 methods 绕过 Create 时的非空不变量。
 	if err := ex.Validate(); err != nil {

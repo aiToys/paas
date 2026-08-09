@@ -27,7 +27,7 @@ interface Service {
 }
 interface Env { id: string; name: string; type: string }
 interface Route {
-  id: string; name: string; path: string; serviceId: string
+  id: string; name: string; host?: string; path: string; serviceId: string
   methods: string[]; stripPath: boolean; enabled: boolean; updatedAt: string
 }
 interface WindowStats { requests: number; failures: number; slowCalls: number; rate: number }
@@ -48,7 +48,7 @@ const form = ref({ name: '', appId: '', envId: '', protocol: 'http', port: 8080,
 
 // 路由创建弹窗
 const showRoute = ref(false)
-const routeForm = ref({ name: '', path: '', serviceId: '', methods: ['ANY'] as string[], stripPath: true })
+const routeForm = ref({ name: '', host: '', path: '', serviceId: '', methods: ['ANY'] as string[], stripPath: true })
 const routeSubmitting = ref(false)
 const methodOpts = ['GET', 'POST', 'PUT', 'DELETE', 'ANY']
 
@@ -113,7 +113,7 @@ async function loadRoutes() {
 const serviceName = (id: string) => services.value.find((s) => s.id === id)?.name ?? id
 
 function openRoute() {
-  routeForm.value = { name: '', path: '', serviceId: services.value[0]?.id ?? '', methods: ['ANY'], stripPath: true }
+  routeForm.value = { name: '', host: '', path: '', serviceId: services.value[0]?.id ?? '', methods: ['ANY'], stripPath: true }
   showRoute.value = true
 }
 
@@ -360,6 +360,12 @@ watch(() => envStore.currentEnvId, load)
         <el-table-column label="名称" min-width="140">
           <template #default="{ row }"><span class="mono">{{ row.name }}</span></template>
         </el-table-column>
+        <el-table-column label="对外域名" min-width="160">
+          <template #default="{ row }">
+            <span v-if="row.host" class="mono">{{ row.host }}</span>
+            <span v-else class="dim">不限</span>
+          </template>
+        </el-table-column>
         <el-table-column label="路径" min-width="180">
           <template #default="{ row }"><span class="mono">{{ row.path }}</span></template>
         </el-table-column>
@@ -450,6 +456,9 @@ watch(() => envStore.currentEnvId, load)
       <el-form label-width="90px">
         <el-form-item label="名称">
           <el-input v-model="routeForm.name" placeholder="租户内唯一，如 chat-api" />
+        </el-form-item>
+        <el-form-item label="对外域名">
+          <el-input v-model="routeForm.host" placeholder="可选，如 api.acme.com；空=不限 Host" />
         </el-form-item>
         <el-form-item label="路径">
           <el-input v-model="routeForm.path" placeholder="如 /api/v1/chat/*" />

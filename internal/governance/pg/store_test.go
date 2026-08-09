@@ -645,6 +645,52 @@ func TestCountMethods(t *testing.T) {
 	}
 }
 
+// TestRouteHostRoundTrip 验证 Route.Host 字段持久化 + 更新 + 清空（对外域名配置）。
+func TestRouteHostRoundTrip(t *testing.T) {
+	db := newTestDB(t)
+	s := NewStore(db)
+	ctx := acmeCtx()
+	sv := createService(t, s, ctx, "svc-h", "host-svc")
+
+	// Create 带 Host。
+	created, err := s.CreateRoute(ctx, governance.Route{
+		ID: "route-h", Name: "host-api", Host: "api.acme.com",
+		Path: "/api/v1/*", ServiceID: sv.ID, Methods: []string{governance.MethodAny},
+		StripPath: true, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateRoute: %v", err)
+	}
+	if created.Host != "api.acme.com" {
+		t.Fatalf("CreateRoute Host 往返失败: %s", created.Host)
+	}
+	g, _ := s.GetRoute(ctx, "route-h")
+	if g.Host != "api.acme.com" {
+		t.Fatalf("GetRoute Host 持久化失败: %s", g.Host)
+	}
+
+	// UpdateRoute 改 Host（传完整值，避免 bool 直接覆盖语义误清原值）。
+	up, err := s.UpdateRoute(ctx, governance.Route{
+		ID: "route-h", Host: "beta.acme.com", Path: "/api/v1/*",
+		Methods: []string{governance.MethodAny}, StripPath: true, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("UpdateRoute Host: %v", err)
+	}
+	if up.Host != "beta.acme.com" {
+		t.Fatalf("UpdateRoute Host 失败: %s", up.Host)
+	}
+
+	// Host 清空（直接覆盖语义，允许从有域名改回不限 Host）。
+	up2, _ := s.UpdateRoute(ctx, governance.Route{
+		ID: "route-h", Host: "", Path: "/api/v1/*",
+		Methods: []string{governance.MethodAny}, StripPath: true, Enabled: true,
+	})
+	if up2.Host != "" {
+		t.Fatalf("Host 应可清空, got %s", up2.Host)
+	}
+}
+
 // 编译期断言：pgx.ErrNoRows 用于错误映射（避免误删 import）。
 var _ = errors.Is
 var _ = pgx.ErrNoRows

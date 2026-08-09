@@ -123,7 +123,7 @@ func TestNamespaceCreateGetList(t *testing.T) {
 
 	// List 多条 + 按 name 升序。
 	createNamespace(t, s, ctx, "ns-2", "beta-cfg")
-	list, err := s.ListNamespaces(ctx)
+	list, err := s.ListNamespaces(ctx, "")
 	if err != nil {
 		t.Fatalf("ListNamespaces: %v", err)
 	}
@@ -492,7 +492,7 @@ func TestTenantIsolation(t *testing.T) {
 	s.CreatePublish(acme, ns.ID)
 
 	// Globex 看不到 Acme 的资源。
-	if list, _ := s.ListNamespaces(globex); len(list) != 0 {
+	if list, _ := s.ListNamespaces(globex, ""); len(list) != 0 {
 		t.Fatalf("跨租户 ListNamespaces 应 0 条, got %d", len(list))
 	}
 	if _, err := s.GetNamespace(globex, ns.ID); err == nil ||
@@ -532,7 +532,7 @@ func TestMissingTenantRejected(t *testing.T) {
 	ctx := noTenantCtx()
 
 	// 全部方法：缺失租户即拒（fail-closed）。
-	if _, err := s.ListNamespaces(ctx); err == nil {
+	if _, err := s.ListNamespaces(ctx, ""); err == nil {
 		t.Fatalf("ListNamespaces 缺失租户应拒")
 	}
 	if _, err := s.GetNamespace(ctx, "x"); err == nil {
@@ -601,6 +601,49 @@ func TestCountMethods(t *testing.T) {
 	}
 	if n, _ := s.PublishesCount(ctx); n != 1 {
 		t.Fatalf("PublishesCount 应 1, got %d", n)
+	}
+}
+
+// TestNamespaceServiceIDRoundTrip 验证 Namespace.ServiceID 持久化 + ListNamespaces 按 serviceId 过滤。
+func TestNamespaceServiceIDRoundTrip(t *testing.T) {
+	db := newTestDB(t)
+	s := NewStore(db)
+	ctx := acmeCtx()
+
+	// 创建两个 namespace，一个关联 svc-a，一个不关联。
+	n1, err := s.CreateNamespace(ctx, configcenter.Namespace{Name: "ns-a", ServiceID: "svc-a"})
+	if err != nil {
+		t.Fatalf("CreateNamespace ns-a: %v", err)
+	}
+	if n1.ServiceID != "svc-a" {
+		t.Fatalf("ServiceID 往返失败: %s", n1.ServiceID)
+	}
+	if _, err := s.CreateNamespace(ctx, configcenter.Namespace{Name: "ns-b"}); err != nil {
+		t.Fatalf("CreateNamespace ns-b: %v", err)
+	}
+
+	// Get 验证 ServiceID 持久化。
+	g, _ := s.GetNamespace(ctx, n1.ID)
+	if g.ServiceID != "svc-a" {
+		t.Fatalf("GetNamespace ServiceID 持久化失败: %s", g.ServiceID)
+	}
+
+	// ListNamespaces 全量（serviceID 空）= 2 条。
+	all, _ := s.ListNamespaces(ctx, "")
+	if len(all) != 2 {
+		t.Fatalf("ListNamespaces 全量应 2, got %d", len(all))
+	}
+
+	// ListNamespaces 按 svc-a 过滤 = 1 条。
+	filtered, _ := s.ListNamespaces(ctx, "svc-a")
+	if len(filtered) != 1 || filtered[0].Name != "ns-a" {
+		t.Fatalf("ListNamespaces svc-a 过滤应 1 条 ns-a, got %v", filtered)
+	}
+
+	// ListNamespaces 按 svc-b 过滤 = 0 条（ns-b 无 ServiceID）。
+	none, _ := s.ListNamespaces(ctx, "svc-b")
+	if len(none) != 0 {
+		t.Fatalf("ListNamespaces svc-b 过滤应 0, got %d", len(none))
 	}
 }
 

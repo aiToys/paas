@@ -135,10 +135,12 @@ func ValidMethod(m string) bool {
 
 // Route 是 API 网关路由规则（治理四件套之 API 网关）。
 // 将入口路径转发到目标服务（与 Service 解耦的逻辑配置，不绑定物理环境）。
+// Host 非空时绑定对外域名（多 Host 路由分离；空=匹配所有 Host）。
 type Route struct {
 	ID        string    `json:"id"`
 	TenantID  string    `json:"tenantId,omitempty"` // ctx 写入，请求体忽略
 	Name      string    `json:"name"`               // 租户内唯一
+	Host      string    `json:"host,omitempty"`     // 对外域名（如 api.acme.com）；空=不限 Host
 	Path      string    `json:"path"`               // 入口路径，如 /api/v1/chat/*
 	ServiceID string    `json:"serviceId"`          // 目标服务
 	Methods   []string  `json:"methods"`            // GET/POST/PUT/DELETE/ANY
