@@ -80,13 +80,19 @@ func (r *WorkloadReconciler) dpEndpoint() string {
 	return "http://paas-core.paas.svc.cluster.local/dp"
 }
 
-// labelsFor 返回工作负载的 K8s 标签（含租户/应用隔离）。
+// labelsFor 返回工作负载的 K8s 标签（含租户/应用隔离 + 泳道）。
+// lane 空→default（基线）；feature 泳道 Workload 带各自 lane，selector 自然区分，Pod/Service 同款 label 匹配。
 func labelsFor(w *v1alpha1.Workload) map[string]string {
+	lane := w.Spec.LaneID
+	if lane == "" {
+		lane = "default"
+	}
 	return map[string]string{
 		"app.kubernetes.io/managed-by": "paas",
 		labels.KeyTenant:               w.Spec.TenantID,
 		labels.KeyApp:                  w.Spec.AppID,
 		labels.KeyWorkload:             w.Name,
+		labels.KeyLane:                 lane,
 	}
 }
 

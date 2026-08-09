@@ -15,6 +15,7 @@ const (
 	KeyWorkload    = Domain + "/workload"    // 工作负载名（Pod→Workload 反查）
 	KeyDataservice = Domain + "/dataservice" // 数据服务名（Pod→DataService 反查）
 	KeyKind        = Domain + "/kind"        // 数据服务 Kind（db/cache/...）
+	KeyLane        = Domain + "/lane"        // 泳道标识（default=基线，feature-x=泳道；L2 前端/governance 分组用，不参与跨租户校验）
 )
 
 // Annotation key（不进 selector，可变更，不触发 Pod 重建）。

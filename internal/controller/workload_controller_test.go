@@ -269,3 +269,45 @@ func TestReconcileJobNoService(t *testing.T) {
 		t.Fatalf("Job Pod restartPolicy 应为 Never，实际 %s", rp)
 	}
 }
+
+// TestReconcileLabelsLane 验证 Workload 的 lane label（L2）：Spec.LaneID 空时打 default，
+// feature 泳道 Workload 打对应 lane。前端/governance 按 lane 分组用。
+func TestReconcileLabelsLane(t *testing.T) {
+	scheme := newScheme(t)
+	// 基线 Workload（无 LaneID）→ default label
+	base := &v1alpha1.Workload{
+		ObjectMeta: metav1.ObjectMeta{Name: "wl-base", Namespace: "default"},
+		Spec:       v1alpha1.WorkloadSpec{TenantID: "t-acme", AppID: "app-cs", Type: "service", Name: "wl-base", Image: "nginx", Replicas: 1},
+	}
+	// feature-x 泳道 Workload → feature-x label
+	feat := &v1alpha1.Workload{
+		ObjectMeta: metav1.ObjectMeta{Name: "wl-feat", Namespace: "default"},
+		Spec:       v1alpha1.WorkloadSpec{TenantID: "t-acme", AppID: "app-cs", Type: "service", Name: "wl-feat", Image: "nginx", Replicas: 1, LaneID: "feature-x"},
+	}
+	cl := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(base, feat).WithStatusSubresource(&v1alpha1.Workload{}).Build()
+	r := &WorkloadReconciler{Client: cl, Scheme: scheme}
+	for _, name := range []string{"wl-base", "wl-feat"} {
+		if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: name, Namespace: "default"}}); err != nil {
+			t.Fatalf("reconcile %s 失败: %v", name, err)
+		}
+	}
+	// 基线 Deployment label = default
+	var depBase appsv1.Deployment
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "wl-base", Namespace: "default"}, &depBase); err != nil {
+		t.Fatalf("应创建基线 Deployment: %v", err)
+	}
+	if got := depBase.Labels["paas.aitoys/lane"]; got != "default" {
+		t.Fatalf("基线 lane label 应 default，got %q", got)
+	}
+	if got := depBase.Spec.Template.Labels["paas.aitoys/lane"]; got != "default" {
+		t.Fatalf("基线 Pod 模板 lane label 应 default，got %q", got)
+	}
+	// feature Deployment label = feature-x
+	var depFeat appsv1.Deployment
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "wl-feat", Namespace: "default"}, &depFeat); err != nil {
+		t.Fatalf("应创建 feature Deployment: %v", err)
+	}
+	if got := depFeat.Labels["paas.aitoys/lane"]; got != "feature-x" {
+		t.Fatalf("feature lane label 应 feature-x，got %q", got)
+	}
+}
