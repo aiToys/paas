@@ -233,7 +233,13 @@ func (e *Engine) execBuild(ctx context.Context, run *PipelineRun, stage StageDef
 		return true, err
 	}
 	logf(sr, "构建提交 buildRunId=%s", br.ID)
-	sr.Input = map[string]any{"buildRunId": br.ID}
+	// 合并而非覆盖：保留初始 Input（buildArgs/branchOverride 等解析参数，retry 时仍需），
+	// 追加 buildRunId（前端拉构建日志依赖 stage.input.buildRunId）。
+	// 覆盖整 map 会丢初始参数，retry 必失败。
+	if sr.Input == nil {
+		sr.Input = map[string]any{}
+	}
+	sr.Input["buildRunId"] = br.ID
 	br, err = e.Builds.PollBuildRun(ctx, br.ID)
 	if err != nil {
 		sr.Error = err.Error()
@@ -274,7 +280,13 @@ func (e *Engine) execDeploy(ctx context.Context, run *PipelineRun, stage StageDe
 		sr.Error = err.Error()
 		return true, err
 	}
-	sr.Input = map[string]any{"releaseId": deployment.ID, "imageId": imageID, "lane": lane}
+	// 合并而非覆盖：保留初始 Input（envId/lane/imageSource 等，retry 时 execDeploy 仍需 envId，
+	// 覆盖丢 envId 会导致 retry fail-fast「deploy stage 缺 envId 参数」）。
+	// 追加 imageId（priorBuild 链供下游 stage + 前端日志）；releaseId 走 Output（OutReleaseID）不写 Input。
+	if sr.Input == nil {
+		sr.Input = map[string]any{}
+	}
+	sr.Input["imageId"] = imageID
 	logf(sr, "等待 Workload %s 就绪", deployment.WorkloadID)
 	if err := e.Releases.PollWorkloadReady(ctx, deployment.WorkloadID); err != nil {
 		sr.Error = err.Error()

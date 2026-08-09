@@ -217,3 +217,47 @@ func TestHandlerItemDeleteCrossTenantHidden(t *testing.T) {
 		t.Fatalf("跨租户删 item 应 404，got %d（越权删除成功=回归）", w.Code)
 	}
 }
+
+// stubServiceLookup 测试用 ServiceLookup 桩：可控存在集合。
+type stubServiceLookup struct {
+	exists map[string]bool
+}
+
+func (s stubServiceLookup) ServiceExists(_ context.Context, serviceID string) (bool, error) {
+	return s.exists[serviceID], nil
+}
+
+// TestCreateNamespaceRejectsDanglingServiceID 验证 CreateNamespace 校验 ServiceID 归属：
+// serviceLookup 注入后，不存在的 serviceID 返 400（防悬挂引用脏数据）；
+// 存在的 serviceID 正常创建；ServiceID 空（不关联）跳过校验。
+func TestCreateNamespaceRejectsDanglingServiceID(t *testing.T) {
+	h := newHandler()
+	h.WithServiceLookup(stubServiceLookup{exists: map[string]bool{"svc-real": true}})
+
+	// 不存在的 serviceID → 400
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req(acmeCtx(), "POST", "/api/configcenter/namespaces", configcenter.Namespace{
+		Name: "ns-dangling", ServiceID: "svc-typo",
+	}))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("悬挂 serviceID 应 400，got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 存在的 serviceID → 201
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req(acmeCtx(), "POST", "/api/configcenter/namespaces", configcenter.Namespace{
+		Name: "ns-ok", ServiceID: "svc-real",
+	}))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("存在 serviceID 应 201，got %d: %s", w.Code, w.Body.String())
+	}
+
+	// ServiceID 空（不关联）→ 201（跳过校验，向后兼容）
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req(acmeCtx(), "POST", "/api/configcenter/namespaces", configcenter.Namespace{
+		Name: "ns-noservice",
+	}))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("无 serviceID 应 201，got %d: %s", w.Code, w.Body.String())
+	}
+}

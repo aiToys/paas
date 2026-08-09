@@ -42,3 +42,11 @@ type PublishStore interface {
 	// PublishNamespaceID 返回发布所属 namespace（回滚路由校验用）。
 	PublishNamespaceID(ctx context.Context, publishID string) (string, error)
 }
+
+// ServiceLookup 校验 governance Service 是否存在（依赖倒置，避免 configcenter→governance import）。
+// Namespace.ServiceID 是弱关联（双向显示用），CreateNamespace 时校验非空 ServiceID 存在 + 属本租户，
+// 防悬挂引用（typo/已删/跨租户 serviceID 产生脏数据）。实现按 ctx tenant 过滤，跨租户返 false。
+// nil 时跳过校验（兼容旧装配/测试）。
+type ServiceLookup interface {
+	ServiceExists(ctx context.Context, serviceID string) (bool, error)
+}

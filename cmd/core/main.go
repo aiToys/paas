@@ -501,6 +501,8 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// 独立于物理环境（namespace 逻辑隔离），不接 EnvTypeResolver；复用 governance:read/write 权限。
 	ccHandler := configcenter.NewHandler(stores.ConfigCenter)
 	ccHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+	// 注入 governance Service 存在性校验（CreateNamespace 的 ServiceID 归属校验，防悬挂引用）。
+	ccHandler.WithServiceLookup(ccServiceLookup{gov: stores.Governance})
 
 	// 可观测（指标监控 + 告警规则，平台能力横切）。
 	// 惰性时序模拟采集，即时评估告警；不接 prod:write，独立于物理环境。
@@ -1273,4 +1275,16 @@ func recoveryMiddleware(h http.Handler) http.Handler {
 		}()
 		h.ServeHTTP(w, r)
 	})
+}
+
+// ccServiceLookup 桥接 governance.Repository → configcenter.ServiceLookup（依赖倒置）。
+// CreateNamespace 时校验 ServiceID 存在 + 属本租户（governance GetService 按 ctx tenant 过滤，
+// 跨租户/不存在返 err → 视为 false 不泄漏）。err 一律视为不存在（存在性辅助校验，降级友好）。
+type ccServiceLookup struct {
+	gov governance.Repository
+}
+
+func (a ccServiceLookup) ServiceExists(ctx context.Context, serviceID string) (bool, error) {
+	_, err := a.gov.GetService(ctx, serviceID)
+	return err == nil, nil
 }

@@ -31,13 +31,21 @@ const (
 //	GET    /api/configcenter/namespaces/{id}/published   客户端发现（active 快照）
 //	POST   /api/configcenter/publishes/{pid}/rollback    回滚
 type Handler struct {
-	repo      Repository
-	Authorize func(r *http.Request, perm string) bool
+	repo          Repository
+	Authorize     func(r *http.Request, perm string) bool
+	serviceLookup ServiceLookup // 可选，CreateNamespace 时校验 ServiceID 归属（防悬挂引用）
 }
 
 // NewHandler 创建配置中心 handler。
 func NewHandler(repo Repository) *Handler {
 	return &Handler{repo: repo}
+}
+
+// WithServiceLookup 注入 governance Service 存在性校验器（依赖倒置）。
+// 非空时 CreateNamespace 的 ServiceID 需存在且属本租户，防悬挂引用脏数据。
+func (h *Handler) WithServiceLookup(sl ServiceLookup) *Handler {
+	h.serviceLookup = sl
+	return h
 }
 
 func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) bool {
@@ -85,6 +93,18 @@ func (h *Handler) serveNamespaceCollection(w http.ResponseWriter, r *http.Reques
 		if err := json.NewDecoder(r.Body).Decode(&n); err != nil {
 			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
+		}
+		// ServiceID 非空时校验关联服务存在 + 属本租户，防悬挂引用（typo/已删/跨租户脏数据）。
+		if n.ServiceID != "" && h.serviceLookup != nil {
+			ok, lerr := h.serviceLookup.ServiceExists(r.Context(), n.ServiceID)
+			if lerr != nil {
+				httputil.WriteInternalError(w, lerr)
+				return
+			}
+			if !ok {
+				httputil.WriteError(w, http.StatusBadRequest, "关联服务不存在: "+n.ServiceID)
+				return
+			}
 		}
 		saved, err := h.repo.CreateNamespace(r.Context(), n)
 		if err != nil {

@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,6 +33,7 @@ type fakeReleaser struct {
 	imageID    string // LatestReadyImage 返回
 	latestErr error
 	deployErr error // Deploy 错误（可选）
+	pollErr   error // PollWorkloadReady 错误（可选，模拟 deploy 后探活失败）
 	domain    string // Deploy/WorkloadDomain 返回（空则默认 wl-{id}.svc.cluster.local)
 
 	deployLane string // Deploy 收到的 lane（断言用）
@@ -48,7 +50,9 @@ func (f *fakeReleaser) CreateRelease(ctx context.Context, input devops.ReleaseIn
 	}
 	return devops.Release{ID: "rel-1", AppID: input.AppID, EnvID: input.EnvID, ImageID: input.ImageID, WorkloadID: "wl-1"}, nil
 }
-func (f *fakeReleaser) PollWorkloadReady(ctx context.Context, workloadID string) error { return nil }
+func (f *fakeReleaser) PollWorkloadReady(ctx context.Context, workloadID string) error {
+	return f.pollErr
+}
 func (f *fakeReleaser) WorkloadDomain(ctx context.Context, workloadID string) string {
 	if f.domain != "" {
 		return f.domain
@@ -884,6 +888,53 @@ func TestEngineRetry(t *testing.T) {
 	// 失败 stage 的 Error 应被清空
 	if run.StageRuns[0].Error != "" {
 		t.Fatalf("Retry 后 stage Error 应清空，got %q", run.StageRuns[0].Error)
+	}
+}
+
+// TestEngineRetryDeployAfterPollFail 验证 deploy stage 在 PollWorkloadReady 失败后 retry 不缺 envId。
+// 回归 finding：execDeploy 曾用 `sr.Input = map{...}` 整覆盖 Input，丢掉初始 envId；
+// PollWorkloadReady 失败 → run failed → Retry 不重置 Input → 重新执行 execDeploy 时 envId 为空 →
+// fail-fast「deploy stage 缺 envId 参数」。修复后 Input 合并保留 envId，retry 正常推进。
+func TestEngineRetryDeployAfterPollFail(t *testing.T) {
+	s := NewMemoryStore()
+	runID, _ := seedBuildDeployPipeline(t, s, map[string]any{
+		"envId": "env-dev", "imageSource": ImagePriorBuild,
+	})
+
+	// build 成功 + deploy 的 PollWorkloadReady 失败 → run failed at stage[1]（deploy）
+	failEng := &Engine{
+		Pipelines: s, Runs: s,
+		Builds:   fakeBuilder{buildStatus: devops.BuildSuccess, imageID: "img-1"},
+		Releases: &fakeReleaser{pollErr: errors.New("workload not ready")},
+	}
+	if err := failEng.Advance(acmeCtxEngine(), runID); err != nil {
+		t.Fatalf("Advance 失败: %v", err)
+	}
+	run, _ := s.GetRun(acmeCtxEngine(), runID)
+	if run.Status != RunFailed {
+		t.Fatalf("期望 failed（deploy 探活失败），got %s (stage1 err=%s)", run.Status, run.StageRuns[1].Error)
+	}
+
+	// Retry：换探活成功的 releaser，deploy 应能重新取 envId 推进（修复后 Input.envId 保留）
+	successEng := &Engine{
+		Pipelines: s, Runs: s,
+		Builds:   fakeBuilder{buildStatus: devops.BuildSuccess, imageID: "img-1"},
+		Releases: &fakeReleaser{},
+	}
+	if err := successEng.Retry(acmeCtxEngine(), runID); err != nil {
+		t.Fatalf("Retry 失败: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		r, _ := s.GetRun(acmeCtxEngine(), runID)
+		if r.Status == RunSucceeded || r.Status == RunFailed {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	run, _ = s.GetRun(acmeCtxEngine(), runID)
+	if run.Status != RunSucceeded {
+		t.Fatalf("deploy retry 后期望 succeeded，got %s (stage1 err=%s)", run.Status, run.StageRuns[1].Error)
 	}
 }
 

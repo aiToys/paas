@@ -39,7 +39,10 @@ type K8sBuildLogStreamer struct {
 }
 
 // NewK8sBuildLogStreamer 构造 streamer；cs nil 时返 nil（集群外降级）。
-func NewK8sBuildLogStreamer(cs kubernetes.Interface) *K8sBuildLogStreamer {
+// 返回接口类型而非具体指针：cs nil 时返真 nil 接口（非 typed-nil），避免 WithBuildLogStreamer
+// 装箱后 h.logStreamer != nil 误判（Go 接口装箱语义：(*K8sBuildLogStreamer)(nil) 装箱为非 nil 接口，
+// 致 handler 降级分支不触发，前端等 30s 才收到「Pod 未就绪」而非「非集群部署」）。
+func NewK8sBuildLogStreamer(cs kubernetes.Interface) BuildLogStreamer {
 	if cs == nil {
 		return nil
 	}
