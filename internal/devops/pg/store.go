@@ -399,7 +399,7 @@ func (s *Store) runBuild(ctx context.Context, p builder.Params) {
 		ID:         newID("img"),
 		TenantID:   p.TenantID,
 		AppID:      p.AppID,
-		Registry:   builder.RegistryOrDefault(p),
+		Registry:   res.Registry,
 		Tag:        res.Tag,
 		Digest:     res.Digest,
 		Source:     p.Commit,

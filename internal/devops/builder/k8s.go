@@ -114,7 +114,7 @@ func (k K8sJob) Build(ctx context.Context, p Params) (result Result, err error) 
 			if perr != nil {
 				return Result{Log: logs}, fmt.Errorf("解析 digest 失败（日志无 PAAS_DIGEST 行）: %w", perr)
 			}
-			return Result{Digest: digest, Tag: tag, Log: logs}, nil
+			return Result{Digest: digest, Tag: tag, Log: logs, Registry: p.Registry}, nil
 		}
 		if js.Status.Failed > 0 {
 			logs := k.podLogs(ctx, ns, jobName)

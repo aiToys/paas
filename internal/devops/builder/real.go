@@ -129,7 +129,7 @@ func (r Real) Build(ctx context.Context, p Params) (Result, error) {
 	if err != nil {
 		return Result{Log: log.String()}, fmt.Errorf("解析 digest 失败: %w", err)
 	}
-	return Result{Digest: digest, Tag: tag, Log: log.String()}, nil
+	return Result{Digest: digest, Tag: tag, Log: log.String(), Registry: p.Registry}, nil
 }
 
 // runCmd 在 workdir 执行命令，stdout/stderr 追加到 log，返回 combined output。

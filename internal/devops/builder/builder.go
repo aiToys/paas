@@ -39,6 +39,11 @@ type Result struct {
 	Digest string // sha256:...
 	Tag    string
 	Log    string
+	// Registry 回传实际 push 的镜像仓库地址（Build 内兜底后填，store 写 Image.Registry 用）。
+	// 关键：Build(ctx, p Params) 是值传递，Build 内修改 p.Registry 不影响 store 的 p；
+	// 故必须经 Result 回传，否则 store 用 RegistryOrDefault(p) 拿默认 registry.paas.local，
+	// 与 K8sJob/Real 实际 push 的 k.Registry 不一致 -> reconciler 拼错镜像地址致 Pod 拉不到。
+	Registry string
 }
 
 // Pipeline 执行构建流水线，产出不可变镜像 digest。
@@ -54,7 +59,7 @@ func (Mock) Build(_ context.Context, p Params) (Result, error) {
 	time.Sleep(800 * time.Millisecond) // 模拟 clone+build+push 耗时
 	digest := "sha256:" + sha256hex(p.Commit+p.AppID+p.BuildID)
 	tag := p.Branch + "-" + safeShort(p.Commit, 8)
-	return Result{Digest: digest, Tag: tag, Log: mockBuildLog(tag)}, nil
+	return Result{Digest: digest, Tag: tag, Log: mockBuildLog(tag), Registry: RegistryOrDefault(p)}, nil
 }
 
 // IsReal 标记是否真实执行（Store 据此决定是否预留长耗时）。
