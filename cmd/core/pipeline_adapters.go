@@ -78,6 +78,7 @@ type releaseBridge struct {
 	workloads workload.Repository
 	envs      environment.Repository
 	gitea     giteaTagger // 可选，nil 时 Publish 跳过 git tag（仅回填 Image.Version）
+	status    workload.StatusReader // 可选，nil 时 PollWorkloadReady 透传 store 原 Ready（集群外降级）
 }
 
 // CreateRelease 编排发布（取镜像 + 找/建基线 Workload + 更新镜像 + 回滚指针）。
@@ -95,6 +96,10 @@ func (r *releaseBridge) PollWorkloadReady(ctx context.Context, workloadID string
 		wl, err := r.workloads.Get(ctx, workloadID)
 		if err != nil {
 			return err
+		}
+		// K8s 实时状态填充 Ready（PG Ready 反向同步留后续，PollWorkloadReady 须读实时非 store 原值）
+		if r.status != nil {
+			_ = r.status.FillStatus(ctx, []workload.Workload{wl})
 		}
 		if wl.Replicas > 0 && wl.Ready >= wl.Replicas {
 			return nil

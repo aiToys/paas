@@ -460,7 +460,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		Releases: &releaseBridge{
 			releases: stores.DevOpsReleases, images: stores.DevOpsImages,
 			workloads: stores.Workload, envs: stores.Environment,
-			gitea: giteaBridgeInst,
+			gitea: giteaBridgeInst, status: statusReader,
 		},
 		Gitea: giteaBridgeInst,
 	}
