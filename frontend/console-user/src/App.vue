@@ -107,7 +107,7 @@ const nav: NavItem[] = [
       { label: '对象存储', icon: 'storage', to: '/resources/storage' },
       { label: '向量数据库', icon: 'layers', to: '/resources/vector' },
       { label: '搜索引擎', icon: 'search', to: '/resources/search' },
-      { label: '知识库', icon: 'layers', to: '/resources/knowledgebase' },
+      { label: '知识库', icon: 'book', to: '/resources/knowledgebase' },
     ],
   },
   {
@@ -121,22 +121,22 @@ const nav: NavItem[] = [
   {
     label: 'AI 编排', icon: 'pipeline', section: 'resources', group: 'ai',
     children: [
-      { label: '工具', icon: 'service', to: '/ai/tools' },
-      { label: '提示词', icon: 'layers', to: '/ai/prompts' },
-      { label: 'Agent', icon: 'playground', to: '/ai/agents' },
+      { label: '工具', icon: 'tool', to: '/ai/tools' },
+      { label: '提示词', icon: 'prompt', to: '/ai/prompts' },
+      { label: 'Agent', icon: 'bot', to: '/ai/agents' },
     ],
   },
   {
     label: '平台能力', icon: 'service', section: 'resources', group: 'platform',
     children: [
       { label: '服务治理', icon: 'service', to: '/platform/governance' },
-      { label: '配置中心', icon: 'layers', to: '/platform/config-center' },
+      { label: '配置中心', icon: 'sliders', to: '/platform/config-center' },
       { label: '可观测', icon: 'activity', to: '/platform/observability' },
       { label: '安全', icon: 'shield', to: '/platform/security' },
     ],
   },
   // —— 环境：物理隔离单元（管理面 + 跨环境总览）——
-  { label: '环境', icon: 'shield', to: '/environments' },
+  { label: '环境', icon: 'env', to: '/environments' },
 ]
 
 const { isOpen: navGroupOpen, toggle: toggleNavGroup } = useNavState()

@@ -67,6 +67,7 @@ import { ElMessage } from 'element-plus'
 import { SearchTable } from '@/app/components'
 import { useCrud } from '@/app/composables/useCrud'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
+import { tableTimeFormatter } from '@/lib/format'
 import { fetchQuotaList, setQuotaForTenant, type AdminQuota, type ResSearchRequest } from '../api'
 
 const { listData, loading, pagination, searchForm, fetchList, handleSearch, handleReset, handlePageChange } =
@@ -81,7 +82,7 @@ const tableData = computed(() => listData.value as unknown as Record<string, unk
 const columns = computed<ColumnDef[]>(() => [
   { prop: 'tenantId', label: '租户', width: 160 },
   { prop: 'limits', label: '配额上限', minWidth: 400, slot: 'limits' },
-  { prop: 'updatedAt', label: '更新时间', width: 180 },
+  { prop: 'updatedAt', label: '更新时间', width: 180, formatter: tableTimeFormatter },
   { prop: 'action', label: '操作', width: 90, slot: 'action', hideable: false }
 ])
 

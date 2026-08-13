@@ -26,7 +26,7 @@
             <el-tag v-if="detail.isRollback" type="warning" size="small">回滚</el-tag>
             <span v-else>-</span>
           </el-descriptions-item>
-          <el-descriptions-item label="创建时间">{{ detail.createdAt || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="创建时间">{{ detail.createdAt ? formatDate(detail.createdAt) : '-' }}</el-descriptions-item>
           <el-descriptions-item label="镜像 Digest" :span="2">
             <code style="word-break: break-all">{{ detail.imageDigest || '-' }}</code>
           </el-descriptions-item>
@@ -55,6 +55,7 @@
 <script lang="ts" setup>
 import { ref, computed, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { formatDate } from '@/lib/format'
 import { fetchReleaseDetail, rollbackRelease, type AdminReleaseDetail } from '../api'
 
 const props = defineProps<{ modelValue: boolean; id: string }>()

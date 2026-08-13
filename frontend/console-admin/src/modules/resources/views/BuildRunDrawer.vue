@@ -22,8 +22,8 @@
           <el-descriptions-item label="分支">{{ detail.branch || '-' }}</el-descriptions-item>
           <el-descriptions-item label="镜像 ID" :span="2">{{ detail.imageId || '-' }}</el-descriptions-item>
           <el-descriptions-item label="提交信息" :span="2">{{ detail.message || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="开始时间">{{ detail.startedAt || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="结束时间">{{ detail.finishedAt || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="开始时间">{{ detail.startedAt ? formatDate(detail.startedAt) : '-' }}</el-descriptions-item>
+          <el-descriptions-item label="结束时间">{{ detail.finishedAt ? formatDate(detail.finishedAt) : '-' }}</el-descriptions-item>
         </el-descriptions>
 
         <div class="block">
@@ -42,6 +42,7 @@
 
 <script lang="ts" setup>
 import { ref, onUnmounted } from 'vue'
+import { formatDate } from '@/lib/format'
 import { fetchBuildRunDetail, type AdminBuildRunDetail } from '../api'
 
 const props = defineProps<{ modelValue: boolean; id: string }>()

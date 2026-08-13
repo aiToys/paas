@@ -52,6 +52,7 @@ import { Refresh } from '@element-plus/icons-vue'
 import { SearchTable } from '@/app/components'
 import { useCrud } from '@/app/composables/useCrud'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
+import { tableTimeFormatter } from '@/lib/format'
 import { fetchReleaseList, type AdminRelease, type ResSearchRequest } from '../api'
 import ReleaseDrawer from './ReleaseDrawer.vue'
 
@@ -83,7 +84,7 @@ const columns = computed<ColumnDef[]>(() => [
   { prop: 'strategy', label: '策略', width: 100 },
   { prop: 'status', label: '状态', width: 110, slot: 'status' },
   { prop: 'isRollback', label: '回滚', width: 80, slot: 'isRollback' },
-  { prop: 'createdAt', label: '发布时间', width: 180 },
+  { prop: 'createdAt', label: '发布时间', width: 180, formatter: tableTimeFormatter },
   { prop: 'detail', label: '操作', width: 110, slot: 'detail', hideable: false }
 ])
 

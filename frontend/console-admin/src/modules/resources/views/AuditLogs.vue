@@ -43,6 +43,7 @@ import { Refresh } from '@element-plus/icons-vue'
 import { SearchTable } from '@/app/components'
 import { useCrud } from '@/app/composables/useCrud'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
+import { tableTimeFormatter } from '@/lib/format'
 import { fetchAuditLogList, type AdminAuditLog, type ResSearchRequest } from '../api'
 
 const { listData, loading, pagination, searchForm, fetchList, handleSearch, handleReset, handlePageChange } =
@@ -60,7 +61,7 @@ const columns = computed<ColumnDef[]>(() => [
   { prop: 'action', label: '动作', width: 120, slot: 'action' },
   { prop: 'resourceType', label: '资源类型', width: 130 },
   { prop: 'resourceId', label: '资源 ID', minWidth: 150 },
-  { prop: 'at', label: '时间', width: 180 }
+  { prop: 'at', label: '时间', width: 180 , formatter: tableTimeFormatter }
 ])
 
 onMounted(() => fetchList())

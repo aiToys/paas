@@ -176,6 +176,29 @@ export const fetchReleaseList = (params: ResSearchRequest) =>
     )
   )
 
+// -- 流水线运行（PipelineRun 跨租户总览）--
+export interface AdminPipelineRun {
+  id: string
+  tenantId: string
+  appId: string
+  pipelineId: string
+  branch: string
+  commit: string
+  status: string // running / paused / succeeded / failed / aborted
+  currentStage: string
+  version?: string
+  createdAt: string
+  finishedAt?: string
+}
+export const fetchPipelineRunList = (params: ResSearchRequest) =>
+  api.get<AdminPipelineRun[]>('/api/admin/pipelineruns').then((list) =>
+    filterPage(list, params, (r) =>
+      (!params.tenantId || r.tenantId === params.tenantId) &&
+      (has(r.id, params.keyword ?? '') || has(r.appId, params.keyword ?? '') ||
+        has(r.status, params.keyword ?? '') || has(r.pipelineId, params.keyword ?? ''))
+    )
+  )
+
 // -- 配置中心 --
 export interface AdminNamespace {
   id: string

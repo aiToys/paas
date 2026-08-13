@@ -7,6 +7,10 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
+import {
+  type Span, type Trace,
+  buildSpanTree, flattenSpanTree, spanWidth, spanLeft, spanChips, errSpanCount,
+} from '@/composables/useSpanTree'
 
 const route = useRoute()
 
@@ -29,14 +33,6 @@ interface Alert {
 interface LogEntry {
   id: string; appId: string; level: string; message: string; traceId?: string; timestamp: string
 }
-interface Span {
-  id: string; parentId?: string; operation: string; service: string
-  startMs: number; durationMs: number; tags?: Record<string, string>
-}
-interface Trace {
-  id: string; appId: string; operation: string; status: string
-  durationMs: number; startedAt: string; spans: Span[]
-}
 
 const apps = ref<App[]>([])
 const targetApp = ref('')
@@ -53,8 +49,8 @@ const loading = ref(false)
 const traceStatusLabel: Record<string, string> = { success: '成功', error: '错误' }
 const traceStatusType: Record<string, TagType> = { success: 'success', error: 'danger' }
 
-const metricOrder = ['cpu', 'mem', 'rps', 'latency']
-const metricLabel: Record<string, string> = { cpu: 'CPU', mem: '内存', rps: '请求/秒', latency: 'P95 延迟' }
+const metricOrder = ['cpu', 'mem', 'rps', 'latency', 'errorRate']
+const metricLabel: Record<string, string> = { cpu: 'CPU', mem: '内存', rps: '请求/秒', latency: 'P95 延迟', errorRate: '错误率' }
 const logLevelLabel: Record<string, string> = { info: '信息', warn: '警告', error: '错误' }
 const logLevelType: Record<string, TagType> = { info: 'info', warn: 'warning', error: 'danger' }
 
@@ -69,10 +65,15 @@ const cards = computed(() =>
 
 const fmtVal = (v: number) => (v >= 100 ? Math.round(v).toString() : v.toFixed(1))
 
-// span 宽度（按占 trace 时长比例，最小 8%）
-function spanWidth(sp: Span, row: Trace): number {
-  if (!row.durationMs) return 8
-  return Math.max(8, Math.round((sp.durationMs / row.durationMs) * 100))
+// spanRows：trace 的 span 树形 flatten（带 depth），驱动 v-for 树形缩进渲染。
+// 每次展开调用一次（非 computed，因 row 是 el-table 展开行动态对象）。
+function spanRows(row: Trace) {
+  return flattenSpanTree(buildSpanTree(row.spans || []))
+}
+
+// trace 行 class：错误 trace 整行红色高亮（el-table row-class-name 回调）。
+function traceRowClass({ row }: { row: Trace }): string {
+  return row.status === 'error' || errSpanCount(row) ? 'trace-err-row' : ''
 }
 
 // sparkline：把 points 映射成 100% 内的高度数组
@@ -156,6 +157,7 @@ const metricsOpts = [
   { value: 'mem', label: '内存 (%)' },
   { value: 'rps', label: '请求/秒' },
   { value: 'latency', label: 'P95 延迟 (ms)' },
+  { value: 'errorRate', label: '错误率 (%)' },
 ]
 const ops = [
   { value: '>', label: '> 大于' },
@@ -370,15 +372,51 @@ onUnmounted(() => {
           <el-button size="small" @click="loadTraces">刷新</el-button>
         </div>
       </div>
-      <el-table :data="traces" size="small" row-key="id" empty-text="暂无链路">
+      <el-table :data="traces" size="small" row-key="id" empty-text="暂无链路"
+            :row-class-name="traceRowClass">
         <el-table-column type="expand">
           <template #default="{ row }">
             <div class="span-list">
-              <div v-for="sp in row.spans" :key="sp.id" class="span-row">
-                <span class="span-bar" :style="{ width: spanWidth(sp, row) + '%' }" />
-                <span class="mono span-svc">{{ sp.service }}</span>
-                <span class="span-op">{{ sp.operation }}</span>
-                <span class="mono span-dur">{{ sp.durationMs }}ms</span>
+              <!-- 时间轴刻度（相对 0 → trace.durationMs），让瀑布条左右位置可读 -->
+              <div class="span-axis">
+                <span class="span-mono">0</span>
+                <span class="span-mono">{{ Math.round(row.durationMs / 2) }}ms</span>
+                <span class="span-mono">{{ row.durationMs }}ms</span>
+              </div>
+              <div v-for="node in spanRows(row)" :key="node.span.id"
+                class="span-card" :class="{ 'span-err': node.span.isError }"
+                :style="{ paddingLeft: 10 + node.depth * 18 + 'px' }">
+                <div class="span-row">
+                  <span class="span-bar" :style="{ width: spanWidth(node.span, row) + '%', left: spanLeft(node.span, row) + '%' }" />
+                  <span v-if="node.depth > 0" class="span-tree-line" />
+                  <span class="mono span-svc">{{ node.span.service }}</span>
+                  <span class="span-op">{{ node.span.operation }}</span>
+                  <span class="mono span-dur">{{ node.span.durationMs }}ms</span>
+                  <el-tag v-if="node.span.isError" type="danger" size="small" effect="dark">
+                    异常<span v-if="node.span.errorType"> · {{ node.span.errorType }}</span>
+                  </el-tag>
+                </div>
+                <!-- 关键元数据 chips（HTTP 方法/路径/状态码、客户端 IP） -->
+                <div v-if="spanChips(node.span).length" class="span-chips">
+                  <span v-for="c in spanChips(node.span)" :key="c.label" class="chip" :class="{ 'chip-err': c.err }">
+                    <b class="chip-k">{{ c.label }}</b> <code>{{ c.v }}</code>
+                  </span>
+                </div>
+                <!-- 全部 OTel 属性（可折叠） -->
+                <details v-if="node.span.tags && Object.keys(node.span.tags).length" class="span-attrs">
+                  <summary>全部属性 ({{ Object.keys(node.span.tags).length }})</summary>
+                  <table class="attr-table"><tbody>
+                    <tr v-for="(v, k) in node.span.tags" :key="k">
+                      <td class="mono ak">{{ k }}</td>
+                      <td class="mono av">{{ v }}</td>
+                    </tr>
+                  </tbody></table>
+                </details>
+                <!-- 异常信息 + 堆栈 -->
+                <div v-if="node.span.errorMessage || node.span.tags?.['exception.stacktrace']" class="span-exc">
+                  <div v-if="node.span.errorMessage" class="exc-msg">⚠ {{ node.span.errorMessage }}</div>
+                  <pre v-if="node.span.tags?.['exception.stacktrace']" class="exc-stack">{{ node.span.tags['exception.stacktrace'] }}</pre>
+                </div>
               </div>
             </div>
           </template>
@@ -397,10 +435,13 @@ onUnmounted(() => {
         <el-table-column label="时长" width="90">
           <template #default="{ row }"><span class="mono">{{ row.durationMs }}ms</span></template>
         </el-table-column>
-        <el-table-column label="状态" width="80">
+        <el-table-column label="状态" width="110">
           <template #default="{ row }">
             <el-tag :type="(traceStatusType[row.status]) || 'info'" size="small">
               {{ traceStatusLabel[row.status] || row.status }}
+            </el-tag>
+            <el-tag v-if="errSpanCount(row)" type="danger" size="small" effect="dark" style="margin-left:4px">
+              异常 {{ errSpanCount(row) }}/{{ row.spans.length }}
             </el-tag>
           </template>
         </el-table-column>
@@ -460,12 +501,37 @@ onUnmounted(() => {
 .block-head .block-title { margin-bottom: 0; }
 .log-filter { display: flex; gap: 8px; align-items: center; }
 .faint { color: var(--text-faint); }
-.span-list { padding: 8px 24px; display: flex; flex-direction: column; gap: 6px; }
-.span-row { display: flex; align-items: center; gap: 10px; position: relative; padding: 4px 8px; border-radius: 4px; background: var(--surface); overflow: hidden; }
-.span-bar { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: rgba(99, 102, 241, 0.18); }
-.span-svc { position: relative; min-width: 120px; font-size: 12px; color: var(--brand); }
-.span-op { position: relative; flex: 1; font-size: 12px; color: var(--text-dim); }
-.span-dur { position: relative; font-size: 12px; color: var(--text-faint); }
+.span-list { padding: 8px 24px; display: flex; flex-direction: column; gap: 8px; }
+:deep(.trace-err-row) { background: var(--danger-soft) !important; }
+/* 时间轴刻度（相对 0 → durationMs，与 span-bar left/width 同坐标系） */
+.span-axis { display: flex; justify-content: space-between; padding: 0 6px 4px; border-bottom: 1px dashed var(--border); margin-bottom: 4px; }
+.span-mono { font-family: var(--font-mono); font-size: 11px; color: var(--text-faint); }
+.span-card { padding: 8px 10px; border-radius: 6px; background: var(--surface); border: 1px solid var(--border); position: relative; }
+.span-card.span-err { border-color: var(--danger); background: var(--danger-soft); }
+/* 树形层级：每层左缩进 18px + 竖线表父子关系（depth>0 才显） */
+.span-tree-line { position: absolute; left: 4px; top: 0; bottom: 0; width: 1px; background: var(--border); }
+.span-row { display: flex; align-items: center; gap: 10px; position: relative; padding: 2px 6px; }
+/* 瀑布条：绝对定位甘特条贴行底，left=startMs%，width=durationMs%（时间轴对齐，一眼看串行/并行/等待） */
+.span-bar { position: absolute; left: 0; bottom: 0; height: 4px; width: 0; background: rgba(99, 102, 241, 0.5); border-radius: 3px; z-index: 0; }
+.span-err .span-bar { background: rgba(239, 68, 68, 0.55); }
+.span-svc { position: relative; min-width: 120px; font-size: 12px; color: var(--brand); z-index: 1; }
+.span-op { position: relative; flex: 1; font-size: 12px; color: var(--text-dim); z-index: 1; }
+.span-dur { position: relative; font-size: 12px; color: var(--text-faint); z-index: 1; }
+.span-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 6px; }
+.chip { font-size: 11.5px; padding: 1px 7px; background: var(--surface-2); border-radius: 4px; color: var(--text-dim); }
+.chip code { color: var(--text); font-family: var(--font-mono); }
+.chip-err { background: var(--danger-soft); color: var(--danger); }
+.chip-err code { color: var(--danger); font-weight: 600; }
+.chip-k { color: var(--text-faint); font-weight: 400; margin-right: 3px; }
+.span-attrs { padding: 2px 6px; font-size: 12px; }
+.span-attrs summary { cursor: pointer; color: var(--brand); font-size: 11.5px; }
+.attr-table { border-collapse: collapse; margin-top: 4px; width: 100%; }
+.attr-table td { border: 1px solid var(--border); padding: 2px 8px; font-size: 11.5px; vertical-align: top; word-break: break-all; }
+.attr-table .ak { color: var(--text-faint); white-space: nowrap; width: 1%; }
+.attr-table .av { color: var(--text); }
+.span-exc { margin: 4px 6px; padding: 6px 8px; border-left: 3px solid var(--danger); background: var(--danger-soft); border-radius: 4px; }
+.exc-msg { font-size: 12px; color: var(--danger); font-weight: 600; }
+.exc-stack { margin: 4px 0 0; padding: 6px; font-size: 11px; color: var(--text-dim); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow: auto; }
 .cnt { font-size: 12px; font-weight: 400; color: var(--text-faint); padding: 1px 8px; background: var(--surface-2); border-radius: 8px; }
 .cnt.firing { color: var(--danger); background: var(--danger-soft); }
 

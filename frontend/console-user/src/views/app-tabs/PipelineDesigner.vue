@@ -192,6 +192,14 @@ onMounted(load)
         <el-input :model-value="getOverride(d.i, 'lane')" @update:model-value="(v: string) => setOverride(d.i, 'lane', v)"
                   placeholder="默认 {{run.branch}}（分支独立泳道联调）；生产填 default" clearable />
         <div class="override-hint">留空 = 用运行期分支名作 lane（测试泳道联调）；生产基线填 default。</div>
+        <div class="override-label" style="margin-top: 12px;">阶段「{{ d.s.name }}」服务（service）</div>
+        <el-input :model-value="getOverride(d.i, 'service')" @update:model-value="(v: string) => setOverride(d.i, 'service', v)"
+                  placeholder="留空 = 单服务；多服务应用填服务名（如 product/recommend）" clearable />
+        <div class="override-hint">同 app 多服务场景区分各服务 Workload（与构建 buildArgs SERVICE 对齐）；留空 = 单服务。</div>
+        <div class="override-label" style="margin-top: 12px;">阶段「{{ d.s.name }}」端口（port）</div>
+        <el-input :model-value="getOverride(d.i, 'port')" @update:model-value="(v: string) => setOverride(d.i, 'port', v)"
+                  placeholder="留空 = 不建 Service；新建 Workload 时驱动建 K8s Service（如 8081）" clearable />
+        <div class="override-hint">ContainerPort 缺省取 port；端口驱动 reconciler 建 Service 供 smoke 探活/服务发现。</div>
       </div>
       <div v-for="b in buildStages" :key="b.i" class="override-item">
         <div class="override-label">阶段「{{ b.s.name }}」构建参数（buildArgs，如 SERVICE=product）</div>

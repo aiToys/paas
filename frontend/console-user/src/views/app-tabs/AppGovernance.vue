@@ -23,7 +23,7 @@ interface Instance {
 }
 interface Route {
   id: string; name: string; path: string; serviceId: string
-  methods: string[]; stripPath: boolean; enabled: boolean
+  methods: string[]; stripPath: boolean; enabled: boolean; host?: string
 }
 interface WindowStats { requests: number; failures: number; slowCalls: number; rate: number }
 interface Breaker {
@@ -157,6 +157,12 @@ watch(() => envStore.currentEnvId, load)
         </el-table-column>
         <el-table-column label="路径" min-width="160">
           <template #default="{ row }"><span class="mono">{{ row.path }}</span></template>
+        </el-table-column>
+        <el-table-column label="对外域名" min-width="180">
+          <template #default="{ row }">
+            <span v-if="row.host" class="mono">{{ row.host }}</span>
+            <span v-else class="faint">不限</span>
+          </template>
         </el-table-column>
         <el-table-column label="方法" width="140">
           <template #default="{ row }">

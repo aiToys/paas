@@ -133,6 +133,55 @@ async function scale(w: Workload) {
   }
 }
 
+// editSchedule 修改 cronjob 的 cron 表达式（PUT /api/workloads/{id}/schedule）。
+// cronjob 专属；生产改调度走 confirmDangerous 二次确认 + 后端 prod:write 兜底。
+const editingSchedule = ref<string>('')
+async function editSchedule(w: Workload) {
+  if (envStore.isProd) {
+    const ok = await confirmDangerous({
+      action: '修改调度',
+      target: w.name,
+      requireNameConfirm: true,
+      isProd: true,
+    })
+    if (!ok) return
+  }
+  try {
+    const { value } = await ElMessageBox.prompt(
+      `${envStore.isProd ? '⚠️ [生产环境] ' : ''}修改「${w.name}」的 cron 调度表达式`,
+      `${envStore.isProd ? '⚠️ [生产环境] ' : ''}改调度`,
+      {
+        confirmButtonText: '应用',
+        cancelButtonText: '取消',
+        inputValue: w.schedule || '',
+        inputPlaceholder: '如 7 * * * *（每小时第 7 分钟）或 */5 * * * *（每 5 分钟）',
+      },
+    )
+    const schedule = value.trim()
+    if (!schedule) {
+      ElMessage.warning('调度表达式不能为空')
+      return
+    }
+    editingSchedule.value = w.id
+    const resp = await fetchAuth(`/api/workloads/${w.id}/schedule`, {
+      method: 'PUT',
+      body: JSON.stringify({ schedule }),
+    })
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}))
+      throw new Error(err.error || `HTTP ${resp.status}`)
+    }
+    ElMessage.success('调度已更新')
+    await load()
+  } catch (e) {
+    if (e !== 'cancel' && e !== 'close') {
+      ElMessage.error('改调度失败：' + (e as Error).message)
+    }
+  } finally {
+    editingSchedule.value = ''
+  }
+}
+
 async function remove(w: Workload) {
   // 删除属高危：生产环境要求输入名称确认（防误操作生产）；工作负载按顶栏 scope 过滤，isProd 用 scope
   const ok = await confirmDangerous({
@@ -417,6 +466,9 @@ onUnmounted(() => {
               <button class="act" @click="openDetail(w)">详情</button>
               <button class="act" :disabled="scaling === w.id || activeType === 'cronjob'" @click="scale(w)">
                 扩缩容
+              </button>
+              <button v-if="activeType === 'cronjob'" class="act" :disabled="editingSchedule === w.id" @click="editSchedule(w)">
+                改调度
               </button>
               <button class="act danger" @click="remove(w)">删除</button>
             </td>

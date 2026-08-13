@@ -13,7 +13,7 @@
 
 **请不要在 GitHub 公开 Issue 中报告安全漏洞。**
 
-发现漏洞请发送邮件至 **rushui@qq.com**，包含：
+请通过 GitHub Security Advisory 私密报告漏洞（https://github.com/aitoys/paas/security/advisories/new），包含：
 
 - 受影响版本
 - 复现步骤（最小可复现示例最佳）

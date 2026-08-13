@@ -87,6 +87,15 @@ const replicaStat = computed(() => {
   const ready = workloads.value.reduce((s, w) => s + w.ready, 0)
   return { ready, total }
 })
+
+// 访问入口：聚合对外暴露的工作负载（domain 非空 → reconciler 自动建 Ingress）。
+// 暴露该应用的对外访问地址，让用户在概览一眼看到「怎么访问这个应用」。
+interface AccessEntry { workload: string; domain: string; port?: number }
+const accessEntries = computed<AccessEntry[]>(() =>
+  workloads.value
+    .filter((w) => w.type === 'service' && w.domain)
+    .map((w) => ({ workload: w.name, domain: w.domain!, port: w.port }))
+)
 interface MetricPoint { ts: string; value: number }
 interface MetricSeries { name: string; unit: string; current: number; points: MetricPoint[] }
 function sparkHeights(points?: MetricPoint[]): number[] {
@@ -111,6 +120,8 @@ interface Workload {
   ready: number
   status: string
   schedule?: string
+  port?: number
+  domain?: string
 }
 interface Env { id: string; name: string; type: string }
 const workloads = ref<Workload[]>([])
@@ -254,7 +265,43 @@ const tabGroups = [
   { label: 'DevOps', tabs: ['流水线', '代码仓库', '构建', '镜像', '发布'] as const },
 ]
 type TabName = '概览' | '部署' | '服务治理' | '可观测' | '资源绑定' | '配置' | '用量' | '流水线' | '代码仓库' | '构建' | '镜像' | '发布'
-const activeTab = ref<TabName>('概览')
+
+// tab 名 ↔ URL query 值的双向映射（query 用英文短名，避免中文 URL 编码臃肿 + 利于分享）。
+const TAB_TO_Q: Record<TabName, string> = {
+  概览: 'overview',
+  部署: 'deploy',
+  服务治理: 'governance',
+  可观测: 'observability',
+  资源绑定: 'bindings',
+  配置: 'configs',
+  用量: 'usage',
+  流水线: 'pipelines',
+  代码仓库: 'repositories',
+  构建: 'builds',
+  镜像: 'images',
+  发布: 'releases',
+}
+const Q_TO_TAB: Record<string, TabName> = Object.fromEntries(
+  Object.entries(TAB_TO_Q).map(([t, q]) => [q, t as TabName]),
+) as Record<string, TabName>
+
+// activeTab 与 URL ?tab= 双向同步：初始化从 query 读（分享/刷新直达指定 tab），切换时写回 query。
+const activeTab = ref<TabName>(Q_TO_TAB[(route.query.tab as string) ?? ''] ?? '概览')
+watch(activeTab, (t) => {
+  const q = TAB_TO_Q[t]
+  // 仅在 query 缺失或不一致时 replace（避免每帧推历史致后退栈膨胀）。
+  if ((route.query.tab as string) !== q) {
+    router.replace({ query: { ...route.query, tab: q } })
+  }
+})
+// 浏览器前进/后退（query 变）时同步 activeTab，保持 URL 与视图一致。
+watch(
+  () => route.query.tab,
+  (q) => {
+    const t = Q_TO_TAB[(q as string) ?? ''] ?? '概览'
+    if (t !== activeTab.value) activeTab.value = t
+  },
+)
 
 // 镜像 tab 点「发布」-> 切到发布 tab 并预选镜像（pickedImageId 变化触发 AppReleases 打开创建弹窗）
 const pickedImageId = ref('')
@@ -440,6 +487,19 @@ async function deleteApp() {
           </div>
         </div>
 
+        <!-- 访问入口：该应用对外暴露的域名（工作负载 domain → 自动建 Ingress） -->
+        <section v-if="accessEntries.length" class="access-card">
+          <div class="chart-title">访问入口</div>
+          <div class="access-list">
+            <a v-for="e in accessEntries" :key="e.workload"
+               :href="'http://' + e.domain" target="_blank" rel="noopener" class="access-item">
+              <Icon name="link" :size="14" />
+              <span class="access-domain mono">{{ e.domain }}</span>
+              <span class="access-wl faint">{{ e.workload }}</span>
+            </a>
+          </div>
+        </section>
+
         <div class="overview-row">
           <div class="topo-card">
             <div class="chart-title">资源依赖拓扑</div>
@@ -499,6 +559,9 @@ async function deleteApp() {
                   <span class="wl-name">{{ w.name }}</span>
                   <span class="wl-type">{{ w.type }}</span>
                   <span v-if="w.laneId && w.laneId !== 'default'" class="wl-lane">泳道 {{ w.laneId }}</span>
+                  <a v-if="w.domain" :href="'http://' + w.domain" target="_blank" rel="noopener" class="wl-domain" @click.stop>
+                    <Icon name="link" :size="12" />{{ w.domain }}
+                  </a>
                   <span class="wl-img mono">{{ w.image }}</span>
                   <span v-if="w.schedule" class="wl-sched mono">{{ w.schedule }}</span>
                 </div>
@@ -519,7 +582,7 @@ async function deleteApp() {
 
       <!-- 可观测 -->
       <div v-else-if="activeTab === '可观测'">
-        <AppObservability :app-id="app.id" />
+        <AppObservability :app-id="app.id" :bindings="app.bindings ?? []" />
       </div>
 
       <!-- 代码仓库 -->
@@ -978,6 +1041,31 @@ async function deleteApp() {
   font-weight: 600;
   margin-bottom: 18px;
 }
+.access-card {
+  margin-top: 16px;
+  padding: 16px 24px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.access-list { display: flex; flex-wrap: wrap; gap: 10px; }
+.access-item {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px; border-radius: var(--radius);
+  background: var(--surface-alt, rgba(99, 102, 241, 0.08));
+  color: var(--primary, #6366f1); font-size: 13px;
+  text-decoration: none; transition: opacity 0.15s;
+}
+.access-item:hover { opacity: 0.8; }
+.access-domain { font-weight: 600; }
+.access-wl { font-size: 11px; }
+.wl-domain {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 2px 8px; border-radius: var(--radius);
+  background: rgba(34, 197, 94, 0.1); color: #16a34a;
+  font-size: 11px; text-decoration: none;
+}
+.wl-domain:hover { opacity: 0.8; }
 .topo-graph {
   display: flex;
   align-items: center;

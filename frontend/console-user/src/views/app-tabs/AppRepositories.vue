@@ -22,7 +22,17 @@ interface Repo {
   createdAt: string
 }
 
+// Commit 是仓库最近提交（列表「最近提交」列展示，省得用户逐个点浏览抽屉才看到）。
+interface Commit {
+  sha: string
+  message: string
+  author: string
+  date: string
+}
+
 const repos = ref<Repo[]>([])
+// repoId -> 最近一次提交（internal 仓库 load 后并发拉取；external 无浏览能力不拉）。
+const latestCommits = ref<Record<string, Commit>>({})
 const loading = ref(false)
 const showBind = ref(false)
 // 来源：internal（内置 Gitea 创建）/ external（绑定外部 gitUrl）
@@ -34,11 +44,52 @@ const canSubmit = computed(() =>
   source.value === 'internal' ? !!form.value.giteaRepo.trim() : !!form.value.gitUrl.trim(),
 )
 
+// 短 sha（前 8 位，GitHub/Gitea 惯例）。
+function shortSha(sha: string): string {
+  return sha ? sha.slice(0, 8) : ''
+}
+
+// 相对时间（如「2 小时前」），列表紧凑展示比绝对时间更易扫。
+function relTime(date: string): string {
+  if (!date) return ''
+  const t = new Date(date).getTime()
+  if (Number.isNaN(t)) return ''
+  const diff = Date.now() - t
+  const m = Math.floor(diff / 60000)
+  if (m < 1) return '刚刚'
+  if (m < 60) return `${m} 分钟前`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h} 小时前`
+  const d = Math.floor(h / 24)
+  if (d < 30) return `${d} 天前`
+  return new Date(date).toLocaleDateString()
+}
+
+// 拉单个 internal 仓库最近 1 条提交（best-effort，失败静默——浏览抽屉仍可看全部）。
+async function loadLatestCommit(repoId: string) {
+  try {
+    const resp = await fetchAuth(`/api/applications/${props.appId}/repositories/${repoId}/commits?limit=1`)
+    if (resp.ok) {
+      const arr = (await resp.json()).data ?? []
+      if (arr.length > 0) latestCommits.value[repoId] = arr[0]
+    }
+  } catch {
+    /* external/不可达：留空，列表显示「—」 */
+  }
+}
+
 async function load() {
   loading.value = true
   try {
     const resp = await fetchAuth(`/api/applications/${props.appId}/repositories`)
-    if (resp.ok) repos.value = (await resp.json()).data ?? []
+    if (resp.ok) {
+      repos.value = (await resp.json()).data ?? []
+      // 并发拉每个 internal 仓库最近提交（external 无浏览能力跳过）。
+      latestCommits.value = {}
+      await Promise.all(
+        repos.value.filter((r) => r.source === 'internal').map((r) => loadLatestCommit(r.id)),
+      )
+    }
   } finally {
     loading.value = false
   }
@@ -115,6 +166,16 @@ watch(() => props.appId, load)
       </el-table-column>
       <el-table-column prop="branch" label="分支" width="100" />
       <el-table-column prop="dockerfile" label="Dockerfile" width="110" />
+      <el-table-column label="最近提交" min-width="320">
+        <template #default="{ row }">
+          <div v-if="latestCommits[row.id]" class="commit-cell">
+            <span class="commit-sha mono">{{ shortSha(latestCommits[row.id].sha) }}</span>
+            <span class="commit-msg" :title="latestCommits[row.id].message">{{ latestCommits[row.id].message }}</span>
+            <span class="commit-time">{{ relTime(latestCommits[row.id].date) }}</span>
+          </div>
+          <span v-else class="commit-empty">{{ row.source === 'internal' ? '—' : '外部仓库（点浏览查看）' }}</span>
+        </template>
+      </el-table-column>
       <el-table-column label="状态" width="80">
         <template #default="{ row }">
           <el-tag :type="row.status === 'active' ? 'success' : 'info'" size="small">{{ row.status }}</el-tag>
@@ -170,4 +231,9 @@ watch(() => props.appId, load)
 .tab-title { font-size: 14px; font-weight: 600; }
 .mono { font-family: var(--mono, ui-monospace, monospace); font-size: 12.5px; word-break: break-all; }
 .repo-cell { display: flex; align-items: center; gap: 8px; }
+.commit-cell { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.commit-sha { flex: 0 0 auto; color: var(--brand, #6366f1); font-size: 12px; }
+.commit-msg { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.commit-time { flex: 0 0 auto; color: var(--text-3, #94a3b8); font-size: 11.5px; }
+.commit-empty { color: var(--text-3, #94a3b8); font-size: 12px; }
 </style>

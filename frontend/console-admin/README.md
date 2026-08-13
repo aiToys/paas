@@ -1,14 +1,16 @@
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/vue-admin/vue-admin/blob/main/LICENSE)
-[![CI](https://github.com/vue-admin/vue-admin/actions/workflows/ci.yml/badge.svg)](https://github.com/vue-admin/vue-admin/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/vue-admin/vue-admin/graph/badge.svg)](https://codecov.io/gh/vue-admin/vue-admin)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/aitoys/paas/blob/main/frontend/console-admin/LICENSE)
+[![CI](https://github.com/aitoys/paas/actions/workflows/ci.yml/badge.svg)](https://github.com/aitoys/paas/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/aitoys/paas/graph/badge.svg)](https://codecov.io/gh/aitoys/paas)
 [![Node](https://img.shields.io/badge/Node-22+-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![pnpm](https://img.shields.io/badge/pnpm-9-F69220?logo=pnpm&logoColor=white)](https://pnpm.io/)
 [![Vue](https://img.shields.io/badge/Vue-3.5-42b883?logo=vue.js&logoColor=white)](https://vuejs.org/)
 [![Vite](https://img.shields.io/badge/Vite-7-646cff?logo=vite&logoColor=white)](https://vitejs.dev/)
 
-# Vue Admin
+# PaaS Admin Console
 
-> Vue 3 + Element Plus 企业级后台管理前端基座。开箱即用的权限系统、HTTP 客户端、路由守卫与开发工作流，可作为中后台项目的起点。
+> [aitoys/paas](https://github.com/aitoys/paas) 的后台管理前端（console-admin）：平台运营中枢，跨租户资源总览 + 身份与权限 + 推理服务 + 全模块管理。基于 [vue-admin](https://github.com/vue-admin/vue-admin)（MIT）四层架构基座，由 Element Plus + Vue 3 + Vite + TypeScript 构建。后端对接 [paas-core](https://github.com/aitoys/paas)（密码登录 + JWT，cookie 会话）。
+
+> 本目录是 aitoys/paas monorepo 的子项目，独立构建但非独立产品。请先阅读主仓 [README](https://github.com/aitoys/paas) 了解整体架构与部署。
 
 ## ✨ 特性
 
@@ -68,8 +70,6 @@
 
 Fork 仓库后可一键部署到 Vercel 或 Netlify（部署后需自行接入后端 API，生产构建不含 mock）。
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2Fvue-admin%2Fvue-admin&project-name=vue-admin&repository-name=vue-admin)
-[![Deploy to Netlify](https://www.netlify.com/img/deploy/button.svg)](https://app.netlify.com/start/deploy?repository=https://github.com/vue-admin/vue-admin)
 
 ### 环境要求
 
@@ -172,8 +172,8 @@ shared  ──────┘
 
 ## 🌐 在线 Demo
 
-[http://demo.cncf.vip/vue-admin/](http://demo.cncf.vip/vue-admin/)
+[（占位：替换为你的部署地址）](（占位：替换为你的部署地址）)
 
 ## 📄 License
 
-[MIT](./LICENSE) © 2026 如水 <rushui@qq.com>
+[MIT](./LICENSE) © 2026 The PaaS Authors (admin console derived from vue-admin, MIT)

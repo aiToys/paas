@@ -80,7 +80,7 @@ const fields = computed<FormField[]>(() => [
     label: 'BaseURL',
     type: 'input',
     span: 24,
-    placeholder: 'https://airouter.ddmc-inc.com/api/v1'
+    placeholder: 'https://api.openai.com/v1'
   },
   {
     prop: 'credentialRef',

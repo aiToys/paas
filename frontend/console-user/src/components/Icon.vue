@@ -137,5 +137,45 @@ defineProps<{ name: string; size?: number }>()
     <template v-else-if="name === 'shield'">
       <path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z" />
     </template>
+    <!-- 知识库：书本（区别于向量数据库 layers） -->
+    <template v-else-if="name === 'book'">
+      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+      <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+    </template>
+    <!-- 配置中心：调节滑块（区别于 layers） -->
+    <template v-else-if="name === 'sliders'">
+      <line x1="4" y1="21" x2="4" y2="14" />
+      <line x1="4" y1="10" x2="4" y2="3" />
+      <line x1="12" y1="21" x2="12" y2="12" />
+      <line x1="12" y1="8" x2="12" y2="3" />
+      <line x1="20" y1="21" x2="20" y2="16" />
+      <line x1="20" y1="12" x2="20" y2="3" />
+      <line x1="1" y1="14" x2="7" y2="14" />
+      <line x1="9" y1="8" x2="15" y2="8" />
+      <line x1="17" y1="16" x2="23" y2="16" />
+    </template>
+    <!-- 工具：扳手（区别于 service 拓扑） -->
+    <template v-else-if="name === 'tool'">
+      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
+    </template>
+    <!-- Agent：机器人头（区别于 playground 终端） -->
+    <template v-else-if="name === 'bot'">
+      <rect x="4" y="8" width="16" height="12" rx="2" />
+      <line x1="12" y1="4" x2="12" y2="8" />
+      <circle cx="12" cy="3" r="1" />
+      <circle cx="9" cy="13" r="1" />
+      <circle cx="15" cy="13" r="1" />
+    </template>
+    <!-- 提示词：对话框（区别于 layers） -->
+    <template v-else-if="name === 'prompt'">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+      <line x1="8" y1="9" x2="16" y2="9" />
+      <line x1="8" y1="13" x2="13" y2="13" />
+    </template>
+    <!-- 环境：物理隔离单元（云+定位，区别于安全盾牌 shield） -->
+    <template v-else-if="name === 'env'">
+      <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
+      <circle cx="12" cy="14" r="1.5" />
+    </template>
   </svg>
 </template>

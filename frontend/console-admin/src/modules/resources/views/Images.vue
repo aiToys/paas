@@ -53,6 +53,7 @@ import { Refresh } from '@element-plus/icons-vue'
 import { SearchTable } from '@/app/components'
 import { useCrud } from '@/app/composables/useCrud'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
+import { tableTimeFormatter } from '@/lib/format'
 import { fetchImageList, type AdminImage, type ResSearchRequest } from '../api'
 import ImageDrawer from './ImageDrawer.vue'
 
@@ -71,7 +72,7 @@ const columns = computed<ColumnDef[]>(() => [
   { prop: 'appId', label: '应用', width: 130 },
   { prop: 'tag', label: 'Tag', minWidth: 120 },
   { prop: 'digest', label: 'Digest', width: 180, slot: 'digest' },
-  { prop: 'builtAt', label: '构建时间', width: 180 },
+  { prop: 'builtAt', label: '构建时间', width: 180, formatter: tableTimeFormatter },
   { prop: 'status', label: '状态', width: 100, slot: 'status' },
   { prop: 'detail', label: '操作', width: 100, slot: 'detail', hideable: false }
 ])

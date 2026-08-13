@@ -33,6 +33,7 @@ interface ConfigNs { id: string; name: string; desc?: string; published: Publish
 
 const svc = ref<Service | null>(null)
 const instances = ref<Instance[]>([])
+const instancesDiscovered = ref(false) // 实例来自数据面 Endpoint（discovered）时隐藏「心跳」按钮
 const envs = ref<Env[]>([])
 const configNs = ref<ConfigNs[]>([])
 const loading = ref(false)
@@ -60,6 +61,9 @@ async function load() {
       const payload = json && typeof json === 'object' && 'service' in json ? json : (json?.data ?? {})
       svc.value = payload.service ?? null
       instances.value = payload.instances ?? []
+      // 实例来源：discovered=数据面 Endpoint 真源（readiness probe 维活，心跳无意义）；
+      // manual=手动注册表（应用上报，心跳维活）。discovered 模式隐藏「心跳」按钮。
+      instancesDiscovered.value = payload.instancesSource === 'discovered'
     }
     await loadConfigNs()
   } catch (e) {
@@ -192,11 +196,17 @@ watch(() => route.params.id, load)
       </el-table-column>
       <el-table-column label="操作" width="150">
         <template #default="{ row }">
-          <el-button text type="primary" size="small" @click="heartbeat(row)">心跳</el-button>
+          <!-- discovered 模式实例由 readiness probe 维活，应用主动心跳无意义（去手动表查必 not found） -->
+          <el-button v-if="!instancesDiscovered" text type="primary" size="small" @click="heartbeat(row)">心跳</el-button>
           <el-button text type="danger" size="small" @click="remove(row)">注销</el-button>
         </template>
       </el-table-column>
     </el-table>
+
+    <!-- 实例来源说明 -->
+    <p v-if="instancesDiscovered" class="inst-hint">
+      实例来自数据面 K8s Endpoints（就绪探针驱动，自动维活，无需手动心跳）
+    </p>
 
     <!-- 关联配置（配置中心双向显示） -->
     <section class="block">
@@ -285,6 +295,11 @@ watch(() => route.params.id, load)
 .inst-title {
   font-size: 14px;
   font-weight: 600;
+}
+.inst-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 .block { margin-top: 24px; }
 .block-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }

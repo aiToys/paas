@@ -51,6 +51,8 @@ const showRoute = ref(false)
 const routeForm = ref({ name: '', host: '', path: '', serviceId: '', methods: ['ANY'] as string[], stripPath: true })
 const routeSubmitting = ref(false)
 const methodOpts = ['GET', 'POST', 'PUT', 'DELETE', 'ANY']
+// Ingress Controller 提示文案（前端无此配置，用通用值；实际 class 由后端 PAAS_INGRESS_CLASS 决定）。
+const ingressHint = 'Ingress Controller'
 
 // 熔断器创建弹窗
 const showBreaker = ref(false)
@@ -356,6 +358,7 @@ watch(() => envStore.currentEnvId, load)
         <span class="block-title">API 网关路由</span>
         <el-button size="small" @click="openRoute">+ 创建路由</el-button>
       </div>
+      <div class="block-desc">填了「对外域名」的路由会自动下发为集群 Ingress（Host + 路径 → 目标服务端口），经 Ingress Controller 对外暴露；未填域名的路由仅作配置记录。</div>
       <el-table :data="routes" size="small" empty-text="暂无路由规则">
         <el-table-column label="名称" min-width="140">
           <template #default="{ row }"><span class="mono">{{ row.name }}</span></template>
@@ -459,9 +462,11 @@ watch(() => envStore.currentEnvId, load)
         </el-form-item>
         <el-form-item label="对外域名">
           <el-input v-model="routeForm.host" placeholder="可选，如 api.acme.com；空=不限 Host" />
+          <div class="form-hint">填 Host 后该路由会下发到集群 Ingress（{{ ingressHint }}）对外暴露；留空则不下发。</div>
         </el-form-item>
         <el-form-item label="路径">
           <el-input v-model="routeForm.path" placeholder="如 /api/v1/chat/*" />
+          <div class="form-hint">Host + 路径会下发为标准 K8s Ingress 规则，转发到目标服务端口。</div>
         </el-form-item>
         <el-form-item label="目标服务">
           <el-select v-model="routeForm.serviceId" style="width: 100%">
@@ -472,9 +477,11 @@ watch(() => envStore.currentEnvId, load)
           <el-select v-model="routeForm.methods" multiple style="width: 100%">
             <el-option v-for="m in methodOpts" :key="m" :label="m" :value="m" />
           </el-select>
+          <div class="form-hint">标准 K8s Ingress 不支持按 HTTP 方法过滤，此字段仅作配置记录，不影响实际下发。</div>
         </el-form-item>
         <el-form-item label="剥离前缀">
           <el-switch v-model="routeForm.stripPath" />
+          <div class="form-hint">标准 K8s Ingress 不支持前缀剥离（需 ingress controller 专属注解），此开关仅作配置记录。</div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -555,6 +562,8 @@ watch(() => envStore.currentEnvId, load)
 .block { margin-top: 24px; }
 .block-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .block-title { font-size: 14px; font-weight: 600; }
+.block-desc { font-size: 12px; color: var(--text-faint); margin: -4px 0 10px; line-height: 1.5; }
+.form-hint { font-size: 11.5px; color: var(--text-faint); line-height: 1.5; margin-top: 2px; }
 .mono { font-family: var(--font-mono); }
 .dim { color: var(--text-dim); }
 .hint { margin-left: 8px; font-size: 12px; color: var(--text-dim); }

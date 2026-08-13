@@ -127,6 +127,12 @@ export const ALL_MENUS = [
             meta: { title: '发布', icon: 'Promotion', showMenu: true }
           },
           {
+            path: '/resources/pipelineruns',
+            name: 'resPipelineRuns',
+            component: 'resources/views/PipelineRuns',
+            meta: { title: '流水线运行', icon: 'VideoPlay', showMenu: true }
+          },
+          {
             path: '/pipeline-template',
             name: 'pipeline-template',
             component: 'pipeline-template/views/List',
@@ -162,6 +168,12 @@ export const ALL_MENUS = [
             name: 'resSecrets',
             component: 'resources/views/Secrets',
             meta: { title: '密钥', icon: 'DocumentCopy', showMenu: true }
+          },
+          {
+            path: '/resources/engines',
+            name: 'resEngines',
+            component: 'engine/views/List',
+            meta: { title: '引擎目录', icon: 'Coin', showMenu: true }
           }
         ]
       },

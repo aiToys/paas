@@ -39,6 +39,7 @@ import { Refresh } from '@element-plus/icons-vue'
 import { SearchTable } from '@/app/components'
 import { useCrud } from '@/app/composables/useCrud'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
+import { tableTimeFormatter } from '@/lib/format'
 import { fetchNamespaceList, type AdminNamespace, type ResSearchRequest } from '../api'
 
 const { listData, loading, pagination, searchForm, fetchList, handleSearch, handleReset, handlePageChange } =
@@ -55,8 +56,8 @@ const columns = computed<ColumnDef[]>(() => [
   { prop: 'id', label: '命名空间 ID', minWidth: 160 },
   { prop: 'name', label: '名称', minWidth: 140 },
   { prop: 'desc', label: '描述', minWidth: 180 },
-  { prop: 'updatedAt', label: '更新时间', width: 180 }
-])
+  { prop: 'updatedAt', label: '更新时间', width: 180, formatter: tableTimeFormatter }
+  ])
 
 onMounted(() => fetchList())
 </script>

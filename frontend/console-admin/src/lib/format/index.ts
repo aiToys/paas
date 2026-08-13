@@ -89,3 +89,14 @@ export function formatRelativeTime(
   const lower = divisions[i - 1]
   return rtf.format(Math.round(diff / (lower?.amount ?? 1)), unit)
 }
+
+// SearchTable 列 formatter（适配 (row, col, value) => string 签名）。
+// 列表时间列统一用此：{ prop: 'createdAt', label: '创建时间', formatter: tableTimeFormatter }。
+// 避免每页重复写 () => formatDate(...)，DRY。
+export function tableTimeFormatter(
+  _row: unknown,
+  _col: unknown,
+  value: unknown
+): string {
+  return formatDate(value as DateInput)
+}

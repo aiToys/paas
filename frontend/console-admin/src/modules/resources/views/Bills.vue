@@ -60,6 +60,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { SearchTable } from '@/app/components'
 import { useCrud } from '@/app/composables/useCrud'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
+import { tableTimeFormatter } from '@/lib/format'
 import { fetchBillList, payBill, type AdminBill, type ResSearchRequest } from '../api'
 
 const { listData, loading, pagination, searchForm, fetchList, handleSearch, handleReset, handlePageChange } =
@@ -77,7 +78,7 @@ const columns = computed<ColumnDef[]>(() => [
   { prop: 'period', label: '周期', width: 110 },
   { prop: 'total', label: '金额', width: 110, slot: 'total' },
   { prop: 'status', label: '状态', width: 100, slot: 'status' },
-  { prop: 'createdAt', label: '创建时间', width: 180 },
+  { prop: 'createdAt', label: '创建时间', width: 180, formatter: tableTimeFormatter },
   { prop: 'action', label: '操作', width: 110, slot: 'action', hideable: false }
 ])
 

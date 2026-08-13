@@ -53,6 +53,7 @@ import { Refresh } from '@element-plus/icons-vue'
 import { SearchTable } from '@/app/components'
 import { useCrud } from '@/app/composables/useCrud'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
+import { tableTimeFormatter } from '@/lib/format'
 import { fetchSecretList, type AdminSecret, type ResSearchRequest } from '../api'
 import SecretDrawer from './SecretDrawer.vue'
 
@@ -71,7 +72,7 @@ const columns = computed<ColumnDef[]>(() => [
   { prop: 'name', label: '名称', minWidth: 140 },
   { prop: 'type', label: '类型', width: 110, slot: 'type' },
   { prop: 'scope', label: '范围', width: 100, slot: 'scope' },
-  { prop: 'updatedAt', label: '更新时间', width: 180 },
+  { prop: 'updatedAt', label: '更新时间', width: 180, formatter: tableTimeFormatter },
   { prop: 'detail', label: '操作', width: 90, slot: 'detail', hideable: false }
 ])
 

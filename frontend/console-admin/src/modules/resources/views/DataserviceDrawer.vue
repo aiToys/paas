@@ -92,7 +92,7 @@
           <el-collapse>
             <el-collapse-item title="操作历史" name="audit">
               <el-table :data="audits" size="small" empty-text="无操作记录">
-                <el-table-column prop="at" label="时间" width="170" />
+                <el-table-column prop="at" label="时间" width="170" :formatter="tableTimeFormatter" />
                 <el-table-column prop="actor" label="操作者" width="130" />
                 <el-table-column prop="action" label="动作" width="130" />
                 <el-table-column prop="detail" label="详情" />
@@ -108,6 +108,7 @@
 <script lang="ts" setup>
 import { ref, watch, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { tableTimeFormatter } from "@/lib/format"
 import {
   fetchDataserviceDetail,
   dataserviceAction,

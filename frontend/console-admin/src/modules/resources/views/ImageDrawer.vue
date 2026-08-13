@@ -22,7 +22,7 @@
           </el-descriptions-item>
           <el-descriptions-item label="Branch">{{ detail.branch || '-' }}</el-descriptions-item>
           <el-descriptions-item label="构建 ID">{{ detail.buildRunId || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="构建时间" :span="2">{{ detail.builtAt || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="构建时间" :span="2">{{ detail.builtAt ? formatDate(detail.builtAt) : '-' }}</el-descriptions-item>
           <el-descriptions-item label="Digest" :span="2">
             <code style="word-break: break-all">{{ detail.digest || '-' }}</code>
           </el-descriptions-item>
@@ -46,6 +46,7 @@
 
 <script lang="ts" setup>
 import { ref, onUnmounted } from 'vue'
+import { formatDate } from '@/lib/format'
 import { fetchImageDetail, type AdminImageDetail } from '../api'
 
 const props = defineProps<{ modelValue: boolean; id: string }>()
