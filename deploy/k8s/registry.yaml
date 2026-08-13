@@ -11,7 +11,8 @@
 #   不依赖 ClusterIP DNS 名——kubelet/CRI 在节点拉镜像无法解析 svc.cluster.local，统一用 IP:NodePort。
 #
 # 存储：local-path PVC 20Gi（与 postgres/gitea 同 SC；dev/demo 轻量，生产规模到时迁共享存储）。
-# 只读：未启 REGISTRY_STORAGE_DELETE_ENABLED（镜像库 UI 仅 catalog/tags，删除+GC 留后续）。
+# 已启 REGISTRY_STORAGE_DELETE_ENABLED=true（支持 manifest DELETE，catalog 清理冗余镜像；
+# DELETE 是软删，blob 释放需 GC：kubectl exec paas-registry-xxx -n paas -- registry garbage-collect /etc/docker/registry/config.yml）。
 #
 # 部署：kubectl apply -f deploy/k8s/registry.yaml
 # 首次前提：节点能拉 registry:2（从 hub.wang.dd:5000/library/registry:2 或 daocloud 中转）。
@@ -82,8 +83,8 @@ spec:
           # Always：registry 镜像 bootstrap 推送后 tag 指向新 digest，强制拉新避节点缓存旧架构镜像。
           imagePullPolicy: Always
           env:
-            # 明确关闭 delete API（镜像库 UI 仅 catalog/tags 只读；删除 + GC 留后续）
-            - { name: REGISTRY_STORAGE_DELETE_ENABLED, value: "false" }
+            # 启用 delete API（manifest DELETE 软删，catalog 清理冗余镜像；blob 释放需 GC）。
+            - { name: REGISTRY_STORAGE_DELETE_ENABLED, value: "true" }
           ports:
             - { name: registry, containerPort: 5000 }
           # readinessProbe：registry v2 根端点返 {} 即就绪

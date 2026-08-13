@@ -1,0 +1,68 @@
+# Jaeger all-in-one（trace 后端，替 Tempo）。
+#
+# 为什么换：Tempo single-binary 把 ingester+querier+compactor 塞一个进程，512Mi OOM、2Gi 才稳；
+# Jaeger all-in-one 是天生单体（Go），in-memory 存储 ~256Mi 长期稳定，CNCF 毕业。
+# core 推送端零改动（OTLP/HTTP 4318，Jaeger 原生接收），查询端 real/traces.go 适配 v1 JSON。
+#
+# 存储：in-memory（dev 最稳最轻，重启丢 trace；MEMORY_MAX_TRACES 防无界增长）。
+#   生产/需持久化：换 badger 本地存储 + PVC（env SPAN_STORAGE_TYPE=badger + 挂载卷），留后续。
+#
+# 镜像：节点直拉国内源 docker.m.daocloud.io（省 crane copy 中转；daocloud 国内 CDN 节点可达）。
+# 若 daocloud 对某 tag DENIED（未缓存/限流），换 quay.io/jaegertracing/all-in-one:1.62（节点慢但能成）。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: jaeger
+    app.kubernetes.io/part-of: observability-stack
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: jaeger }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: jaeger }
+    spec:
+      containers:
+        - name: jaeger
+          image: docker.m.daocloud.io/jaegertracing/all-in-one:1.60.0
+          args:
+            - "--collector.otlp.enabled=true" # 启用 OTLP gRPC(4317)/HTTP(4318) 接收
+          env:
+            # in-memory trace 上限（防无界增长 OOM）；超出 FIFO 淘汰。
+            - { name: MEMORY_MAX_TRACES, value: "50000" }
+          ports:
+            - { name: ui, containerPort: 16686 }       # Query API + UI（core 查 /api/traces）
+            - { name: otlp-http, containerPort: 4318 } # OTLP/HTTP（core PAAS_OTEL_ENDPOINT 推送）
+            - { name: otlp-grpc, containerPort: 4317 } # OTLP/gRPC
+          readinessProbe:
+            httpGet: { path: "/", port: 16686 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: "/", port: 16686 }
+            initialDelaySeconds: 30
+            failureThreshold: 10
+            periodSeconds: 30
+          resources:
+            # all-in-one in-memory：~256Mi 稳定跑（无 Tempo 的 WAL replay/compactor 峰值）。
+            requests: { cpu: 50m, memory: 256Mi }
+            limits: { cpu: 500m, memory: 512Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: jaeger
+    app.kubernetes.io/part-of: observability-stack
+spec:
+  type: ClusterIP
+  selector: { app.kubernetes.io/name: jaeger }
+  ports:
+    - { name: ui, port: 16686, targetPort: 16686 }
+    - { name: otlp-http, port: 4318, targetPort: 4318 }
+    - { name: otlp-grpc, port: 4317, targetPort: 4317 }

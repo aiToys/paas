@@ -73,8 +73,12 @@ curl -H "Authorization: Bearer sk-acme-admin" http://localhost:8080/livez
 **K8s 部署**（单镜像同域 serve 前端 + API，含数据面 CRD + Reconciler）：
 
 ```bash
-./scripts/deploy-k8s.sh            # docker build（前端 embed）→ push registry → helm upgrade
-# 默认推 hub.wang.dd:5000/paas-core，覆盖配置见 deploy/charts/paas/values-paas-k8s.yaml
+# 公网路径（默认 values 用 ghcr.io/aitoys 公开镜像，开源用户首选）：
+helm install paas deploy/charts/paas
+
+# 本地 dev 集群便捷脚本（构建前端 embed 镜像 → push 集群内 registry → helm upgrade；
+# 需自建 registry + 覆盖镜像地址，参考 deploy/charts/paas/values-paas-k8s.yaml）：
+./scripts/deploy-k8s.sh
 # 持久化：PAAS_DB_URL 指向集群内 postgres；数据面：in-cluster SA token + RBAC 自动授权
 ```
 
@@ -130,4 +134,4 @@ curl -X POST -H "Authorization: Bearer sk-acme-dev" -H "Content-Type: applicatio
 
 ## 协议
 
-[Apache License 2.0](./LICENSE) © 2026 aitoys
+[Apache License 2.0](./LICENSE) © 2026 The PaaS Authors

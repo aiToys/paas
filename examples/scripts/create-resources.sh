@@ -35,7 +35,7 @@ echo "  agent: $AGENT_ID (virtual model: agent:$AGENT_ID)"
 
 echo "=== 5. 创建 appconfig（traffic-gen env，注入工作负载）==="
 APP_ID="app-rec"
-for kv in "CORE_URL:http://paas-core.paas.svc.cluster.local:8080" "API_KEY:sk-acme-dev" "AGENT_MODEL:agent:$AGENT_ID" "REC_SVC_URL:http://wl-rec-svc.paas.svc.cluster.local" "MICRO_INTERVAL:300" "AGENT_INTERVAL:600"; do
+for kv in "CORE_URL:http://paas-core.paas.svc.cluster.local:8080" "API_KEY:sk-acme-dev" "AGENT_MODEL:agent:$AGENT_ID" "REC_SVC_URL:http://wl-rec-svc.paas.svc.cluster.local" "MICRO_INTERVAL:600" "AGENT_INTERVAL:3600"; do
   K="${kv%%:*}"; V="${kv#*:}"
   TYPE="env"; [ "$K" = "API_KEY" ] && TYPE="secret"
   curl -s -o /dev/null -X POST -H "$H" -H "Content-Type: application/json" "$B/api/applications/$APP_ID/configs" -d \

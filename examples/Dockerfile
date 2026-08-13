@@ -14,5 +14,6 @@ FROM ${BASE_REGISTRY}/alpine:3.20
 RUN apk add --no-cache ca-certificates
 COPY mcp-server /usr/local/bin/mcp-server
 COPY traffic-gen /usr/local/bin/traffic-gen
+RUN chmod +x /usr/local/bin/mcp-server /usr/local/bin/traffic-gen
 # 默认跑 traffic-gen 常驻模式；CronJob/Deployment 用 command 覆盖指定二进制
 ENTRYPOINT ["traffic-gen"]

@@ -38,7 +38,7 @@ PaaS 在 K8s 集群内**自建 Docker Registry**（`deploy/karts/registry.yaml`�
 | `minio:latest` | 数据服务引擎（storage=minio） | `docker.m.daocloud.io/minio/minio:latest` | `<nodeIP>:30050/library/minio:latest` |
 | `local-path-provisioner:v0.0.24` | StorageClass（local-path PVC） | `hub.wang.dd:5000/rancher/local-path-provisioner:v0.0.24` | （local-path.yaml 直接引用） |
 | `busybox:latest` | local-path helper（PV mount/umount） | `docker.m.daocloud.io/library/busybox:latest` | `<nodeIP>:30050/library/busybox:latest` |
-| observability 全套 | Prom/Loki/Tempo/Grafana/Promtail/node-exporter | 见 `deploy/observability/` | `<nodeIP>:30050/observability/*` |
+| observability 全套 | Prom/Loki/Jaeger/Grafana/Promtail/node-exporter | 见 `deploy/observability/` | `<nodeIP>:30050/observability/*` |
 
 > **data-service 引擎镜像**：reconciler 按 `PAAS_IMAGE_REGISTRY` env 拼 `<registry>/library/<name>`，引擎镜像需推到 `<nodeIP>:30050/library/`。占位引擎（kafka/rabbitmq/rocketmq/vector/search）不拉起，无需预推。
 

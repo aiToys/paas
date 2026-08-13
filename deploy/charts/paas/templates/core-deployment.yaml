@@ -27,12 +27,12 @@ spec:
             - name: http
               containerPort: 8080
           env:
+            # DB 连接串（含密码）经 Secret 注入，避免明文进 Deployment env。
             - name: PAAS_DB_URL
-              {{- if .Values.db.enabled }}
-              value: {{ printf "postgres://paas:paas-dev@%s-postgres:5432/paas?sslmode=disable" .Release.Name | quote }}
-              {{- else }}
-              value: {{ .Values.db.url | quote }}
-              {{- end }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "paas.fullname" . }}-secret
+                  key: PAAS_DB_URL
             {{- if .Values.env.PAAS_API_KEY }}
             - name: PAAS_API_KEY
               value: {{ .Values.env.PAAS_API_KEY | quote }}
@@ -40,20 +40,27 @@ spec:
             # 演示凭证 seed：seed.demo=false 时设 true，关闭 admin/123456 + sk-* 演示 Key（生产防护）。
             - name: PAAS_DISABLE_DEMO_SEED
               value: {{ if not .Values.seed.demo }}"true"{{ else }}""{{ end }}
-            # 身份会话：JWT secret（生产必填，空+prod=true 拒启）；cookie Secure（HTTP false / TLS true）；生产标识。
-            - name: PAAS_JWT_SECRET
-              value: {{ .Values.auth.jwtSecret | quote }}
+            # 身份会话：cookie Secure（HTTP false / TLS true）；生产标识。
+            # JWT secret 经 Secret 注入（见下方 secretKeyRef），不进明文 env。
             - name: PAAS_COOKIE_SECURE
               value: {{ .Values.auth.cookieSecure | quote }}
             - name: PAAS_PROD
               value: {{ .Values.auth.prod | quote }}
+            {{- if .Values.auth.jwtSecret }}
+            - name: PAAS_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "paas.fullname" . }}-secret
+                  key: PAAS_JWT_SECRET
+            {{- end }}
             # K8s 数据面（in-cluster）：ctrl.GetConfigOrDie() 自动用 ServiceAccount token，
             # 无需 PAAS_KUBECONFIG。落地 namespace = release namespace；metrics server 禁用避端口冲突。
             - name: PAAS_K8S_NAMESPACE
               value: {{ .Release.Namespace | quote }}
             # 应用域名->自动 Ingress：workload spec.domain 非空时 reconciler 建 Ingress 的 ingressClassName。
+            # 默认与 values.yaml 的 ingress.className（nginx）一致；dev 集群覆盖为 hermes。
             - name: PAAS_INGRESS_CLASS
-              value: {{ .Values.ingress.className | default "hermes" | quote }}
+              value: {{ .Values.ingress.className | default "nginx" | quote }}
             - name: PAAS_METRICS_ADDR
               value: "0"
             # DevOps 构建流水线（PAAS_DEVOPS_BUILDER：k8s=Job Pod 构建；process=in-process docker；空=Mock）。
@@ -69,33 +76,57 @@ spec:
             # 数据服务引擎镜像 registry（reconciler 拼 image 字符串用，kubelet pull IP:port 直连）。
             - name: PAAS_IMAGE_REGISTRY
               value: {{ .Values.devops.registry | default "" | quote }}
-            # MaaS airouter 网关 API Key（统一真实推理入口；启动 seed 到 sec-platform-airouter）。
+            # MaaS airouter 网关 API Key（经 Secret 注入）：统一真实推理入口，启动 seed 到 sec-platform-airouter。
             # 留空则 airouter 通道调用返 ErrCredentialMissing（不影响 catalog 注册与平台其他能力）。
+            {{- if .Values.maas.airouterApiKey }}
             - name: PAAS_AIROUTER_API_KEY
-              value: {{ .Values.maas.airouterApiKey | default "" | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "paas.fullname" . }}-secret
+                  key: PAAS_AIROUTER_API_KEY
+            {{- end }}
+            # airouter 网关 BaseURL（OpenAI 兼容）。留空则预置 airouter 供应商 BaseURL 为空，
+            # 运维需在 admin 后台「供应商管理」配置自己的 OpenAI 兼容网关地址。
+            - name: PAAS_AIROUTER_BASE_URL
+              value: {{ .Values.maas.airouterBaseUrl | default "" | quote }}
+            {{- if .Values.devops.gitToken }}
             - name: PAAS_GIT_TOKEN
-              value: {{ .Values.devops.gitToken | default "" | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "paas.fullname" . }}-secret
+                  key: PAAS_GIT_TOKEN
+            {{- end }}
             - name: PAAS_REGISTRY_USER
               value: {{ .Values.devops.registryUser | default "" | quote }}
+            {{- if .Values.devops.registryPass }}
             - name: PAAS_REGISTRY_PASS
-              value: {{ .Values.devops.registryPass | default "" | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "paas.fullname" . }}-secret
+                  key: PAAS_REGISTRY_PASS
+            {{- end }}
             # 内置 Git 后端（Gitea 无头，ClusterIP）：一站式代码托管。空则内置仓库创建/浏览降级（不影响外部仓库构建）。
             # PAAS_GITEA_URL 是 Gitea API 根地址（http://gitea.paas.svc.cluster.local:3000）。
             - name: PAAS_GITEA_URL
               value: {{ .Values.devops.gitea.url | default "" | quote }}
             - name: PAAS_GITEA_USER
               value: {{ .Values.devops.gitea.username | default "" | quote }}
+            {{- if .Values.devops.gitea.password }}
             - name: PAAS_GITEA_PASSWORD
-              value: {{ .Values.devops.gitea.password | default "" | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "paas.fullname" . }}-secret
+                  key: PAAS_GITEA_PASSWORD
+            {{- end }}
             # 可观测三支柱 + 控制面自身 OTel 链路（指向 observability namespace 的真实后端）。
             # 任一为空则该支柱降级为 memory 惰性 mock（三支柱独立可混用）。
-            # Tempo OTLP/HTTP endpoint 不含 scheme（otlptracehttp + WithInsecure）。
+            # Jaeger OTLP/HTTP endpoint 不含 scheme（otlptracehttp + WithInsecure）。
             - name: PAAS_PROM_URL
               value: {{ .Values.observability.prometheusURL | default "" | quote }}
             - name: PAAS_LOKI_URL
               value: {{ .Values.observability.lokiURL | default "" | quote }}
-            - name: PAAS_TEMPO_URL
-              value: {{ .Values.observability.tempoURL | default "" | quote }}
+            - name: PAAS_JAEGER_URL
+              value: {{ .Values.observability.jaegerURL | default "" | quote }}
             - name: PAAS_OTEL_ENDPOINT
               value: {{ .Values.observability.otelEndpoint | default "" | quote }}
             # 数据面 SDK 接入：注入 service 类型 Pod env（zeus 应用经 paas-registry 插件发现 PaaS）。
@@ -109,14 +140,24 @@ spec:
             # minio endpoint 不含 scheme（minio SDK 自动判 http/https，内网 http）。
             - name: PAAS_KB_QDRANT_URL
               value: {{ .Values.kb.qdrantURL | default "" | quote }}
+            {{- if .Values.kb.qdrantAPIKey }}
             - name: PAAS_KB_QDRANT_API_KEY
-              value: {{ .Values.kb.qdrantAPIKey | default "" | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "paas.fullname" . }}-secret
+                  key: PAAS_KB_QDRANT_API_KEY
+            {{- end }}
             - name: PAAS_KB_MINIO_ENDPOINT
               value: {{ .Values.kb.minioEndpoint | default "" | quote }}
             - name: PAAS_KB_MINIO_ACCESS_KEY
               value: {{ .Values.kb.minioAccessKey | default "" | quote }}
+            {{- if .Values.kb.minioSecretKey }}
             - name: PAAS_KB_MINIO_SECRET_KEY
-              value: {{ .Values.kb.minioSecretKey | default "" | quote }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "paas.fullname" . }}-secret
+                  key: PAAS_KB_MINIO_SECRET_KEY
+            {{- end }}
           resources: {{- toYaml .Values.resources | nindent 12 }}
           readinessProbe:
             httpGet: { path: /livez, port: http }

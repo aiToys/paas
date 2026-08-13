@@ -1,6 +1,6 @@
 # MaaS 对接第三方供应商设计
 
-> 状态：设计稿（待评审）｜日期：2026-07-28｜作者：如水
+> 状态：设计稿（待评审）｜日期：2026-07-28｜作者：The PaaS Authors
 > 关联：[[maas-platform-foundation-design]]（MaaS 基座）、[[platform-modules-blueprint]]
 
 ## 1. 背景与动机

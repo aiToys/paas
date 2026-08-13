@@ -30,7 +30,9 @@ promtail:
     registry: hub.wang.dd:5000
     repository: observability/promtail
     tag: "3.5.1"
-  # 抓所有 namespace Pod 日志（含 paas namespace）
+  # 抓所有 namespace Pod 日志（含 paas namespace）。
+  # 应用级日志查询（real/logs.go）按 namespace + 工作负载 pod 名正则匹配（paas-<tenant>/wl-<id>-.*），
+  # 不依赖 promtail 提取自定义 pod label（默认只提取 app/namespace 等通用 label）。
   config:
     clients:
       - url: http://loki:3100/loki/api/v1/push

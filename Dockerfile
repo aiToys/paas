@@ -20,7 +20,9 @@ ARG BASE_REGISTRY=docker.m.daocloud.io
 
 # ---------- 1. 前端构建阶段 ----------
 # node:22-alpine：console-admin preinstall 要求 Node >= 22.13.0。
-FROM ${BASE_REGISTRY}/node:22-alpine AS frontend
+# --platform=$BUILDPLATFORM：frontend 跑 host 原生架构（如 arm64 Mac），避 QEMU 模拟跑 esbuild
+# （esbuild 二进制在 QEMU amd64 下易 panic）。前端产物是架构无关的静态 JS/CSS，COPY 到任意 runtime。
+FROM --platform=$BUILDPLATFORM ${BASE_REGISTRY}/node:22-alpine AS frontend
 # 国内 npm 镜像（外网受限环境必需）；海外构建可 --build-arg NPM_REGISTRY=https://registry.npmjs.org 覆盖。
 ARG NPM_REGISTRY=https://registry.npmmirror.com
 WORKDIR /fe
@@ -59,10 +61,11 @@ COPY --from=frontend /fe/console-user/dist ./internal/web/dist/console-user
 COPY --from=frontend /fe/console-admin/dist ./internal/web/dist/console-admin
 COPY --from=frontend /fe/landing/dist ./internal/web/dist/landing
 # 静态编译（CGO 禁用，适配 distroless）。
-# GOARCH=amd64：builder 跑在本地（如 arm64）用 Go 交叉编译到 amd64（多数 K8s 集群架构），
-# 避免 QEMU 全栈模拟；arm64 集群可 --build-arg GOARCH=arm64 覆盖。
-ARG GOARCH=amd64
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${GOARCH} go build -trimpath -ldflags="-s -w" -o /out/core ./cmd/core
+# GOARCH 跟随目标平台：buildkit multi-platform build 自动按目标平台注入 TARGETARCH
+# （amd64 平台→amd64，arm64 平台→arm64）。builder 始终跑 $BUILDPLATFORM（amd64 host）避 QEMU，
+# Go 交叉编译到 ${TARGETARCH}。单平台本地构建（无 buildkit）TARGETARCH 空时兜底 amd64。
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH:-amd64} go build -trimpath -ldflags="-s -w" -o /out/core ./cmd/core
 
 # ---------- 3. 运行阶段 ----------
 # alpine runtime（Go 静态二进制 CGO_ENABLED=0 不依赖 glibc/musl，alpine 可跑）。

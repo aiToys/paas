@@ -1,0 +1,23 @@
+# Grafana dashboard provisioning 配置（file provider 指向 /tmp/dashboards）。
+# grafana 启动读 /etc/grafana/provisioning/dashboards/*.yaml（本 ConfigMap 挂载），
+# 扫 /tmp/dashboards 下的 JSON（dashboard ConfigMap 挂载到 app/cp 子目录，file provider 递归扫描）。
+# 不需 sidecar（provisioning + ConfigMap 直接挂载，grafana 启动加载）。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-providers
+  namespace: observability
+  labels:
+    app.kubernetes.io/part-of: observability-stack
+data:
+  paas.yaml: |
+    apiVersion: 1
+    providers:
+      - name: 'paas'
+        orgId: 1
+        folder: 'PaaS'
+        type: file
+        disableDeletion: false
+        editable: true
+        options:
+          path: /tmp/dashboards

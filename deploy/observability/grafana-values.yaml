@@ -1,4 +1,4 @@
-# Grafana values（统一面板，预配 Prometheus/Loki/Tempo 三数据源）。
+# Grafana values（统一面板，预配 Prometheus/Loki/Jaeger 三数据源 + sidecar 自动加载 dashboard）。
 ---
 adminPassword: "paas-admin"
 
@@ -7,9 +7,34 @@ persistence:
   storageClassName: local-path
   size: 5Gi
 
+# 跳过 init-chown-data：grafana chart 的 init container 对 image 内 /var/lib/grafana/png|csv|pdf
+# （非 PVC 挂载点，grafana 12 渲染插件目录）chown 失败（Permission denied）致 CrashLoopBackOff 9 天。
+# local-path PVC 本身可写（dynamic provisioner 设 472 属主），无需 init chown。
+initChownData:
+  enabled: false
+
+# 内网化镜像（节点拉不到 docker.io）。
+image:
+  repository: hub.wang.dd:5000/observability/grafana
+  tag: "12.3.1"
+
 resources:
   requests: { cpu: 100m, memory: 128Mi }
   limits: { cpu: 500m, memory: 512Mi }
+
+# sidecar dashboards：自动加载带 label grafana_dashboard=1 的 ConfigMap（见 grafana-dashboards.yaml）。
+# dashboard 独立 ConfigMap 维护，新增面板只需 apply ConfigMap，无需 helm upgrade。
+# sidecar image 节点直拉 daocloud（与 jaeger 同款，省中转；若 DENIED 换 quay.io/kiwigrid/k8s-sidecar）。
+sidecar:
+  image:
+    repository: docker.m.daocloud.io/kiwigrid/k8s-sidecar
+    tag: "1.27.0"
+  dashboards:
+    enabled: true
+    label: grafana_dashboard
+    labelValue: "1"
+    folder: /tmp/dashboards
+    searchNamespace: observability
 
 # 数据源 Provisioning（开箱即用，三支柱全配好）
 datasources:
@@ -25,9 +50,9 @@ datasources:
         type: loki
         url: http://loki.observability.svc.cluster.local:3100
         access: proxy
-      - name: Tempo
-        type: tempo
-        url: http://tempo.observability.svc.cluster.local:3100
+      - name: Jaeger
+        type: jaeger
+        url: http://jaeger.observability.svc.cluster.local:16686
         access: proxy
 
 service:

@@ -17,6 +17,10 @@ postgres:
   image: postgres:16-alpine       # 内网集群改 registry 全名（如 hub.wang.dd:5000/library/postgres:16-alpine）
   storageClassName: ""            # 指定 StorageClass（如 local-path）；空用集群默认 SC
   storageSize: "10Gi"             # 数据卷大小
+  password: "paas-dev"            # 连接密码（生产必改；经 Secret 注入，不进 Deployment 明文 env）
+  resources:                      # 资源配额（防 OOM 影响节点 + 防 noisy neighbor）
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { cpu: "1", memory: 1Gi }
 
 # CRD：install=true 时 chart 一并 apply Workload/Dataservice CRD（K8s 数据面纳管所需）。
 # 重复 upgrade 幂等；uninstall 会删 CRD（连带 CR 实例，生产慎用 helm uninstall）。
@@ -50,18 +54,19 @@ devops:
     username: ""                  # 平台账号（paas-bot，initContainer 创建）
     password: ""                  # 平台账号密码（与 deploy/devops/gitea.yaml Secret 一致）
 
-# MaaS 推理（airouter 统一真实推理入口）
+# MaaS 推理（airouter 示例 OpenAI 兼容网关；可替换为任意 OpenAI 兼容供应商）
 maas:
-  airouterApiKey: ""              # airouter 网关 API Key（形如 airouter-xxx）；留空则推理通道返凭证缺失
+  airouterApiKey: ""              # airouter 网关 API Key；留空则推理通道返凭证缺失
+  airouterBaseUrl: ""             # airouter 网关 BaseURL（如 https://api.openai.com/v1）；留空则需在 admin 后台配置
 
 # 可观测三支柱 + 控制面自身 OTel（指向 observability namespace 真实后端）。
 # 任一为空则该支柱降级为 memory 惰性 mock（三支柱独立可混用）。
-# 部署后端：见 deploy/observability/*.yaml（Prometheus + Loki + Tempo + Grafana）。
+# 部署后端：见 deploy/observability/*.yaml（Prometheus + Loki + Jaeger + Grafana）。
 observability:
   prometheusURL: ""               # Prometheus 根地址（http://prom:9090），查 /api/v1/query_range
   lokiURL: ""                     # Loki 根地址（http://loki:3100），查 /loki/api/v1/query_range
-  tempoURL: ""                    # Tempo 根地址（http://tempo:3200），按 tags 查 trace
-  otelEndpoint: ""                # OTLP/HTTP 推送地址（host:port，不含 scheme；tempo:4318）
+  jaegerURL: ""                   # Jaeger Query 根地址（http://jaeger:16686），查 /api/traces
+  otelEndpoint: ""                # OTLP/HTTP 推送地址（host:port，不含 scheme；jaeger:4318）
 
 # 数据面 SDK 接入：把 K8s Endpoints 经 /dp/ API 暴露给数据面 SDK（如 zeus 经 paas-registry 插件）。
 # token 注入 service 类型 Pod env（PAAS_DP_TOKEN）；空则不注入。
@@ -92,6 +97,11 @@ auth:
   jwtSecret: ""
   cookieSecure: false
   prod: false
+
+# core Deployment 配置。
+# hostNetwork：true 时 core Pod 用节点网络（dev 集群访问外部 registry 用），生产保持 false。
+core:
+  hostNetwork: false
 
 # core 容器资源
 resources:

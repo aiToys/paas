@@ -1,9 +1,10 @@
 # 可观测栈统一 Ingress 暴露（*.k8s.dd 通配域名 + hermes ingress class）。
 #
 # 暴露策略：
-#   - grafana.k8s.dd  → Grafana 统一面板（含 Prom/Loki/Tempo 数据源），运维主入口，带 admin 认证
+#   - grafana.k8s.dd  → Grafana 统一面板（含 Prom/Loki/Jaeger 数据源），运维主入口，带 admin 认证
 #   - prom.k8s.dd     → Prometheus 原生 UI（target/query 排查），内网 dev 无额外认证
-#   - Loki / Tempo    → 不暴露（仅 ClusterIP，供 Grafana 与 paas-core 内部访问，减少攻击面）
+#   - jaeger.k8s.dd   → Jaeger UI（trace 排查），内网 dev 无额外认证
+#   - Loki            → 不暴露（仅 ClusterIP，供 Grafana 与 paas-core 内部访问，减少攻击面）
 #
 # PaaS 控制台的可观测页不走 ingress，走 core API（core 经 ClusterIP 访问 obs 三支柱）。
 ---
@@ -50,3 +51,25 @@ spec:
                 name: prom-prometheus-server
                 port:
                   number: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: observability-jaeger
+  namespace: observability
+  labels:
+    app.kubernetes.io/name: jaeger
+    app.kubernetes.io/part-of: observability-stack
+spec:
+  ingressClassName: hermes
+  rules:
+    - host: jaeger.k8s.dd
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: jaeger
+                port:
+                  number: 16686

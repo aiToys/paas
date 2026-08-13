@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## 项目定位
 
@@ -881,7 +881,7 @@ console-user 导航采用**三层信息架构**（避免「资源」概念被滥
 - 一句话区分：顶栏 scope =「我在哪个环境干活」；环境菜单 =「我管理环境本身」。工作负载页无环境切换控件（去重，环境切换唯一走顶栏）。设计见 `docs/superpowers/specs/2026-07-28-environment-ia-redesign.md`。
 
 - API 契约：后端 OpenAPI 自动生成前端 TS 类型（Plan 4 起接入 Gateway）。
-- console-admin 的基座源码自带其 `CLAUDE.md` 与 `docs/standards/`（四层架构 lib/app/modules/shared），改它时遵循其自身规范。
+- console-admin 的基座源码自带其 `AGENTS.md` 与 `docs/standards/`（四层架构 lib/app/modules/shared），改它时遵循其自身规范。
 
 ## 平台模块全景
 
@@ -914,5 +914,5 @@ console-user 导航采用**三层信息架构**（避免「资源」概念被滥
 2. **`values-paas-k8s.yaml` 含 dev 密码**（`paas-gitea-bot-2026` / `sk-acme-admin` token）：已加文件级 dev-overlay 声明（标注复制后替换）。重命名为 `.example` 会破坏 `deploy-k8s.sh` 引用，权衡后保留文件名 + 头声明。
 3. **EnvTypeResolver DRY**（pipeline/handler.go 用 `func` 类型，其余 5 处用 `environment.EnvTypeResolver` 接口别名）：pipeline 包内部 func 类型一致自洽，统一为接口别名需改 handler/engine/adapter 多处调用点，纯重构收益小（Minor，YAGNI 暂留）。
 
-**判断**：CLAUDE.md 保留（项目导航真源，非泄漏他人信息）；vue-admin 上游 MIT 声明保留（fork 归属合规）。
+**判断**：AGENTS.md 保留（项目导航真源，非泄漏他人信息）；vue-admin 上游 MIT 声明保留（fork 归属合规）。
 

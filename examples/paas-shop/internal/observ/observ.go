@@ -1,9 +1,9 @@
-// Package observ 提供 paas-shop 示例服务共享的可观测工具：OTel trace（OTLP -> Tempo）
+// Package observ 提供 paas-shop 示例服务共享的可观测工具：OTel trace（OTLP -> Jaeger）
 // + Prometheus metrics（/metrics）+ 结构化日志（slog）+ HTTP client/server 传播 trace。
 //
 // 设计：每个微服务（product/recommend/chatbot/bff）启动调 Init(serviceName) 初始化 tracer，
 // Handler 包装业务路由自动建 span，NewClient 注入 traceparent 实现跨服务 trace 链路。
-// PAAS_OTEL_ENDPOINT 由平台注入（tempo.observability.svc:4318），空则 noop（本地 dev 可用）。
+// PAAS_OTEL_ENDPOINT 由平台 controller 注入（jaeger.observability.svc:4318），空则 noop（本地 dev 可用）。
 package observ
 
 import (
@@ -13,6 +13,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
@@ -22,6 +23,25 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 )
+
+// RED 指标（OpenTelemetry 语义约定：Rate/Error/Duration）。
+// 平台 controller 给 service Pod 注 prometheus.io/scrape 注解后，Prometheus 自动抓 /metrics，
+// 控制台 metrics.go 按 pod 正则聚合出应用级 RPS / 错误率 / P95 延迟。
+var (
+	httpReqs = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "http_requests_total",
+		Help: "HTTP 请求总数（按状态码 code）",
+	}, []string{"code"})
+	httpDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "http_request_duration_seconds",
+		Help:    "HTTP 请求耗时分布",
+		Buckets: prometheus.DefBuckets,
+	}, []string{})
+)
+
+func init() {
+	prometheus.MustRegister(httpReqs, httpDuration)
+}
 
 // Init 初始化 OTel tracer（OTLP HTTP -> PAAS_OTEL_ENDPOINT）+ W3C tracecontext 传播器。
 // endpoint 空（本地 dev）则 noop，不阻塞功能。返回 shutdown func，主函数 defer 调用。
@@ -34,7 +54,7 @@ func Init(serviceName string) func() {
 	}
 	exp, err := otlptracehttp.New(context.Background(),
 		otlptracehttp.WithEndpoint(endpoint),
-		otlptracehttp.WithInsecure(), // Tempo ClusterIP 内部访问，无 TLS
+		otlptracehttp.WithInsecure(), // Jaeger ClusterIP 内部访问，无 TLS
 	)
 	if err != nil {
 		slog.Error("otlp exporter 构造失败，trace noop", "err", err, "endpoint", endpoint)
@@ -55,10 +75,14 @@ func Init(serviceName string) func() {
 	}
 }
 
-// Handler 包装 http.Handler，自动建 span（operation 名）+ 记录 HTTP 指标。
-// 每个服务的 mux 用此包装，所有请求自动 trace。
+// Handler 包装 http.Handler：先记录 RED 指标（promhttp 自动填 code = 状态码），
+// 再用 otelhttp 自动建 span（含 http 语义属性 + 5xx 异常）。
+// 每个服务的 mux 用此包装，所有请求自动 RED + trace。
+// /metrics 和 /healthz 通过 skipTracePaths 跳过（不建 span，避免高频无意义请求污染链路）。
 func Handler(operation string, h http.Handler) http.Handler {
-	return otelhttp.NewHandler(h, operation)
+	h = promhttp.InstrumentHandlerCounter(httpReqs, h)
+	h = promhttp.InstrumentHandlerDuration(httpDuration, h)
+	return otelhttp.NewHandler(h, operation, otelhttp.WithFilter(skipTracePaths))
 }
 
 // MetricsHandler 返回 /metrics handler（promhttp），供 Prometheus scrape。
@@ -95,4 +119,15 @@ func Recover(next http.Handler) http.Handler {
 		}()
 		next.ServeHTTP(w, r)
 	})
+}
+
+// skipTracePaths 过滤无业务价值的高频端点，避免污染 trace（与 paas-core 同款策略）。
+// /metrics：Prometheus scrape（15s/次，纯数据输出端点，trace 无意义且制造噪音）。
+// /healthz：健康检查探针。
+func skipTracePaths(r *http.Request) bool {
+	switch r.URL.Path {
+	case "/metrics", "/healthz":
+		return false // 跳过（不建 span）
+	}
+	return true
 }

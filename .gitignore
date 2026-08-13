@@ -38,3 +38,8 @@ dist/
 .superpowers/
 /core
 .tmp-build/
+
+# 排查截图（不入库，本地保留）
+paas-shop-*.png
+# Go 编译产物
+examples/traffic-gen/traffic-gen

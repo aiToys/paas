@@ -130,26 +130,41 @@ REPO_ID=$(curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/ap
   '{"gitUrl":"https://github.com/aitoys/paas.git","branch":"main","dockerfile":"examples/paas-shop/Dockerfile.backend","buildContext":".","source":"external"}' \
   | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',{});print(d.get('id',''))" 2>/dev/null)
 echo "  repo: $REPO_ID"
-# 9.2 触发 BuildRun（mock 模式派生 digest；PAAS_DEVOPS_BUILDER=k8s 时真实 docker build + push）
-curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/applications/$APP/buildruns" -d \
-  "{\"repoId\":\"$REPO_ID\",\"branch\":\"main\",\"trigger\":\"manual\"}" \
-  | python3 -c "import sys,json;d=json.load(sys.stdin);print('  build:',d.get('status',d))" 2>/dev/null
-# 9.3 轮询最新 BuildRun 状态到 success/failed（mock 快速完成）
-for i in $(seq 1 15); do
-  LATEST=$(curl -s -H "$H" "$B/api/applications/$APP/buildruns" | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',[]);print(d[0].get('status','')+'|'+d[0].get('imageId','') if d else '|')" 2>/dev/null)
-  STATUS="${LATEST%|*}"; IMG="${LATEST#*|}"
-  echo "  build status: $STATUS  image: $IMG"
-  { [ "$STATUS" = "success" ] || [ "$STATUS" = "failed" ]; } && break
-  sleep 2
+# 9.2 多服务构建：paas-shop 是 monorepo（bff/product/recommend/chatbot 4 个 Go 后端），
+#     共用 Dockerfile.backend + buildContext=examples/，靠 buildArgs.SERVICE 区分构建目标。
+#     每个 SERVICE 一次 BuildRun → 各自独立 tag（buildArgs 哈希区分，见 builder.buildTag）→ 独立 digest 镜像。
+#     frontend 是 nginx SPA（独立 Dockerfile），单独构建。
+for SVC in product recommend chatbot bff; do
+  echo "  build service: $SVC"
+  curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/applications/$APP/buildruns" -d \
+    "{\"repoId\":\"$REPO_ID\",\"branch\":\"main\",\"trigger\":\"manual\",\"buildArgs\":{\"SERVICE\":\"$SVC\"}}" \
+    | python3 -c "import sys,json;d=json.load(sys.stdin);print('   ',d.get('status',d))" 2>/dev/null
 done
-# 9.4 查镜像列表（构建产物，digest 不可变真源）
+# 9.2b frontend 构建（独立 Dockerfile.frontend，无 SERVICE buildArgs）
+curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/applications/$APP/repositories" -d \
+  '{"gitUrl":"https://github.com/aitoys/paas.git","branch":"main","dockerfile":"examples/paas-shop/frontend/Dockerfile","buildContext":".","source":"external"}' \
+  | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',{});print('  repo(frontend):',d.get('id',''))" 2>/dev/null >/tmp/shop-fe-repo
+FE_REPO_ID=$(cat /tmp/shop-fe-repo 2>/dev/null | awk '{print $2}')
+if [ -n "$FE_REPO_ID" ]; then
+  curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/applications/$APP/buildruns" -d \
+    "{\"repoId\":\"$FE_REPO_ID\",\"branch\":\"main\",\"trigger\":\"manual\"}" \
+    | python3 -c "import sys,json;d=json.load(sys.stdin);print('  build frontend:',d.get('status',d))" 2>/dev/null
+fi
+# 9.3 轮询所有 BuildRun 到终态（多服务并行构建，mock 快速；k8s 真实构建需更长 timeout）
+for i in $(seq 1 30); do
+  PENDING=$(curl -s -H "$H" "$B/api/applications/$APP/buildruns" | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',[]);p=[b for b in d if b.get('status') in ('pending','running')];print(len(p))" 2>/dev/null)
+  echo "  待完成构建数: $PENDING"
+  [ "$PENDING" = "0" ] && break
+  sleep 3
+done
+# 9.4 查镜像列表（构建产物，digest 不可变真源；多服务各自独立 tag）
 curl -s -H "$H" "$B/api/applications/$APP/images" | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',[]);print('\n'.join('  image: '+x['id']+'  '+x.get('tag','')+'  digest='+x.get('digest','')[:20] for x in d) if d else '  (暂无镜像)')" 2>/dev/null
 echo "=== §9 DevOps 链路创建完成 ==="
 
 echo "=== §10 持续流量生成（traffic-gen 针对 paas-shop bff + agent:shop-agent）==="
-REGISTRY="${REGISTRY:-192.168.41.122:30050}"
+REGISTRY="${REGISTRY:?设置 REGISTRY 为你的集群 registry 地址，如 <nodeIP>:30050}"
 # 10.1 创建 traffic-gen appconfig（注入 paas-shop bff URL + agent 虚拟模型，env 归属 paas-shop test 环境）
-for kv in "SHOP_BFF_URL:http://paas-shop-bff:8080" "CORE_URL:http://paas-core.paas.svc.cluster.local" "API_KEY:sk-acme-dev" "AGENT_MODEL:agent:$AGENT_ID" "MICRO_INTERVAL:60" "AGENT_INTERVAL:300"; do
+for kv in "SHOP_BFF_URL:http://paas-shop-bff:8080" "CORE_URL:http://paas-core.paas.svc.cluster.local" "API_KEY:sk-acme-dev" "AGENT_MODEL:agent:$AGENT_ID" "MICRO_INTERVAL:300" "AGENT_INTERVAL:3600"; do
   K="${kv%%:*}"; V="${kv#*:}"
   TYPE="env"; [ "$K" = "API_KEY" ] && TYPE="secret"
   curl -s -o /dev/null -X POST -H "$H" -H "Content-Type: application/json" "$B/api/applications/$APP/configs" -d \

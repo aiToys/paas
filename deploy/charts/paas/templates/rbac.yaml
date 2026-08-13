@@ -30,10 +30,15 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs", "cronjobs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Service（workload service 类型建 K8s Service + StatefulSet headless）+ Pods 只读（状态观测）。
+  # Service：workload service 类型建 K8s Service + StatefulSet headless（reconciler 全生命周期管理）。
   - apiGroups: [""]
-    resources: ["services", "pods"]
+    resources: ["services"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Pods 只读：状态观测 / FillStatus 读 readyReplicas / builder 读 Job Pod 日志。
+  # 不授 delete（Pod 删除由 Deployment/Job ownerRef 级联自动处理，core 不直接删 Pod，收敛攻击面）。
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
   # Ingress（workload spec.domain 非空时 reconciler 自动建 Ingress，host=Domain -> Service:Port）。
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]

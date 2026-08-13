@@ -1,7 +1,12 @@
 # paas-shop 后端通用 Dockerfile：ARG SERVICE 指定服务（product/recommend/chatbot/bff）。
 # 用 vendor（go mod vendor 生成），docker build 不需网络。
 # 在 examples/ 目录 build：docker build -f examples/paas-shop/Dockerfile.backend --build-arg SERVICE=product -t <img> .
-FROM docker.m.daocloud.io/library/golang:1.26-alpine AS builder
+#
+# 架构：builder 用 $BUILDPLATFORM（host 架构，Mac arm64 上避免 QEMU 跑 Go 编译 SIGSEGV），
+# Go 交叉编译到 amd64；runtime 由 `docker build --platform linux/amd64` 指定（$TARGETPLATFORM，
+# alpine 用户态与 Go binary 同架构，否则 arm64 alpine 的 busybox/wget 在 amd64 节点 exec format error）。
+# 故 build 时必须传 --platform linux/amd64。
+FROM --platform=$BUILDPLATFORM docker.m.daocloud.io/library/golang:1.26-alpine AS builder
 WORKDIR /app
 COPY . .
 ARG SERVICE

@@ -64,7 +64,8 @@ echo "▶ 1/4 构建镜像（多阶段：前端 build + Go 交叉编译 amd64 + 
 # DOCKER_BUILDKIT=1 走 buildkit：builder 用 --platform=$BUILDPLATFORM 跑本地架构（arm64 Mac），
 # Go 交叉编译到 amd64，避 QEMU 全栈模拟（Go http2/TLS 在 QEMU amd64 下 SIGSEGV 致 go mod
 # download 必 crash）。buildkit 内置 frontend 支持 $BUILDPLATFORM（不加 # syntax= 不拉远程）。
-DOCKER_BUILDKIT=1 docker build -t "$IMAGE" -f Dockerfile .
+# --platform=linux/amd64：明确目标架构（dev 集群 amd64），Dockerfile 的 ARG TARGETARCH 据此取 amd64。
+DOCKER_BUILDKIT=1 docker build --platform=linux/amd64 -t "$IMAGE" -f Dockerfile .
 
 push_image() {
   # 优先 docker push（daemon 已配 insecure registry）；失败 fallback crane 直推（不经 dockerd）。
@@ -90,6 +91,17 @@ else
   echo ""
   echo "▶ 2/4 推送到集群内 registry $REG ..."
   push_image
+fi
+
+# 构建+推送完成后清理 dangling 镜像（上一轮 build 留下的旧 <none> 镜像）。
+# 只清无 tag 且未被任何容器引用的，避免影响正在跑的容器；本次构建的新镜像有 tag 不会被清。
+echo ""
+echo "▶ 2.5/4 清理本地旧镜像（dangling <none>）..."
+pruned=$(docker image prune -f 2>&1 | grep "Total reclaimed space" || true)
+if [[ -n "$pruned" ]]; then
+  echo "  $pruned"
+else
+  echo "  无可清理镜像"
 fi
 
 echo ""

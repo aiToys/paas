@@ -13,7 +13,7 @@
 - 注释中文，与代码库一致
 - Repository 从 ctx 取租户强制过滤，缺失/跨租户即 not found
 - 工作负载归属应用，不进 ResourceCount（不是绑定资源）
-- 不引新外部依赖；提交者 如水 <rushui@qq.com>
+- 不引新外部依赖；提交者 The PaaS Authors
 - 默认 Key sk-acme-admin
 
 ---

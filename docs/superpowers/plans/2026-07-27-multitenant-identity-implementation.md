@@ -15,7 +15,7 @@
 - Repository 必须从 ctx 取租户，缺失即拒绝（防止插件绕过隔离）
 - 模型目录 `/api/models` `/v1/models` 平台级共享，不按租户过滤
 - 默认开发 Key `sk-acme-admin`，兼容现有 curl 文档
-- 提交者：如水 <rushui@qq.com>
+- 提交者：The PaaS Authors
 
 ---
 

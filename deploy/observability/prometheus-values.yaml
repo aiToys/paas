@@ -1,6 +1,6 @@
 # Prometheus 精简 values（dev 轻量但真实）。
 # 含：Prometheus server（持久化）+ node-exporter（节点指标）+ 抓 kubelet/cAdvisor（数据服务 Pod 指标）
-# 关：alertmanager、kube-state-metrics（YAGNI）
+# 关：alertmanager、kube-state-metrics（YAGNI——应用级指标改按 workload pod 名正则查，无需 KSM label join）。
 ---
 alertmanager:
   enabled: false
@@ -17,7 +17,7 @@ prometheus-node-exporter:
 # 额外抓取配置：kubelet cAdvisor（数据服务 Pod 真实指标来源）+ paas-core /metrics
 extraScrapeConfigs: |
   # kubelet cAdvisor —— container_cpu_usage_seconds_total / container_memory_working_set_bytes 等
-  # 平台数据服务监控（real/metrics.go TargetDataservice）依赖这些。
+  # 平台数据服务监控（real/metrics.go TargetDataservice）+ 应用级指标（listAppMetrics 按工作负载 pod 名正则）依赖这些。
   - job_name: 'kubernetes-cadvisor'
     scheme: https
     tls_config:
@@ -38,7 +38,9 @@ extraScrapeConfigs: |
         target_label: __metrics_path__
         replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor
 
-  # paas-core 自身指标（controller-runtime 进程级 + 后续业务 paas_* 埋点）
+  # paas-core 业务指标（internal/metrics Registry：http_requests_total /
+  # http_request_duration_seconds / paas_inference_*）。/metrics 在主端口 :8080 暴露。
+  # （controller-runtime 进程级指标经 PAAS_METRICS_ADDR=0 关闭，不再抓 :8081。）
   - job_name: 'paas-core'
     metrics_path: /metrics
     kubernetes_sd_configs:
@@ -53,7 +55,7 @@ extraScrapeConfigs: |
       - source_labels: [__meta_kubernetes_pod_ip]
         regex: (.+)
         target_label: __address__
-        replacement: $1:8081
+        replacement: $1:8080
 
 server:
   retention: "7d"

@@ -1,8 +1,9 @@
 // Command traffic-gen 是平台流量生成示例：定期调用微服务链 + AI Agent，保障调用链一直有流量。
 //
-// 两种运行模式：
+// 三种运行模式：
 //   - 默认（无参）：常驻 Deployment，并行跑「微服务链循环」+「AI Agent 循环（带会话记忆）」
 //   - once：单次调用微服务链后退出（CronJob 用，每次 Pod 新建，无状态）
+//   - once-agent：单次调用微服务链 + 一次 AI Agent（CronJob 用，保留 agent 流量不退化）
 //
 // AI Agent 记忆：常驻模式内存维护 sessions[sessionId] -> []message，每次调用带上历史消息，
 // Agent 可引用上文（如「总结我刚才的咨询」）。Pod 重启历史丢失（演示可接受；生产用 redis 持久化）。
@@ -13,8 +14,8 @@
 //   AGENT_MODEL     Agent 虚拟模型（如 agent:xxx）
 //   SHOP_BFF_URL    paas-shop bff 根 URL（配了调 /api/products + /api/recommend 多端点，产全链路流量）
 //   REC_SVC_URL     推荐服务 URL（兼容单端点；SHOP_BFF_URL 优先）
-//   MICRO_INTERVAL  微服务调用间隔秒（默认 300）
-//   AGENT_INTERVAL  Agent 调用间隔秒（默认 600）
+//   MICRO_INTERVAL  微服务调用间隔秒（默认 600）
+//   AGENT_INTERVAL  Agent 调用间隔秒（默认 3600；AI 推理按次计费，默认 1h 控成本）
 package main
 
 import (
@@ -58,7 +59,10 @@ func main() {
 	}
 	switch mode {
 	case "once":
-		callMicroOnce() // CronJob 单次调用
+		callMicroOnce() // CronJob 单次调用微服务链
+	case "once-agent":
+		callMicroOnce() // CronJob 单次：微服务链 + 一次 Agent（保留 agent 流量）
+		callAgentOnce()
 	default:
 		runLoops() // 常驻 Deployment
 	}
@@ -71,8 +75,8 @@ func runLoops() {
 	coreURL := env("CORE_URL", "http://paas-core.paas.svc.cluster.local")
 	apiKey := env("API_KEY", "")
 	agentModel := env("AGENT_MODEL", "")
-	microInterval := envInt("MICRO_INTERVAL", 300)
-	agentInterval := envInt("AGENT_INTERVAL", 600)
+	microInterval := envInt("MICRO_INTERVAL", 600)
+	agentInterval := envInt("AGENT_INTERVAL", 3600)
 
 	log.Printf("[traffic-gen] 启动常驻模式：micro=%ds agent=%ds shopBFF=%q rec=%q agent=%q", microInterval, agentInterval, shopBFF, recSvcURL, agentModel)
 
@@ -102,6 +106,20 @@ func loop(name string, intervalSec int, fn func()) {
 		time.Sleep(time.Duration(intervalSec) * time.Second)
 		fn()
 	}
+}
+
+// callAgentOnce 单次调用 AI Agent（CronJob once-agent 模式）。
+// 复用 callAgent：读 env 取 coreURL/apiKey/model，配齐才调一次，否则跳过。
+// 注：CronJob 每次新建 Pod，sessions 内存历史不跨次保留（无状态，与 once 同语义）。
+func callAgentOnce() {
+	coreURL := env("CORE_URL", "http://paas-core.paas.svc.cluster.local")
+	apiKey := env("API_KEY", "")
+	agentModel := env("AGENT_MODEL", "")
+	if agentModel == "" || apiKey == "" {
+		log.Println("[traffic-gen:once-agent] AGENT_MODEL/API_KEY 未设置，跳过 AI 流量")
+		return
+	}
+	callAgent(coreURL, apiKey, agentModel)
 }
 
 // callMicroOnce 单次调用微服务链（CronJob 模式）。
