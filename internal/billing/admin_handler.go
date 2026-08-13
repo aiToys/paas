@@ -20,15 +20,13 @@ import (
 	"net/http"
 	"strings"
 
+	adminutil "github.com/aitoys/paas/internal/web/admin"
 	"github.com/aitoys/paas/internal/httputil"
-	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // AdminAuditRecorder admin 写操作审计（依赖倒置，避免 billing->security）。
 // tenantID = 资源所属租户（target_tenant）；actor = super_admin UserID；action 带 admin: 前缀。
-type AdminAuditRecorder interface {
-	Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error
-}
+type AdminAuditRecorder = adminutil.AuditRecorder // admin 写操作审计（依赖倒置，统一真源 internal/web/admin）
 
 // AdminTenantChecker 校验租户存在（admin 调整配额 body tenantId 校验，防孤儿配额记录）。cmd/core 桥接 identity.Repository。
 type AdminTenantChecker interface {
@@ -98,11 +96,6 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminTenantCtx 派生资源所属租户 ctx（admin 跨租户操作以资源租户身份执行下游）。
-func adminTenantCtx(r *http.Request, tenantID string) (context.Context, *http.Request) {
-	ctx := tenant.WithTenant(r.Context(), tenantID)
-	return ctx, r.WithContext(ctx)
-}
-
 func (h *AdminHandler) actor(r *http.Request) string {
 	if h.actorOf != nil {
 		return h.actorOf(r)
@@ -154,7 +147,7 @@ func (h *AdminHandler) serveSetQuota(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	q := ResourceQuota{TenantID: in.TenantID, Limits: in.Limits}
-	ctx, rr := adminTenantCtx(r, in.TenantID)
+	ctx, rr := adminutil.TenantCtx(r, in.TenantID)
 	saved, err := h.repo.SetQuota(ctx, q)
 	if err != nil {
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)
@@ -248,7 +241,7 @@ func (h *AdminHandler) servePay(w http.ResponseWriter, r *http.Request, id strin
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
-	ctx, rr := adminTenantCtx(r, b.TenantID)
+	ctx, rr := adminutil.TenantCtx(r, b.TenantID)
 	paid, err := h.repo.PayBill(ctx, id)
 	if err != nil {
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)

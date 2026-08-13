@@ -13,7 +13,7 @@ type fakeRepo struct {
 	createErr error
 }
 
-func (f *fakeRepo) List(ctx context.Context, envID, appID, laneID, wtype string) ([]Workload, error) {
+func (f *fakeRepo) List(ctx context.Context, envID, appID, laneID, wtype, service string) ([]Workload, error) {
 	return nil, nil
 }
 func (f *fakeRepo) ListAll(ctx context.Context) ([]Workload, error) { return nil, nil }
@@ -32,12 +32,15 @@ func (f *fakeRepo) Update(ctx context.Context, id string, replicas int, status s
 func (f *fakeRepo) UpdateImage(ctx context.Context, id, image, imageRef string) (Workload, error) {
 	return Workload{ID: id, Image: image, ImageRef: imageRef}, nil
 }
+func (f *fakeRepo) UpdateSchedule(ctx context.Context, id, schedule string) (Workload, error) {
+	return Workload{ID: id, Schedule: schedule}, nil
+}
 func (f *fakeRepo) Delete(ctx context.Context, id string) error {
 	f.deleted = append(f.deleted, id)
 	return nil
 }
 
-// fakeApplier 记录 Apply/Delete 调用。
+// fakeApplier 记录 Apply/EnsureIfMissing/Delete 调用。
 type fakeApplier struct {
 	applied []Workload
 	deleted []string
@@ -46,6 +49,11 @@ type fakeApplier struct {
 func (a *fakeApplier) Apply(ctx context.Context, w Workload) error {
 	a.applied = append(a.applied, w)
 	return nil
+}
+// EnsureIfMissing 测试桩：视为 CRD 总不存在，走 Apply 补建并报 created=true。
+func (a *fakeApplier) EnsureIfMissing(ctx context.Context, w Workload) (bool, error) {
+	a.applied = append(a.applied, w)
+	return true, nil
 }
 func (a *fakeApplier) Delete(ctx context.Context, id string) error {
 	a.deleted = append(a.deleted, id)

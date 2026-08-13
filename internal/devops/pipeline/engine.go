@@ -42,9 +42,11 @@ type Releaser interface {
 	Promote(ctx context.Context, srcReleaseID string) (devops.Release, error)
 	// SetVersion 给本次 run 涉及的 Release 批量回填版本号（baseline stage 打版本）。
 	SetVersion(ctx context.Context, releaseIDs []string, version string) error
-	// Deploy 部署镜像到 env×lane（找/建基线 Workload + UpdateImage），产生部署记录，不打版本。
-	// sourceRunID 非空时回填到部署记录（追溯哪次 pipeline run 触发）。返回部署记录 + 探活域名。
-	Deploy(ctx context.Context, appID, envID, lane, imageID, sourceRunID string) (deployment devops.Release, domain string, err error)
+	// Deploy 部署镜像到 env×lane×service（找/建基线 Workload + UpdateImage），产生部署记录，不打版本。
+	// service 标识同 app 多服务（空=单服务）；port/containerPort 非零时在新建 Workload 时设定
+	// （驱动 reconciler 建 Service，供 smoke 探活/服务发现）；复用既有 Workload 时忽略（端口属 Workload 既有配置）。
+	// sourceRunID 非空时回填到部署记录。
+	Deploy(ctx context.Context, appID, envID, lane, service, imageID string, port, containerPort int, sourceRunID string) (deployment devops.Release, domain string, err error)
 	// Publish 打版本号里程碑：Image.Version 回填 + git tag（commit 非空且仓库为 internal 时）。
 	// 不部署（部署是 deploy stage 的事）。返回 tagSha（未打 tag 时为空串）。
 	Publish(ctx context.Context, appID, imageID, version, commit string) (tagSha string, err error)
@@ -112,9 +114,11 @@ func (e *Engine) Abort(ctx context.Context, runID string) error {
 	}
 	run.Status = RunAborted
 	run.FinishedAt = time.Now()
-	// 清理残留 running 的 stage_runs（advance 退出时未标终态的那个）
+	// 清理残留非终态 stage_runs：running（advance 退出时未标终态）+ waiting（Paused 时等待 approve/test-manual）。
+	// 否则 run=aborted 但 stage=running/waiting，前端时间线显示不一致。
 	for i := range run.StageRuns {
-		if run.StageRuns[i].Status == StageRunning {
+		s := run.StageRuns[i].Status
+		if s == StageRunning || s == StageWaiting {
 			run.StageRuns[i].Status = StageAborted
 			run.StageRuns[i].FinishedAt = time.Now()
 		}
@@ -165,6 +169,10 @@ func (e *Engine) Retry(ctx context.Context, runID string) error {
 // 测试直接调；Start 内部 go Advance。
 func (e *Engine) Advance(ctx context.Context, runID string) error {
 	for {
+		// ctx cancel（Abort/进程退出）立即退出循环，防 cancel 后多推进一个同步 stage。
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		run, err := e.Runs.GetRun(ctx, runID)
 		if err != nil {
 			return err
@@ -281,9 +289,17 @@ func (e *Engine) execDeploy(ctx context.Context, run *PipelineRun, stage StageDe
 		return true, err
 	}
 	lane := strOr(stage.Params, "lane", LaneDefault)
-	logf(sr, "部署镜像 %s 到 env=%s lane=%s", imageID, envID, lane)
+	// service 标识部署到哪个服务（同 app 多服务场景，如 paas-shop product/recommend/...）。
+	// 模板不填（app-specific），应用经 Pipeline.paramOverrides 覆盖（如 paas-shop product 各一条 pipeline）。
+	// 空=单服务（向后兼容，CreateRelease 查找按 app×env×lane×service，service 空匹配单服务 Workload）。
+	service := strOr(stage.Params, "service", "")
+	// port/containerPort 透传给新建 Workload（驱动 reconciler 建 Service）。复用既有 Workload 忽略。
+	// 模板不填（app-specific），应用经 Pipeline.paramOverrides 覆盖（如 paas-shop product=8081）。
+	port := intOr(stage.Params, "port", 0)
+	cport := intOr(stage.Params, "containerPort", port)
+	logf(sr, "部署镜像 %s 到 env=%s lane=%s service=%s", imageID, envID, lane, service)
 	// prod 环境写受 prod:write 保护（adapter 内 CreateRelease 走 EnvTypeResolver）
-	deployment, domain, err := e.Releases.Deploy(ctx, run.AppID, envID, lane, imageID, run.ID)
+	deployment, domain, err := e.Releases.Deploy(ctx, run.AppID, envID, lane, service, imageID, port, cport, run.ID)
 	if err != nil {
 		sr.Error = err.Error()
 		return true, err
@@ -493,22 +509,32 @@ func shortID(id string) string {
 // Resume 恢复 paused run 的某 stage（handler approve 调用）。
 // 标记该 stage 成功 + currentStage++ + run.Status=running，再启 advance 异步推进。
 // 拒绝审批走 Abort（Task 12），此处只处理通过路径。
+//
+// 并发安全：两次并发 approve 会都读到同一份 paused 快照。用 e.mu 把「校验 paused + 转 running +
+// UpdateRun」串行化——第二个 Resume 进入时 run 已是 running，ErrNotPaused 拒绝，避免起两个
+// advance goroutine + cancels map 互相覆盖。Start 的 cancels 注册在锁外（其内部自锁，防自死锁）。
 func (e *Engine) Resume(ctx context.Context, runID string, stageIdx int) error {
+	e.mu.Lock()
 	run, err := e.Runs.GetRun(ctx, runID)
 	if err != nil {
+		e.mu.Unlock()
 		return err
 	}
 	if run.Status != RunPaused {
+		e.mu.Unlock()
 		return ErrNotPaused
 	}
 	if stageIdx != run.CurrentStage {
+		e.mu.Unlock()
 		return ErrStageNotCurrent
 	}
 	run.StageRuns[stageIdx].Status = StageSuccess
 	run.StageRuns[stageIdx].FinishedAt = time.Now()
 	run.CurrentStage++
 	run.Status = RunRunning
-	if _, err := e.Runs.UpdateRun(ctx, run); err != nil {
+	_, err = e.Runs.UpdateRun(ctx, run)
+	e.mu.Unlock()
+	if err != nil {
 		return err
 	}
 	e.Start(ctx, runID)
@@ -616,6 +642,29 @@ func strOr(params map[string]any, key, def string) string {
 	if v, ok := params[key]; ok {
 		if s, ok := v.(string); ok && s != "" {
 			return s
+		}
+	}
+	return def
+}
+
+// intOr 从 params 取 int（deploy stage port/containerPort 等）。支持 JSON 反序列化的
+// float64（json.Unmarshal 把数字统一解成 float64）+ int + 字符串数字。缺失/非法返 def。
+func intOr(params map[string]any, key string, def int) int {
+	v, ok := params[key]
+	if !ok {
+		return def
+	}
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case string:
+		var i int
+		if _, err := fmt.Sscanf(n, "%d", &i); err == nil {
+			return i
 		}
 	}
 	return def

@@ -119,11 +119,24 @@ func (r *releaseBridge) PollWorkloadReady(ctx context.Context, workloadID string
 }
 
 // WorkloadDomain 拼探活域名：workload.Domain 优先，否则集群内 FQDN（同 ns DNS 可达）。
+// FQDN host 用 reconciler 建的 Service 名（wl.Name 优先，空则 wl.ID），与 applyService 命名一致；
+// port 非 0 且非 80 时显式带端口（Service 监听 wl.Port，smoke 默认走 80 会连不上）。
 func (r *releaseBridge) WorkloadDomain(ctx context.Context, workloadID string) string {
-	if wl, err := r.workloads.Get(ctx, workloadID); err == nil && wl.Domain != "" {
-		return wl.Domain
-	}
 	tid, _ := tenant.TenantFrom(ctx)
+	if wl, err := r.workloads.Get(ctx, workloadID); err == nil {
+		if wl.Domain != "" {
+			return wl.Domain
+		}
+		host := wl.Name
+		if host == "" {
+			host = workloadID
+		}
+		fqdn := fmt.Sprintf("%s.%s.svc.cluster.local", host, tenant.Namespace(tid))
+		if wl.Port > 0 && wl.Port != 80 {
+			fqdn = fmt.Sprintf("%s:%d", fqdn, wl.Port)
+		}
+		return fqdn
+	}
 	return fmt.Sprintf("%s.%s.svc.cluster.local", workloadID, tenant.Namespace(tid))
 }
 
@@ -164,12 +177,12 @@ func (r *releaseBridge) SetVersion(ctx context.Context, releaseIDs []string, ver
 	return nil
 }
 
-// Deploy 部署镜像到 env×lane（找/建基线 Workload + UpdateImage），产生部署记录，不打版本。
-// 内部经 CreateRelease 编排（已支持 lane），domain 经 WorkloadDomain 拼探活地址。
-// sourceRunID 非空时回填到部署记录（追溯哪次 pipeline run 触发）。
-func (r *releaseBridge) Deploy(ctx context.Context, appID, envID, lane, imageID, sourceRunID string) (devops.Release, string, error) {
+// Deploy 部署镜像到 env×lane×service（找/建基线 Workload + UpdateImage），产生部署记录，不打版本。
+// port/containerPort 仅新建 Workload 时设定（驱动 reconciler 建 Service）。sourceRunID 非空回填追溯。
+func (r *releaseBridge) Deploy(ctx context.Context, appID, envID, lane, service, imageID string, port, containerPort int, sourceRunID string) (devops.Release, string, error) {
 	rel, err := r.releases.CreateRelease(ctx, devops.ReleaseInput{
-		AppID: appID, EnvID: envID, LaneID: lane, ImageID: imageID,
+		AppID: appID, EnvID: envID, LaneID: lane, Service: service, ImageID: imageID,
+		Port: port, ContainerPort: containerPort,
 	})
 	if err != nil {
 		return devops.Release{}, "", err

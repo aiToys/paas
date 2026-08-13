@@ -6,15 +6,13 @@ import (
 	"net/http"
 	"strings"
 
+	adminutil "github.com/aitoys/paas/internal/web/admin"
 	"github.com/aitoys/paas/internal/httputil"
-	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // AdminAuditRecorder admin 写操作审计（依赖倒置，避免 application->security）。
 // tenantID = 资源所属租户（target_tenant）；actor = super_admin UserID；action 带 admin: 前缀。
-type AdminAuditRecorder interface {
-	Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error
-}
+type AdminAuditRecorder = adminutil.AuditRecorder // admin 写操作审计（依赖倒置，统一真源 internal/web/admin）
 
 // QuotaCheckFunc 配额检查-递增（横切）。ctx 必须带目标租户；delta=+1 创建/-1 删除。
 type QuotaCheckFunc func(ctx context.Context, delta int) error
@@ -91,11 +89,6 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // tenantCtx 派生资源所属租户 ctx（admin 跨租户操作以资源租户身份执行下游）。
-func adminTenantCtx(r *http.Request, tenantID string) (context.Context, *http.Request) {
-	ctx := tenant.WithTenant(r.Context(), tenantID)
-	return ctx, r.WithContext(ctx)
-}
-
 func (h *AdminHandler) actor(r *http.Request) string {
 	if h.actorOf != nil {
 		return h.actorOf(r)
@@ -172,7 +165,7 @@ func (h *AdminHandler) serveDelete(w http.ResponseWriter, r *http.Request, id st
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
-	ctx, rr := adminTenantCtx(r, a.TenantID)
+	ctx, rr := adminutil.TenantCtx(r, a.TenantID)
 	// 级联清理关联资源（best-effort，失败仅记日志不阻断；与租户侧 handler 一致）。
 	if h.cascade != nil {
 		_ = h.cascade.CascadeDelete(ctx, id)

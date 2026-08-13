@@ -40,6 +40,56 @@ func TestSafeShort(t *testing.T) {
 	}
 }
 
+// TestBuildTagNoArgsBackwardCompat 无 buildArgs 时保持原 branch-commit8（向后兼容单服务场景）。
+func TestBuildTagNoArgsBackwardCompat(t *testing.T) {
+	got := buildTag(Params{Branch: "main", Commit: "abcdef1234567890"})
+	if got != "main-abcdef12" {
+		t.Fatalf("无 buildArgs 应为 main-abcdef12，实得 %s", got)
+	}
+}
+
+// TestBuildTagDifferentArgsProduceDifferentTag 多服务同 repo 构建场景：
+// 同 app 同 commit 但 buildArgs 不同（SERVICE=product vs recommend）必须产出不同 tag，
+// 否则 registry 同 tag 互相覆盖，各 BuildRun 记的 digest 与实际拉取内容不一致。
+func TestBuildTagDifferentArgsProduceDifferentTag(t *testing.T) {
+	base := Params{Branch: "main", Commit: "abcdef1234567890"}
+	product := buildTag(Params(base).withArgs(map[string]string{"SERVICE": "product"}))
+	recommend := buildTag(Params(base).withArgs(map[string]string{"SERVICE": "recommend"}))
+	if product == recommend {
+		t.Fatalf("不同 buildArgs 应产出不同 tag（多服务区分），均得 %s", product)
+	}
+	// 基础部分一致（branch-commit8 前缀）。
+	if !strings.HasPrefix(product, "main-abcdef12-") || !strings.HasPrefix(recommend, "main-abcdef12-") {
+		t.Fatalf("tag 应保留 branch-commit8 前缀，product=%s recommend=%s", product, recommend)
+	}
+}
+
+// TestBuildTagSameArgsIdempotent 同 buildArgs 重构产出相同 tag（幂等，不产生垃圾 tag）。
+func TestBuildTagSameArgsIdempotent(t *testing.T) {
+	args := map[string]string{"SERVICE": "product", "VERSION": "1"}
+	p := Params{Branch: "main", Commit: "abcdef12", BuildArgs: args}
+	if buildTag(p) != buildTag(p) {
+		t.Fatal("同 buildArgs 重构 tag 应一致（幂等）")
+	}
+}
+
+// TestArgsHashStableRegardlessOfMapIterationOrder map 迭代序漂移不影响 hash（按 key 排序）。
+func TestArgsHashStableRegardlessOfMapIterationOrder(t *testing.T) {
+	a := map[string]string{"SERVICE": "product", "B": "2", "A": "1"}
+	h1 := argsHash(a)
+	for i := 0; i < 20; i++ { // 多次取应稳定（map 迭代序随机）
+		if argsHash(a) != h1 {
+			t.Fatal("argsHash 应不受 map 迭代序影响（按 key 排序）")
+		}
+	}
+}
+
+// withArgs 辅助构造（值传递后设 BuildArgs）。
+func (p Params) withArgs(a map[string]string) Params {
+	p.BuildArgs = a
+	return p
+}
+
 func TestImageRefAndRegistry(t *testing.T) {
 	p := Params{AppID: "app-cs", Branch: "main", Commit: "abcdef12"}
 	if got := ImageRef(p, "main-abcdef12"); got != "registry.paas.local/app-cs:main-abcdef12" {

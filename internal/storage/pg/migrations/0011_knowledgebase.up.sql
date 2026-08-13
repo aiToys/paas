@@ -3,7 +3,7 @@
 -- chunk 文本/元数据存 PG（便于展示+BM25+调试）。全表带 tenant_id 多租户隔离。
 -- spec: docs/superpowers/specs/2026-08-05-ai-app-platform-design.md
 
-CREATE TABLE ai_knowledgebases (
+CREATE TABLE IF NOT EXISTS ai_knowledgebases (
   id TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL,
   app_id TEXT NOT NULL DEFAULT '',
@@ -18,7 +18,7 @@ CREATE TABLE ai_knowledgebases (
   UNIQUE(tenant_id, name)
 );
 
-CREATE TABLE ai_documents (
+CREATE TABLE IF NOT EXISTS ai_documents (
   id TEXT PRIMARY KEY,
   kb_id TEXT NOT NULL REFERENCES ai_knowledgebases(id) ON DELETE CASCADE,
   tenant_id TEXT NOT NULL,
@@ -31,11 +31,11 @@ CREATE TABLE ai_documents (
   metadata JSONB NOT NULL DEFAULT '{}',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX idx_ai_documents_tenant_kb ON ai_documents (tenant_id, kb_id);
+CREATE INDEX IF NOT EXISTS idx_ai_documents_tenant_kb ON ai_documents (tenant_id, kb_id);
 
 -- ai_chunks: 文本/元数据存 PG，向量存 qdrant（point_id = chunk.id）。
 -- doc_id FK CASCADE：删文档级联清 chunks；删 KB 经 ai_documents CASCADE 间接清 chunks。
-CREATE TABLE ai_chunks (
+CREATE TABLE IF NOT EXISTS ai_chunks (
   id TEXT PRIMARY KEY,
   kb_id TEXT NOT NULL,
   doc_id TEXT NOT NULL REFERENCES ai_documents(id) ON DELETE CASCADE,
@@ -45,5 +45,5 @@ CREATE TABLE ai_chunks (
   metadata JSONB NOT NULL DEFAULT '{}',
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX idx_ai_chunks_tenant_kb_doc ON ai_chunks (tenant_id, kb_id, doc_id);
+CREATE INDEX IF NOT EXISTS idx_ai_chunks_tenant_kb_doc ON ai_chunks (tenant_id, kb_id, doc_id);
 -- tsvector 列预留（BM25 后续）：ALTER TABLE ai_chunks ADD COLUMN tsv tsvector;

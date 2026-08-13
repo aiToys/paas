@@ -33,6 +33,8 @@ type Repository interface {
 // RunRepository PipelineRun 读写（engine 推进主要调 UpdateRun 写回 StageRuns）。
 type RunRepository interface {
 	ListRuns(ctx context.Context, appID, pipelineID, status string) ([]PipelineRun, error)
+	// ListAllRuns 跨租户列表（admin 总览用，返回对象带 TenantID）；可选 status 过滤；created_at 倒序。
+	ListAllRuns(ctx context.Context, status string) ([]PipelineRun, error)
 	GetRun(ctx context.Context, id string) (PipelineRun, error)
 	CreateRun(ctx context.Context, r PipelineRun) (PipelineRun, error)
 	UpdateRun(ctx context.Context, r PipelineRun) (PipelineRun, error)

@@ -163,6 +163,13 @@ func staticMenus() []Menu {
 							Meta:      MenuMeta{Title: "发布", Icon: "Promotion", ShowMenu: true},
 						},
 						{
+							// 流水线运行：跨租户 PipelineRun 总览（运维看全平台流水线运行状态），10s 轮询。
+							Path:      "/resources/pipelineruns",
+							Name:      "resPipelineRuns",
+							Component: "resources/views/PipelineRuns",
+							Meta:      MenuMeta{Title: "流水线运行", Icon: "VideoPlay", ShowMenu: true},
+						},
+						{
 							// 流水线模板：平台级公共模板 CRUD（builtin 拒改删），super_admin 维护，应用绑定用。
 							// 属 DevOps 链路（构建→部署→发布编排），非推理服务。
 							Path:      "/pipeline-template",

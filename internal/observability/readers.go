@@ -25,3 +25,15 @@ type RuleStore interface {
 	// ListAllAlertRules 跨租户列出全部告警规则（admin 平台总览，不过滤 tenant）。
 	ListAllAlertRules(ctx context.Context) ([]AlertRule, error)
 }
+
+// AppWorkloadLister 解析某应用下全部工作负载 ID（用于应用级指标/日志按 pod 名正则查询）。
+// 依赖倒置：real 适配器不直接依赖 workload 包，由 cmd/core 桥接 workload.Repository。
+// 工作负载的 K8s Deployment 名 = 工作负载 ID（wl-<id>），Pod 名 = <id>-<rsHash>-<podHash>，
+// 故按 `pod=~"wl-<id>-.*"` 聚合即可得应用级 cAdvisor 指标 / Loki 日志，无需 kube-state-metrics。
+type AppWorkloadLister interface {
+	AppWorkloadIDs(ctx context.Context, appID string) ([]string, error)
+	// AppWorkloadNames 返回某应用下全部工作负载名（K8s Deployment/Service 名）。
+	// 用于应用级 trace 查询：应用 span 的 OTel service.name = 工作负载名（如 paas-shop-bff），
+	// 故按 service.name 匹配工作负载名即可定位该应用的 trace（非工作负载 ID wl-xxx）。
+	AppWorkloadNames(ctx context.Context, appID string) ([]string, error)
+}

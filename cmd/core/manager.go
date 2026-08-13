@@ -11,6 +11,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
@@ -30,6 +31,7 @@ type k8sAppliers struct {
 	dsRestarter   *controller.DSRestarter // 数据服务实例滚动重启（patch STS），nil=集群外降级
 	clientset     kubernetes.Interface    // 供 builder.K8sJob（create Job + pods/log）；nil=K8s 不可用
 	wlReconciler  *controller.WorkloadReconciler
+	client        client.Client           // controller-runtime typed client（供 route applier 聚合 Ingress）
 }
 
 // startManager 启 controller-runtime manager（K8s 数据面），自动检测配置来源：
@@ -86,6 +88,9 @@ func startManager() (k8sAppliers, context.CancelFunc) {
 		// token 来自 PAAS_DP_TOKEN env（helm values dataplane.token），空则不注入。
 		DPToken:    os.Getenv("PAAS_DP_TOKEN"),
 		DPEndpoint: os.Getenv("PAAS_DP_ENDPOINT_DEFAULT"),
+		// OTel trace 推送地址（PAAS_OTEL_ENDPOINT，集群内 jaeger:4318）。注入 service 类型
+		// Pod env，应用 observ.Init 据此建 tracer 推 Jaeger。与 core 自身 tracing.Init 同源 env。
+		OtelEndpoint: os.Getenv("PAAS_OTEL_ENDPOINT"),
 		// 应用域名->自动 Ingress 的 ingressClassName（env PAAS_INGRESS_CLASS，默认 hermes）。
 		// workload spec.domain 非空时 reconciler 建 Ingress，host=domain -> Service:port。
 		IngressClass: ingressClassFromEnv(),
@@ -119,6 +124,7 @@ func startManager() (k8sAppliers, context.CancelFunc) {
 		dsRestarter:  controller.NewDSRestarter(mgr.GetClient()),
 		clientset:    clientset,
 		wlReconciler: wlReconciler,
+		client:       mgr.GetClient(),
 	}, cancel
 }
 

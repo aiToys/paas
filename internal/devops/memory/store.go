@@ -45,18 +45,10 @@ func NewStore(wlRepo workload.Repository) *Store {
 	return s
 }
 
-func tenantOrErr(ctx context.Context) (string, error) {
-	tid, ok := tenant.TenantFrom(ctx)
-	if !ok {
-		return "", fmt.Errorf("missing tenant context")
-	}
-	return tid, nil
-}
-
 // ---------- CodeRepoRepository ----------
 
 func (s *Store) ListRepos(ctx context.Context, appID string) ([]devops.CodeRepo, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +69,7 @@ func (s *Store) ListRepos(ctx context.Context, appID string) ([]devops.CodeRepo,
 }
 
 func (s *Store) GetRepo(ctx context.Context, id string) (devops.CodeRepo, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return devops.CodeRepo{}, err
 	}
@@ -91,7 +83,7 @@ func (s *Store) GetRepo(ctx context.Context, id string) (devops.CodeRepo, error)
 }
 
 func (s *Store) CreateRepo(ctx context.Context, r devops.CodeRepo) error {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return err
 	}
@@ -124,7 +116,7 @@ func (s *Store) CreateRepo(ctx context.Context, r devops.CodeRepo) error {
 }
 
 func (s *Store) DeleteRepo(ctx context.Context, id string) error {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return err
 	}
@@ -141,7 +133,7 @@ func (s *Store) DeleteRepo(ctx context.Context, id string) error {
 // ---------- BuildRunRepository ----------
 
 func (s *Store) ListBuildRuns(ctx context.Context, appID string) ([]devops.BuildRun, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +172,7 @@ func (s *Store) ListAllBuildRuns(ctx context.Context) ([]devops.BuildRun, error)
 }
 
 func (s *Store) GetBuildRun(ctx context.Context, id string) (devops.BuildRun, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return devops.BuildRun{}, err
 	}
@@ -195,7 +187,7 @@ func (s *Store) GetBuildRun(ctx context.Context, id string) (devops.BuildRun, er
 
 // Create 触发一次构建。校验仓库归属后置 pending，启动 mock CI runner 异步流转并产出 Image。
 func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) (devops.BuildRun, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return devops.BuildRun{}, err
 	}
@@ -324,7 +316,7 @@ func (s *Store) runBuild(ctx context.Context, p builder.Params) {
 // ---------- ImageRepository ----------
 
 func (s *Store) ListImages(ctx context.Context, appID string) ([]devops.Image, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -362,7 +354,7 @@ func (s *Store) ListAllImages(ctx context.Context) ([]devops.Image, error) {
 }
 
 func (s *Store) GetImage(ctx context.Context, id string) (devops.Image, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return devops.Image{}, err
 	}
@@ -389,7 +381,7 @@ func (s *Store) findImageIDByDigest(tid, digest string) string {
 // ---------- ReleaseRepository ----------
 
 func (s *Store) ListReleases(ctx context.Context, appID string) ([]devops.Release, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -427,7 +419,7 @@ func (s *Store) ListAllReleases(ctx context.Context) ([]devops.Release, error) {
 }
 
 func (s *Store) GetRelease(ctx context.Context, id string) (devops.Release, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return devops.Release{}, err
 	}
@@ -442,7 +434,7 @@ func (s *Store) GetRelease(ctx context.Context, id string) (devops.Release, erro
 
 // SetReleaseVersion 回填版本号（baseline stage 打版本）。
 func (s *Store) SetReleaseVersion(ctx context.Context, id, version string) error {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return err
 	}
@@ -459,7 +451,7 @@ func (s *Store) SetReleaseVersion(ctx context.Context, id, version string) error
 
 // MarkSourceRun 给部署记录回填触发它的 pipeline run ID（deploy stage 经 Deploy 接口写入）。
 func (s *Store) MarkSourceRun(ctx context.Context, id, runID string) error {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return err
 	}
@@ -476,7 +468,7 @@ func (s *Store) MarkSourceRun(ctx context.Context, id, runID string) error {
 
 // SetVersion 给镜像回填正式版本号（release stage 打版本时调）。
 func (s *Store) SetVersion(ctx context.Context, id, version string) error {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return err
 	}
@@ -496,7 +488,7 @@ func (s *Store) SetVersion(ctx context.Context, id, version string) error {
 // 不同 lane 各自独立（联调/灰度场景）。策略非 rolling 也走 rolling 编排（mock 期无真实流量切分），
 // Release.Strategy 记录请求策略。
 func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (devops.Release, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return devops.Release{}, err
 	}
@@ -523,8 +515,8 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 2. 找目标环境某泳道的基线 Workload（同 app×env×lane 唯一）
-	wls, err := s.workload.List(ctx, input.EnvID, input.AppID, lane, workload.TypeService)
+	// 2. 找目标环境某泳道某服务的基线 Workload（同 app×env×lane×service 唯一）
+	wls, err := s.workload.List(ctx, input.EnvID, input.AppID, lane, workload.TypeService, input.Service)
 	if err != nil {
 		return devops.Release{}, err
 	}
@@ -541,23 +533,32 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 		}
 	} else {
 		// 无基线 Workload -> 创建（基线 service，Replicas=1）
-		// Name 规则：default 用 `<app>-svc`（兼容现有 seed），非 default 用 `<app>-svc-<lane>`（同 app×env×lane 唯一）。
-		name := input.AppID + "-svc"
-		if lane != workload.LaneDefault {
-			name = input.AppID + "-svc-" + lane
+		// Name 规则：多服务（service 非空）用 `<app>-<service>-svc[-<lane>]`，单服务（service 空）用 `<app>-svc[-<lane>]`。
+		name := devops.BaselineWorkloadName(input.AppID, input.Service, lane)
+		// 端口来源（优先级）：① input.Port（deploy stage 显式 port 参数）> ② 同 app×env×service baseline 继承
+		// （泳道克隆基线端口）> ③ 0（不建 Service，向后兼容）。端口驱动 reconciler 建 Service，
+		// 否则 smoke 探活/跨泳道服务发现 DNS 不可达。
+		port, cport := input.Port, input.ContainerPort
+		if port == 0 && lane != workload.LaneDefault {
+			if bases, err := s.workload.List(ctx, input.EnvID, input.AppID, workload.LaneDefault, workload.TypeService, input.Service); err == nil && len(bases) > 0 {
+				port, cport = bases[0].Port, bases[0].ContainerPort
+			}
 		}
 		wl = workload.Workload{
-			ID:        newID("wl"),
-			AppID:     input.AppID,
-			EnvID:     input.EnvID,
-			LaneID:    lane,
-			Type:      workload.TypeService,
-			Name:      name,
-			Image:     display,
-			ImageRef:  img.Digest,
-			Replicas:  1,
-			Status:    workload.StatusDeploying,
-			CreatedAt: time.Now(),
+			ID:            newID("wl"),
+			AppID:         input.AppID,
+			EnvID:         input.EnvID,
+			LaneID:        lane,
+			Service:       input.Service,
+			Type:          workload.TypeService,
+			Name:          name,
+			Image:         display,
+			ImageRef:      img.Digest,
+			Port:          port,
+			ContainerPort: cport,
+			Replicas:      1,
+			Status:        workload.StatusDeploying,
+			CreatedAt:     time.Now(),
 		}
 		if err := s.workload.Create(ctx, wl); err != nil {
 			return devops.Release{}, err
@@ -591,7 +592,7 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 
 // RollbackRelease 回滚到上一镜像：更新 Workload 回退镜像 + 原发布标记 rolled-back + 新建回滚发布单。
 func (s *Store) RollbackRelease(ctx context.Context, releaseID string) (devops.Release, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return devops.Release{}, err
 	}
@@ -646,7 +647,7 @@ func (s *Store) RollbackRelease(ctx context.Context, releaseID string) (devops.R
 // targetEnvID 由 handler 经 environment.NextPromoteTarget 算出（store 不感知 env 阶序）。
 // 不持锁调 CreateRelease（其内部自持 s.mu，Go mutex 不可重入会自死锁），PromotedFrom 标记单独锁内写。
 func (s *Store) PromoteRelease(ctx context.Context, srcReleaseID, targetEnvID string) (devops.Release, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return devops.Release{}, err
 	}

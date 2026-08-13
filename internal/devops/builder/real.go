@@ -89,7 +89,7 @@ func (r Real) Build(ctx context.Context, p Params) (Result, error) {
 	if buildCtx == "" {
 		buildCtx = "."
 	}
-	tag := p.Branch + "-" + safeShort(p.Commit, 8)
+	tag := buildTag(p)
 	ref := ImageRef(p, tag)
 
 	// 可选 docker login（私有 registry 凭证）。

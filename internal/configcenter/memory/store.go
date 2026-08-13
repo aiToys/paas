@@ -33,18 +33,10 @@ func NewStore() *Store {
 	}
 }
 
-func tenantOrErr(ctx context.Context) (string, error) {
-	tid, ok := tenant.TenantFrom(ctx)
-	if !ok {
-		return "", fmt.Errorf("missing tenant context")
-	}
-	return tid, nil
-}
-
 // —— Namespace ——
 
 func (s *Store) ListNamespaces(ctx context.Context, serviceID string) ([]configcenter.Namespace, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -82,7 +74,7 @@ func (s *Store) ListAllNamespaces(ctx context.Context) ([]configcenter.Namespace
 }
 
 func (s *Store) GetNamespace(ctx context.Context, id string) (configcenter.Namespace, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return configcenter.Namespace{}, err
 	}
@@ -96,7 +88,7 @@ func (s *Store) GetNamespace(ctx context.Context, id string) (configcenter.Names
 }
 
 func (s *Store) CreateNamespace(ctx context.Context, n configcenter.Namespace) (configcenter.Namespace, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return configcenter.Namespace{}, err
 	}
@@ -119,7 +111,7 @@ func (s *Store) CreateNamespace(ctx context.Context, n configcenter.Namespace) (
 }
 
 func (s *Store) DeleteNamespace(ctx context.Context, id string) error {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return err
 	}
@@ -147,7 +139,7 @@ func (s *Store) DeleteNamespace(ctx context.Context, id string) error {
 // —— Item ——
 
 func (s *Store) ListItems(ctx context.Context, namespaceID string) ([]configcenter.ConfigItem, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -169,7 +161,7 @@ func (s *Store) ListItems(ctx context.Context, namespaceID string) ([]configcent
 
 // UpsertItem 同 (tenant, namespace, key) 视为同一项更新，否则新增。
 func (s *Store) UpsertItem(ctx context.Context, item configcenter.ConfigItem) (configcenter.ConfigItem, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return configcenter.ConfigItem{}, err
 	}
@@ -207,7 +199,7 @@ func (s *Store) UpsertItem(ctx context.Context, item configcenter.ConfigItem) (c
 }
 
 func (s *Store) DeleteItem(ctx context.Context, id string) error {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return err
 	}
@@ -237,7 +229,7 @@ func clonePublish(p configcenter.Publish) configcenter.Publish {
 }
 
 func (s *Store) ListPublishes(ctx context.Context, namespaceID string) ([]configcenter.Publish, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -259,7 +251,7 @@ func (s *Store) ListPublishes(ctx context.Context, namespaceID string) ([]config
 
 // CreatePublish 快照当前 namespace 全部 item 生成新 active 发布。
 func (s *Store) CreatePublish(ctx context.Context, namespaceID string) (configcenter.Publish, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return configcenter.Publish{}, err
 	}
@@ -308,7 +300,7 @@ func (s *Store) CreatePublish(ctx context.Context, namespaceID string) (configce
 
 // RollbackPublish 激活历史 rolled-back 发布为 active。
 func (s *Store) RollbackPublish(ctx context.Context, publishID string) (configcenter.Publish, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return configcenter.Publish{}, err
 	}
@@ -334,7 +326,7 @@ func (s *Store) RollbackPublish(ctx context.Context, publishID string) (configce
 }
 
 func (s *Store) ActivePublish(ctx context.Context, namespaceID string) (configcenter.Publish, bool, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return configcenter.Publish{}, false, err
 	}
@@ -359,7 +351,7 @@ func (s *Store) ActivePublish(ctx context.Context, namespaceID string) (configce
 
 // PublishNamespaceID 返回发布所属 namespace（回滚路由校验用）。
 func (s *Store) PublishNamespaceID(ctx context.Context, publishID string) (string, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return "", err
 	}

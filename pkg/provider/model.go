@@ -53,7 +53,7 @@ type Vendor struct {
 	ID            string `json:"id"`            // 如 "airouter"
 	Name          string `json:"name"`          // 展示名（如 "airouter 网关"）
 	Type          string `json:"type"`          // openai-compatible（Channel.Type 同源）
-	BaseURL       string `json:"baseUrl"`       // 供应商 BaseURL（如 https://airouter.ddmc-inc.com/api/v1）
+	BaseURL       string `json:"baseUrl"`       // 供应商 BaseURL（OpenAI 兼容网关地址，如 https://api.openai.com/v1）
 	CredentialRef string `json:"credentialRef"` // 凭证引用（security 平台级 Secret ID）
 	Description   string `json:"description,omitempty"`
 }

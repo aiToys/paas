@@ -69,6 +69,15 @@ type Chunk struct {
 	// FinishReason 结束原因（"stop" | "tool_calls" | "length"）；流末块填充。
 	// runtime 据 "tool_calls" 判定进入下一轮工具循环。
 	FinishReason string
+	// Usage 流末 token 用量（仅最后一块带，依赖 stream_options.include_usage=true）。
+	// 供 OTel gen_ai.usage.{input,output}_tokens 属性记录 LLM 调用成本。nil 表示上游未返。
+	Usage *Usage
+}
+
+// Usage 是 LLM 调用的 token 用量（OpenAI 兼容 usage 字段，OTel gen_ai.usage 语义）。
+type Usage struct {
+	InputTokens  int // prompt_tokens（输入）
+	OutputTokens int // completion_tokens（输出）
 }
 
 // Provider 是推理提供者抽象（echo / mock / OpenAICompatibleProvider 等均实现它）。

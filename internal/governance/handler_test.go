@@ -249,3 +249,86 @@ func TestHandlerInstanceLaneFilter(t *testing.T) {
 		t.Fatalf("?lane=default 应只返基线实例，got %+v", base.Instances)
 	}
 }
+
+// fakeDiscoverer stub governance.InstanceDiscoverer（数据面真源）。
+type fakeDiscoverer struct {
+	instances []governance.Instance
+	err       error
+	gotLane   string
+}
+
+func (f *fakeDiscoverer) DiscoverInstances(ctx context.Context, namespace, serviceName, lane string) ([]governance.Instance, error) {
+	f.gotLane = lane
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.instances, nil
+}
+
+// TestHandlerServiceDetailDiscovered 验证注入 discoverer 后服务详情返数据面 ready 实例（覆盖手动注册表）。
+func TestHandlerServiceDetailDiscovered(t *testing.T) {
+	store := govmemory.NewStore()
+	h := governance.NewHandler(store,
+		governance.WithEnvResolver(envmemory.NewStore()),
+		governance.WithInstanceDiscoverer(&fakeDiscoverer{instances: []governance.Instance{
+			{ID: "ep-1", ServiceID: "paas-shop-bff", Addr: "192.168.1.10:8080", Status: governance.StatusHealthy, LaneID: governance.LaneDefault},
+		}}))
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+
+	// 建一个服务（手动注册表为空）
+	r := req(acmeCtx(), "POST", "/api/services", governance.Service{
+		Name: "paas-shop-bff", EnvID: "env-acme-test", Protocol: governance.ProtocolHTTP, Port: 8080,
+	})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("建服务应 201，got %d: %s", w.Code, w.Body.String())
+	}
+	var svc governance.Service
+	decodeData(t, w.Body.Bytes(), &svc)
+
+	// 详情应返 discoverer 的 ready 实例（手动表为空，被数据面真源覆盖）
+	r = req(acmeCtx(), "GET", "/api/services/"+svc.ID, nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	var detail governance.ServiceDetail
+	decodeData(t, w.Body.Bytes(), &detail)
+	if len(detail.Instances) != 1 || detail.Instances[0].Addr != "192.168.1.10:8080" {
+		t.Fatalf("应返 discoverer 的 ready 实例，got %+v", detail.Instances)
+	}
+}
+
+// TestHandlerServiceDetailDiscovererEmptyFallback 验证 discoverer 返空（未部署）时回退手动注册表。
+func TestHandlerServiceDetailDiscovererEmptyFallback(t *testing.T) {
+	store := govmemory.NewStore()
+	h := governance.NewHandler(store,
+		governance.WithEnvResolver(envmemory.NewStore()),
+		governance.WithInstanceDiscoverer(&fakeDiscoverer{instances: nil}))
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+
+	r := req(acmeCtx(), "POST", "/api/services", governance.Service{
+		Name: "manual-svc", EnvID: "env-acme-test", Protocol: governance.ProtocolHTTP, Port: 8080,
+	})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	var svc governance.Service
+	decodeData(t, w.Body.Bytes(), &svc)
+
+	// 手动注册一条实例
+	r = req(acmeCtx(), "POST", "/api/services/"+svc.ID+"/instances", governance.Instance{Addr: "10.0.0.1:8080"})
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("注册实例应 201，got %d", w.Code)
+	}
+
+	// discoverer 返空 -> 回退手动表（1 条）
+	r = req(acmeCtx(), "GET", "/api/services/"+svc.ID, nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	var detail governance.ServiceDetail
+	decodeData(t, w.Body.Bytes(), &detail)
+	if len(detail.Instances) != 1 || detail.Instances[0].Addr != "10.0.0.1:8080" {
+		t.Fatalf("discoverer 空应回退手动表，got %+v", detail.Instances)
+	}
+}

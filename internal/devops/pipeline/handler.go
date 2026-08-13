@@ -155,6 +155,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case strings.HasPrefix(r.URL.Path, "/api/admin/pipeline-templates"):
 		h.serveAdminTemplates(w, r) // Task B2
+	case strings.HasPrefix(r.URL.Path, "/api/admin/pipelineruns"):
+		h.serveAdminRuns(w, r) // admin 跨租户 PipelineRun 总览
 	case strings.HasPrefix(r.URL.Path, "/api/pipeline-templates"):
 		h.serveTemplates(w, r)
 	case strings.HasPrefix(r.URL.Path, "/api/pipelineruns"):
@@ -367,6 +369,25 @@ func (h *Handler) serveTemplates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	list, err := h.templates.ListTemplates(r.Context())
+	if err != nil {
+		httputil.WriteInternalError(w, err)
+		return
+	}
+	httputil.WriteData(w, list)
+}
+
+// serveAdminRuns 处理 GET /api/admin/pipelineruns（super_admin 跨租户 PipelineRun 总览）。
+// 返回全租户最近运行（带 TenantID，LIMIT 1000），可选 ?status= 过滤。只读。
+func (h *Handler) serveAdminRuns(w http.ResponseWriter, r *http.Request) {
+	if !h.platformAdmin(r) {
+		httputil.WriteError(w, http.StatusForbidden, "forbidden: super_admin required")
+		return
+	}
+	if r.Method != http.MethodGet {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	list, err := h.runs.ListAllRuns(r.Context(), r.URL.Query().Get("status"))
 	if err != nil {
 		httputil.WriteInternalError(w, err)
 		return
@@ -701,6 +722,12 @@ func (h *Handler) webhookTrigger(w http.ResponseWriter, r *http.Request, pid str
 		httputil.WriteError(w, http.StatusBadRequest, "参数解析失败: "+rerr.Error())
 		return
 	}
+	// webhook 触发免 prod:write（无用户身份），但若 stages 触达 prod 必须含 approve 门禁兜底，
+	// 防去掉 approve 的 CD 模板被 webhook 直接部署生产（manual 路径靠调用者 prod:write，webhook 靠 approve）。
+	if h.targetsProd(wctx, resolved) && !hasApproveGate(resolved) {
+		httputil.WriteError(w, http.StatusForbidden, "webhook 触发的生产部署流水线必须包含 approve 审批门禁")
+		return
+	}
 	created, err := h.triggerRunInternal(wctx, p.AppID, pid, resolved, branch, push.After, "", TriggerWebhook)
 	if err != nil {
 		httputil.WriteServiceError(w, toHTTPStatus(err), err)
@@ -762,34 +789,53 @@ func validateDeployEnvs(stages []StageDef) string {
 // （promote 提升的是前序 deploy 产生的 release，target = NextPromoteTarget(前序 deploy envId)）。
 // 覆盖 [deploy test, promote] 这类把变更间接发布到 prod 的链路（防绕过 prod:write）。
 func (h *Handler) allowProdFlow(w http.ResponseWriter, r *http.Request, stages []StageDef) bool {
+	if !h.targetsProd(r.Context(), stages) {
+		return true // 不触 prod，放行
+	}
+	return h.hasProdWrite(w, r)
+}
+
+// targetsProd 静态判定 stages 是否触达 prod 环境（deploy 到 prod，或 promote 链路目标 prod）。
+// 解析失败时保守按 prod 处理（fail-closed，防 env 查不到时绕过）。供 allowProdFlow 与 webhook 门禁复用。
+func (h *Handler) targetsProd(ctx context.Context, stages []StageDef) bool {
 	if h.envType == nil && h.promoteTargetType == nil {
-		return true // 未注入环境解析（测试场景），跳过
+		return false // 未注入环境解析（测试场景），不触 prod
 	}
 	lastDeployEnvID := ""
 	for _, s := range stages {
 		switch s.Type {
 		case StageDeploy:
 			lastDeployEnvID = strOr(s.Params, "envId", "")
-			if lastDeployEnvID == "" || h.envType == nil {
+			if lastDeployEnvID == "" {
 				continue
 			}
-			if etype, err := h.envType(r.Context(), lastDeployEnvID); err == nil && etype == environment.TypeProd {
-				if !h.hasProdWrite(w, r) {
-					return false
-				}
+			if h.envType == nil {
+				return true // 已触 deploy 但无法解析类型，fail-closed
+			}
+			if etype, err := h.envType(ctx, lastDeployEnvID); err != nil || etype == environment.TypeProd {
+				return true
 			}
 		case StagePromote:
 			if lastDeployEnvID == "" || h.promoteTargetType == nil {
 				continue
 			}
-			if etype, err := h.promoteTargetType(r.Context(), lastDeployEnvID); err == nil && etype == environment.TypeProd {
-				if !h.hasProdWrite(w, r) {
-					return false
-				}
+			if etype, err := h.promoteTargetType(ctx, lastDeployEnvID); err != nil || etype == environment.TypeProd {
+				return true
 			}
 		}
 	}
-	return true
+	return false
+}
+
+// hasApproveGate 判定 stages 是否含 approve（人工审批门禁）stage。
+// webhook 触发的 CD pipeline 免 prod:write，强制要求 approve 门禁兜底（防去掉 approve 的模板被 webhook 直接部署 prod）。
+func hasApproveGate(stages []StageDef) bool {
+	for _, s := range stages {
+		if s.Type == StageApprove {
+			return true
+		}
+	}
+	return false
 }
 
 // hasProdWrite 校验调用者持 prod:write，失败写 403 返 false。

@@ -40,6 +40,7 @@ import (
 	"github.com/aitoys/paas/internal/configcenter"
 	ccmemory "github.com/aitoys/paas/internal/configcenter/memory"
 	ccpg "github.com/aitoys/paas/internal/configcenter/pg"
+	"github.com/aitoys/paas/internal/controller"
 	"github.com/aitoys/paas/internal/core/application"
 	appmemory "github.com/aitoys/paas/internal/core/application/memory"
 	applicationpg "github.com/aitoys/paas/internal/core/application/pg"
@@ -146,6 +147,13 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		devopsRepo := devopspg.NewStore(db, wlRepo) // Release 编排经 workload.Repository 接口透明
 		devopsRepo.SetPipeline(devopsPipeline)      // PAAS_DEVOPS_REAL=true 接真实 git/docker
 		govRepo := govpg.NewStore(db)
+		// K8s 启用：governance Route 写投影聚合 Ingress（按 host 多 path，hermes/nginx 标准）。
+		// applier 持裸 govRepo（RouteStore+ServiceStore），ApplyRepo 包装后给 handler（无循环引用）。
+		var govRepoWithApply governance.Repository = govRepo
+		if appliers.client != nil {
+			routeApplier := controller.NewK8sRouteApplier(appliers.client, govRepo, govRepo, ingressClassFromEnv())
+			govRepoWithApply = governance.NewApplyRepo(govRepo, routeApplier)
+		}
 		ccRepo := ccpg.NewStore(db)
 		billingRepo := billingpg.NewStore(db)
 		secRepo := secpg.NewStore(db)
@@ -188,7 +196,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 			DevOpsBuilds:   devopsRepo,
 			DevOpsImages:   devopsRepo,
 			DevOpsReleases: devopsRepo,
-			Governance:     govRepo,
+			Governance:     govRepoWithApply,
 			ConfigCenter:   ccRepo,
 			Billing:        billingRepo,
 			Security:       secRepo,
@@ -224,6 +232,12 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 	devopsRepo := devopsmemory.NewStore(wlRepo)
 	devopsRepo.SetPipeline(devopsPipeline) // PAAS_DEVOPS_REAL=true 接真实 git/docker
 	govRepo := govmemory.NewStore()
+	// K8s 启用：governance Route 写投影聚合 Ingress（内存路径同款，applier 持裸 govRepo）。
+	var govRepoWithApply governance.Repository = govRepo
+	if appliers.client != nil {
+		routeApplier := controller.NewK8sRouteApplier(appliers.client, govRepo, govRepo, ingressClassFromEnv())
+		govRepoWithApply = governance.NewApplyRepo(govRepo, routeApplier)
+	}
 	ccRepo := ccmemory.NewStore()
 	billingRepo := billingmemory.NewStore()
 	secRepo := secmemory.NewStore()
@@ -254,7 +268,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		DevOpsBuilds:   devopsRepo,
 		DevOpsImages:   devopsRepo,
 		DevOpsReleases: devopsRepo,
-		Governance:     govRepo,
+		Governance:     govRepoWithApply,
 		ConfigCenter:   ccRepo,
 		Billing:        billingRepo,
 		Security:       secRepo,

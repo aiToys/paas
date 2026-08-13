@@ -90,7 +90,17 @@ type Instance struct {
 type ServiceDetail struct {
 	Service   Service    `json:"service"`
 	Instances []Instance `json:"instances"`
+	// InstancesSource 标识实例来源：discovered=数据面 Endpoints 真源（readiness probe 驱动，
+	// 无需应用主动心跳）；manual=手动注册表（应用/SDK 上报，心跳维活）。前端据此决定「心跳」
+	// 按钮显隐——discovered 模式下心跳无意义（去手动表查 iid 必 not found）。
+	InstancesSource string `json:"instancesSource,omitempty"`
 }
+
+// 实例来源常量（ServiceDetail.InstancesSource）。
+const (
+	SourceDiscovered = "discovered" // 数据面 Endpoints 真源
+	SourceManual     = "manual"     // 手动注册表
+)
 
 // Validate 校验实例：serviceID/addr/status 合法。
 func (i Instance) Validate() error {

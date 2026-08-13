@@ -240,9 +240,14 @@ type ReleaseInput struct {
 	AppID     string `json:"appId"`
 	EnvID     string `json:"envId"`
 	LaneID    string `json:"laneId,omitempty"` // 部署到的泳道（空=default 基线，向后兼容）
+	Service   string `json:"service,omitempty"` // 部署到的服务（同 app 多服务场景，如 paas-shop product/recommend/...）；空=单服务（向后兼容）
 	ImageID   string `json:"imageId"`
 	Strategy  string `json:"strategy"`
-	CreatedBy string `json:"-"` // handler 从身份 ctx 注入，非用户提交
+	// Port/ContainerPort 仅在「新建基线 Workload」时设定（驱动 reconciler 建 Service，供 smoke 探活/服务发现）。
+	// 复用既有 Workload 时忽略（端口属 Workload 既有配置）。0 = 不建 Service（向后兼容）。
+	Port          int `json:"port,omitempty"`
+	ContainerPort int `json:"containerPort,omitempty"`
+	CreatedBy     string `json:"-"` // handler 从身份 ctx 注入，非用户提交
 }
 
 type fieldErr struct{ field string }
@@ -250,3 +255,22 @@ type fieldErr struct{ field string }
 func (e fieldErr) Error() string { return "字段非法或缺失: " + e.field }
 
 func errInvalid(field string) error { return fieldErr{field: field} }
+
+// BaselineWorkloadName 生成基线 Workload 名（CreateRelease 新建时用，memory+pg 共享，DRY）。
+//
+// 命名规则：
+//   - 多服务（service 非空，如 product/recommend）：`<app>-<service>-svc[-<lane>]`
+//   - 单服务（service 空，向后兼容）：`<app>-svc[-<lane>]`
+//
+// lane=default 不带后缀；非 default（feature 泳道）追加 `-<lane>`。
+// 同 app×env×lane×service 唯一，reconciler 建同名 K8s Service（DNS 可达）。
+func BaselineWorkloadName(appID, service, lane string) string {
+	base := appID + "-svc"
+	if service != "" {
+		base = appID + "-" + service + "-svc"
+	}
+	if lane != "" && lane != "default" {
+		base = base + "-" + lane
+	}
+	return base
+}

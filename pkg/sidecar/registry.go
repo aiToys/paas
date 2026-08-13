@@ -20,8 +20,17 @@ type Client struct {
 }
 
 // NewClient 创建客户端，默认 10s 超时。
+// CheckRedirect 设为 ErrUseLastResponse（不跟随重定向），防 BaseURL 被误配/劫持为 302→攻击者主机
+// 或云元数据接口时携带 Bearer APIKey 外发（SSRF 凭证泄漏）。与平台 internal/httputil.NewClient 同款防护。
 func NewClient(baseURL, apiKey string) *Client {
-	return &Client{BaseURL: baseURL, APIKey: apiKey, HTTP: &http.Client{Timeout: 10 * time.Second}}
+	return &Client{
+		BaseURL: baseURL,
+		APIKey:  apiKey,
+		HTTP: &http.Client{
+			Timeout:       10 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
+	}
 }
 
 // Instance 注册体（对齐 governance.Instance）。

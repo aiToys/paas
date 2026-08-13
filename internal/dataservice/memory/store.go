@@ -76,16 +76,8 @@ func cloneIntP(p *int) *int {
 	return &v
 }
 
-func tenantOrErr(ctx context.Context) (string, error) {
-	tid, ok := tenant.TenantFrom(ctx)
-	if !ok {
-		return "", fmt.Errorf("missing tenant context")
-	}
-	return tid, nil
-}
-
 func (s *Store) List(ctx context.Context, kind string) ([]dataservice.DataService, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +122,7 @@ func (s *Store) ListAll(ctx context.Context) ([]dataservice.DataService, error) 
 }
 
 func (s *Store) Get(ctx context.Context, id string) (dataservice.DataService, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return dataservice.DataService{}, err
 	}
@@ -162,7 +154,7 @@ func (s *Store) GetAny(ctx context.Context, id string) (dataservice.DataService,
 
 // Create 校验后存入；status 空时补 running。
 func (s *Store) Create(ctx context.Context, d dataservice.DataService) (dataservice.DataService, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return dataservice.DataService{}, err
 	}
@@ -203,7 +195,7 @@ func (s *Store) Create(ctx context.Context, d dataservice.DataService) (dataserv
 }
 
 func (s *Store) Update(ctx context.Context, d dataservice.DataService) (dataservice.DataService, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return dataservice.DataService{}, err
 	}
@@ -258,7 +250,7 @@ func (s *Store) Update(ctx context.Context, d dataservice.DataService) (dataserv
 }
 
 func (s *Store) Delete(ctx context.Context, id string) error {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return err
 	}

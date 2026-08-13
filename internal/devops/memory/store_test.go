@@ -384,7 +384,7 @@ func TestCreateReleaseUsesLane(t *testing.T) {
 	}
 
 	// feature-x 泳道应建 1 个 Workload（且 LaneID=feature-x）
-	wls, err := wl.List(ctx, "env-acme-test", "app-cs", "feature-x", "service")
+	wls, err := wl.List(ctx, "env-acme-test", "app-cs", "feature-x", "service", "")
 	if err != nil {
 		t.Fatalf("List feature-x: %v", err)
 	}
@@ -392,5 +392,105 @@ func TestCreateReleaseUsesLane(t *testing.T) {
 		t.Errorf("feature-x 泳道应建 1 个 Workload，得 %d", len(wls))
 	} else if wls[0].LaneID != "feature-x" {
 		t.Errorf("新建 Workload.LaneID=%q, want feature-x", wls[0].LaneID)
+	}
+}
+
+// TestCreateReleaseLaneInheritsPort 验证新建泳道 Workload 从同 app×env 的 baseline
+// 继承 Port/ContainerPort（泳道是基线的联调克隆，需建 Service 供 smoke 探活/跨泳道发现）。
+// baseline wl-cs-api seed Port=80；feature-x 新建应继承 80，否则 reconciler 不建 Service。
+func TestCreateReleaseLaneInheritsPort(t *testing.T) {
+	wl := wlmemory.NewStore()
+	s := NewStore(wl)
+	ctx := acmeCtx()
+	seedImage(s, "img-port-test", "t-acme", "app-cs")
+
+	relLane, err := s.CreateRelease(ctx, devops.ReleaseInput{
+		AppID: "app-cs", EnvID: "env-acme-test", LaneID: "feature-x", ImageID: "img-port-test",
+	})
+	if err != nil {
+		t.Fatalf("CreateRelease lane: %v", err)
+	}
+
+	got, err := wl.Get(ctx, relLane.WorkloadID)
+	if err != nil {
+		t.Fatalf("Get 泳道 Workload: %v", err)
+	}
+	if got.Port != 80 || got.ContainerPort != 80 {
+		t.Errorf("泳道 Workload 应继承 baseline Port/ContainerPort=80，得 Port=%d ContainerPort=%d", got.Port, got.ContainerPort)
+	}
+}
+
+// TestCreateReleaseExplicitPort 验证 ReleaseInput.Port（deploy stage 显式端口）优先于
+// baseline 继承，写入新建 Workload。端口驱动 reconciler 建 Service（paas-shop 多微服务模型
+// 下 generic <app>-svc-<lane> 无 baseline 可继承，须 deploy 显式指定）。
+func TestCreateReleaseExplicitPort(t *testing.T) {
+	wl := wlmemory.NewStore()
+	s := NewStore(wl)
+	ctx := acmeCtx()
+	seedImage(s, "img-explicit-port", "t-acme", "app-cs")
+
+	// 显式 Port=8081 + 非 default lane（baseline wl-cs-api 是 Port=80，显式应覆盖继承值）
+	rel, err := s.CreateRelease(ctx, devops.ReleaseInput{
+		AppID: "app-cs", EnvID: "env-acme-test", LaneID: "feature-y",
+		ImageID: "img-explicit-port", Port: 8081, ContainerPort: 8081,
+	})
+	if err != nil {
+		t.Fatalf("CreateRelease: %v", err)
+	}
+	got, _ := wl.Get(ctx, rel.WorkloadID)
+	if got.Port != 8081 || got.ContainerPort != 8081 {
+		t.Errorf("显式 Port 应覆盖继承，得 Port=%d ContainerPort=%d", got.Port, got.ContainerPort)
+	}
+}
+
+// TestCreateReleaseMultiService 验证同 app 多服务场景（paas-shop 模型）：
+// 同 app×env×lane 下不同 service 各自独立 Workload（不互相覆盖），CreateRelease 按 service 精确查找。
+func TestCreateReleaseMultiService(t *testing.T) {
+	wl := wlmemory.NewStore()
+	s := NewStore(wl)
+	ctx := acmeCtx()
+	seedImage(s, "img-prod", "t-acme", "paas-shop")
+	seedImage(s, "img-rec", "t-acme", "paas-shop")
+
+	// 部署 product 服务
+	relProd, err := s.CreateRelease(ctx, devops.ReleaseInput{
+		AppID: "paas-shop", EnvID: "env-acme-test", Service: "product",
+		ImageID: "img-prod", Port: 8081, ContainerPort: 8081,
+	})
+	if err != nil {
+		t.Fatalf("CreateRelease product: %v", err)
+	}
+	// 部署 recommend 服务（同 app×env×lane，不同 service）
+	relRec, err := s.CreateRelease(ctx, devops.ReleaseInput{
+		AppID: "paas-shop", EnvID: "env-acme-test", Service: "recommend",
+		ImageID: "img-rec", Port: 8082, ContainerPort: 8082,
+	})
+	if err != nil {
+		t.Fatalf("CreateRelease recommend: %v", err)
+	}
+	// 两个服务应落到不同 Workload（不互相覆盖）
+	if relProd.WorkloadID == relRec.WorkloadID {
+		t.Errorf("product/recommend 应落到不同 Workload，均得 %s", relProd.WorkloadID)
+	}
+	// 各自 Service 字段 + Name 正确
+	prodWL, _ := wl.Get(ctx, relProd.WorkloadID)
+	if prodWL.Service != "product" || prodWL.Name != "paas-shop-product-svc" {
+		t.Errorf("product Workload Service=%q Name=%q", prodWL.Service, prodWL.Name)
+	}
+	recWL, _ := wl.Get(ctx, relRec.WorkloadID)
+	if recWL.Service != "recommend" || recWL.Name != "paas-shop-recommend-svc" {
+		t.Errorf("recommend Workload Service=%q Name=%q", recWL.Service, recWL.Name)
+	}
+
+	// 再次部署 product：应复用既有 product Workload（不新建，仅 UpdateImage）
+	relProd2, err := s.CreateRelease(ctx, devops.ReleaseInput{
+		AppID: "paas-shop", EnvID: "env-acme-test", Service: "product",
+		ImageID: "img-prod", Port: 8081, ContainerPort: 8081,
+	})
+	if err != nil {
+		t.Fatalf("CreateRelease product 2nd: %v", err)
+	}
+	if relProd2.WorkloadID != relProd.WorkloadID {
+		t.Errorf("2nd product 应复用 Workload %s，得 %s", relProd.WorkloadID, relProd2.WorkloadID)
 	}
 }

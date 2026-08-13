@@ -20,11 +20,13 @@ import (
 type LogsStore struct {
 	lokiURL string
 	client  *http.Client
+	lister  observability.AppWorkloadLister // 应用级查询：解析 app→工作负载 ID（pod 名正则）
 }
 
 // NewLogsStore 创建 Loki 适配。lokiURL 为 Loki 根地址（如 http://loki:3100）。
-func NewLogsStore(lokiURL string) *LogsStore {
-	return &LogsStore{lokiURL: lokiURL, client: httputil.NewClient(10 * time.Second)}
+// lister 可为 nil（应用级查询降级返空）。
+func NewLogsStore(lokiURL string, lister observability.AppWorkloadLister) *LogsStore {
+	return &LogsStore{lokiURL: lokiURL, client: httputil.NewClient(10 * time.Second), lister: lister}
 }
 
 // lokiResponse 是 Loki /loki/api/v1/query_range 响应的最小子集。
@@ -42,30 +44,34 @@ type lokiResponse struct {
 
 // ListLogs 调 Loki 查最近 1h 日志，按 appID/level/q 过滤。
 //
-// 应用级映射：workload_controller 给工作负载 Pod 打 label `paas.aitoys/app=<appID>`，
-// promtail 采集时把 label key 的 `.`/`/` 转成 `_`，故 Loki stream label = `paas_aitoys_app`。
-// LogQL selector 用该 label 精确匹配 appID；空 appID 用 `=~".+"` 匹配全部 PaaS 应用 Pod。
+// 应用级查询：promtail 默认只提取 app/namespace 等通用 stream label，不含自定义 `paas.aitoys/app`，
+// 故按 namespace(paas-<tenant>) + 工作负载 pod 名正则（wl-<id>-.*）匹配，与 metrics 同源。
+// 空 appID 用 namespace 内 `pod=~"wl-.*"` 匹配该租户全部 PaaS 应用 Pod（带 tenant 隔离）。
 //
 // level：Pod stdout 日志无结构化 level label，改用内容正则 best-effort 过滤
 // （`|~ "(?i)\berror\b"` 等），非严格——仅缩小范围，不保证命中所有该级别日志。
 //
-// Loki 按时间倒序返回；截断 limit。后端不可达降级返空。
+// Loki 按时间倒序返回；截断 limit。后端不可达 / lister 未注入降级返空。
 func (s *LogsStore) ListLogs(ctx context.Context, appID, level, q string, limit int) ([]observability.LogEntry, error) {
 	if limit <= 0 || limit > observability.MaxLogs {
 		limit = 100
 	}
-	// LogQL selector：按 paas_aitoys_app label 过滤
-	appSel := fmt.Sprintf("paas_aitoys_app=%q", appID)
-	if appID == "" {
-		appSel = `paas_aitoys_app=~".+"` // 全部 PaaS 应用 Pod（带 app label）
+	tid, _ := tenant.TenantFrom(ctx)
+	ns := tenant.Namespace(tid) // paas-<tenant>，多租户隔离（空 tid 兜底 paas-x）
+	// Pod 名正则：appID 指定时解析其工作负载 ID；否则匹配全部 wl-.* Pod（本租户）。
+	podRegex := "wl-.*"
+	if appID != "" {
+		if s.lister == nil {
+			return []observability.LogEntry{}, nil // 应用级需 lister
+		}
+		ids, err := s.lister.AppWorkloadIDs(ctx, appID)
+		if err != nil || len(ids) == 0 {
+			return []observability.LogEntry{}, nil // app 无工作负载：降级返空
+		}
+		podRegex = lokiPodSelector(ids)
 	}
-	// 多租户隔离：限定本租户 Pod（paas_aitoys/tenant label 被 promtail 转下划线）。
-	// 无 tenant ctx（测试/未鉴权）保持原查询，不额外过滤（兼容现有行为）。
-	selector := "{" + appSel
-	if tid, ok := tenant.TenantFrom(ctx); ok && tid != "" {
-		selector += fmt.Sprintf(",paas_aitoys_tenant=%q", tid)
-	}
-	selector += "}"
+	// LogQL selector：限定本租户 ns + 应用 pod 名正则。
+	selector := fmt.Sprintf(`{namespace=%q,pod=~%q}`, ns, podRegex)
 	if level != "" {
 		// 内容正则 best-effort（非严格 level label）
 		selector += fmt.Sprintf(" |~ %q", "(?i)\\b"+regexp.QuoteMeta(level)+"\\b")
@@ -95,7 +101,6 @@ func (s *LogsStore) ListLogs(ctx context.Context, appID, level, q string, limit 
 	}
 	out := make([]observability.LogEntry, 0, limit)
 	for _, r := range lr.Data.Result {
-		app := r.Stream["paas_aitoys_app"]
 		pod := r.Stream["pod"]
 		for _, val := range r.Values {
 			if len(val) < 2 {
@@ -105,7 +110,7 @@ func (s *LogsStore) ListLogs(ctx context.Context, appID, level, q string, limit 
 			msg := val[1]
 			out = append(out, observability.LogEntry{
 				ID:        fmt.Sprintf("%s/%s", pod, val[0]),
-				AppID:     app,
+				AppID:     appID, // appID 来自查询参数（stream 已按 ns+pod 正则限定，无 paas_aitoys_app label）
 				Level:     inferLevel(msg),
 				Message:   msg,
 				TraceID:   r.Stream["trace_id"],

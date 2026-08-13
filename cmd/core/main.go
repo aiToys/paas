@@ -46,6 +46,7 @@ import (
 	"github.com/aitoys/paas/internal/governance"
 	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/internal/maas"
+	"github.com/aitoys/paas/internal/metrics"
 	"github.com/aitoys/paas/internal/messaging"
 	"github.com/aitoys/paas/internal/observability"
 	"github.com/aitoys/paas/internal/observability/tracing"
@@ -64,15 +65,18 @@ func main() {
 	defer cancel()
 
 	gw := gateway.New()
-	meter := &gateway.Meter{}
+	// 业务 Prometheus 指标 registry（隔离 controller-runtime 进程级指标）。
+	// 推理指标经 gateway.Meter.Inf 记录（成功/失败统一入口）；HTTP 指标经 HTTPMiddleware 记录。
+	metricsReg := metrics.NewRegistry()
+	meter := &gateway.Meter{Inf: metricsReg.Inference()}
 
-	if err := run(ctx, gw, meter); err != nil {
+	if err := run(ctx, gw, meter, metricsReg); err != nil {
 		log.Fatalf("core 启动失败: %v", err)
 	}
 }
 
 // run 启动 HTTP 服务并引导插件；返回非 nil 则进程以 1 退出。
-func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter) error {
+func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, metricsReg *metrics.Registry) error {
 	// OTel tracer 初始化（PAAS_OTEL_ENDPOINT 非空接 OTLP/HTTP 后端，空=noop 行为不变）。
 	tracerShutdown, err := tracing.Init(ctx, os.Getenv("PAAS_OTEL_ENDPOINT"))
 	if err != nil {
@@ -123,7 +127,20 @@ func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter) error {
 			log.Printf("[devops] 崩溃恢复 sweep 失败（继续启动）: %v", err)
 		}
 	}
-	srv := serveHTTP(gw, meter, stores, appliers)
+	// drift 修复：异步扫 PG workloads 全部行，对「PG 有行无 CRD」的补投影（CreateOrUpdate 幂等）。
+	// 等 manager cache 就绪后再扫（避免首启 controller 还没 watch 到 CRD）；2s 延迟 best-effort。
+	// 解决 traffic-pulse cronjob「PG 有行无 K8s CronJob」+ 历史裸 workload drift（paas-shop baseline）。
+	if appliers.workload != nil {
+		go func() {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(2 * time.Second):
+			}
+			reconcileWorkloadDrift(ctx, stores.Workload, appliers.workload)
+		}()
+	}
+	srv := serveHTTP(gw, meter, stores, appliers, metricsReg)
 	ran, err := bootstrapCore(ctx, plugins, deps)
 	if err != nil {
 		return err
@@ -221,6 +238,41 @@ func (a dsInstanceReader) Instances(ctx context.Context, ns, svc string) ([]data
 	return out, nil
 }
 
+// govInstanceDiscoverer 桥接 dataplane.EndpointsReader -> governance.InstanceDiscoverer。
+// 服务治理详情按 Service.Name（约定 = K8s Service 名）从 Endpoints 读 ready 实例，
+// namespace = paas-<tenant>（reader 内部再按 Service tenant label 校验归属本租户）。
+type govInstanceDiscoverer struct{ r dataplane.EndpointsReader }
+
+func (a govInstanceDiscoverer) DiscoverInstances(ctx context.Context, namespace, serviceName, lane string) ([]governance.Instance, error) {
+	if a.r == nil {
+		return nil, nil
+	}
+	list, err := a.r.Instances(ctx, namespace, serviceName, lane)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]governance.Instance, 0, len(list))
+	for _, x := range list {
+		meta := x.Metadata
+		if meta == nil {
+			meta = map[string]string{}
+		}
+		if x.Name != "" {
+			meta["pod"] = x.Name // 携带 K8s Service/Pod 名供前端展示
+		}
+		out = append(out, governance.Instance{
+			ID:        x.ID,
+			ServiceID: serviceName,
+			Addr:      fmt.Sprintf("%s:%d", x.IP, x.Port),
+			Status:    governance.StatusHealthy, // Endpoints Addresses 仅含 ready（readiness probe 通过）
+			LaneID:    x.LaneID,
+			Meta:      meta,
+			UpdatedAt: time.Now().UTC(),
+		})
+	}
+	return out, nil
+}
+
 // tenantChecker 桥接 identity.Repository -> dataservice/environment TenantChecker（代建校验租户存在）。
 type tenantChecker struct{ repo identity.Repository }
 
@@ -295,7 +347,7 @@ func resolveJWTSecret() string {
 //   - EnvTypeResolver：注入 environment store（实现 EnvType 方法），prod:write 校验跨模块复用。
 //
 // 模型目录平台共享（不按租户过滤）；应用/治理/配置等业务模块按租户隔离。
-func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, appliers k8sAppliers) *http.Server {
+func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, appliers k8sAppliers, metricsReg *metrics.Registry) *http.Server {
 	apiKey := resolveAPIKey()
 	// P3-2 计量采集：推理 token 用量回写 billing（meter.OnTokens 钩子）。
 	// appID 来自应用级 Key（强制归因到应用）；user 是 agent 软标签（仅日志，不入 billing 聚合）。
@@ -484,9 +536,11 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	appconfigHandler := appconfig.NewHandler(stores.AppConfig, appconfig.WithEnvResolver(stores.Environment))
 	appconfigHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
-	// 服务治理（注册中心 = 平台能力横切）：注入 environment store（prod 写校验）。
-	// 服务/实例租户私有；本期进程内 mock，数据面 SDK 接入留后续。
-	govHandler := governance.NewHandler(stores.Governance, governance.WithEnvResolver(stores.Environment))
+	// 服务治理（注册中心 = 平台能力横切）：注入 environment store（prod 写校验）+
+	// 数据面实例发现器（服务详情按 Service.Name 返真实 K8s Endpoint ready 实例）。
+	govHandler := governance.NewHandler(stores.Governance,
+		governance.WithEnvResolver(stores.Environment),
+		governance.WithInstanceDiscoverer(govInstanceDiscoverer{r: dataplane.NewEndpointsReader(appliers.clientset)}))
 	govHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 	// 数据面 SDK 接入 API（/dp/）：把 K8s Endpoints 暴露为 zeus 兼容服务发现真源。
 	// 鉴权复用 auth（dp token = API Key，绑 tenant）；reader 从 appliers.clientset 读 Endpoints
@@ -506,7 +560,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 
 	// 可观测（指标监控 + 告警规则，平台能力横切）。
 	// 惰性时序模拟采集，即时评估告警；不接 prod:write，独立于物理环境。
-	obsRepo := buildObservabilityStore()
+	obsRepo := buildObservabilityStore(workloadLister{repo: stores.Workload})
 	obsHandler := observability.NewHandler(obsRepo)
 	obsHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
@@ -521,7 +575,10 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// 配额计费（租户级资源配额 + 用量 + 账单，多租户商业化根基）。
 	// 独立于物理环境，不接 prod:write；权限 billing:read/write（admin 写，dev/view 读）。
 	// stores.Billing 与资源 Create 配额拦截共享同一 Store（用量真源唯一）。
-	billingHandler := billing.NewHandler(stores.Billing)
+	billingHandler := billing.NewHandler(stores.Billing,
+		billing.WithAudit(&identityAuditAdapter{store: stores.Security}),
+		billing.WithActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
+	)
 	billingHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
 	// 数据服务（资源中心：DB/缓存/MQ/存储/向量/搜索，通用领域 + Kind 区分）。
@@ -576,6 +633,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		workload.WithAdminQuota(wlQuotaFn),
 		workload.WithAdminAudit(&identityAuditAdapter{store: stores.Security}),
 		workload.WithAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
+		workload.WithAdminApplier(appliers.workload),
 	)
 
 	// admin devops handler（构建/镜像/发布 详情 + 回滚）。不代建（业务编排类）。
@@ -668,6 +726,8 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	mux.Handle("/api/admin/pipeline-templates/", auth(pipelineHandler))
 	mux.Handle("/api/pipelineruns", auth(pipelineHandler))
 	mux.Handle("/api/pipelineruns/", auth(pipelineHandler))
+	// admin 跨租户 PipelineRun 总览（super_admin，handler 内 platformAdmin 判定，与 admin 模板同款）。
+	mux.Handle("/api/admin/pipelineruns", auth(pipelineHandler))
 	// webhook 触发端点（无 auth 中间件，token 鉴权）：Gitea push event -> 触发 pipeline run。
 	// 用户在 Gitea 配 webhook URL = <baseURL>/api/webhooks/pipeline/<pid>?token=<token>。
 	mux.Handle("/api/webhooks/pipeline/", pipelineHandler)
@@ -834,6 +894,11 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 
 	mux.Handle("/livez", health.NewHandler())
 
+	// /metrics：业务 Prometheus 指标（http_requests_total / http_request_duration_seconds /
+	// paas_inference_*）。公开无鉴权——Prometheus scraper 不带凭证；路径已在 skipTelemetryPaths
+	// 跳过链路与 metrics 中间件自身统计（防自指）。
+	mux.Handle("/metrics", metricsReg.Handler())
+
 	// —— OpenAPI 元数据声明（Operation：spec-only，mux 注册见上方各 mux.Handle）——
 	// 应用主线（composite 内部派发，mux 粗粒度已注册，此处补 spec 逻辑操作）
 	reg.Operation("GET", "/api/applications",
@@ -904,6 +969,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		Replicas int    `json:"replicas"`
 		Status   string `json:"status"`
 	}{}), apiroute.WithResp(workload.Workload{}))
+	reg.Operation("PUT", "/api/workloads/{id}/schedule", apiroute.Tags("工作负载"), apiroute.Summary("修改 cronjob 调度表达式"), apiroute.Perm("workload:write"), apiroute.WithReqBody(struct {
+		Schedule string `json:"schedule"`
+	}{}), apiroute.WithResp(workload.Workload{}))
 	reg.Operation("DELETE", "/api/workloads/{id}", apiroute.Tags("工作负载"), apiroute.Summary("删除工作负载"), apiroute.Perm("workload:write"))
 	// DevOps
 	reg.Operation("GET", "/api/applications/{id}/repositories", apiroute.Tags("DevOps"), apiroute.Summary("应用代码仓库"), apiroute.Perm("repository:read"), apiroute.WithResp([]devops.CodeRepo{}))
@@ -944,6 +1012,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		Version string `json:"version"`
 	}{}), apiroute.WithResp(pipeline.PipelineRun{}))
 	reg.Operation("GET", "/api/pipelineruns", apiroute.Tags("流水线"), apiroute.Summary("运行列表（?appId=&pipelineId=&status=）"), apiroute.Perm("pipeline:read"), apiroute.WithResp([]pipeline.PipelineRun{}))
+	reg.Operation("GET", "/api/admin/pipelineruns", apiroute.Tags("流水线"), apiroute.Summary("运行总览（管理员跨租户，?status=）"), apiroute.Perm("super_admin"), apiroute.WithResp([]pipeline.PipelineRun{}))
 	reg.Operation("GET", "/api/pipelineruns/{id}", apiroute.Tags("流水线"), apiroute.Summary("运行详情（含各 stage 状态/输入输出）"), apiroute.Perm("pipeline:read"), apiroute.WithResp(pipeline.PipelineRun{}))
 	reg.Operation("POST", "/api/pipelineruns/{id}/stages/{idx}/approve", apiroute.Tags("流水线"), apiroute.Summary("审批/人工确认通过（恢复 paused run）"), apiroute.Perm("pipeline:write"))
 	reg.Operation("POST", "/api/pipelineruns/{id}/abort", apiroute.Tags("流水线"), apiroute.Summary("终止运行"), apiroute.Perm("pipeline:write"))
@@ -1059,6 +1128,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	mux.Handle("/api/admin/workloads", adminGuard(wlAdminHandler))
 	mux.Handle("/api/admin/workloads/", adminGuard(wlAdminHandler))
 	reg.Operation("GET", "/api/admin/workloads", apiroute.Tags("工作负载管理"), apiroute.Summary("工作负载列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]workload.Workload{}))
+	reg.Operation("POST", "/api/admin/workloads/reconcile", apiroute.Tags("工作负载管理"), apiroute.Summary("drift 修复（PG 有行无 CRD 的 Workload 补投影）"), apiroute.Perm("super_admin"), apiroute.WithResp(map[string]int{}))
 	reg.Operation("GET", "/api/admin/workloads/{id}", apiroute.Tags("工作负载管理"), apiroute.Summary("工作负载详情（跨租户，含实例）"), apiroute.Perm("super_admin"))
 	reg.Operation("GET", "/api/admin/workloads/{id}/logs", apiroute.Tags("工作负载管理"), apiroute.Summary("实例日志（Pod 级）"), apiroute.Perm("super_admin"))
 	reg.Operation("PUT", "/api/admin/workloads/{id}/scale", apiroute.Tags("工作负载管理"), apiroute.Summary("扩缩容（绕过 prod:write）"), apiroute.Perm("super_admin"))
@@ -1229,12 +1299,16 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Register("DELETE", "/api/api-keys/{id}", auth(http.HandlerFunc(idmHandler.DeleteAPIKey)),
 		apiroute.Tags("API 密钥"), apiroute.Summary("删除本租户 API Key"))
 
+	// 中间件链（内→外）：mux → csrf → recovery → metrics → otelhttp → securityHeaders。
+	// recovery 包 mux 最内层（捕获 handler panic 写 500，防单请求挂掉进程，SSE 流式也保护）；
+	// csrf 在 recovery 外（写操作 Origin/Referer 同源校验，cookie 会话防 CSRF 纵深）；
+	// metrics 在 recovery 外（statusRecorder 在 recovery 之外才能捕获 panic 写的 500；记
+	//   http_requests_total{method,route,status} + 耗时，route 经 reg.RegisteredPaths() 归一化防高基数）；
+	// otelhttp 最外层（自动建 span，过滤探针/契约/文档端点避免噪音）。
+	rootHandler := metrics.HTTPMiddleware(metricsReg, reg.RegisteredPaths())(recoveryMiddleware(csrfMiddleware(mux)))
 	srv := &http.Server{
 		Addr: ":8080",
-		// recovery 中间件包 mux 最内层（捕获 handler panic，防单请求挂掉进程，SSE 流式也保护）；
-		// csrf 在其外（写操作 Origin/Referer 同源校验，cookie 会话防 CSRF 纵深）；
-		// otelhttp 再包外层（自动建 span，过滤探针/契约/文档端点避免噪音）。
-		Handler: securityHeadersMiddleware(otelhttp.NewHandler(recoveryMiddleware(csrfMiddleware(mux)), "http.server",
+		Handler:          securityHeadersMiddleware(otelhttp.NewHandler(rootHandler, "http.server",
 			otelhttp.WithFilter(skipTelemetryPaths))),
 		ReadHeaderTimeout: 10 * time.Second, // 防 Slowloris 慢速头部攻击
 	}
@@ -1257,11 +1331,18 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	return srv
 }
 
-// skipTelemetryPaths 过滤探针/契约/文档端点，避免高频无业务语义请求污染链路。
+// skipTelemetryPaths 过滤探针/契约/文档/可观测查询端点，避免高频无业务语义请求污染链路。
+// - 探针/契约/文档：/livez、/openapi.json、/docs、/metrics（Prometheus scrape）
+// - 可观测查询：/api/observability/*（前端 10s 轮询，只读，trace 本身不能产生 trace 递归）
 func skipTelemetryPaths(r *http.Request) bool {
-	switch r.URL.Path {
-	case "/livez", "/openapi.json", "/docs":
+	path := r.URL.Path
+	switch path {
+	case "/livez", "/openapi.json", "/docs", "/metrics":
 		return false // 跳过（不建 span）
+	}
+	// /api/observability/ 前缀的只读查询全跳过（metrics/logs/traces/alert-rules/alerts）
+	if strings.HasPrefix(path, "/api/observability/") {
+		return false
 	}
 	return true
 }

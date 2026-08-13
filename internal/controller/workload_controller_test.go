@@ -61,6 +61,65 @@ func TestReconcileCreatesDeployment(t *testing.T) {
 	}
 }
 
+// OtelEndpoint 注入 service 类型 Pod env，与 DPToken 独立（应用不接数据面也应有 trace）。
+func TestReconcileInjectsOtelEndpoint(t *testing.T) {
+	scheme := newScheme(t)
+	w := &v1alpha1.Workload{
+		ObjectMeta: metav1.ObjectMeta{Name: "wl-otel", Namespace: "default"},
+		Spec: v1alpha1.WorkloadSpec{TenantID: "t-acme", AppID: "app-cs", Type: "service",
+			Name: "wl-otel", Image: "nginx", Replicas: 1},
+	}
+	cl := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(w).WithStatusSubresource(&v1alpha1.Workload{}).Build()
+	// OtelEndpoint 配了 DPToken 没配：验证独立注入，只应有 OTEL env。
+	r := &WorkloadReconciler{Client: cl, Scheme: scheme, OtelEndpoint: "jaeger.observability.svc:4318"}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "wl-otel", Namespace: "default"}}); err != nil {
+		t.Fatalf("reconcile 失败: %v", err)
+	}
+	var dep appsv1.Deployment
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "wl-otel", Namespace: "default"}, &dep); err != nil {
+		t.Fatalf("应创建 Deployment: %v", err)
+	}
+	var otel, dpToken string
+	for _, e := range dep.Spec.Template.Spec.Containers[0].Env {
+		switch e.Name {
+		case "PAAS_OTEL_ENDPOINT":
+			otel = e.Value
+		case "PAAS_DP_TOKEN":
+			dpToken = e.Value
+		}
+	}
+	if otel != "jaeger.observability.svc:4318" {
+		t.Fatalf("PAAS_OTEL_ENDPOINT 应注入，got %q", otel)
+	}
+	if dpToken != "" {
+		t.Fatalf("DPToken 未配不应注入，got %q", dpToken)
+	}
+}
+
+// OtelEndpoint 空时不注入（未配 OTEL 后端，应用 observ.Init noop 功能不受影响）。
+func TestReconcileNoOtelEndpointWhenEmpty(t *testing.T) {
+	scheme := newScheme(t)
+	w := &v1alpha1.Workload{
+		ObjectMeta: metav1.ObjectMeta{Name: "wl-no-otel", Namespace: "default"},
+		Spec: v1alpha1.WorkloadSpec{TenantID: "t-acme", AppID: "app-cs", Type: "service",
+			Name: "wl-no-otel", Image: "nginx", Replicas: 1},
+	}
+	cl := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(w).WithStatusSubresource(&v1alpha1.Workload{}).Build()
+	r := &WorkloadReconciler{Client: cl, Scheme: scheme}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "wl-no-otel", Namespace: "default"}}); err != nil {
+		t.Fatalf("reconcile 失败: %v", err)
+	}
+	var dep appsv1.Deployment
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "wl-no-otel", Namespace: "default"}, &dep); err != nil {
+		t.Fatalf("应创建 Deployment: %v", err)
+	}
+	for _, e := range dep.Spec.Template.Spec.Containers[0].Env {
+		if e.Name == "PAAS_OTEL_ENDPOINT" {
+			t.Fatalf("OtelEndpoint 空时不应注入，got %q", e.Value)
+		}
+	}
+}
+
 func TestReconcileIdempotent(t *testing.T) {
 	scheme := newScheme(t)
 	w := &v1alpha1.Workload{
@@ -124,6 +183,13 @@ func TestReconcileCronJob(t *testing.T) {
 	if rp := cj.Spec.JobTemplate.Spec.Template.Spec.RestartPolicy; rp != corev1.RestartPolicyNever {
 		t.Fatalf("CronJob Pod restartPolicy 应为 Never，实际 %s", rp)
 	}
+	// 同 applyJob：衍生 Job 失败一次即终止（BackoffLimit=0）+ 1 天后 GC，防永久残留。
+	if bl := cj.Spec.JobTemplate.Spec.BackoffLimit; bl == nil || *bl != 0 {
+		t.Fatalf("CronJob BackoffLimit 应为 0，实际 %v", bl)
+	}
+	if ttl := cj.Spec.JobTemplate.Spec.TTLSecondsAfterFinished; ttl == nil || *ttl != 86400 {
+		t.Fatalf("CronJob TTLSecondsAfterFinished 应为 86400，实际 %v", ttl)
+	}
 }
 
 // TestReconcileServiceCreatesService 验证 service 类型 + Port>0 时建 K8s Service（多微服务 DNS 互调前提）。
@@ -168,6 +234,11 @@ func TestReconcileServiceCreatesService(t *testing.T) {
 	if c.ReadinessProbe == nil || c.ReadinessProbe.TCPSocket == nil {
 		t.Fatalf("container 应有 TCP readiness probe")
 	}
+	// service + port>0 应注入 Prometheus 自动发现注解（抓业务端口 /metrics，应用级 RED 指标数据源）
+	ann := dep.Spec.Template.ObjectMeta.Annotations
+	if ann["prometheus.io/scrape"] != "true" || ann["prometheus.io/port"] != "8080" || ann["prometheus.io/path"] != "/metrics" {
+		t.Fatalf("service Pod 应注 prometheus.io/scrape|port|path 注解, 实际 %v", ann)
+	}
 }
 
 // TestReconcileServiceNoPortSkipsService 验证 Port=0 时不建 Service（向后兼容）。
@@ -185,6 +256,12 @@ func TestReconcileServiceNoPortSkipsService(t *testing.T) {
 	var svc corev1.Service
 	if err := cl.Get(context.Background(), types.NamespacedName{Name: "wl-noport", Namespace: "default"}, &svc); err == nil {
 		t.Fatalf("Port=0 不应建 Service")
+	}
+	// port=0 不注 prometheus 注解（无业务端口可抓）
+	var dep appsv1.Deployment
+	_ = cl.Get(context.Background(), types.NamespacedName{Name: "wl-noport", Namespace: "default"}, &dep)
+	if a := dep.Spec.Template.ObjectMeta.Annotations; a != nil && a["prometheus.io/scrape"] == "true" {
+		t.Fatalf("Port=0 不应注 prometheus.io/scrape, 实际 %v", a)
 	}
 }
 

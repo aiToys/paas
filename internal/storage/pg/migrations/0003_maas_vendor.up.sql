@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS maas_vendors (
     "desc"         TEXT NOT NULL DEFAULT ''
 );
 
--- 回填存量 airouter 通道的 vendor_id（用 endpoint 匹配最稳；airouter vendor 由 SeedCatalog ensure）。
+-- 回填存量 airouter 通道的 vendor_id（按凭证引用匹配，vendor-neutral；airouter vendor 由 SeedCatalog ensure）。
 UPDATE maas_channels
 SET vendor_id = 'airouter'
-WHERE endpoint = 'https://airouter.ddmc-inc.com/api/v1' AND vendor_id = '';
+WHERE credential_ref = 'sec-platform-airouter' AND vendor_id = '';

@@ -196,6 +196,21 @@ func (s *memoryStore) ListRuns(ctx context.Context, appID, pipelineID, status st
 	return out, nil
 }
 
+// ListAllRuns 跨租户列表（admin 总览用，返回对象带 TenantID）；可选 status 过滤；倒序。
+func (s *memoryStore) ListAllRuns(ctx context.Context, status string) ([]PipelineRun, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]PipelineRun, 0)
+	for _, r := range s.runs {
+		if status != "" && r.Status != status {
+			continue
+		}
+		out = append(out, cloneRun(r))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	return out, nil
+}
+
 func (s *memoryStore) GetRun(ctx context.Context, id string) (PipelineRun, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {

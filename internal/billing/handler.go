@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/aitoys/paas/internal/httputil"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -28,6 +29,8 @@ const (
 type Handler struct {
 	repo      Repository
 	Authorize func(r *http.Request, perm string) bool
+	audit     AdminAuditRecorder // 租户侧写操作审计（SetQuota/GenerateBill/PayBill 敏感财务写）
+	actor     func(*http.Request) string
 }
 
 // NewHandler 创建配额计费 handler。
@@ -39,8 +42,34 @@ func NewHandler(repo Repository, opts ...HandlerOpt) *Handler {
 	return h
 }
 
-// HandlerOpt 配置 Handler（当前无选项，预留扩展，如单价注入）。
+// HandlerOpt 配置 Handler。
 type HandlerOpt func(*Handler)
+
+// WithAudit 注入审计 recorder（租户侧写操作记审计）。
+func WithAudit(a AdminAuditRecorder) HandlerOpt {
+	return func(h *Handler) { h.audit = a }
+}
+
+// WithActor 注入 actor 提取器（审计 actor 字段）。
+func WithActor(f func(*http.Request) string) HandlerOpt {
+	return func(h *Handler) { h.actor = f }
+}
+
+// recordAudit best-effort 记审计（错误不影响主流程）。tenant 取 ctx，缺失归 "platform"。
+func (h *Handler) recordAudit(r *http.Request, action, resourceType, resourceID, detail string) {
+	if h.audit == nil {
+		return
+	}
+	tid, ok := tenant.TenantFrom(r.Context())
+	if !ok || tid == "" {
+		tid = "platform"
+	}
+	actor := ""
+	if h.actor != nil {
+		actor = h.actor(r)
+	}
+	_ = h.audit.Record(r.Context(), tid, actor, action, resourceType, resourceID, detail)
+}
 
 func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) bool {
 	if h.Authorize == nil || h.Authorize(r, perm) {
@@ -96,6 +125,7 @@ func (h *Handler) serveQuota(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteInternalError(w, err)
 			return
 		}
+		h.recordAudit(r, "set_quota", "quota", "", "调整配额")
 		httputil.WriteData(w, saved)
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -156,6 +186,7 @@ func (h *Handler) serveGenerate(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}
+	h.recordAudit(r, "generate_bill", "bill", rec.ID, "生成账单 "+period)
 	httputil.WriteDataCreated(w, rec)
 }
 
@@ -179,6 +210,7 @@ func (h *Handler) servePay(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}
+	h.recordAudit(r, "pay_bill", "bill", id, "支付账单 "+id)
 	httputil.WriteData(w, rec)
 }
 

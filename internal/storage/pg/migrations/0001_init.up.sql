@@ -126,12 +126,14 @@ CREATE INDEX IF NOT EXISTS idx_ds_tenant_kind ON data_services(tenant_id, kind);
 
 -- ===== workload：应用运行形态（Service/Job/CronJob） =====
 -- lane_id 默认 'default'（基线单例）；port>0 才建 K8s Service。
+-- service 同 app 多服务场景区分（product/recommend/...），空=单服务（向后兼容）。
 CREATE TABLE IF NOT EXISTS workloads (
     id             TEXT PRIMARY KEY,
     tenant_id      TEXT NOT NULL,
     app_id         TEXT NOT NULL DEFAULT '',
     env_id         TEXT NOT NULL DEFAULT '',
     lane_id        TEXT NOT NULL DEFAULT 'default',
+    service        TEXT NOT NULL DEFAULT '',
     type           TEXT NOT NULL,
     name           TEXT NOT NULL,
     image          TEXT NOT NULL DEFAULT '',
@@ -147,6 +149,7 @@ CREATE TABLE IF NOT EXISTS workloads (
     created_at     TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_wl_lookup ON workloads(tenant_id, env_id, app_id, type);
+CREATE INDEX IF NOT EXISTS idx_wl_service ON workloads(tenant_id, env_id, app_id, lane_id, service, type);
 
 -- ===== devops：代码→构建→镜像→发布（4 表，跨模块不建外键） =====
 CREATE TABLE IF NOT EXISTS code_repos (

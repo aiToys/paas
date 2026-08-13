@@ -44,6 +44,23 @@ func (f *fakeStatus) FillStatus(ctx context.Context, wls []workload.Workload) er
 	return nil
 }
 
+// fakeApplier 记录 Apply/EnsureIfMissing 调用（drift 修复端点测试用）。
+type fakeApplier struct {
+	applied       []workload.Workload
+	ensured       []workload.Workload
+	ensureCreated bool // EnsureIfMissing 是否每次都报「补建」（CRD 视为不存在）
+}
+
+func (f *fakeApplier) Apply(ctx context.Context, w workload.Workload) error {
+	f.applied = append(f.applied, w)
+	return nil
+}
+func (f *fakeApplier) EnsureIfMissing(ctx context.Context, w workload.Workload) (bool, error) {
+	f.ensured = append(f.ensured, w)
+	return f.ensureCreated, nil
+}
+func (f *fakeApplier) Delete(ctx context.Context, id string) error { return nil }
+
 func (f *fakeStatus) Instances(ctx context.Context, id string) ([]workload.Instance, error) {
 	return []workload.Instance{{Name: id + "-pod", Status: "Running"}}, nil
 }
@@ -200,5 +217,35 @@ func TestAdminScaleUsesResourceTenantCtx(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAdminReconcileDrift 验证 POST /api/admin/workloads/reconcile 触发 drift 修复：
+// 扫全部 workload，对每行调 applier.EnsureIfMissing（仅 CRD 缺失才补建，绝不覆盖既有运行态），
+// 返 scanned/created/skipped 统计。
+func TestAdminReconcileDrift(t *testing.T) {
+	repo := wlmemory.NewStore()
+	applier := &fakeApplier{ensureCreated: true}
+	h := workload.NewAdminHandler(repo, workload.WithAdminApplier(applier))
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/workloads/reconcile", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(applier.ensured) == 0 {
+		t.Error("reconcile 应对 seed workload 调 EnsureIfMissing，实际 ensured=0")
+	}
+}
+
+// TestAdminReconcileDriftNoApplier 验证未注入 applier（K8s 未启用）返 503 友好提示。
+func TestAdminReconcileDriftNoApplier(t *testing.T) {
+	repo := wlmemory.NewStore()
+	h := workload.NewAdminHandler(repo) // 无 WithAdminApplier
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/workloads/reconcile", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("未启用应 503, got code=%d", rec.Code)
 	}
 }

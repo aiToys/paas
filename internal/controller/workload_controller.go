@@ -33,6 +33,11 @@ type WorkloadReconciler struct {
 	DPToken string
 	// DPEndpoint 数据面 API 地址（覆盖默认 http://paas-core.paas.svc.cluster.local/dp）。
 	DPEndpoint string
+	// OtelEndpoint OTel trace 推送地址（OTLP/HTTP host:port，env PAAS_OTEL_ENDPOINT，
+	// 集群内 jaeger.observability.svc:4318）。注入 service 类型 Pod env，让应用自动推 trace
+	// 到平台可观测后端（paas-shop observ.Init 据此建 tracer，空则 noop）。与 DPToken 独立——
+	// 应用即使不接数据面也应有可观测。空则不注入（未配 OTEL 后端的场景）。
+	OtelEndpoint string
 	// IngressClass 是 applyIngress 建的 Ingress 的 ingressClassName（env PAAS_INGRESS_CLASS，
 	// 默认 hermes）。空则不设 ingressClassName（集群默认 IngressController 接管）。
 	IngressClass string
@@ -80,23 +85,52 @@ func (r *WorkloadReconciler) dpEndpoint() string {
 	return "http://paas-core.paas.svc.cluster.local/dp"
 }
 
-// labelsFor 返回工作负载的 K8s 标签（含租户/应用隔离 + 泳道）。
+// labelsFor 返回工作负载的 K8s 标签（含租户/应用隔离 + 泳道 + 服务）。
 // lane 空→default（基线）；feature 泳道 Workload 带各自 lane，selector 自然区分，Pod/Service 同款 label 匹配。
+// service 非空才加 label（同 app 多服务区分）；空=单服务场景不带，避免污染既有 Workload 致无谓 Pod 重建。
+// 注意：selector 仅创建时设（Deployment selector immutable），service label 后加不影响既有 selector 匹配
+// （MatchLabels 子集语义，Pod 多带 service label 仍匹配原 selector）。
 func labelsFor(w *v1alpha1.Workload) map[string]string {
 	lane := w.Spec.LaneID
 	if lane == "" {
 		lane = "default"
 	}
-	return map[string]string{
+	m := map[string]string{
 		"app.kubernetes.io/managed-by": "paas",
 		labels.KeyTenant:               w.Spec.TenantID,
 		labels.KeyApp:                  w.Spec.AppID,
 		labels.KeyWorkload:             w.Name,
 		labels.KeyLane:                 lane,
 	}
+	if w.Spec.Service != "" {
+		m[labels.KeyService] = w.Spec.Service
+	}
+	return m
 }
 
-// podSpec 构造容器 Pod 模板（含 GPU resource + 反亲和）。
+// prometheusAnnotations 返回 service 类型工作负载 Pod 的 Prometheus 自动发现注解。
+// 仅 type=service 且端口>0：Prometheus kubernetes-pods job 按 prometheus.io/scrape=true 发现 Pod，
+// 抓 <port>/metrics（复用业务端口，paas-shop 等服务已在业务端口暴露 /metrics）。
+// job/cronjob 无常驻 HTTP server，不抓。端口取 ContainerPort，缺省取 Port。
+// 配合 Pod template 的 paas.aitoys/app + paas.aitoys/workload label（labelsFor），metrics.go
+// 可按 namespace + pod 正则聚合应用级 RED 指标（RPS/延迟/错误率）。
+func prometheusAnnotations(w *v1alpha1.Workload) map[string]string {
+	if w.Spec.Type != "service" {
+		return nil
+	}
+	port := w.Spec.ContainerPort
+	if port <= 0 {
+		port = w.Spec.Port
+	}
+	if port <= 0 {
+		return nil
+	}
+	return map[string]string{
+		"prometheus.io/scrape": "true",
+		"prometheus.io/port":   strconv.Itoa(int(port)),
+		"prometheus.io/path":   "/metrics",
+	}
+}
 func podSpec(w *v1alpha1.Workload) corev1.PodSpec {
 	container := corev1.Container{
 		Name:            "main",
@@ -180,7 +214,7 @@ func (r *WorkloadReconciler) applyDeployment(ctx context.Context, w *v1alpha1.Wo
 			dep.Spec.Selector = &metav1.LabelSelector{MatchLabels: labels}
 		}
 		dep.Spec.Template = corev1.PodTemplateSpec{
-			ObjectMeta: metav1.ObjectMeta{Labels: labels},
+			ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: prometheusAnnotations(w)},
 			Spec:       podSpec(w),
 		}
 		c := &dep.Spec.Template.Spec.Containers[0]
@@ -196,6 +230,14 @@ func (r *WorkloadReconciler) applyDeployment(ctx context.Context, w *v1alpha1.Wo
 				corev1.EnvVar{Name: "PAAS_DP_ENDPOINT", Value: r.dpEndpoint()},
 				corev1.EnvVar{Name: "PAAS_DP_TOKEN", Value: r.DPToken},
 				corev1.EnvVar{Name: "PAAS_TENANT_ID", Value: w.Spec.TenantID},
+			)
+		}
+		// OTel trace 推送 endpoint（service 类型 Pod 自动建 tracer 推 Jaeger）。
+		// 空则跳过（未配 OTEL 后端时应用 observ.Init noop，功能不受影响）。
+		// 与 DPToken 独立注入：可观测是横切能力，应用不接数据面也应有 trace。
+		if w.Spec.Type == "service" && r.OtelEndpoint != "" {
+			c.Env = append(c.Env,
+				corev1.EnvVar{Name: "PAAS_OTEL_ENDPOINT", Value: r.OtelEndpoint},
 			)
 		}
 		// OwnerReference：CR 删除时 K8s GC 自动清理 Deployment（SetupWithManager 的 Owns 生效前提，
@@ -372,6 +414,9 @@ func (r *WorkloadReconciler) applyCronJob(ctx context.Context, w *v1alpha1.Workl
 		}
 		// 同 applyJob：CronJob 衍生的 Job Pod 必须显式 restartPolicy（Never），否则 apiserver 拒绝。
 		cj.Spec.JobTemplate.Spec.Template.Spec.RestartPolicy = corev1.RestartPolicyNever
+		// 同 applyJob：衍生 Job 失败一次即终止（BackoffLimit=0）+ 1 天后 GC（防完成 Job/Pod 永久残留拖慢 list/watch）。
+		cj.Spec.JobTemplate.Spec.BackoffLimit = ptrInt32(0)
+		cj.Spec.JobTemplate.Spec.TTLSecondsAfterFinished = ptrInt32(86400)
 		// 应用配置注入（创建时，JobTemplate PodTemplate 不可变；新增绑定需删旧建新）。
 		if envVars := r.appEnvVars(ctx, w); len(envVars) > 0 {
 			tmpl := &cj.Spec.JobTemplate.Spec.Template.Spec.Containers[0]

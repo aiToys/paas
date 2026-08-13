@@ -194,7 +194,7 @@ func (h *Handler) DeleteTenant(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.audit(r, "delete", "tenant", id, "删除租户 "+id)
-	w.WriteHeader(http.StatusNoContent)
+	httputil.WriteData(w, map[string]string{"deleted": id})
 }
 
 // —— Users ——
@@ -338,7 +338,7 @@ func (h *Handler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.audit(r, "delete", "user", id, "删除用户 "+id)
-	w.WriteHeader(http.StatusNoContent)
+	httputil.WriteData(w, map[string]string{"deleted": id})
 }
 
 // userInCallerTenant 校验目标用户归属调用者租户（tenant-admin 作用域）；
@@ -436,7 +436,7 @@ func (h *Handler) DeleteAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.audit(r, "delete", "api_key", id, "吊销 API 密钥 "+id)
-	w.WriteHeader(http.StatusNoContent)
+	httputil.WriteData(w, map[string]string{"deleted": id})
 }
 
 // apiKeyInCallerTenant 校验目标 API Key 归属调用者租户；不归属写 404 返回 false。

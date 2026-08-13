@@ -17,7 +17,7 @@ func globexCtx() context.Context { return tenant.WithTenant(context.Background()
 func TestListByType(t *testing.T) {
 	s := NewStore()
 	// acme: cs-api/rec-svc(service) + batch-recall(job) + daily-report(cronjob)；globex: etl-nightly(cronjob)/etl-backfill(job)/agent-gw(service)
-	svcs, err := s.List(acmeCtx(), "", "", "", workload.TypeService)
+	svcs, err := s.List(acmeCtx(), "", "", "", workload.TypeService, "")
 	require.NoError(t, err)
 	require.Len(t, svcs, 2)
 	for _, w := range svcs {
@@ -28,8 +28,8 @@ func TestListByType(t *testing.T) {
 
 func TestListIsolatedByTenant(t *testing.T) {
 	s := NewStore()
-	acme, _ := s.List(acmeCtx(), "", "", "", "")
-	globex, _ := s.List(globexCtx(), "", "", "", "")
+	acme, _ := s.List(acmeCtx(), "", "", "", "", "")
+	globex, _ := s.List(globexCtx(), "", "", "", "", "")
 	for _, w := range acme {
 		assert.Equal(t, "t-acme", w.TenantID)
 	}
@@ -45,7 +45,7 @@ func TestListIsolatedByTenant(t *testing.T) {
 func TestListByApp(t *testing.T) {
 	s := NewStore()
 	// app-etl 属 globex，挂 cronjob + job
-	got, err := s.List(globexCtx(), "", "app-etl", "", "")
+	got, err := s.List(globexCtx(), "", "app-etl", "", "", "")
 	require.NoError(t, err)
 	require.Len(t, got, 2)
 }
@@ -53,7 +53,7 @@ func TestListByApp(t *testing.T) {
 func TestListByEnv(t *testing.T) {
 	s := NewStore()
 	// env-acme-test 下应只有 acme 的 4 条（cs-api/rec-svc/batch-recall/daily-report）
-	got, err := s.List(acmeCtx(), "env-acme-test", "", "", "")
+	got, err := s.List(acmeCtx(), "env-acme-test", "", "", "", "")
 	require.NoError(t, err)
 	require.Len(t, got, 4)
 	for _, w := range got {
@@ -123,7 +123,7 @@ func TestDelete(t *testing.T) {
 
 func TestMissingTenantRejected(t *testing.T) {
 	s := NewStore()
-	_, err := s.List(context.Background(), "", "", "", "")
+	_, err := s.List(context.Background(), "", "", "", "", "")
 	assert.Error(t, err)
 }
 
@@ -150,19 +150,85 @@ func TestListFilterByLane(t *testing.T) {
 	}))
 
 	// lane="" 返回全部
-	all, err := s.List(ctx, "e", "a", "", workload.TypeService)
+	all, err := s.List(ctx, "e", "a", "", workload.TypeService, "")
 	require.NoError(t, err)
 	assert.Len(t, all, 2)
 
 	// lane=feature-x 只返该泳道
-	feature, err := s.List(ctx, "e", "a", "feature-x", workload.TypeService)
+	feature, err := s.List(ctx, "e", "a", "feature-x", workload.TypeService, "")
 	require.NoError(t, err)
 	require.Len(t, feature, 1)
 	assert.Equal(t, "wl-2", feature[0].ID)
 
 	// lane=default 只返基线
-	base, err := s.List(ctx, "e", "a", workload.LaneDefault, workload.TypeService)
+	base, err := s.List(ctx, "e", "a", workload.LaneDefault, workload.TypeService, "")
 	require.NoError(t, err)
 	require.Len(t, base, 1)
 	assert.Equal(t, "wl-1", base[0].ID)
+}
+
+// TestListFilterByService 验证 List 的 service 参数：同 app 多服务场景（paas-shop product/recommend/...）
+// 按 service 精确过滤；空串=不过滤返全部。CreateRelease 多服务查找依赖此维度区分各服务 Workload。
+func TestListFilterByService(t *testing.T) {
+	s := NewStore()
+	ctx := tenant.WithTenant(context.Background(), "t1")
+	// 同 app「paas-shop」两个服务（product / recommend），同 env×lane×type
+	for _, w := range []workload.Workload{
+		{ID: "wl-prod", AppID: "paas-shop", EnvID: "e", LaneID: workload.LaneDefault, Service: "product",
+			Type: workload.TypeService, Name: "paas-shop-product-svc", Image: "img"},
+		{ID: "wl-rec", AppID: "paas-shop", EnvID: "e", LaneID: workload.LaneDefault, Service: "recommend",
+			Type: workload.TypeService, Name: "paas-shop-recommend-svc", Image: "img"},
+		{ID: "wl-single", AppID: "app-x", EnvID: "e", LaneID: workload.LaneDefault, Service: "",
+			Type: workload.TypeService, Name: "app-x-svc", Image: "img"},
+	} {
+		require.NoError(t, s.Create(ctx, w))
+	}
+
+	// service="" 返回全部（含单服务场景的空 Service）
+	all, err := s.List(ctx, "e", "", "", workload.TypeService, "")
+	require.NoError(t, err)
+	assert.Len(t, all, 3)
+
+	// service=product 只返 product（多服务精确匹配，CreateRelease 找基线用）
+	prod, err := s.List(ctx, "e", "paas-shop", workload.LaneDefault, workload.TypeService, "product")
+	require.NoError(t, err)
+	require.Len(t, prod, 1)
+	assert.Equal(t, "wl-prod", prod[0].ID)
+
+	// service=recommend 只返 recommend（不混入 product）
+	rec, err := s.List(ctx, "e", "paas-shop", workload.LaneDefault, workload.TypeService, "recommend")
+	require.NoError(t, err)
+	require.Len(t, rec, 1)
+	assert.Equal(t, "wl-rec", rec[0].ID)
+}
+
+// TestUpdateSchedule 验证 cronjob schedule 修改 + 类型校验 + 跨租户隔离。
+func TestUpdateSchedule(t *testing.T) {
+	s := NewStore()
+	ctx := tenant.WithTenant(context.Background(), "t1")
+	// 建 cronjob + service 各一
+	require.NoError(t, s.Create(ctx, workload.Workload{
+		ID: "wl-cj", AppID: "a", EnvID: "e", Type: workload.TypeCronJob, Name: "cj",
+		Image: "img", Schedule: "*/5 * * * *",
+	}))
+	require.NoError(t, s.Create(ctx, workload.Workload{
+		ID: "wl-svc", AppID: "a", EnvID: "e", Type: workload.TypeService, Name: "svc", Image: "img",
+	}))
+
+	// cronjob 改 schedule 成功
+	got, err := s.UpdateSchedule(ctx, "wl-cj", "7 * * * *")
+	require.NoError(t, err)
+	assert.Equal(t, "7 * * * *", got.Schedule)
+
+	// schedule 空 → 拒绝
+	_, err = s.UpdateSchedule(ctx, "wl-cj", "")
+	assert.Error(t, err, "schedule 空应拒绝")
+
+	// service 改 schedule → 拒绝（仅 cronjob）
+	_, err = s.UpdateSchedule(ctx, "wl-svc", "0 * * * *")
+	assert.Error(t, err, "service 改 schedule 应拒绝")
+
+	// 跨租户 → not found
+	_, err = s.UpdateSchedule(globexCtx(), "wl-cj", "0 * * * *")
+	assert.Error(t, err)
 }

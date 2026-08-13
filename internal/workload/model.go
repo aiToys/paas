@@ -35,6 +35,7 @@ type Workload struct {
 	AppID    string `json:"appId"`              // 归属应用
 	EnvID    string `json:"envId"`              // 归属环境
 	LaneID   string `json:"laneId"`             // "default"=基线（单例）；其他=泳道（预留，本期不创建非 default）
+	Service  string `json:"service,omitempty"`  // 服务名（同 app 多服务场景区分，如 product/recommend/chatbot/bff）；空=单服务（向后兼容）
 	Type     string `json:"type"`               // service / job / cronjob
 	Name     string `json:"name"`
 	Image    string `json:"image"`

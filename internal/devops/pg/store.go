@@ -710,9 +710,9 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 		lane = workload.LaneDefault
 	}
 
-	// 2. 找目标环境某泳道的基线 Workload（同 app×env×lane 唯一）（锁外调 workload 仓储，避免跨仓储持锁）
+	// 2. 找目标环境某泳道某服务的基线 Workload（同 app×env×lane×service 唯一）（锁外调 workload 仓储，避免跨仓储持锁）
 	// —— 对齐内存版 step 2
-	wls, err := s.workload.List(ctx, input.EnvID, input.AppID, lane, workload.TypeService)
+	wls, err := s.workload.List(ctx, input.EnvID, input.AppID, lane, workload.TypeService, input.Service)
 	if err != nil {
 		return devops.Release{}, err
 	}
@@ -729,23 +729,30 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 		}
 	} else {
 		// 无基线 Workload -> 创建（基线 service，Replicas=1）—— 对齐内存版
-		// Name 规则：default 用 `<app>-svc`（兼容现有 seed），非 default 用 `<app>-svc-<lane>`。
-		name := input.AppID + "-svc"
-		if lane != workload.LaneDefault {
-			name = input.AppID + "-svc-" + lane
+		// Name 规则：多服务用 `<app>-<service>-svc[-<lane>]`，单服务用 `<app>-svc[-<lane>]`。
+		name := devops.BaselineWorkloadName(input.AppID, input.Service, lane)
+		// 端口来源：① input.Port（deploy 显式）> ② baseline 继承 > ③ 0——对齐内存版
+		port, cport := input.Port, input.ContainerPort
+		if port == 0 && lane != workload.LaneDefault {
+			if bases, err := s.workload.List(ctx, input.EnvID, input.AppID, workload.LaneDefault, workload.TypeService, input.Service); err == nil && len(bases) > 0 {
+				port, cport = bases[0].Port, bases[0].ContainerPort
+			}
 		}
 		wl = workload.Workload{
-			ID:        newID("wl"),
-			AppID:     input.AppID,
-			EnvID:     input.EnvID,
-			LaneID:    lane,
-			Type:      workload.TypeService,
-			Name:      name,
-			Image:     display,
-			ImageRef:  img.Digest,
-			Replicas:  1,
-			Status:    workload.StatusDeploying,
-			CreatedAt: time.Now(),
+			ID:            newID("wl"),
+			AppID:         input.AppID,
+			EnvID:         input.EnvID,
+			LaneID:        lane,
+			Service:       input.Service,
+			Type:          workload.TypeService,
+			Name:          name,
+			Image:         display,
+			ImageRef:      img.Digest,
+			Port:          port,
+			ContainerPort: cport,
+			Replicas:      1,
+			Status:        workload.StatusDeploying,
+			CreatedAt:     time.Now(),
 		}
 		if err := s.workload.Create(ctx, wl); err != nil {
 			return devops.Release{}, err

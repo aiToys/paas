@@ -37,18 +37,34 @@ func NewStore() *Store {
 	}
 }
 
-func tenantOrErr(ctx context.Context) (string, error) {
-	tid, ok := tenant.TenantFrom(ctx)
-	if !ok {
-		return "", fmt.Errorf("missing tenant context")
+// cloneInstance 深拷贝 Instance（Meta map），隔离返回值与 store 内部状态，防外部修改 + 并发 map race。
+func cloneInstance(in governance.Instance) governance.Instance {
+	if in.Meta != nil {
+		in.Meta = cloneStringMap(in.Meta)
 	}
-	return tid, nil
+	return in
+}
+
+// cloneRoute 深拷贝 Route（Methods 切片），隔离返回值与 store 内部状态。
+func cloneRoute(r governance.Route) governance.Route {
+	if r.Methods != nil {
+		r.Methods = append([]string(nil), r.Methods...)
+	}
+	return r
+}
+
+func cloneStringMap(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 // —— Service ——
 
 func (s *Store) ListServices(ctx context.Context, envID, appID string) ([]governance.Service, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -89,7 +105,7 @@ func (s *Store) ListAllServices(ctx context.Context) ([]governance.Service, erro
 }
 
 func (s *Store) GetService(ctx context.Context, id string) (governance.Service, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return governance.Service{}, err
 	}
@@ -103,7 +119,7 @@ func (s *Store) GetService(ctx context.Context, id string) (governance.Service, 
 }
 
 func (s *Store) CreateService(ctx context.Context, svc governance.Service) (governance.Service, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return governance.Service{}, err
 	}
@@ -127,7 +143,7 @@ func (s *Store) CreateService(ctx context.Context, svc governance.Service) (gove
 }
 
 func (s *Store) DeleteService(ctx context.Context, id string) error {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return err
 	}
@@ -150,7 +166,7 @@ func (s *Store) DeleteService(ctx context.Context, id string) error {
 // —— Instance ——
 
 func (s *Store) ListInstances(ctx context.Context, serviceID string) ([]governance.Instance, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -164,14 +180,14 @@ func (s *Store) ListInstances(ctx context.Context, serviceID string) ([]governan
 		if serviceID != "" && in.ServiceID != serviceID {
 			continue
 		}
-		out = append(out, in)
+		out = append(out, cloneInstance(in))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Addr < out[j].Addr })
 	return out, nil
 }
 
 func (s *Store) RegisterInstance(ctx context.Context, in governance.Instance) (governance.Instance, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return governance.Instance{}, err
 	}
@@ -195,12 +211,13 @@ func (s *Store) RegisterInstance(ctx context.Context, in governance.Instance) (g
 	in.ID = fmt.Sprintf("inst-%d-%d", time.Now().UnixNano(), s.instSeq)
 	in.TenantID = tid
 	in.UpdatedAt = time.Now()
+	in = cloneInstance(in) // 深拷贝 Meta，隔离入参与 store 内部状态
 	s.instances[in.ID] = in
-	return in, nil
+	return cloneInstance(in), nil
 }
 
 func (s *Store) DeregisterInstance(ctx context.Context, id string) error {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return err
 	}
@@ -215,7 +232,7 @@ func (s *Store) DeregisterInstance(ctx context.Context, id string) error {
 }
 
 func (s *Store) Heartbeat(ctx context.Context, id string) (governance.Instance, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return governance.Instance{}, err
 	}
@@ -228,12 +245,12 @@ func (s *Store) Heartbeat(ctx context.Context, id string) (governance.Instance, 
 	in.UpdatedAt = time.Now()
 	in.Status = governance.StatusHealthy
 	s.instances[id] = in
-	return in, nil
+	return cloneInstance(in), nil
 }
 
 // InstanceServiceID 返回实例所属服务 ID（handler 注销时校验生产权限用）。
 func (s *Store) InstanceServiceID(ctx context.Context, id string) (string, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -280,7 +297,7 @@ func seedInstances() []governance.Instance {
 // —— Route ——
 
 func (s *Store) ListRoutes(ctx context.Context, serviceID string) ([]governance.Route, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -294,14 +311,14 @@ func (s *Store) ListRoutes(ctx context.Context, serviceID string) ([]governance.
 		if serviceID != "" && r.ServiceID != serviceID {
 			continue
 		}
-		out = append(out, r)
+		out = append(out, cloneRoute(r))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
 	return out, nil
 }
 
 func (s *Store) GetRoute(ctx context.Context, id string) (governance.Route, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return governance.Route{}, err
 	}
@@ -311,11 +328,11 @@ func (s *Store) GetRoute(ctx context.Context, id string) (governance.Route, erro
 	if !ok || r.TenantID != tid {
 		return governance.Route{}, fmt.Errorf("路由不存在: %s", id)
 	}
-	return r, nil
+	return cloneRoute(r), nil
 }
 
 func (s *Store) CreateRoute(ctx context.Context, r governance.Route) (governance.Route, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return governance.Route{}, err
 	}
@@ -335,7 +352,7 @@ func (s *Store) CreateRoute(ctx context.Context, r governance.Route) (governance
 	r.UpdatedAt = time.Now()
 	r.Methods = append([]string(nil), r.Methods...) // 深拷贝，隔离调用方切片与 store 内部状态
 	s.routes[r.ID] = r
-	return r, nil
+	return cloneRoute(r), nil
 }
 
 // UpdateRoute 混合更新语义（PUT 全量替换的变体）：
@@ -344,7 +361,7 @@ func (s *Store) CreateRoute(ctx context.Context, r governance.Route) (governance
 // bool 字段无法区分"未设"与"false"，故直接覆盖是唯一选择；Host 直接覆盖允许从有域名改回不限 Host。
 // 合并后复 Validate，防 PUT 用空 methods 绕过 Create 时的非空不变量。
 func (s *Store) UpdateRoute(ctx context.Context, r governance.Route) (governance.Route, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return governance.Route{}, err
 	}
@@ -372,11 +389,11 @@ func (s *Store) UpdateRoute(ctx context.Context, r governance.Route) (governance
 		return governance.Route{}, err
 	}
 	s.routes[r.ID] = ex
-	return ex, nil
+	return cloneRoute(ex), nil
 }
 
 func (s *Store) DeleteRoute(ctx context.Context, id string) error {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return err
 	}
@@ -402,7 +419,7 @@ func seedRoutes() []governance.Route {
 // —— CircuitBreaker ——
 
 func (s *Store) ListBreakers(ctx context.Context, serviceID string) ([]governance.CircuitBreaker, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -423,7 +440,7 @@ func (s *Store) ListBreakers(ctx context.Context, serviceID string) ([]governanc
 }
 
 func (s *Store) GetBreaker(ctx context.Context, id string) (governance.CircuitBreaker, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return governance.CircuitBreaker{}, err
 	}
@@ -437,7 +454,7 @@ func (s *Store) GetBreaker(ctx context.Context, id string) (governance.CircuitBr
 }
 
 func (s *Store) CreateBreaker(ctx context.Context, b governance.CircuitBreaker) (governance.CircuitBreaker, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return governance.CircuitBreaker{}, err
 	}
@@ -460,7 +477,7 @@ func (s *Store) CreateBreaker(ctx context.Context, b governance.CircuitBreaker) 
 }
 
 func (s *Store) UpdateBreaker(ctx context.Context, b governance.CircuitBreaker) (governance.CircuitBreaker, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return governance.CircuitBreaker{}, err
 	}
@@ -495,7 +512,7 @@ func (s *Store) UpdateBreaker(ctx context.Context, b governance.CircuitBreaker) 
 }
 
 func (s *Store) DeleteBreaker(ctx context.Context, id string) error {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return err
 	}

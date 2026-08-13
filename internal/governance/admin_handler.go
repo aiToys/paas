@@ -17,15 +17,13 @@ import (
 	"net/http"
 	"strings"
 
+	adminutil "github.com/aitoys/paas/internal/web/admin"
 	"github.com/aitoys/paas/internal/httputil"
-	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // AdminAuditRecorder admin 写操作审计（依赖倒置，避免 governance->security）。
 // tenantID = 资源所属租户（target_tenant）；actor = super_admin UserID；action 带 admin: 前缀。
-type AdminAuditRecorder interface {
-	Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error
-}
+type AdminAuditRecorder = adminutil.AuditRecorder // admin 写操作审计（依赖倒置，统一真源 internal/web/admin）
 
 // AdminHandler 暴露服务治理 admin REST API（/api/admin/services/{id}*）。
 //
@@ -107,11 +105,6 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminTenantCtx 派生资源所属租户 ctx（admin 跨租户操作以资源租户身份执行下游）。
-func adminTenantCtx(r *http.Request, tenantID string) (context.Context, *http.Request) {
-	ctx := tenant.WithTenant(r.Context(), tenantID)
-	return ctx, r.WithContext(ctx)
-}
-
 func (h *AdminHandler) actor(r *http.Request) string {
 	if h.actorOf != nil {
 		return h.actorOf(r)
@@ -149,7 +142,7 @@ func (h *AdminHandler) serveDetail(w http.ResponseWriter, r *http.Request, id st
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
-	ctx, _ := adminTenantCtx(r, s.TenantID)
+	ctx, _ := adminutil.TenantCtx(r, s.TenantID)
 	instances, err := h.repo.ListInstances(ctx, id)
 	if err != nil {
 		instances = []Instance{}
@@ -164,7 +157,7 @@ func (h *AdminHandler) serveDelete(w http.ResponseWriter, r *http.Request, id st
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
-	ctx, rr := adminTenantCtx(r, s.TenantID)
+	ctx, rr := adminutil.TenantCtx(r, s.TenantID)
 	if err := h.repo.DeleteService(ctx, id); err != nil {
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
@@ -181,7 +174,7 @@ func (h *AdminHandler) serveDeregister(w http.ResponseWriter, r *http.Request, s
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
-	ctx, rr := adminTenantCtx(r, s.TenantID)
+	ctx, rr := adminutil.TenantCtx(r, s.TenantID)
 	// 校验实例归属该服务（与租户侧 handler 一致，防越权路径）。
 	sid, err := h.repo.InstanceServiceID(ctx, instID)
 	if err != nil || sid != serviceID {

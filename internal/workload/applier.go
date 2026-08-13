@@ -12,6 +12,10 @@ import (
 type Applier interface {
 	// Apply 把工作负载期望状态投影到数据面（CreateOrUpdate CRD）。
 	Apply(ctx context.Context, w Workload) error
+	// EnsureIfMissing 仅在 CRD 不存在时补建（drift 修复用），存在则跳过——避免把 PG 陈旧状态
+	// （如裸 workload 空 image_ref/replicas=0）覆盖 K8s 既有运行态。
+	// 返回 (created bool, err error)：true=本次补建，false=已存在跳过。
+	EnsureIfMissing(ctx context.Context, w Workload) (bool, error)
 	// Delete 从数据面移除（级联清 K8s 资源）。
 	Delete(ctx context.Context, id string) error
 }
@@ -67,6 +71,19 @@ func (r *ApplyRepo) UpdateImage(ctx context.Context, id, image, imageRef string)
 	if r.applier != nil {
 		saved = withTenant(ctx, saved)
 		r.applyLog("update-image", saved.ID, r.applier.Apply(ctx, saved))
+	}
+	return saved, nil
+}
+
+// UpdateSchedule 修改 cron schedule 并投影数据面（reconciler 据 CRD spec.schedule 更新 K8s CronJob）。
+func (r *ApplyRepo) UpdateSchedule(ctx context.Context, id, schedule string) (Workload, error) {
+	saved, err := r.Repository.UpdateSchedule(ctx, id, schedule)
+	if err != nil {
+		return saved, err
+	}
+	if r.applier != nil {
+		saved = withTenant(ctx, saved)
+		r.applyLog("update-schedule", saved.ID, r.applier.Apply(ctx, saved))
 	}
 	return saved, nil
 }

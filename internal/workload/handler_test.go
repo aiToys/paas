@@ -23,7 +23,7 @@ type stubRepo struct {
 	updatedID string
 }
 
-func (s *stubRepo) List(context.Context, string, string, string, string) ([]Workload, error) {
+func (s *stubRepo) List(context.Context, string, string, string, string, string) ([]Workload, error) {
 	return s.list, nil
 }
 func (s *stubRepo) ListAll(context.Context) ([]Workload, error) { return s.list, nil }
@@ -53,6 +53,16 @@ func (s *stubRepo) UpdateImage(_ context.Context, id, image, imageRef string) (W
 		if w.ID == id {
 			w.Image = image
 			w.ImageRef = imageRef
+			return w, nil
+		}
+	}
+	return Workload{}, errNotFound
+}
+
+func (s *stubRepo) UpdateSchedule(_ context.Context, id, schedule string) (Workload, error) {
+	for _, w := range s.list {
+		if w.ID == id {
+			w.Schedule = schedule
 			return w, nil
 		}
 	}

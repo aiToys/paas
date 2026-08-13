@@ -19,7 +19,7 @@ type appWorkloadStats struct {
 
 // StatsByTenant 返回 map[appID]AppStats。StatusReader 失败仅忽略（降级用 store 原值聚合）。
 func (s *appWorkloadStats) StatsByTenant(ctx context.Context) (map[string]application.AppStats, error) {
-	wls, err := s.wlRepo.List(ctx, "", "", "", "") // appID="" 返租户内全部工作负载
+	wls, err := s.wlRepo.List(ctx, "", "", "", "", "") // appID="" 返租户内全部工作负载
 	if err != nil {
 		return nil, err
 	}

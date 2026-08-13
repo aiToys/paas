@@ -37,6 +37,7 @@ type fakeReleaser struct {
 	domain    string // Deploy/WorkloadDomain 返回（空则默认 wl-{id}.svc.cluster.local)
 
 	deployLane string // Deploy 收到的 lane（断言用）
+	deployPort int    // Deploy 收到的 port（断言用）
 
 	promoteRel  devops.Release // Promote 返回（空则默认 Release{ID:"rel-promoted"}）
 	promoteErr  error
@@ -78,8 +79,9 @@ func (f *fakeReleaser) SetVersion(ctx context.Context, releaseIDs []string, vers
 }
 
 // Deploy stub：返有效部署记录（rel-fake/wl-fake）+ 尊重 domain 字段，供 execDeploy 链路测试可控。
-func (f *fakeReleaser) Deploy(ctx context.Context, appID, envID, lane, imageID, sourceRunID string) (devops.Release, string, error) {
+func (f *fakeReleaser) Deploy(ctx context.Context, appID, envID, lane, service, imageID string, port, containerPort int, sourceRunID string) (devops.Release, string, error) {
 	f.deployLane = lane
+	f.deployPort = port
 	if f.deployErr != nil {
 		return devops.Release{}, "", f.deployErr
 	}
@@ -175,6 +177,7 @@ func TestExecDeployUsesLaneAndLogs(t *testing.T) {
 		{Name: "部署", Type: StageDeploy, Params: map[string]any{
 			"envId": "env-test", "lane": "feature-x",
 			"imageSource": ImageSelected, "imageId": "img-1",
+			"port": 8081, "containerPort": 8081,
 		}},
 	})
 
@@ -192,6 +195,10 @@ func TestExecDeployUsesLaneAndLogs(t *testing.T) {
 	// Deploy 收到 lane=feature-x
 	if rel.deployLane != "feature-x" {
 		t.Errorf("Deploy 收到 lane=%q, want feature-x", rel.deployLane)
+	}
+	// Deploy 收到 port=8081（新建 Workload 时设定，驱动 reconciler 建 Service）
+	if rel.deployPort != 8081 {
+		t.Errorf("Deploy 收到 port=%d, want 8081", rel.deployPort)
 	}
 	// StageRun.Input.lane 记录泳道（Task 6/7 + 前端消费）
 	if sr.Input["lane"] != "feature-x" {

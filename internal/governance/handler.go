@@ -1,6 +1,7 @@
 package governance
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/httputil"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -41,9 +43,18 @@ type EnvTypeResolver = environment.EnvTypeResolver
 //	POST   /api/breakers                              创建熔断器（governance:write）
 //	PUT    /api/breakers/{id}                         更新熔断器（governance:write）
 //	DELETE /api/breakers/{id}                         删除熔断器（governance:write）
+// InstanceDiscoverer 从数据面（K8s Endpoints 真源）发现服务真实运行实例。
+// 未注入时服务详情回退到手动注册表（governance.Instance 表）。
+// 注入后：服务详情优先返数据面 ready 实例（readiness probe 驱动），
+// namespace = paas-<tenant>，serviceName = Service.Name（约定 = 工作负载/K8s Service 名）。
+type InstanceDiscoverer interface {
+	DiscoverInstances(ctx context.Context, namespace, serviceName, lane string) ([]Instance, error)
+}
+
 type Handler struct {
 	repo        Repository
 	envResolver EnvTypeResolver
+	discoverer  InstanceDiscoverer
 	Authorize   func(r *http.Request, perm string) bool
 }
 
@@ -62,6 +73,12 @@ type HandlerOpt func(*Handler)
 // WithEnvResolver 注入环境类型解析器，启用生产写权限校验。
 func WithEnvResolver(r EnvTypeResolver) HandlerOpt {
 	return func(h *Handler) { h.envResolver = r }
+}
+
+// WithInstanceDiscoverer 注入数据面实例发现器，服务详情返回真实 K8s Endpoint 实例
+// （而非手动注册表）。未注入或数据面无 ready 实例时回退到手动注册表。
+func WithInstanceDiscoverer(d InstanceDiscoverer) HandlerOpt {
+	return func(h *Handler) { h.discoverer = d }
 }
 
 func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) bool {
@@ -128,8 +145,22 @@ func (h *Handler) serveRouteCollection(w http.ResponseWriter, r *http.Request) {
 		if !h.allow(w, r, PermGovernanceWrite) {
 			return
 		}
+		// raw 解码判定 body 是否显式含 enabled（区分「漏传→默认 true」与「显式 false→禁用」）。
+		var raw map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+			return
+		}
+		enabled := true // 默认启用：漏传时不应静默建为禁用（禁用不下发 Ingress）
+		if v, ok := raw["enabled"]; ok {
+			if b, ok2 := v.(bool); ok2 {
+				enabled = b // 显式指定（含 false）以调用方为准
+			}
+		}
+		raw["enabled"] = enabled
+		rtJSON, _ := json.Marshal(raw)
 		var rt Route
-		if err := json.NewDecoder(r.Body).Decode(&rt); err != nil {
+		if err := json.Unmarshal(rtJSON, &rt); err != nil {
 			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
@@ -355,9 +386,23 @@ func (h *Handler) serveServiceItem(w http.ResponseWriter, r *http.Request, id st
 			httputil.WriteInternalError(w, err)
 			return
 		}
-		// lane 过滤（L2 启用）：?lane=feature-x 只看该泳道实例；空=全部（基线 + 各泳道，向后兼容）。
-		// 服务治理手动注册表按 lane 分组展示；数据面真源（跨泳道降级发现）走 /dp/instances。
-		if lane := r.URL.Query().Get("lane"); lane != "" {
+		// 数据面真源优先：注入 discoverer 时按 Service.Name（约定 = K8s Service 名）
+		// 从 K8s Endpoints 读 ready 实例（readiness probe 驱动）。有 ready 实例则覆盖手动注册表；
+		// 无（未部署/未就绪/非集群部署）回退手动注册表，保持向后兼容。
+		source := SourceManual // 默认手动注册表（无 discoverer / 回退路径）
+		lane := r.URL.Query().Get("lane")
+		if h.discoverer != nil {
+			tid, _ := tenant.TenantFrom(r.Context())
+			discovered, derr := h.discoverer.DiscoverInstances(r.Context(), tenant.Namespace(tid), s.Name, lane)
+			if derr == nil && len(discovered) > 0 {
+				instances = discovered
+				source = SourceDiscovered // 实例来自数据面 Endpoint，心跳无意义
+			} else if derr != nil {
+				httputil.WriteInternalError(w, derr)
+				return
+			}
+		} else if lane != "" {
+			// 无 discoverer 回退路径：手动注册表按 lane 过滤（L2 启用，向后兼容）。
 			filtered := make([]Instance, 0, len(instances))
 			for _, in := range instances {
 				if in.LaneID == lane {
@@ -366,7 +411,7 @@ func (h *Handler) serveServiceItem(w http.ResponseWriter, r *http.Request, id st
 			}
 			instances = filtered
 		}
-		httputil.WriteData(w, ServiceDetail{Service: s, Instances: instances})
+		httputil.WriteData(w, ServiceDetail{Service: s, Instances: instances, InstancesSource: source})
 		return
 	}
 	if r.Method == http.MethodDelete {

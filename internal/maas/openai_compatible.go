@@ -15,7 +15,15 @@ import (
 
 	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/pkg/provider"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
+
+// chatTracer 标记一次 LLM 调用（gen_ai.operation.name=chat），作为 agent.run 的子 span。
+// noop tracer 未接后端时无开销。让 trace 树从 agent.run 展开为多轮 chat 子 span。
+var chatTracer = otel.Tracer("paas.maas/chat")
 
 // readBodySnippet 读取响应体前 512 字节作诊断片段。
 // 上游错误 JSON 一般不含平台凭证（凭证在请求头），可安全入日志/错误，
@@ -28,13 +36,19 @@ func readBodySnippet(r io.Reader) string {
 // openaiReq 是 OpenAI 兼容协议的请求体（仅取推理所需字段）。
 // DeepSeek / 通义千问 DashScope 兼容模式 / OpenAI 三家同构。
 type openaiReq struct {
-	Model       string             `json:"model"`
-	Messages    []provider.Message `json:"messages"`
-	Stream      bool               `json:"stream"`
-	Tools       []provider.ToolDef `json:"tools,omitempty"`
-	ToolChoice  string             `json:"tool_choice,omitempty"`
-	Temperature *float64           `json:"temperature,omitempty"`
-	MaxTokens   *int               `json:"max_tokens,omitempty"`
+	Model        string             `json:"model"`
+	Messages     []provider.Message `json:"messages"`
+	Stream       bool               `json:"stream"`
+	StreamOptions *streamOpt        `json:"stream_options,omitempty"` // 流末返 usage（token 用量）
+	Tools        []provider.ToolDef `json:"tools,omitempty"`
+	ToolChoice   string             `json:"tool_choice,omitempty"`
+	Temperature  *float64           `json:"temperature,omitempty"`
+	MaxTokens    *int               `json:"max_tokens,omitempty"`
+}
+
+// streamOpt 启用流末 usage 返回（OpenAI 兼容 stream_options.include_usage）。
+type streamOpt struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 // openaiToolCallDelta 是流式 tool_call 增量（按 index 聚合）。
@@ -63,6 +77,15 @@ type openaiDelta struct {
 		} `json:"delta"`
 		FinishReason string `json:"finish_reason,omitempty"`
 	} `json:"choices"`
+	// Usage 流末 token 用量（choices 为空，仅 stream_options.include_usage=true 时上游返）。
+	Usage *openaiUsage `json:"usage,omitempty"`
+}
+
+// openaiUsage 是 OpenAI 兼容 usage 字段（流末 chunk 带）。
+type openaiUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 // OpenAICompatibleProvider 对接所有 OpenAI 兼容协议的供应商
@@ -117,18 +140,30 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req provider.ChatRe
 		return nil, provider.ErrCredentialMissing
 	}
 
+	// gen_ai chat span：标记一次 LLM 调用，作为 agent.run 的子 span（trace 树从 agent.run 展开为多轮 chat）。
+	// usage 属性在流末解析 chunk 时回填（gen_ai.usage.input/output_tokens）。
+	ctx, span := chatTracer.Start(ctx, "provider.chat",
+		trace.WithAttributes(
+			attribute.String("gen_ai.operation.name", "chat"),
+			attribute.String("gen_ai.system", p.vendor),
+			attribute.String("gen_ai.request.model", p.upstreamModel),
+		),
+	)
+
 	body, _ := json.Marshal(openaiReq{
-		Model:       p.upstreamModel, // 转换为供应商侧模型名
-		Messages:    req.Messages,
-		Stream:      true,
-		Tools:       req.Tools,
-		ToolChoice:  req.ToolChoice,
-		Temperature: req.Temperature,
-		MaxTokens:   req.MaxTokens,
+		Model:         p.upstreamModel, // 转换为供应商侧模型名
+		Messages:      req.Messages,
+		Stream:        true,
+		StreamOptions: &streamOpt{IncludeUsage: true}, // 流末返 usage（token 用量，gen_ai.usage 属性）
+		Tools:         req.Tools,
+		ToolChoice:    req.ToolChoice,
+		Temperature:   req.Temperature,
+		MaxTokens:     req.MaxTokens,
 	})
 	endpoint := strings.TrimRight(p.baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
+		span.End()
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
@@ -140,12 +175,16 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req provider.ChatRe
 
 	resp, err := p.httpClient.Do(httpReq)
 	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		span.End()
 		return nil, classifyErr(err, 0)
 	}
 	if resp.StatusCode != http.StatusOK {
 		snippet := readBodySnippet(resp.Body)
 		_ = resp.Body.Close()
 		log.Printf("[maas] chat 上游 %s model=%s 返回 %d: %s", p.vendor, p.upstreamModel, resp.StatusCode, snippet)
+		span.SetStatus(codes.Error, fmt.Sprintf("upstream %d", resp.StatusCode))
+		span.End()
 		return nil, fmt.Errorf("%w: %s %d: %s", classifyErr(nil, resp.StatusCode), p.vendor, resp.StatusCode, snippet)
 	}
 
@@ -153,9 +192,11 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req provider.ChatRe
 	go func() {
 		defer close(ch)
 		defer func() { _ = resp.Body.Close() }()
+		defer span.End() // 流结束才 End（含流末 usage 回填到 span）
 		// tool_call 按 index 累积：首 delta 带 id/name，后续 delta 仅追加 arguments 片段。
 		toolAcc := map[int]*provider.ToolCall{}
 		finishReason := ""
+		var usage *provider.Usage // 流末累积（usage chunk 的 choices 为空，单独发）
 		scanner := bufio.NewScanner(resp.Body)
 		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // 容纳长 SSE 行
 		for scanner.Scan() {
@@ -170,6 +211,10 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req provider.ChatRe
 			var d openaiDelta
 			if json.Unmarshal([]byte(payload), &d) != nil {
 				continue // 跳过无法解析的行（如上游心跳/注释）
+			}
+			// 流末 usage chunk（choices 空，仅 usage）：累积待流末发 + 回填 span（gen_ai.usage 语义）。
+			if d.Usage != nil {
+				usage = &provider.Usage{InputTokens: d.Usage.PromptTokens, OutputTokens: d.Usage.CompletionTokens}
 			}
 			if len(d.Choices) == 0 {
 				continue
@@ -225,6 +270,18 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req provider.ChatRe
 			case <-ctx.Done():
 				return
 			case ch <- provider.Chunk{ToolCalls: calls, FinishReason: finishReason}:
+			}
+		}
+		// 流末 usage：回填 chat span 的 gen_ai.usage 属性 + 单独发 Chunk（trace 可见 token 用量）。
+		if usage != nil {
+			span.SetAttributes(
+				attribute.Int("gen_ai.usage.input_tokens", usage.InputTokens),
+				attribute.Int("gen_ai.usage.output_tokens", usage.OutputTokens),
+			)
+			select {
+			case <-ctx.Done():
+				return
+			case ch <- provider.Chunk{Usage: usage}:
 			}
 		}
 	}()

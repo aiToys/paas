@@ -24,13 +24,10 @@ func IsUniqueViolation(err error) bool {
 // FormatExists 把实体名拼进「已存在」错误，如 FormatExists("应用") → "应用已存在"。
 func FormatExists(what string) error { return fmt.Errorf("%s%w", what, ErrAlreadyExists) }
 
-// TenantOrErr 从 ctx 取租户 ID；缺失返错误（fail-closed，与内存实现一致）。
+// TenantOrErr 从 ctx 取租户 ID；缺失返错误（fail-closed）。
+// 委托 pkg/tenant.IDOrErr（单一真源），保留本包签名供各 pg 子包复用（已广泛引用）。
 func TenantOrErr(ctx context.Context) (string, error) {
-	tid, ok := tenant.TenantFrom(ctx)
-	if !ok {
-		return "", errors.New("missing tenant context")
-	}
-	return tid, nil
+	return tenant.IDOrErr(ctx)
 }
 
 // RowScanner 抽象 pgx QueryRow 与 Row 的 Scan 来源，供 scan 辅助函数复用。

@@ -187,7 +187,7 @@ func (r *Runtime) buildTools(ctx context.Context, a Agent) ([]provider.ToolDef, 
 // Run 执行 Agent，流式回调 onChunk（content/reasoning + 工具进度）。
 // 启用工具时进入多轮循环；底层 LLM 不可达（凭证/模型缺失）返脱敏错误。
 // 输入护栏在调 LLM 前拦截（命中返 ErrBlocked）；输出护栏逐段检（命中截断 + ErrBlocked）。
-// 整轮包在 gen_ai OTel span 内（接 Tempo 后 /api/observability/traces 可观测）。
+// 整轮包在 gen_ai OTel span 内（接 Jaeger 后 /api/observability/traces 可观测）。
 func (r *Runtime) Run(ctx context.Context, agentID string, msgs []provider.Message, onChunk func(provider.Chunk)) error {
 	a, err := r.agents.Get(ctx, agentID)
 	if err != nil {
@@ -212,7 +212,7 @@ func (r *Runtime) Run(ctx context.Context, agentID string, msgs []provider.Messa
 	}
 	p := maas.BuildProvider(m.Channels[0], r.resolver)
 
-	// gen_ai span：OpenTelemetry GenAI 语义约定，接 Tempo 后可观测 Agent 链路。
+	// gen_ai span：OpenTelemetry GenAI 语义约定，接 Jaeger 后可观测 Agent 链路。
 	ctx, span := tracer.Start(ctx, "agent.run",
 		trace.WithAttributes(
 			attribute.String("gen_ai.operation.name", "agent"),
@@ -323,11 +323,17 @@ func (r *Runtime) runLoop(ctx context.Context, p provider.Provider, a Agent, msg
 				onChunk(provider.Chunk{Reasoning: fmt.Sprintf("\n⚠️ 未知工具 %s\n", tc.Function.Name)})
 			} else {
 				onChunk(provider.Chunk{Reasoning: fmt.Sprintf("\n🔧 调用工具 %s(%s)\n", tc.Function.Name, tc.Function.Arguments)})
-				if res, err := inv(ctx, tc.Function.Arguments); err == nil {
+				// gen_ai tool span：标记一次工具调用（trace 树 agent.run → chat → tool.call）。
+				toolCtx, toolSpan := tracer.Start(ctx, "tool.call",
+					trace.WithAttributes(attribute.String("gen_ai.tool.name", tc.Function.Name)),
+				)
+				if res, err := inv(toolCtx, tc.Function.Arguments); err == nil {
 					result = res
 				} else {
 					result = "工具调用失败: " + err.Error()
+					toolSpan.SetStatus(codes.Error, err.Error())
 				}
+				toolSpan.End()
 				onChunk(provider.Chunk{Reasoning: "结果: " + truncate(result, 500) + "\n"})
 			}
 			conv = append(conv, provider.Message{Role: "tool", Content: result, ToolCallID: tc.ID})

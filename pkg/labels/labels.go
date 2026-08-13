@@ -13,9 +13,11 @@ const (
 	KeyTenant      = Domain + "/tenant"      // 租户隔离（多租户必带，status_reader/dataplane 越权校验依据）
 	KeyApp         = Domain + "/app"         // 工作负载归属应用（observability 应用级查询依据）
 	KeyWorkload    = Domain + "/workload"    // 工作负载名（Pod→Workload 反查）
+	KeyService     = Domain + "/service"     // 工作负载归属服务（同 app 多服务区分，如 product/recommend；空=单服务，不参与跨租户校验）
 	KeyDataservice = Domain + "/dataservice" // 数据服务名（Pod→DataService 反查）
 	KeyKind        = Domain + "/kind"        // 数据服务 Kind（db/cache/...）
 	KeyLane        = Domain + "/lane"        // 泳道标识（default=基线，feature-x=泳道；L2 前端/governance 分组用，不参与跨租户校验）
+	KeyRouteHost   = Domain + "/route-host"  // governance Route 聚合 Ingress key（同 host 多 Route 共用一条 Ingress，重建/删除定位用）
 )
 
 // Annotation key（不进 selector，可变更，不触发 Pod 重建）。

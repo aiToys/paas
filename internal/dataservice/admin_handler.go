@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/aitoys/paas/internal/httputil"
+	adminutil "github.com/aitoys/paas/internal/web/admin"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
@@ -31,9 +32,7 @@ type TenantChecker interface {
 
 // AdminAuditRecorder admin 写操作审计（依赖倒置，避免 dataservice->security）。
 // tenantID = 资源所属租户（target_tenant）；actor = super_admin UserID；action 带 admin: 前缀。
-type AdminAuditRecorder interface {
-	Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error
-}
+type AdminAuditRecorder = adminutil.AuditRecorder // admin 写操作审计（依赖倒置，统一真源 internal/web/admin）
 
 // QuotaCheckFunc 配额检查-递增（横切）。ctx 必须带目标租户；delta=+1 创建/-1 删除。
 type QuotaCheckFunc func(ctx context.Context, delta int) error

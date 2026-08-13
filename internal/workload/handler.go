@@ -161,7 +161,8 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		envID := r.URL.Query().Get("envId")
-		list, err := h.repo.List(r.Context(), envID, appID, "", "")
+		service := r.URL.Query().Get("service")
+		list, err := h.repo.List(r.Context(), envID, appID, "", "", service)
 		if err != nil {
 			httputil.WriteInternalError(w, err)
 			return
@@ -230,7 +231,8 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 		}
 		wtype := r.URL.Query().Get("type")
 		envID := r.URL.Query().Get("envId")
-		list, err := h.repo.List(r.Context(), envID, "", "", wtype)
+		service := r.URL.Query().Get("service")
+		list, err := h.repo.List(r.Context(), envID, "", "", wtype, service)
 		if err != nil {
 			httputil.WriteInternalError(w, err)
 			return
@@ -288,6 +290,36 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 		h.fillStatus(r.Context(), []Workload{wl})
 		instances := h.instances(r.Context(), id)
 		httputil.WriteData(w, Detail{Workload: wl, Instances: instances})
+		return
+	}
+
+	// PUT /api/workloads/{id}/schedule 修改 cronjob 的 cron 表达式（仅 cronjob 类型有效）。
+	// 生产环境改 schedule 需 prod:write（先查 workload 所属环境）。schedule 空对 cronjob 拒绝。
+	if r.Method == http.MethodPut && len(parts) == 2 && parts[1] == "schedule" && id != "" {
+		if !h.allow(w, r, PermWorkloadWrite) {
+			return
+		}
+		existing, err := h.repo.Get(r.Context(), id)
+		if err != nil {
+			httputil.WriteServiceError(w, http.StatusNotFound, err)
+			return
+		}
+		if !h.allowProd(w, r, existing.EnvID) {
+			return
+		}
+		var body struct {
+			Schedule string `json:"schedule"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+			return
+		}
+		w0, err := h.repo.UpdateSchedule(r.Context(), id, body.Schedule)
+		if err != nil {
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
+			return
+		}
+		httputil.WriteData(w, w0)
 		return
 	}
 

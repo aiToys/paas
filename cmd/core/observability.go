@@ -1,32 +1,81 @@
 package main
 
 import (
+	"context"
 	"os"
 
 	"github.com/aitoys/paas/internal/observability"
 	obcompose "github.com/aitoys/paas/internal/observability/compose"
 	obsmemory "github.com/aitoys/paas/internal/observability/memory"
 	obreal "github.com/aitoys/paas/internal/observability/real"
+	"github.com/aitoys/paas/internal/workload"
 )
 
 // buildObservabilityStore 按环境变量构造 observability.Repository：
 // alert rules 始终 memory（含 seed）；metrics/logs/traces 按
-// PAAS_PROM_URL / PAAS_LOKI_URL / PAAS_TEMPO_URL 非空则接真实后端，
+// PAAS_PROM_URL / PAAS_LOKI_URL / PAAS_JAEGER_URL 非空则接真实后端，
 // 否则保持 memory 惰性 mock（三支柱独立、可混用）。
 // 未配任何 URL 时行为与现状完全一致。
-func buildObservabilityStore() observability.Repository {
+//
+// trace 后端用 Jaeger all-in-one（天生单体，~256Mi 稳定），core 推送端走 OTel OTLP/HTTP
+// （PAAS_OTEL_ENDPOINT 指向 Jaeger 4318），后端可插拔（Tempo/Jaeger/Zipkin 均接 OTLP）。
+//
+// lister 桥接 workload.Repository，供应用级 metrics/logs 按工作负载 pod 名正则查询
+// （cAdvisor/Loki 不带 paas 自定义 label，靠 app→工作负载 ID 解析 pod 集合）。nil 时应用级查询降级返空。
+func buildObservabilityStore(lister observability.AppWorkloadLister) observability.Repository {
 	rules := obsmemory.NewStore()
 	metrics := observability.MetricsReader(rules)
 	if u := os.Getenv("PAAS_PROM_URL"); u != "" {
-		metrics = obreal.NewMetricsStore(u)
+		metrics = obreal.NewMetricsStore(u, lister)
 	}
 	logs := observability.LogsReader(rules)
 	if u := os.Getenv("PAAS_LOKI_URL"); u != "" {
-		logs = obreal.NewLogsStore(u)
+		logs = obreal.NewLogsStore(u, lister)
 	}
 	traces := observability.TracesReader(rules)
-	if u := os.Getenv("PAAS_TEMPO_URL"); u != "" {
-		traces = obreal.NewTracesStore(u)
+	if u := os.Getenv("PAAS_JAEGER_URL"); u != "" {
+		traces = obreal.NewTracesStore(u, lister)
 	}
 	return obcompose.New(rules, metrics, logs, traces)
+}
+
+// workloadLister 桥接 workload.Repository → observability.AppWorkloadLister。
+// 应用级可观测按 app→工作负载 ID 列表解析 pod 名正则（Deployment 名=工作负载 ID，Pod=<id>-<hash>-<hash>）。
+type workloadLister struct{ repo workload.Repository }
+
+func (l workloadLister) AppWorkloadIDs(ctx context.Context, appID string) ([]string, error) {
+	wls, err := l.repo.List(ctx, "", appID, "", "", "")
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(wls))
+	for _, w := range wls {
+		if w.ID != "" {
+			ids = append(ids, w.ID)
+		}
+	}
+	return ids, nil
+}
+
+// AppWorkloadNames 返回应用下全部 service 工作负载名（Deployment/Service 名 = OTel service.name）。
+// 应用级 trace 查询按 service.name 匹配工作负载名定位该应用的 span。仅 service 类型（job/cronjob
+// 无常驻 HTTP server，不产生入站请求 trace）；同名去重（多环境基线可能同名）。
+func (l workloadLister) AppWorkloadNames(ctx context.Context, appID string) ([]string, error) {
+	wls, err := l.repo.List(ctx, "", appID, "", "", "")
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(wls))
+	seen := make(map[string]struct{}, len(wls))
+	for _, w := range wls {
+		if w.Type != "service" || w.Name == "" {
+			continue
+		}
+		if _, dup := seen[w.Name]; dup {
+			continue
+		}
+		seen[w.Name] = struct{}{}
+		names = append(names, w.Name)
+	}
+	return names, nil
 }

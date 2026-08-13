@@ -53,13 +53,15 @@ func (c InstallConfig) Run() error {
 			return fmt.Errorf("docker push %s: %w", target, err)
 		}
 	}
-	// helm upgrade --install（image.registry 指向私有 registry）
+	// helm upgrade --install（image.registry 指向私有 registry）。
+	// core 镜像 + postgres 镜像都覆盖到私有 registry——否则离线集群 postgres Pod 仍拉公网 postgres:16-alpine 失败。
 	chartPath := filepath.Join(work, m.ChartFile)
 	if _, err := c.Runner.Run("helm", "upgrade", "--install", "paas", chartPath,
 		"--namespace", c.Namespace, "--create-namespace",
 		"--set", fmt.Sprintf("image.registry=%s", c.TargetReg),
 		"--set", "image.repository=paas-core",
 		"--set", fmt.Sprintf("image.tag=%s", m.PaasVersion),
+		"--set", fmt.Sprintf("postgres.image=%s/postgres:16-alpine", c.TargetReg),
 		"--wait"); err != nil {
 		return fmt.Errorf("helm install: %w", err)
 	}

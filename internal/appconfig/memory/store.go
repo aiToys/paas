@@ -24,14 +24,6 @@ func NewStore() *Store {
 	return &Store{items: map[string]appconfig.ConfigItem{}}
 }
 
-func tenantOrErr(ctx context.Context) (string, error) {
-	tid, ok := tenant.TenantFrom(ctx)
-	if !ok {
-		return "", fmt.Errorf("missing tenant context")
-	}
-	return tid, nil
-}
-
 func (s *Store) List(ctx context.Context, appID, envID string) ([]appconfig.ConfigItem, error) {
 	return s.list(ctx, appID, envID, true)
 }
@@ -42,7 +34,7 @@ func (s *Store) ListPlain(ctx context.Context, appID, envID string) ([]appconfig
 }
 
 func (s *Store) list(ctx context.Context, appID, envID string, mask bool) ([]appconfig.ConfigItem, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +63,7 @@ func (s *Store) list(ctx context.Context, appID, envID string, mask bool) ([]app
 
 // Upsert 新增或更新（同 tenant+app+env+key 视为同一项）。存储明文，返回掩码。
 func (s *Store) Upsert(ctx context.Context, item appconfig.ConfigItem) (appconfig.ConfigItem, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return appconfig.ConfigItem{}, err
 	}
@@ -103,7 +95,7 @@ func (s *Store) Upsert(ctx context.Context, item appconfig.ConfigItem) (appconfi
 }
 
 func (s *Store) Delete(ctx context.Context, id string) error {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return err
 	}

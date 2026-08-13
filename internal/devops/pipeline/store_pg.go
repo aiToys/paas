@@ -299,6 +299,40 @@ func (s *pgStore) ListRuns(ctx context.Context, appID, pipelineID, status string
 	return out, rows.Err()
 }
 
+// ListAllRuns 跨租户列表（admin 总览用，返回对象带 TenantID）；可选 status 过滤；created_at 倒序。
+// 与 ListRuns 区别：不按 ctx tenant 过滤（admin 跨租户视图）。LIMIT 1000 防御上界（与审计日志同款）。
+func (s *pgStore) ListAllRuns(ctx context.Context, status string) ([]PipelineRun, error) {
+	q := `SELECT ` + runCols + ` FROM pipeline_runs`
+	args := []any{}
+	if status != "" {
+		args = append(args, status)
+		q += fmt.Sprintf(` WHERE status=$%d`, len(args))
+	}
+	q += ` ORDER BY created_at DESC, id DESC LIMIT 1000`
+	rows, err := s.db.Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]PipelineRun, 0)
+	for rows.Next() {
+		var r PipelineRun
+		var fp *time.Time
+		if err = rows.Scan(&r.ID, &r.TenantID, &r.AppID, &r.PipelineID, &r.Branch, &r.Commit, &r.RepoID,
+			&r.Trigger, &r.TriggerRef, &r.Status, &r.CurrentStage, &r.Version, &r.CreatedAt, &fp); err != nil {
+			return nil, err
+		}
+		if fp != nil {
+			r.FinishedAt = *fp
+		}
+		if err = loadStageRuns(ctx, s.db, &r); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // GetRun 取单个（含 stageRuns）；跨租户 NotFound 不泄漏。
 func (s *pgStore) GetRun(ctx context.Context, id string) (PipelineRun, error) {
 	tid, err := tenantOrErr(ctx)

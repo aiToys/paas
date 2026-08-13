@@ -1,6 +1,6 @@
 // Package memory 提供 observability.Repository 的内存实现（降级模式）。
 //
-// 去假数据：未接真实后端（PAAS_PROM_URL/PAAS_LOKI_URL/PAAS_TEMPO_URL 空）时
+// 去假数据：未接真实后端（PAAS_PROM_URL/PAAS_LOKI_URL/PAAS_JAEGER_URL 空）时
 // metrics/logs/traces 返空，不惰性生成 mock 数据。告警规则（配置类）保留 seed 演示规则。
 // 接真实后端走 internal/observability/real + compose 聚合，memory 仅作零依赖降级。
 package memory
@@ -38,14 +38,6 @@ func NewStore() *Store {
 	return s
 }
 
-func tenantOrErr(ctx context.Context) (string, error) {
-	tid, ok := tenant.TenantFrom(ctx)
-	if !ok {
-		return "", fmt.Errorf("missing tenant context")
-	}
-	return tid, nil
-}
-
 // clonePoints 返回 Points 切片的深拷贝，确保返回值与 store 内底层数组独立。
 func clonePoints(pts []observability.MetricPoint) []observability.MetricPoint {
 	if len(pts) == 0 {
@@ -57,7 +49,7 @@ func clonePoints(pts []observability.MetricPoint) []observability.MetricPoint {
 }
 
 func (s *Store) ListMetrics(ctx context.Context, targetType, targetID, name string) ([]observability.MetricSeries, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +77,7 @@ func (s *Store) ListMetrics(ctx context.Context, targetType, targetID, name stri
 }
 
 func (s *Store) ListAlertRules(ctx context.Context) ([]observability.AlertRule, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -119,7 +111,7 @@ func (s *Store) ListAllAlertRules(ctx context.Context) ([]observability.AlertRul
 }
 
 func (s *Store) CreateAlertRule(ctx context.Context, rule observability.AlertRule) (observability.AlertRule, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return observability.AlertRule{}, err
 	}
@@ -137,7 +129,7 @@ func (s *Store) CreateAlertRule(ctx context.Context, rule observability.AlertRul
 }
 
 func (s *Store) DeleteAlertRule(ctx context.Context, id string) error {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return err
 	}
@@ -154,7 +146,7 @@ func (s *Store) DeleteAlertRule(ctx context.Context, id string) error {
 // ListAlerts 即时评估 enabled 规则对匹配 series 当前值超阈值者生成 firing 告警。
 // 降级模式 series 为空（无 mock 指标），返空；接真实后端时 series 由 real store 提供。
 func (s *Store) ListAlerts(ctx context.Context) ([]observability.Alert, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +192,7 @@ func (s *Store) ListAlerts(ctx context.Context) ([]observability.Alert, error) {
 
 // ListLogs 应用日志查询（过滤，不补点）。降级模式返空。按时间倒序返回。
 func (s *Store) ListLogs(ctx context.Context, appID, level, q string, limit int) ([]observability.LogEntry, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +229,7 @@ func (s *Store) ListLogs(ctx context.Context, appID, level, q string, limit int)
 
 // ListTraces 链路追踪查询（过滤，不补点）。降级模式返空。按 StartedAt 倒序返回。
 func (s *Store) ListTraces(ctx context.Context, appID, status string, limit int) ([]observability.Trace, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}

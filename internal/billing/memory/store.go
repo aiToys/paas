@@ -32,14 +32,6 @@ func NewStore() *Store {
 	return s
 }
 
-func tenantOrErr(ctx context.Context) (string, error) {
-	tid, ok := tenant.TenantFrom(ctx)
-	if !ok {
-		return "", fmt.Errorf("missing tenant context")
-	}
-	return tid, nil
-}
-
 // DefaultQuota 返回新租户的默认配额（各资源适度上限）。
 func DefaultQuota(tid string, at time.Time) billing.ResourceQuota {
 	return billing.ResourceQuota{
@@ -81,7 +73,7 @@ func cloneByApp(m map[string]map[string]int) map[string]map[string]int {
 // —— Quota ——
 
 func (s *Store) GetQuota(ctx context.Context) (billing.ResourceQuota, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return billing.ResourceQuota{}, err
 	}
@@ -96,7 +88,7 @@ func (s *Store) GetQuota(ctx context.Context) (billing.ResourceQuota, error) {
 }
 
 func (s *Store) SetQuota(ctx context.Context, q billing.ResourceQuota) (billing.ResourceQuota, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return billing.ResourceQuota{}, err
 	}
@@ -125,7 +117,7 @@ func (s *Store) ListAllQuotas(ctx context.Context) ([]billing.ResourceQuota, err
 // —— Usage ——
 
 func (s *Store) GetUsage(ctx context.Context) (billing.ResourceUsage, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return billing.ResourceUsage{}, err
 	}
@@ -141,7 +133,7 @@ func (s *Store) GetUsage(ctx context.Context) (billing.ResourceUsage, error) {
 }
 
 func (s *Store) IncUsage(ctx context.Context, resource string, delta int) (billing.ResourceUsage, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return billing.ResourceUsage{}, err
 	}
@@ -182,7 +174,7 @@ func (s *Store) IncUsage(ctx context.Context, resource string, delta int) (billi
 // CheckAndInc 原子「检查超限 + 递增」：limit>0 且 usage+delta 超限返 ErrQuotaExceeded（不递增）；
 // limit<=0（Unlimited 或未设）不拦截。与 IncUsage 同锁，保证检查-递增原子（横切配额拦截基石）。
 func (s *Store) CheckAndInc(ctx context.Context, resource string, delta int) (billing.ResourceUsage, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return billing.ResourceUsage{}, err
 	}
@@ -218,7 +210,7 @@ func (s *Store) CheckAndInc(ctx context.Context, resource string, delta int) (bi
 // —— Bills ——
 
 func (s *Store) ListBills(ctx context.Context) ([]billing.BillingRecord, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -252,7 +244,7 @@ func (s *Store) ListAllBills(ctx context.Context) ([]billing.BillingRecord, erro
 }
 
 func (s *Store) GetBill(ctx context.Context, id string) (billing.BillingRecord, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return billing.BillingRecord{}, err
 	}
@@ -275,7 +267,7 @@ func cloneBill(b billing.BillingRecord) billing.BillingRecord {
 
 // GenerateBill 按当前用量 × 单价生成 period 账单；同 period 已有 unpaid 则覆盖更新。
 func (s *Store) GenerateBill(ctx context.Context, period string) (billing.BillingRecord, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return billing.BillingRecord{}, err
 	}
@@ -330,7 +322,7 @@ func (s *Store) GenerateBill(ctx context.Context, period string) (billing.Billin
 }
 
 func (s *Store) PayBill(ctx context.Context, id string) (billing.BillingRecord, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return billing.BillingRecord{}, err
 	}

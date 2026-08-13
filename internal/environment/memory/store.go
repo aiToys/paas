@@ -26,16 +26,8 @@ func NewStore() *Store {
 	return s
 }
 
-func tenantOrErr(ctx context.Context) (string, error) {
-	tid, ok := tenant.TenantFrom(ctx)
-	if !ok {
-		return "", fmt.Errorf("missing tenant context")
-	}
-	return tid, nil
-}
-
 func (s *Store) List(ctx context.Context) ([]environment.Environment, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +61,7 @@ func (s *Store) ListAll(ctx context.Context) ([]environment.Environment, error) 
 }
 
 func (s *Store) Get(ctx context.Context, id string) (environment.Environment, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return environment.Environment{}, err
 	}
@@ -83,7 +75,7 @@ func (s *Store) Get(ctx context.Context, id string) (environment.Environment, er
 }
 
 func (s *Store) Create(ctx context.Context, e environment.Environment) error {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return err
 	}
@@ -104,7 +96,7 @@ func (s *Store) Create(ctx context.Context, e environment.Environment) error {
 }
 
 func (s *Store) Delete(ctx context.Context, id string) error {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return err
 	}
@@ -130,7 +122,7 @@ func (s *Store) EnvType(ctx context.Context, id string) (string, error) {
 // NextPromoteTarget 返回同租户内 PromoteOrder 严格大于当前的最小阶序环境（同 order 取 id 最小，确定性）。
 // 当前环境不存在 / 已是最高阶序返 ErrNoPromoteTarget。
 func (s *Store) NextPromoteTarget(ctx context.Context, envID string) (environment.Environment, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return environment.Environment{}, err
 	}

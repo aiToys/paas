@@ -59,6 +59,7 @@ func (a *K8sApplier) Apply(ctx context.Context, w workload.Workload) error {
 			AppID:         w.AppID,
 			EnvID:         w.EnvID,
 			LaneID:        w.LaneID,
+			Service:       w.Service,
 			Type:          w.Type,
 			Name:          w.Name,
 			Image:         w.Image,
@@ -76,6 +77,37 @@ func (a *K8sApplier) Apply(ctx context.Context, w workload.Workload) error {
 		return fmt.Errorf("apply workload crd: %w", err)
 	}
 	return nil
+}
+
+// EnsureIfMissing 仅在 CRD 不存在时补建（drift 修复用），存在则跳过。
+//
+// 与 Apply 的区别（关键）：Apply 是 CreateOrUpdate，会用 PG 当前状态覆盖既有 CRD spec。
+// drift 修复场景下 PG 可能是陈旧的（裸 workload 空 image_ref / replicas=0），Apply 会把
+// 已有运行态（如 Release 编排出来的带 image 的 Deployment）回退成陈旧状态——典型副作用：
+// service 被缩到 0 副本。EnsureIfMissing 用 client.Get 先判存在，存在即返 (false,nil) 不动，
+// 仅 CRD 缺失时才 Apply 补建，避免覆盖 K8s 既有运行态。
+//
+// 返回 (created bool, err error)：true=本次补建，false=已存在跳过。
+func (a *K8sApplier) EnsureIfMissing(ctx context.Context, w workload.Workload) (bool, error) {
+	if w.TenantID == "" {
+		return false, fmt.Errorf("workload tenantID 为空，无法派生数据面 namespace")
+	}
+	ns := tenant.Namespace(w.TenantID)
+	var existing v1alpha1.Workload
+	err := a.Client.Get(ctx, client.ObjectKey{Name: w.ID, Namespace: ns}, &existing)
+	if err == nil {
+		// CRD 已存在：跳过，绝不覆盖既有运行态
+		return false, nil
+	}
+	// NotFound 才补建；其余真实错误（权限/连接）上抛，drift 修复记日志跳过该条
+	if realErr := client.IgnoreNotFound(err); realErr != nil {
+		return false, fmt.Errorf("get workload crd: %w", realErr)
+	}
+	// NotFound：CRD 缺失，补建
+	if err := a.Apply(ctx, w); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Delete 删 Workload CRD（级联清 K8s 资源）。ns 从 ctx tenant 派生（与 Apply 同源）。

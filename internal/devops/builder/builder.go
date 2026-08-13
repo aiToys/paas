@@ -14,6 +14,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 )
 
@@ -58,7 +60,7 @@ type Mock struct{}
 func (Mock) Build(_ context.Context, p Params) (Result, error) {
 	time.Sleep(800 * time.Millisecond) // 模拟 clone+build+push 耗时
 	digest := "sha256:" + sha256hex(p.Commit+p.AppID+p.BuildID)
-	tag := p.Branch + "-" + safeShort(p.Commit, 8)
+	tag := buildTag(p)
 	return Result{Digest: digest, Tag: tag, Log: mockBuildLog(tag), Registry: RegistryOrDefault(p)}, nil
 }
 
@@ -97,4 +99,46 @@ func RegistryOrDefault(p Params) string {
 // ImageRef 拼接 registry/app:tag 全量引用。
 func ImageRef(p Params, tag string) string {
 	return RegistryOrDefault(p) + "/" + p.AppID + ":" + tag
+}
+
+// buildTag 生成镜像 tag：<branch>-<commit8>[-<argsHash8>]。
+//
+// 多服务同 repo 构建场景（如 paas-shop 用 buildArgs SERVICE=product/recommend/... 区分）：
+// 同 app 同 commit 的多次构建若 tag 仅 branch-commit8 会完全相同，后构建在 registry 覆盖
+// 先构建，但各 BuildRun 记的 digest 是各自构建时的值 → registry 实际内容（按 tag 拉取）与
+// PG images 表 digest 不一致，部署拉到「最后一个构建」而非期望服务。
+//
+// 解法：有 buildArgs 时末尾追加 buildArgs 稳定哈希（按 key 排序拼接，取 sha256 前 8 位）。
+//   - 同 buildArgs 重构 → 同 argsHash → 同 tag（幂等，不产生垃圾 tag）
+//   - 不同 buildArgs → 不同 argsHash → 不同 tag（多服务区分，各自独立 digest）
+//   - 无 buildArgs → 保持原 branch-commit8（向后兼容，单服务场景不变）
+//
+// fallbackCommit 为空 Commit 时的兜底（各实现用 BuildID 派生）。
+func buildTag(p Params) string {
+	tagCommit := p.Commit
+	if tagCommit == "" {
+		tagCommit = p.BuildID
+	}
+	base := p.Branch + "-" + safeShort(tagCommit, 8)
+	if len(p.BuildArgs) == 0 {
+		return base
+	}
+	return base + "-" + argsHash(p.BuildArgs)
+}
+
+// argsHash 按 key 排序拼接 buildArgs 后取 sha256 前 8 位（确定性，避免 map 迭代序漂移）。
+func argsHash(args map[string]string) string {
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(args[k])
+		b.WriteByte('|')
+	}
+	return safeShort(sha256hex(b.String()), 8)
 }

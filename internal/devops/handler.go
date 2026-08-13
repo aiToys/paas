@@ -166,7 +166,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(path, "/rollback"), strings.HasSuffix(path, "/promote"):
 		h.serveReleaseAction(w, r)
 	case path == "/api/registry/repositories":
-		// registry 实时视图：列 hub.wang.dd 所有镜像仓库名（catalog）
+		// registry 实时视图：列平台镜像仓库所有镜像仓库名（catalog，地址取自 PAAS_REGISTRY）
 		h.serveRegistryCatalog(w, r)
 	case path == "/api/registry/tags":
 		// registry 实时视图：某仓库的 tag + digest（?repository=paas/paas-core）
@@ -494,7 +494,8 @@ func (h *Handler) serveBuildRuns(w http.ResponseWriter, r *http.Request, appID s
 			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
-		httputil.WriteJSON(w, http.StatusCreated, map[string]string{"status": "triggered"})
+		// 返回创建的 BuildRun（含后端分配的 ID/状态），符合 {data:T} 契约（spec 登记 WithResp(BuildRun{})）。
+		httputil.WriteDataCreated(w, b)
 		return
 	}
 	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")

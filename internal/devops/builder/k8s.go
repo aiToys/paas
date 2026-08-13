@@ -60,12 +60,8 @@ func (k K8sJob) Build(ctx context.Context, p Params) (result Result, err error) 
 	// cloneURL 在 Go 侧注入 token（避免 shell 拼接面）；Job 脚本纯读 env。
 	cloneURL := injectToken(p.GitURL, p.GitToken)
 
-	// tag：commit 已知用 branch-commit8（与 Real/Mock 一致），空则用 buildID8 派生（Store 通常已 mockCommit 填，此为兜底）。
-	tagCommit := p.Commit
-	if tagCommit == "" {
-		tagCommit = p.BuildID
-	}
-	tag := p.Branch + "-" + safeShort(tagCommit, 8)
+	// tag：经 buildTag 生成（branch-commit8[-argsHash8]，多服务 buildArgs 区分，与 Real/Mock 一致）。
+	tag := buildTag(p)
 	ref := ImageRef(p, tag)
 
 	// 构建 Job 落地租户数据面 ns（paas-<tenant>），写前 ensure。

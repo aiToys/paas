@@ -24,21 +24,21 @@ type Store struct {
 func NewStore(db *pg.DB) *Store { return &Store{db: db} }
 
 // wlCols 与 model.Workload 字段顺序对齐（scan 列顺序必须一致）。
-const wlCols = `id, tenant_id, app_id, env_id, lane_id, type, name, image, image_ref, replicas, ready, status, schedule, command, port, container_port, domain, created_at`
+const wlCols = `id, tenant_id, app_id, env_id, lane_id, service, type, name, image, image_ref, replicas, ready, status, schedule, command, port, container_port, domain, created_at`
 
 // scanWL 通过 pg.RowScanner 抽象 QueryRow 与 Row 两种 Scan 来源。
 func scanWL(r pg.RowScanner, w *workload.Workload) error {
 	return r.Scan(
-		&w.ID, &w.TenantID, &w.AppID, &w.EnvID, &w.LaneID, &w.Type,
+		&w.ID, &w.TenantID, &w.AppID, &w.EnvID, &w.LaneID, &w.Service, &w.Type,
 		&w.Name, &w.Image, &w.ImageRef, &w.Replicas, &w.Ready,
 		&w.Status, &w.Schedule, &w.Command, &w.Port, &w.ContainerPort, &w.Domain, &w.CreatedAt,
 	)
 }
 
-// List 按租户 + 可选 envID/appID/laneID/wtype 过滤；空串表示该维度不过滤（与内存语义一致）。
-// 动态拼 WHERE：固定 tenant_id=$1，envID/appID/laneID/wtype 非空各追加 AND col=$N。
-// 各维度均条件追加（非空才 AND），参数顺序按 append 动态编号。
-func (s *Store) List(ctx context.Context, envID, appID, laneID, wtype string) ([]workload.Workload, error) {
+// List 按租户 + 可选 envID/appID/laneID/wtype/service 过滤；空串表示该维度不过滤（与内存语义一致）。
+// 动态拼 WHERE：固定 tenant_id=$1，各过滤维度非空各追加 AND col=$N。
+// 参数顺序按 append 动态编号。
+func (s *Store) List(ctx context.Context, envID, appID, laneID, wtype, service string) ([]workload.Workload, error) {
 	tid, err := pg.TenantOrErr(ctx)
 	if err != nil {
 		return nil, err
@@ -60,6 +60,10 @@ func (s *Store) List(ctx context.Context, envID, appID, laneID, wtype string) ([
 	if wtype != "" {
 		args = append(args, wtype)
 		q += fmt.Sprintf(` AND type=$%d`, len(args))
+	}
+	if service != "" {
+		args = append(args, service)
+		q += fmt.Sprintf(` AND service=$%d`, len(args))
 	}
 	q += ` ORDER BY id`
 	rows, err := s.db.Pool().Query(ctx, q, args...)
@@ -135,8 +139,8 @@ func (s *Store) Create(ctx context.Context, w workload.Workload) error {
 		w.LaneID = workload.LaneDefault
 	}
 	_, err = s.db.Pool().Exec(ctx,
-		`INSERT INTO workloads (`+wlCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
-		w.ID, w.TenantID, w.AppID, w.EnvID, w.LaneID, w.Type,
+		`INSERT INTO workloads (`+wlCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+		w.ID, w.TenantID, w.AppID, w.EnvID, w.LaneID, w.Service, w.Type,
 		w.Name, w.Image, w.ImageRef, w.Replicas, w.Ready,
 		w.Status, w.Schedule, w.Command, w.Port, w.ContainerPort, w.Domain, w.CreatedAt)
 	if pg.IsUniqueViolation(err) {
@@ -186,6 +190,38 @@ func (s *Store) UpdateImage(ctx context.Context, id, image, imageRef string) (wo
 		if errors.Is(err, pgx.ErrNoRows) {
 			return workload.Workload{}, fmt.Errorf("工作负载不存在: %s", id)
 		}
+		return workload.Workload{}, err
+	}
+	return w, nil
+}
+
+// UpdateSchedule 修改 cronjob 的 cron 表达式。
+// 仅 cronjob 类型有效（service/job 拒绝）；schedule 空对 cronjob 拒绝（Validate 语义）。
+// 跨租户访问返回 not found（不泄漏）。
+func (s *Store) UpdateSchedule(ctx context.Context, id, schedule string) (workload.Workload, error) {
+	tid, err := pg.TenantOrErr(ctx)
+	if err != nil {
+		return workload.Workload{}, err
+	}
+	// 先取 + 校验类型（cronjob 专属）+ 归属租户，跨租户统一 not found 不泄漏
+	var wtype string
+	if err = s.db.Pool().QueryRow(ctx,
+		`SELECT type FROM workloads WHERE id=$1 AND tenant_id=$2`, id, tid).Scan(&wtype); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return workload.Workload{}, fmt.Errorf("工作负载不存在: %s", id)
+		}
+		return workload.Workload{}, err
+	}
+	if wtype != workload.TypeCronJob {
+		return workload.Workload{}, fmt.Errorf("仅 cronjob 支持修改 schedule，当前类型: %s", wtype)
+	}
+	if schedule == "" {
+		return workload.Workload{}, fmt.Errorf("cronjob schedule 不能为空")
+	}
+	row := s.db.Pool().QueryRow(ctx,
+		`UPDATE workloads SET schedule=$3 WHERE id=$1 AND tenant_id=$2 RETURNING `+wlCols, id, tid, schedule)
+	var w workload.Workload
+	if err = scanWL(row, &w); err != nil {
 		return workload.Workload{}, err
 	}
 	return w, nil

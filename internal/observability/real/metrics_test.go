@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 func TestMetricsStoreSuccess(t *testing.T) {
@@ -14,8 +16,8 @@ func TestMetricsStoreSuccess(t *testing.T) {
 			t.Fatalf("路径应为 /api/v1/query_range，实际 %s", r.URL.Path)
 		}
 		q := r.URL.Query().Get("query")
-		// 应用级：按 paas_aitoys_app label 聚合 cAdvisor CPU
-		want := `sum(rate(container_cpu_usage_seconds_total{paas_aitoys_app="app-cs",container!="POD",container!=""}[5m]))`
+		// 应用级：cAdvisor 不带 pod label，按 namespace(paas-<tenant>) + 工作负载 pod 名正则聚合 CPU。
+		want := `sum(rate(container_cpu_usage_seconds_total{namespace="paas-t-acme",pod=~"wl-wl1-.*|wl-wl2-.*",container!="POD",container!=""}[5m]))`
 		if q != want {
 			t.Fatalf("PromQL 不符:\n got: %s\nwant: %s", q, want)
 		}
@@ -33,8 +35,9 @@ func TestMetricsStoreSuccess(t *testing.T) {
 		})
 	}))
 	defer srv.Close()
-	s := NewMetricsStore(srv.URL)
-	out, err := s.ListMetrics(context.Background(), "app", "app-cs", "cpu")
+	s := NewMetricsStore(srv.URL, &fakeLister{ids: []string{"wl-wl1", "wl-wl2"}})
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	out, err := s.ListMetrics(ctx, "app", "app-cs", "cpu")
 	if err != nil {
 		t.Fatalf("意外错误: %v", err)
 	}
@@ -51,7 +54,7 @@ func TestMetricsStoreSuccess(t *testing.T) {
 
 func TestMetricsStoreBackendDown(t *testing.T) {
 	// 指向不存在的端口 → 降级返空切片，不报错。
-	s := NewMetricsStore("http://127.0.0.1:1")
+	s := NewMetricsStore("http://127.0.0.1:1", nil)
 	out, err := s.ListMetrics(context.Background(), "app", "", "cpu")
 	if err != nil {
 		t.Fatalf("后端不可达应降级返空非报错: %v", err)
@@ -80,7 +83,7 @@ func TestMetricsStoreDataservicePodQuery(t *testing.T) {
 		})
 	}))
 	defer srv.Close()
-	s := NewMetricsStore(srv.URL)
+	s := NewMetricsStore(srv.URL, nil)
 	out, err := s.ListMetrics(context.Background(), "dataservice", "ds-mysql", "cpu")
 	if err != nil {
 		t.Fatalf("意外错误: %v", err)
@@ -91,7 +94,7 @@ func TestMetricsStoreDataservicePodQuery(t *testing.T) {
 	if out[0].Unit != "cores" || out[0].Current != 0.6 {
 		t.Fatalf("cpu 单位/值错误: unit=%s current=%v", out[0].Unit, out[0].Current)
 	}
-	want := `sum(rate(container_cpu_usage_seconds_total{pod="ds-mysql-0",container="main"}[5m]))`
+	want := `sum(rate(container_cpu_usage_seconds_total{namespace="paas-x",pod="ds-mysql-0",container="main"}[5m]))`
 	if gotQuery != want {
 		t.Fatalf("dataservice PromQL 应按 pod 标签查 cAdvisor:\n got: %s\nwant: %s", gotQuery, want)
 	}
@@ -111,7 +114,7 @@ func TestMetricsStoreDataserviceMemoryScale(t *testing.T) {
 		})
 	}))
 	defer srv.Close()
-	s := NewMetricsStore(srv.URL)
+	s := NewMetricsStore(srv.URL, nil)
 	out, _ := s.ListMetrics(context.Background(), "dataservice", "ds-r", "mem")
 	if len(out) != 1 {
 		t.Fatalf("应 1 条 series，got %d", len(out))

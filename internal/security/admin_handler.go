@@ -16,15 +16,14 @@ import (
 	"net/http"
 	"strings"
 
+	adminutil "github.com/aitoys/paas/internal/web/admin"
 	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // AdminAuditRecorder admin 写操作审计（依赖倒置，避免 security 自引用循环）。
 // tenantID = 资源所属租户（target_tenant，平台级密钥为空字符串）；actor = super_admin UserID；action 带 admin: 前缀。
-type AdminAuditRecorder interface {
-	Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error
-}
+type AdminAuditRecorder = adminutil.AuditRecorder // admin 写操作审计（依赖倒置，统一真源 internal/web/admin）
 
 // AdminHandler 暴露密钥 admin REST API（/api/admin/secrets/{id}*）。
 //
@@ -85,12 +84,13 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// adminTenantCtx 派生资源所属租户 ctx（admin 跨租户操作以资源租户身份执行下游）。
+// tenantCtxForSecret 派生资源所属租户 ctx（security 特例：平台级 Secret TenantID 空）。
 // 平台级 Secret（TenantID 空）注入 sentinel "platform"：下游 DeleteSecret 调 TenantOrErr
 // 拒绝空字符串（返 "missing tenant context"），sentinel 让其通过；SQL tenant_id='platform'
 // 不会误匹配租户级（NULL ≠ 'platform'），OR scope='platform' 命中平台级行（与 identityAuditAdapter 同款）。
 // 审计仍记真实 sec.TenantID（空），由 identityAuditAdapter 转 "platform" 落库。
-func adminTenantCtx(r *http.Request, tenantID string) (context.Context, *http.Request) {
+// 不复用 web/admin.TenantCtx（后者无 platform sentinel 处理，security 平台级资源特例）。
+func tenantCtxForSecret(r *http.Request, tenantID string) (context.Context, *http.Request) {
 	if tenantID == "" {
 		tenantID = "platform"
 	}
@@ -145,7 +145,7 @@ func (h *AdminHandler) serveDelete(w http.ResponseWriter, r *http.Request, id st
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
-	ctx, rr := adminTenantCtx(r, sec.TenantID)
+	ctx, rr := tenantCtxForSecret(r, sec.TenantID)
 	if err := h.repo.DeleteSecret(ctx, id); err != nil {
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return

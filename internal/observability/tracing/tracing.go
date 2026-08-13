@@ -35,7 +35,7 @@ func Init(ctx context.Context, endpoint string) (func(context.Context) error, er
 
 	exp, err := otlptracehttp.New(ctx,
 		otlptracehttp.WithEndpoint(endpoint),
-		// 开发/内网直连 Collector 或 Tempo，不走 TLS（生产经 Collector 终结 TLS）。
+		// 开发/内网直连 Collector 或 Jaeger，不走 TLS（生产经 Collector 终结 TLS）。
 		otlptracehttp.WithInsecure(),
 	)
 	if err != nil {

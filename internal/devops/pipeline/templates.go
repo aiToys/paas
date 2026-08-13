@@ -28,7 +28,7 @@ func BuiltinTemplates() []PipelineTemplate {
 			Name:        "测试联调流水线",
 			Kind:        KindCI,
 			Builtin:     true,
-			Version:     1, // 破坏性改动 +1（存量经 migration 0025 回填为 1）
+			Version:     2, // v2: smoke 默认路径 /livez -> /healthz（K8s 业界惯例 + dogfood app 实际值）
 			Description: "变更验证：构建 -> 部署到测试环境的分支泳道 -> 冒烟联调（不打版本、不合并主干）",
 			Stages: []StageDef{
 				{Name: "构建", Type: StageBuild},
@@ -40,7 +40,7 @@ func BuiltinTemplates() []PipelineTemplate {
 				}},
 				{Name: "冒烟联调", Type: StageTest, Params: map[string]any{
 					"mode": TestSmoke,
-					"path": "/livez",
+					"path": "/healthz", // K8s 业界惯例（kubelet probe 通用）；应用可经 paramOverrides 覆盖
 				}},
 			},
 		},

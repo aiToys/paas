@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 
+	adminutil "github.com/aitoys/paas/internal/web/admin"
 	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/pkg/tenant"
 )
@@ -17,9 +18,7 @@ type AdminTenantChecker interface {
 }
 
 // AdminAuditRecorder admin 写操作审计（与 dataservice.AdminAuditRecorder 同源）。
-type AdminAuditRecorder interface {
-	Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error
-}
+type AdminAuditRecorder = adminutil.AuditRecorder // admin 写操作审计（依赖倒置，统一真源 internal/web/admin）
 
 // AdminHandler 暴露环境 admin REST API（/api/admin/environments*）。
 //

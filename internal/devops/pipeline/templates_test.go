@@ -57,7 +57,7 @@ func TestSeedTemplatesUpgradesBuiltinOnVersionBump(t *testing.T) {
 		t.Fatalf("注入旧 builtin 模板失败: %v", err)
 	}
 
-	// seed：代码 Version=1 > DB Version=0，应触发覆盖
+	// seed：代码 Version（当前 v2）> DB Version=0，应触发覆盖
 	if err := SeedTemplates(seedCtx, s); err != nil {
 		t.Fatalf("seed 失败: %v", err)
 	}
@@ -66,8 +66,13 @@ func TestSeedTemplatesUpgradesBuiltinOnVersionBump(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTemplate 失败: %v", err)
 	}
-	if got.Version != 1 {
-		t.Errorf("Version 升级 want 1，got %d", got.Version)
+	if got.Version != 2 {
+		t.Errorf("Version 升级 want 2，got %d", got.Version)
+	}
+	// v2: smoke 默认路径 /livez -> /healthz
+	smoke := got.Stages[2]
+	if smoke.Params["path"] != "/healthz" {
+		t.Errorf("smoke path want /healthz，got %v", smoke.Params["path"])
 	}
 	if got.Name != "测试联调流水线" {
 		t.Errorf("Name 覆盖 want 测试联调流水线，got %s", got.Name)

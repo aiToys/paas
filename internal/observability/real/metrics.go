@@ -1,4 +1,4 @@
-// Package real 提供 observability reader 的真实后端实现（Prometheus/Loki/Tempo HTTP API）。
+// Package real 提供 observability reader 的真实后端实现（Prometheus/Loki/Jaeger HTTP API）。
 // 纯 net/http + JSON；后端不可达返空切片 + 日志，不 panic、不 5xx（降级）。
 package real
 
@@ -29,11 +29,13 @@ var metricNameToPromQL = map[string]string{
 type MetricsStore struct {
 	promURL string
 	client  *http.Client
+	lister  observability.AppWorkloadLister // 应用级查询：解析 app→工作负载 ID（pod 名正则）
 }
 
 // NewMetricsStore 创建 Prometheus 适配。promURL 为 Prometheus 根地址（如 http://prom:9090）。
-func NewMetricsStore(promURL string) *MetricsStore {
-	return &MetricsStore{promURL: promURL, client: httputil.NewClient(10 * time.Second)}
+// lister 可为 nil（应用级查询降级返空，不影响 dataservice/通用查询）。
+func NewMetricsStore(promURL string, lister observability.AppWorkloadLister) *MetricsStore {
+	return &MetricsStore{promURL: promURL, client: httputil.NewClient(10 * time.Second), lister: lister}
 }
 
 // promResponse 是 Prometheus /api/v1/query_range 响应的最小子集。
@@ -166,18 +168,24 @@ func (s *MetricsStore) listDataserviceMetrics(ctx context.Context, targetID, nam
 	if targetID == "" {
 		return out, nil // 数据服务需指定 targetID
 	}
+	tid, _ := tenant.TenantFrom(ctx)
+	ns := tenant.Namespace(tid) // paas-<tenant>，多租户隔离：防跨租户同名 Pod 串数据
 	pod := targetID + "-0"
 	type metricDef struct {
 		promQL, unit string
 		scale        float64
 	}
 	defs := map[string]metricDef{
-		observability.MetricCPU: {fmt.Sprintf("sum(rate(container_cpu_usage_seconds_total{pod=%q,container=\"main\"}[5m]))", pod), "cores", 1},
-		observability.MetricMem: {fmt.Sprintf("container_memory_working_set_bytes{pod=%q,container=\"main\"}", pod), "MiB", 1.0 / 1048576},
+		observability.MetricCPU: {fmt.Sprintf("sum(rate(container_cpu_usage_seconds_total{namespace=%q,pod=%q,container=\"main\"}[5m]))", ns, pod), "cores", 1},
+		observability.MetricMem: {fmt.Sprintf("container_memory_working_set_bytes{namespace=%q,pod=%q,container=\"main\"}", ns, pod), "MiB", 1.0 / 1048576},
+		// 磁盘 IO：读+写速率合计（container_fs 按 container 维度，仅 main 容器）。
+		observability.MetricDiskIO: {fmt.Sprintf("sum(rate(container_fs_reads_bytes_total{namespace=%q,pod=%q,container=\"main\"}[5m]) + rate(container_fs_writes_bytes_total{namespace=%q,pod=%q,container=\"main\"}[5m]))", ns, pod, ns, pod), "KB/s", 1.0 / 1024},
+		// 网络 IO：收+发速率合计（container_network 在 pod 级，不带 container label）。
+		observability.MetricNetIO: {fmt.Sprintf("sum(rate(container_network_receive_bytes_total{namespace=%q,pod=%q}[5m]) + rate(container_network_transmit_bytes_total{namespace=%q,pod=%q}[5m]))", ns, pod, ns, pod), "KB/s", 1.0 / 1024},
 	}
 	names := []string{name}
 	if name == "" {
-		names = []string{observability.MetricCPU, observability.MetricMem}
+		names = []string{observability.MetricCPU, observability.MetricMem, observability.MetricDiskIO, observability.MetricNetIO}
 	}
 	now := time.Now()
 	end := now.Unix()
@@ -234,36 +242,58 @@ func (s *MetricsStore) listDataserviceMetrics(ctx context.Context, targetID, nam
 	return out, nil
 }
 
-// listAppMetrics 聚合某应用下所有工作负载 Pod 的 cAdvisor 指标（CPU 核数 / 内存 MiB）。
+// listAppMetrics 聚合某应用下所有工作负载 Pod 的指标（计算 + RED 流量健康）。
 //
-// workload_controller 给工作负载 Pod 打 label `paas.aitoys/app=<appID>`（promtail/cAdvisor
-// 原样保留该 label），故 cAdvisor 指标可按 `paas_aitoys_app` label 过滤 + sum 聚合。
-// 排除 pause 容器（container="POD"）和空容器名，避免重复计数。
+// 计算指标（CPU/内存）：cAdvisor 在 node 级抓取，不带 Pod 自定义 label——无法按 paas_aitoys_app 直接过滤，
+// 改按「工作负载 pod 名正则」聚合（AppWorkloadLister 解析 app→工作负载 ID，Deployment 名 = wl-<id>，
+// Pod = <id>-<rsHash>-<podHash>），PromQL 用 `pod=~"wl-<id>-.*|..."` + namespace=paas-<tenant> 隔离。
 //
-// 仅 CPU/内存：应用级 RPS/latency 无数据源（PaaS 平台不代理应用业务流量，无 ingress
-// metrics），留后续接应用网关 metrics 时补；当前 name 传 rps/latency 返空（降级）。
+// RED 指标（RPS/延迟/错误率）：依赖应用自身在业务端口暴露 /metrics（paas-shop observ.Handler 经
+// promhttp 自动产 http_requests_total / http_request_duration_seconds）+ controller 注 prometheus.io/scrape
+// 注解让 Prometheus 自动发现抓取。PromQL 同样按 ns + pod 正则聚合。
+// 未暴露 /metrics 的应用 → RED PromQL 返空 series（前端卡片不出现，与 cpu/mem 同款降级）。
+//
+// 降级：lister 未注入 / app 无工作负载 / appID 空 → 返空切片（不报错）。
 func (s *MetricsStore) listAppMetrics(ctx context.Context, appID, name string) ([]observability.MetricSeries, error) {
 	out := make([]observability.MetricSeries, 0)
-	if appID == "" {
-		return out, nil // 应用级需指定 appID
+	if appID == "" || s.lister == nil {
+		return out, nil // 应用级需指定 appID + lister 注入
 	}
+	ids, err := s.lister.AppWorkloadIDs(ctx, appID)
+	if err != nil || len(ids) == 0 {
+		return out, nil // app 无工作负载 / lister 错误：降级返空
+	}
+	tid, _ := tenant.TenantFrom(ctx)
+	ns := tenant.Namespace(tid) // paas-<tenant>，多租户隔离（空 tid 兜底 paas-x）
+	// Pod 名正则：wl-<id1>-.* | wl-<id2>-.* （Deployment 名 = wl-<id>，Pod = <deploy>-<hash>-<hash>）。
+	podRegex := appPodRegex(ids)
 	type metricDef struct {
 		promQL, unit string
 		scale        float64
 	}
-	// label 过滤：paas_aitoys_app=<appID> + 排除 pause/空容器 + 多租户隔离（paas_aitoys_tenant）。
-	lbl := fmt.Sprintf(`{paas_aitoys_app=%q,container!="POD",container!=""`, appID)
-	if tid, ok := tenant.TenantFrom(ctx); ok && tid != "" {
-		lbl += fmt.Sprintf(`,paas_aitoys_tenant=%q`, tid)
-	}
-	lbl += "}"
+	// cAdvisor 指标限定本租户 ns + 本应用 pod 名正则 + 排除 pause/空容器。
+	lbl := fmt.Sprintf(`{namespace=%q,pod=~%q,container!="POD",container!=""}`, ns, podRegex)
+	// 应用自暴露的 RED 指标（http_requests_total / http_request_duration_seconds）按 ns + pod 正则聚合。
+	// 依赖：controller 给 service Pod 注 prometheus.io/scrape 注解（Prometheus kubernetes-pods job 发现）+
+	// 应用在业务端口暴露 /metrics（paas-shop 经 observ.Handler 双重包装 promhttp 自动产 RED）。
+	// 未暴露 /metrics 的应用 → 这些 PromQL 返空 series（前端卡片不出现，与 cpu/mem 同款降级）。
+	redLbl := fmt.Sprintf(`{namespace=%q,pod=~%q}`, ns, podRegex)
+	// 5xx selector：redLbl 内联 code=~"5.."（不可再开 { }，否则两个连续 selector 语法错）。
+	redLbl5xx := fmt.Sprintf(`{namespace=%q,pod=~%q,code=~"5.."}`, ns, podRegex)
 	defs := map[string]metricDef{
 		observability.MetricCPU: {fmt.Sprintf("sum(rate(container_cpu_usage_seconds_total%s[5m]))", lbl), "cores", 1},
 		observability.MetricMem: {fmt.Sprintf("sum(container_memory_working_set_bytes%s)", lbl), "MiB", 1.0 / 1048576},
+		// RED · Rate：每秒请求数（sum 全部 code）。
+		observability.MetricRPS: {fmt.Sprintf("sum(rate(http_requests_total%s[5m]))", redLbl), "req/s", 1},
+		// RED · Duration：P95 延迟（histogram_quantile over bucket rate，ms）。
+		observability.MetricLatency: {fmt.Sprintf("histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket%s[5m]))) * 1000", redLbl), "ms", 1},
+		// RED · Error：5xx 占比（防除零 clamp_min）；`or vector(0)` 让无 5xx 时也返 0%
+		// 而非空 series——错误率面板应总可见（0% = 健康，缺卡易误判监控失效）。
+		observability.MetricErrorRate: {fmt.Sprintf("(sum(rate(http_requests_total%s[5m])) or on() vector(0)) / clamp_min(sum(rate(http_requests_total%s[5m])), 1) * 100", redLbl5xx, redLbl), "%", 1},
 	}
 	names := []string{name}
 	if name == "" {
-		names = []string{observability.MetricCPU, observability.MetricMem}
+		names = []string{observability.MetricCPU, observability.MetricMem, observability.MetricRPS, observability.MetricLatency, observability.MetricErrorRate}
 	}
 	now := time.Now()
 	end := now.Unix()

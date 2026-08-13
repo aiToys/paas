@@ -42,16 +42,8 @@ func NewStore(opts ...StoreOpt) *Store {
 	return s
 }
 
-func tenantOrErr(ctx context.Context) (string, error) {
-	tid, ok := tenant.TenantFrom(ctx)
-	if !ok {
-		return "", fmt.Errorf("missing tenant context")
-	}
-	return tid, nil
-}
-
-func (s *Store) List(ctx context.Context, envID, appID, laneID, wtype string) ([]workload.Workload, error) {
-	tid, err := tenantOrErr(ctx)
+func (s *Store) List(ctx context.Context, envID, appID, laneID, wtype, service string) ([]workload.Workload, error) {
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -73,6 +65,10 @@ func (s *Store) List(ctx context.Context, envID, appID, laneID, wtype string) ([
 			continue
 		}
 		if wtype != "" && w.Type != wtype {
+			continue
+		}
+		// service 空串=不过滤（返所有服务，含单服务场景空 Service）；非空精确匹配
+		if service != "" && w.Service != service {
 			continue
 		}
 		out = append(out, w)
@@ -100,7 +96,7 @@ func (s *Store) ListAll(ctx context.Context) ([]workload.Workload, error) {
 }
 
 func (s *Store) Get(ctx context.Context, id string) (workload.Workload, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return workload.Workload{}, err
 	}
@@ -114,7 +110,7 @@ func (s *Store) Get(ctx context.Context, id string) (workload.Workload, error) {
 }
 
 func (s *Store) Create(ctx context.Context, w workload.Workload) error {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return err
 	}
@@ -138,7 +134,7 @@ func (s *Store) Create(ctx context.Context, w workload.Workload) error {
 }
 
 func (s *Store) Update(ctx context.Context, id string, replicas int, status string) (workload.Workload, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return workload.Workload{}, err
 	}
@@ -163,7 +159,7 @@ func (s *Store) Update(ctx context.Context, id string, replicas int, status stri
 // UpdateImage 更新工作负载镜像（display + digest）。供 devops.Release 编排调用。
 // imageRef 为空时不覆盖已有 digest（兼容仅刷新 display 的场景）。
 func (s *Store) UpdateImage(ctx context.Context, id, image, imageRef string) (workload.Workload, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return workload.Workload{}, err
 	}
@@ -181,8 +177,33 @@ func (s *Store) UpdateImage(ctx context.Context, id, image, imageRef string) (wo
 	return w, nil
 }
 
+// UpdateSchedule 修改 cronjob 的 cron 表达式。
+// 仅 cronjob 类型有效（service/job 拒绝）；schedule 空对 cronjob 拒绝（Validate 语义）。
+// 跨租户访问返回 not found（不泄漏）。
+func (s *Store) UpdateSchedule(ctx context.Context, id, schedule string) (workload.Workload, error) {
+	tid, err := tenant.IDOrErr(ctx)
+	if err != nil {
+		return workload.Workload{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w, hit := s.workloads[id]
+	if !hit || w.TenantID != tid {
+		return workload.Workload{}, fmt.Errorf("工作负载不存在: %s", id)
+	}
+	if w.Type != workload.TypeCronJob {
+		return workload.Workload{}, fmt.Errorf("仅 cronjob 支持修改 schedule，当前类型: %s", w.Type)
+	}
+	if schedule == "" {
+		return workload.Workload{}, fmt.Errorf("cronjob schedule 不能为空")
+	}
+	w.Schedule = schedule
+	s.workloads[id] = w
+	return w, nil
+}
+
 func (s *Store) Delete(ctx context.Context, id string) error {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return err
 	}

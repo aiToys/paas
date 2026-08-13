@@ -16,15 +16,13 @@ import (
 	"net/http"
 	"strings"
 
+	adminutil "github.com/aitoys/paas/internal/web/admin"
 	"github.com/aitoys/paas/internal/httputil"
-	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // AdminAuditRecorder admin 写操作审计（依赖倒置，避免 observability->security）。
 // tenantID = 资源所属租户（target_tenant）；actor = super_admin UserID；action 带 admin: 前缀。
-type AdminAuditRecorder interface {
-	Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error
-}
+type AdminAuditRecorder = adminutil.AuditRecorder // admin 写操作审计（依赖倒置，统一真源 internal/web/admin）
 
 // AdminHandler 暴露告警规则 admin REST API（/api/admin/alert-rules/{id}*）。
 //
@@ -85,11 +83,6 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminTenantCtx 派生资源所属租户 ctx（admin 跨租户操作以资源租户身份执行下游）。
-func adminTenantCtx(r *http.Request, tenantID string) (context.Context, *http.Request) {
-	ctx := tenant.WithTenant(r.Context(), tenantID)
-	return ctx, r.WithContext(ctx)
-}
-
 func (h *AdminHandler) actor(r *http.Request) string {
 	if h.actorOf != nil {
 		return h.actorOf(r)
@@ -137,7 +130,7 @@ func (h *AdminHandler) serveDelete(w http.ResponseWriter, r *http.Request, id st
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
-	ctx, rr := adminTenantCtx(r, rule.TenantID)
+	ctx, rr := adminutil.TenantCtx(r, rule.TenantID)
 	if err := h.repo.DeleteAlertRule(ctx, id); err != nil {
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return

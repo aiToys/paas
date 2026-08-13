@@ -9,14 +9,12 @@ import (
 	"strings"
 
 	"github.com/aitoys/paas/internal/httputil"
-	"github.com/aitoys/paas/pkg/tenant"
+	adminutil "github.com/aitoys/paas/internal/web/admin"
 )
 
 // AdminAuditRecorder admin 写操作审计（依赖倒置，避免 workload->security）。
 // tenantID = 资源所属租户（target_tenant）；actor = super_admin UserID；action 带 admin: 前缀。
-type AdminAuditRecorder interface {
-	Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error
-}
+type AdminAuditRecorder = adminutil.AuditRecorder // admin 写操作审计（依赖倒置，统一真源 internal/web/admin）
 
 // QuotaCheckFunc 配额检查-递增（横切）。ctx 必须带目标租户；delta=+1 创建/-1 删除。
 type QuotaCheckFunc func(ctx context.Context, delta int) error
@@ -42,6 +40,7 @@ type AdminHandler struct {
 	quota    QuotaCheckFunc
 	audit    AdminAuditRecorder
 	actorOf  func(*http.Request) string
+	applier  Applier // 可选；注入后支持 drift 修复（POST /reconcile 补投影 PG 有行无 CRD 的 Workload）
 	fillStat func(ctx context.Context, list []Workload) // 便于测试注入 stub；默认走 status.FillStatus
 }
 
@@ -78,6 +77,10 @@ func WithAdminActor(f func(*http.Request) string) AdminHandlerOpt {
 	return func(h *AdminHandler) { h.actorOf = f }
 }
 
+// WithAdminApplier 注入 K8s 数据面 applier，启用 drift 修复端点（POST /api/admin/workloads/reconcile）。
+// 注入后 super_admin 可手动触发「PG 有行无 CRD」的 Workload 补投影（CreateOrUpdate 幂等）。
+func WithAdminApplier(a Applier) AdminHandlerOpt { return func(h *AdminHandler) { h.applier = a } }
+
 // withAdminFillStat 仅供测试：替换 fillStatus 实现。
 func withAdminFillStat(f func(ctx context.Context, list []Workload)) AdminHandlerOpt {
 	return func(h *AdminHandler) { h.fillStat = f }
@@ -90,6 +93,8 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case path == "/api/admin/workloads" && r.Method == http.MethodGet:
 		h.serveList(w, r)
+	case path == "/api/admin/workloads/reconcile" && r.Method == http.MethodPost:
+		h.serveReconcile(w, r)
 	case strings.HasPrefix(path, "/api/admin/workloads/"):
 		h.serveItem(w, r)
 	default:
@@ -102,12 +107,7 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// tenantCtx 派生资源所属租户 ctx（admin 跨租户操作以资源租户身份执行下游）。
-func adminTenantCtx(r *http.Request, tenantID string) (context.Context, *http.Request) {
-	ctx := tenant.WithTenant(r.Context(), tenantID)
-	return ctx, r.WithContext(ctx)
-}
-
+// actor 取审计操作者（super_admin UserID，未注入兜底 "admin"）。
 func (h *AdminHandler) actor(r *http.Request) string {
 	if h.actorOf != nil {
 		return h.actorOf(r)
@@ -121,6 +121,48 @@ func (h *AdminHandler) recordAudit(r *http.Request, tenantID, action, resourceID
 		return
 	}
 	_ = h.audit.Record(r.Context(), tenantID, h.actor(r), action, "workload", resourceID, detail)
+}
+
+// serveReconcile POST /api/admin/workloads/reconcile 手动触发 drift 修复：
+// 扫 PG workloads 全部行，对「PG 有行无 CRD」的补投影（EnsureIfMissing：仅缺失才补建，
+// 绝不覆盖 K8s 既有运行态，防 PG 陈旧状态如 replicas=0 把 service 缩到 0）。
+// applier 未注入（K8s 未启用）返 503 友好提示。记审计（平台级运维操作）。
+func (h *AdminHandler) serveReconcile(w http.ResponseWriter, r *http.Request) {
+	if h.applier == nil {
+		httputil.WriteError(w, http.StatusServiceUnavailable, "K8s 数据面未启用，drift 修复不可用")
+		return
+	}
+	list, err := h.repo.ListAll(r.Context())
+	if err != nil {
+		httputil.WriteInternalError(w, err)
+		return
+	}
+	created := 0
+	skipped := 0
+	failed := 0
+	for i := range list {
+		w := list[i]
+		if w.TenantID == "" {
+			continue
+		}
+		ok, err := h.applier.EnsureIfMissing(r.Context(), w)
+		if err != nil {
+			failed++
+			continue
+		}
+		if ok {
+			created++
+		} else {
+			skipped++
+		}
+	}
+	h.recordAudit(r, "", "reconcile-drift", "", "")
+	httputil.WriteData(w, map[string]int{
+		"scanned": len(list),
+		"created": created,
+		"skipped": skipped,
+		"failed":  failed,
+	})
 }
 
 // findByID 跨租户取单条工作负载（ListAll filter by id）。
@@ -197,7 +239,7 @@ func (h *AdminHandler) serveDetail(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 	// 以资源租户 ctx 回填真实状态 + 读实例（StatusReader 内部按 ctx tenant 取 K8s Pod）。
-	ctx, _ := adminTenantCtx(r, wl.TenantID)
+	ctx, _ := adminutil.TenantCtx(r, wl.TenantID)
 	if h.fillStat != nil {
 		h.fillStat(ctx, []Workload{wl})
 	}
@@ -245,7 +287,7 @@ func (h *AdminHandler) serveLogs(w http.ResponseWriter, r *http.Request, id stri
 		tail = 1000
 	}
 	previous := r.URL.Query().Get("previous") == "true"
-	ctx, _ := adminTenantCtx(r, wl.TenantID)
+	ctx, _ := adminutil.TenantCtx(r, wl.TenantID)
 	rc, err := h.status.PodLogs(ctx, id, podName, tail, previous)
 	if err != nil {
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
@@ -280,7 +322,7 @@ func (h *AdminHandler) serveScale(w http.ResponseWriter, r *http.Request, id str
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
-	ctx, rr := adminTenantCtx(r, wl.TenantID)
+	ctx, rr := adminutil.TenantCtx(r, wl.TenantID)
 	// replicas 缺省时保留当前值（防 body 漏 replicas 致意外缩容到 0，与 dataservice scale 对齐）。
 	replicas := wl.Replicas
 	if in.Replicas != nil {
@@ -311,7 +353,7 @@ func (h *AdminHandler) serveDelete(w http.ResponseWriter, r *http.Request, id st
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
-	ctx, rr := adminTenantCtx(r, wl.TenantID)
+	ctx, rr := adminutil.TenantCtx(r, wl.TenantID)
 	if err := h.repo.Delete(ctx, id); err != nil {
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return

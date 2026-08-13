@@ -20,7 +20,8 @@ type WorkloadSpec struct {
 	AppID    string     `json:"appId"`
 	EnvID    string     `json:"envId"`
 	LaneID   string     `json:"laneId,omitempty"`
-	Type     string     `json:"type"` // service|job|cronjob
+	Service  string     `json:"service,omitempty"` // 同 app 多服务区分（product/recommend/...）；空=单服务
+	Type     string     `json:"type"`              // service|job|cronjob
 	Name     string     `json:"name"`
 	Image    string     `json:"image"`
 	ImageRef string     `json:"imageRef,omitempty"`

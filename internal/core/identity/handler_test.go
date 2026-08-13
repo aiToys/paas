@@ -213,7 +213,7 @@ func TestTenantsCRUD(t *testing.T) {
 	assert.Contains(t, names, "NewCo")
 
 	rec = doReq(t, h.DeleteTenant, http.MethodDelete, "/api/admin/tenants/t-new", "")
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestDeleteTenantNonEmptyRejected(t *testing.T) {
@@ -227,8 +227,8 @@ func TestDeleteTenantNonEmptyRejected(t *testing.T) {
 	require.Equal(t, http.StatusConflict, rec.Code)
 	assert.Contains(t, rec.Body.String(), "仍有用户")
 	// 清用户后删 -> 204
-	require.Equal(t, http.StatusNoContent, doReq(t, h.DeleteUser, http.MethodDelete, "/api/admin/users/u-ne", "").Code)
-	assert.Equal(t, http.StatusNoContent, doReq(t, h.DeleteTenant, http.MethodDelete, "/api/admin/tenants/t-ne", "").Code)
+	require.Equal(t, http.StatusOK, doReq(t, h.DeleteUser, http.MethodDelete, "/api/admin/users/u-ne", "").Code)
+	assert.Equal(t, http.StatusOK, doReq(t, h.DeleteTenant, http.MethodDelete, "/api/admin/tenants/t-ne", "").Code)
 }
 
 func TestUsersCRUDNoPasswordLeak(t *testing.T) {
@@ -249,7 +249,7 @@ func TestUsersCRUDNoPasswordLeak(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	rec = doReq(t, h.DeleteUser, http.MethodDelete, "/api/admin/users/u1", "")
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestAPIKeyCreatePlaintextListMasks(t *testing.T) {
@@ -313,7 +313,7 @@ func TestAPIKeySelfServiceCapsRoles(t *testing.T) {
 	r = withTenantReq(httptest.NewRequest(http.MethodDelete, "/api/api-keys/"+kid, nil), "t-acme")
 	rec = httptest.NewRecorder()
 	h.DeleteAPIKey(rec, r)
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, http.StatusOK, rec.Code)
 
 	// 删除他租户密钥 → 404 不泄漏（apiKeyInCallerTenant 拒绝）。
 	require.NoError(t, repo.CreateAPIKey(context.Background(), APIKey{ID: "k-globex", TenantID: "t-globex", UserID: "u-g", Key: "sk-x"}))
@@ -411,5 +411,5 @@ func TestPlatformAdminCrossTenant(t *testing.T) {
 	r := withTenantReq(httptest.NewRequest(http.MethodDelete, "/api/admin/users/u-globex", nil), "t-acme")
 	rec := httptest.NewRecorder()
 	h.DeleteUser(rec, r)
-	assert.Equal(t, http.StatusNoContent, rec.Code, "平台超管可跨租户删除")
+	assert.Equal(t, http.StatusOK, rec.Code, "平台超管可跨租户删除")
 }

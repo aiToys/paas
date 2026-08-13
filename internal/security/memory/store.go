@@ -27,20 +27,12 @@ func NewStore() *Store {
 	return s
 }
 
-func tenantOrErr(ctx context.Context) (string, error) {
-	tid, ok := tenant.TenantFrom(ctx)
-	if !ok {
-		return "", fmt.Errorf("missing tenant context")
-	}
-	return tid, nil
-}
-
 // —— Secret ——
 
 // ListSecrets 返回「该租户的租户级 Secret」+「所有平台级 Secret」（均掩码）。
 // 平台级凭证全租户共享（第三方供应商 Key），故不按租户过滤。
 func (s *Store) ListSecrets(ctx context.Context) ([]security.Secret, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +67,7 @@ func (s *Store) ListAllSecrets(ctx context.Context) ([]security.Secret, error) {
 }
 
 func (s *Store) GetSecret(ctx context.Context, id string) (security.Secret, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return security.Secret{}, err
 	}
@@ -91,7 +83,7 @@ func (s *Store) GetSecret(ctx context.Context, id string) (security.Secret, erro
 
 // CreateSecret 明文存储，返回掩码。平台级 TenantID 强制为空（全租户共享）。
 func (s *Store) CreateSecret(ctx context.Context, sec security.Secret) (security.Secret, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return security.Secret{}, err
 	}
@@ -123,7 +115,7 @@ func (s *Store) CreateSecret(ctx context.Context, sec security.Secret) (security
 }
 
 func (s *Store) DeleteSecret(ctx context.Context, id string) error {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return err
 	}
@@ -153,7 +145,7 @@ func (s *Store) Resolve(ctx context.Context, id string) (security.Secret, error)
 // —— Audit ——
 
 func (s *Store) ListAuditLogs(ctx context.Context, resourceType, action string) ([]security.AuditLog, error) {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +188,7 @@ func (s *Store) ListAllAuditLogs(ctx context.Context) ([]security.AuditLog, erro
 
 // RecordAudit 追加一条审计（actor 已由调用方填好）。
 func (s *Store) RecordAudit(ctx context.Context, log security.AuditLog) error {
-	tid, err := tenantOrErr(ctx)
+	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return err
 	}

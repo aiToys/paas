@@ -1,12 +1,12 @@
 package maas
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
 
+	adminutil "github.com/aitoys/paas/internal/web/admin"
 	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/pkg/provider"
 )
@@ -34,9 +34,7 @@ type Handler struct {
 
 // AdminAuditRecorder admin 写操作审计（依赖倒置，避免 maas->security）。平台级资源 tenantID=""。
 // cmd/core 注入 identityAuditAdapter（空 tenantID 转 "platform" 落库，满足 audit_logs.tenant_id NOT NULL）。
-type AdminAuditRecorder interface {
-	Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error
-}
+type AdminAuditRecorder = adminutil.AuditRecorder // admin 写操作审计（依赖倒置，统一真源 internal/web/admin）
 
 // NewHandler 创建模型管理 handler。gw 用于 CRUD 后增量刷新 gateway 路由表。
 func NewHandler(repo Repository, gw provider.GatewayRegistrar, resolver provider.CredentialResolver) *Handler {

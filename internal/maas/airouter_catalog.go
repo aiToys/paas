@@ -1,26 +1,35 @@
 package maas
 
 import (
+	"os"
 	"strconv"
 	"strings"
 
 	"github.com/aitoys/paas/pkg/provider"
 )
 
-// airouter —— OpenAI 兼容协议 + Bearer 鉴权的 LLM 路由网关。
+// airouter —— OpenAI 兼容协议 + Bearer 鉴权的 LLM 路由网关示例。
 //
-// 推理端点：POST https://airouter.ddmc-inc.com/api/v1/chat/completions
-// 鉴权    ：Authorization: Bearer <api_key>（api_key 形如 airouter-xxx）
+// 这是一个**示例预置供应商**，演示如何把任意 OpenAI 兼容网关接入平台。开源仓不绑定特定供应商：
+// 默认 BaseURL 为空（neutral），运维通过环境变量 `PAAS_AIROUTER_BASE_URL` 或 admin 后台
+// 「供应商管理」配置自己的 OpenAI 兼容网关地址（如 https://api.openai.com/v1、自建网关等）。
+//
+// 推理端点：POST {baseURL}/chat/completions
+// 鉴权    ：Authorization: Bearer <api_key>
 // 模型字段：model 用 internalModel（如 qwen-plus / glm-5.2）。
 //
-// airouter 内部已聚合百炼(dashscope)/千帆(qianfan)/豆包(doubao) 多供应商容灾与限流，
-// 把它当作单一 OpenAI 兼容供应商接入，复用 OpenAICompatibleProvider（Bearer），
-// 白嫖其容灾链路，无需各自申请百炼/千帆/豆包 API Key。
+// 已部署 PG 的存量 vendor/通道因 seed 幂等（ON CONFLICT DO NOTHING / exists 跳过）保留原值，
+// 改此默认不影响已运行的部署；仅全新部署生效。
 const (
-	baseAirouter  = "https://airouter.ddmc-inc.com/api/v1"
-	credAirouter  = "sec-platform-airouter"  //nolint:gosec // G101 误报：Secret ID 引用，非凭证明文
+	credAirouter   = "sec-platform-airouter" //nolint:gosec // G101 误报：Secret ID 引用，非凭证明文
 	vendorAirouter = "airouter"              // 预置供应商 ID（airouter 通道 VendorID 关联）
 )
+
+// airouterBaseURL 返回 airouter 网关 BaseURL：优先 `PAAS_AIROUTER_BASE_URL` 环境变量，
+// 未设则返空串（开源 neutral 默认，运维经 admin 后台或 env 配置）。
+func airouterBaseURL() string {
+	return strings.TrimRight(os.Getenv("PAAS_AIROUTER_BASE_URL"), "/")
+}
 
 // AirouterVendor 返回 airouter 预置供应商（seed 时灌入 Vendor 表，admin 可见可改）。
 // 12 个 airouter 模型通道的 VendorID 均指向它；admin 修改其 BaseURL/凭证后，
@@ -30,9 +39,9 @@ func AirouterVendor() *provider.Vendor {
 		ID:            vendorAirouter,
 		Name:          "airouter 网关",
 		Type:          ProviderOpenAICompatible,
-		BaseURL:       baseAirouter,
+		BaseURL:       airouterBaseURL(),
 		CredentialRef: credAirouter,
-		Description:   "聚合百炼/千帆/豆包多供应商容灾的 OpenAI 兼容网关，配单一 api_key 即全模型可用",
+		Description:   "示例 OpenAI 兼容网关（通过 PAAS_AIROUTER_BASE_URL 或 admin 后台配置 BaseURL，配单一 api_key 即全模型可用）",
 	}
 }
 
@@ -85,7 +94,7 @@ func airouterCatalog(resolver provider.CredentialResolver) []*provider.Model {
 			OutputPrice:   m.Out,
 			Description:   m.Desc,
 			Channels: []*provider.Channel{
-				realCh(m.ID+"#airouter", 0, "airouter", baseAirouter, m.ID, credAirouter, vendorAirouter, resolver),
+				realCh(m.ID+"#airouter", 0, "airouter", airouterBaseURL(), m.ID, credAirouter, vendorAirouter, resolver),
 			},
 		})
 	}
