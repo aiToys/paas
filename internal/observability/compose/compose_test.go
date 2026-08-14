@@ -51,7 +51,7 @@ func TestListAlertsEvaluatesAgainstMetrics(t *testing.T) {
 		{TargetType: observability.TargetApp, TargetID: "app-cs", Name: observability.MetricCPU, Current: 80},
 	}}
 	r := New(rules, metrics, nil, nil)
-	alerts, err := r.ListAlerts(acmeCtx())
+	alerts, err := r.ListAlerts(acmeCtx(), "", "")
 	if err != nil {
 		t.Fatalf("意外错误: %v", err)
 	}
@@ -71,9 +71,45 @@ func TestListAlertsSkipsDisabledAndNonBreached(t *testing.T) {
 		{TargetType: observability.TargetApp, TargetID: "app-cs", Name: observability.MetricCPU, Current: 80},
 	}}
 	r := New(rules, metrics, nil, nil)
-	alerts, _ := r.ListAlerts(acmeCtx())
+	alerts, _ := r.ListAlerts(acmeCtx(), "", "")
 	if len(alerts) != 0 {
 		t.Fatalf("禁用规则与未超阈值规则不应触发，实际: %+v", alerts)
+	}
+}
+
+// TestListAlertsFiltersByTarget 维度过滤：targetType/targetId 非空时只返回匹配维度的告警。
+func TestListAlertsFiltersByTarget(t *testing.T) {
+	rules := &fakeRules{rules: []observability.AlertRule{
+		{ID: "r1", Name: "DS 连接数", MetricName: observability.MetricConnections, TargetType: observability.TargetDataservice,
+			Operator: observability.OpGT, Threshold: 50, Severity: observability.SeverityWarning, Enabled: true},
+		{ID: "r2", Name: "App CPU", MetricName: observability.MetricCPU, TargetType: observability.TargetApp,
+			Operator: observability.OpGT, Threshold: 50, Severity: observability.SeverityWarning, Enabled: true},
+	}}
+	metrics := &fakeMetrics{series: []observability.MetricSeries{
+		{TargetType: observability.TargetDataservice, TargetID: "ds-pg", Name: observability.MetricConnections, Current: 80},
+		{TargetType: observability.TargetDataservice, TargetID: "ds-redis", Name: observability.MetricConnections, Current: 90},
+		{TargetType: observability.TargetApp, TargetID: "app-cs", Name: observability.MetricCPU, Current: 80},
+	}}
+	r := New(rules, metrics, nil, nil)
+	// 按 dataservice 维度过滤：2 条（ds-pg + ds-redis），排除 app。
+	dsAlerts, _ := r.ListAlerts(acmeCtx(), observability.TargetDataservice, "")
+	if len(dsAlerts) != 2 {
+		t.Fatalf("dataservice 维度应 2 条告警，got %d", len(dsAlerts))
+	}
+	for _, a := range dsAlerts {
+		if a.TargetType != observability.TargetDataservice {
+			t.Fatalf("泄漏非 dataservice 告警: %+v", a)
+		}
+	}
+	// 精确到 ds-pg：1 条。
+	pgAlerts, _ := r.ListAlerts(acmeCtx(), observability.TargetDataservice, "ds-pg")
+	if len(pgAlerts) != 1 || pgAlerts[0].TargetID != "ds-pg" {
+		t.Fatalf("ds-pg 应 1 条告警，got %+v", pgAlerts)
+	}
+	// 不传维度：全量 3 条。
+	all, _ := r.ListAlerts(acmeCtx(), "", "")
+	if len(all) != 3 {
+		t.Fatalf("无维度过滤应 3 条告警，got %d", len(all))
 	}
 }
 

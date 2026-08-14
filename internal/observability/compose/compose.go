@@ -29,8 +29,8 @@ func (r *Repo) ListMetrics(ctx context.Context, targetType, targetID, name strin
 	return r.metrics.ListMetrics(ctx, targetType, targetID, name)
 }
 
-func (r *Repo) ListLogs(ctx context.Context, appID, level, q string, limit int) ([]observability.LogEntry, error) {
-	return r.logs.ListLogs(ctx, appID, level, q, limit)
+func (r *Repo) ListLogs(ctx context.Context, appID, targetType, targetID, level, q string, limit int) ([]observability.LogEntry, error) {
+	return r.logs.ListLogs(ctx, appID, targetType, targetID, level, q, limit)
 }
 
 func (r *Repo) ListTraces(ctx context.Context, appID, status string, limit int) ([]observability.Trace, error) {
@@ -56,7 +56,8 @@ func (r *Repo) ListAllAlertRules(ctx context.Context) ([]observability.AlertRule
 
 // ListAlerts 即时评估：遍历 rules，对每 enabled 规则调 metrics reader 取匹配 series 当前值评估。
 // real 模式 metrics 来自 Prometheus，memory 模式来自 mock seed——统一在此评估。
-func (r *Repo) ListAlerts(ctx context.Context) ([]observability.Alert, error) {
+// targetType/targetId 非空时按维度过滤（仅返回匹配的 firing 告警）。
+func (r *Repo) ListAlerts(ctx context.Context, targetType, targetId string) ([]observability.Alert, error) {
 	rules, err := r.rules.ListAlertRules(ctx)
 	if err != nil {
 		return nil, err
@@ -76,6 +77,13 @@ func (r *Repo) ListAlerts(ctx context.Context) ([]observability.Alert, error) {
 				continue
 			}
 			if rule.Breached(s.Current) {
+				// 维度过滤：targetType/targetId 非空时仅保留匹配的告警。
+				if targetType != "" && s.TargetType != targetType {
+					continue
+				}
+				if targetId != "" && s.TargetID != targetId {
+					continue
+				}
 				alerts = append(alerts, observability.Alert{
 					RuleID:     rule.ID,
 					RuleName:   rule.Name,

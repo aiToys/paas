@@ -176,13 +176,15 @@ func ValidLevel(l string) bool {
 // LogEntry 是一条应用日志（可观测三支柱之 Logs）。
 // 惰性补点（无 goroutine）：查询时按时间间隔追加 mock 日志，环形截断。
 type LogEntry struct {
-	ID        string    `json:"id"`
-	TenantID  string    `json:"tenantId,omitempty"`
-	AppID     string    `json:"appId"`
-	Level     string    `json:"level"` // info | warn | error
-	Message   string    `json:"message"`
-	TraceID   string    `json:"traceId,omitempty"`
-	Timestamp time.Time `json:"timestamp"`
+	ID         string    `json:"id"`
+	TenantID   string    `json:"tenantId,omitempty"`
+	AppID      string    `json:"appId"`
+	TargetType string    `json:"targetType,omitempty"` // app | dataservice（日志归属维度，空=历史 app 日志）
+	TargetID   string    `json:"targetId,omitempty"`   // app 时=appID；dataservice 时=数据服务 ID
+	Level      string    `json:"level"`                // info | warn | error
+	Message    string    `json:"message"`
+	TraceID    string    `json:"traceId,omitempty"`
+	Timestamp  time.Time `json:"timestamp"`
 }
 
 // 链路状态。
@@ -229,9 +231,9 @@ type Trace struct {
 	ID         string    `json:"id"`
 	TenantID   string    `json:"tenantId,omitempty"`
 	AppID      string    `json:"appId"`
-	Operation  string    `json:"operation"` // 入口操作，如 POST /v1/chat
+	Operation  string    `json:"operation"`         // 入口操作，如 POST /v1/chat
 	Service    string    `json:"service,omitempty"` // OTel service.name（工作负载名），多服务应用区分来源
-	Status     string    `json:"status"`    // success | error
+	Status     string    `json:"status"`            // success | error
 	DurationMs int64     `json:"durationMs"`
 	StartedAt  time.Time `json:"startedAt"`
 	Spans      []Span    `json:"spans"`

@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/aitoys/paas/internal/observability"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
@@ -121,5 +123,36 @@ func TestMetricsStoreDataserviceMemoryScale(t *testing.T) {
 	}
 	if out[0].Unit != "MiB" || out[0].Current != 1 {
 		t.Fatalf("内存应缩放为 MiB: unit=%s current=%v", out[0].Unit, out[0].Current)
+	}
+}
+
+// TestDataserviceDefsContainsAllMetrics 验证 dataserviceDefs 含 PVC 用量 + 全部引擎业务指标，
+// 且 PromQL 字符串构造正确（按 ns+pod 限定多租户隔离）。
+func TestDataserviceDefsContainsAllMetrics(t *testing.T) {
+	defs := dataserviceDefs("paas-t-acme", "ds-1-0", "ds-1")
+	// PVC 用量：查 kubelet_volume_stats，PVC 名 data-ds-1-0。
+	disk, ok := defs[observability.MetricDiskUsage]
+	if !ok {
+		t.Fatal("缺 disk_usage")
+	}
+	if !strings.Contains(disk.promQL, "kubelet_volume_stats_used_bytes") {
+		t.Fatalf("disk_usage 应查 kubelet_volume_stats_used_bytes：%s", disk.promQL)
+	}
+	if !strings.Contains(disk.promQL, "data-ds-1-0") {
+		t.Fatalf("disk_usage 应限定 PVC=data-ds-1-0：%s", disk.promQL)
+	}
+	// 引擎业务指标全集。
+	for _, key := range []string{
+		observability.MetricConnections, observability.MetricQPS,
+		observability.MetricHitRate, observability.MetricLag, observability.MetricVectors,
+	} {
+		if _, ok := defs[key]; !ok {
+			t.Fatalf("缺引擎业务指标 %s", key)
+		}
+	}
+	// connections PromQL 应按 paas_aitoys_dataservice label 过滤（exporter 指标不带 pod label）。
+	conn := defs[observability.MetricConnections].promQL
+	if !strings.Contains(conn, "paas_aitoys_dataservice") || !strings.Contains(conn, "ds-1") {
+		t.Fatalf("connections PromQL 应按 paas_aitoys_dataservice=ds-1 过滤：%s", conn)
 	}
 }

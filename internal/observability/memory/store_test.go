@@ -49,7 +49,7 @@ func TestTenantIsolation(t *testing.T) {
 // 接真实后端时 series 由 real store 提供，告警评估在 real 模式测。
 func TestAlertEvaluation(t *testing.T) {
 	s := NewStore()
-	alerts, err := s.ListAlerts(acmeCtx())
+	alerts, err := s.ListAlerts(acmeCtx(), "", "")
 	if err != nil {
 		t.Fatalf("评估失败: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestAlertEvaluation(t *testing.T) {
 		t.Fatalf("降级模式 series 空应无 firing 告警，got %d", len(alerts))
 	}
 	// globex 无规则 -> 空告警
-	gAlerts, _ := s.ListAlerts(globexCtx())
+	gAlerts, _ := s.ListAlerts(globexCtx(), "", "")
 	if len(gAlerts) != 0 {
 		t.Fatalf("globex 无规则不应有告警，got %d", len(gAlerts))
 	}
@@ -132,11 +132,11 @@ func TestLogsFilterByLevel(t *testing.T) {
 		{ID: "l2", TenantID: "t-acme", AppID: "app-cs", Level: observability.LevelError, Message: "失败", Timestamp: now.Add(time.Second)},
 		{ID: "l3", TenantID: "t-acme", AppID: "app-cs", Level: observability.LevelError, Message: "再次失败", Timestamp: now.Add(2 * time.Second)},
 	}
-	all, _ := s.ListLogs(acmeCtx(), "", "", "", 100)
+	all, _ := s.ListLogs(acmeCtx(), "", "", "", "", "", 100)
 	if len(all) != 3 {
 		t.Fatalf("全部应 3 条，got %d", len(all))
 	}
-	errs, _ := s.ListLogs(acmeCtx(), "", observability.LevelError, "", 100)
+	errs, _ := s.ListLogs(acmeCtx(), "", "", "", observability.LevelError, "", 100)
 	if len(errs) != 2 {
 		t.Fatalf("error 应 2 条，got %d", len(errs))
 	}
@@ -154,7 +154,7 @@ func TestLogsFilterByLevel(t *testing.T) {
 // TestLogsInvalidLevel 验证非法级别报错。
 func TestLogsInvalidLevel(t *testing.T) {
 	s := NewStore()
-	if _, err := s.ListLogs(acmeCtx(), "", "fatal", "", 10); err == nil {
+	if _, err := s.ListLogs(acmeCtx(), "", "", "", "fatal", "", 10); err == nil {
 		t.Fatal("非法级别应报错")
 	}
 }
@@ -167,7 +167,7 @@ func TestLogsKeywordSearch(t *testing.T) {
 		{ID: "l1", TenantID: "t-acme", AppID: "app-cs", Level: observability.LevelInfo, Message: "路由表更新", Timestamp: now},
 		{ID: "l2", TenantID: "t-acme", AppID: "app-cs", Level: observability.LevelInfo, Message: "健康检查", Timestamp: now.Add(time.Second)},
 	}
-	hits, _ := s.ListLogs(acmeCtx(), "", "", "路由", 100)
+	hits, _ := s.ListLogs(acmeCtx(), "", "", "", "", "路由", 100)
 	if len(hits) != 1 {
 		t.Fatalf("关键字 '路由' 应命中 1 条，got %d", len(hits))
 	}
@@ -186,7 +186,7 @@ func TestLogsAppFilter(t *testing.T) {
 		{ID: "l1", TenantID: "t-acme", AppID: "app-cs", Level: observability.LevelInfo, Message: "a", Timestamp: now},
 		{ID: "l2", TenantID: "t-acme", AppID: "app-etl", Level: observability.LevelInfo, Message: "b", Timestamp: now.Add(time.Second)},
 	}
-	cs, _ := s.ListLogs(acmeCtx(), "app-cs", "", "", 100)
+	cs, _ := s.ListLogs(acmeCtx(), "app-cs", "", "", "", "", 100)
 	if len(cs) != 1 {
 		t.Fatalf("app-cs 应 1 条，got %d", len(cs))
 	}
@@ -202,13 +202,37 @@ func TestLogsCrossTenantHidden(t *testing.T) {
 	s.logs["t-acme"] = []observability.LogEntry{
 		{ID: "l1", TenantID: "t-acme", AppID: "app-cs", Level: observability.LevelInfo, Message: "a", Timestamp: now},
 	}
-	acme, _ := s.ListLogs(acmeCtx(), "", "", "", 50)
+	acme, _ := s.ListLogs(acmeCtx(), "", "", "", "", "", 50)
 	if len(acme) != 1 {
 		t.Fatalf("acme 应见 1 条，got %d", len(acme))
 	}
-	globex, _ := s.ListLogs(globexCtx(), "", "", "", 50)
+	globex, _ := s.ListLogs(globexCtx(), "", "", "", "", "", 50)
 	if len(globex) != 0 {
 		t.Fatalf("globex 不应见 acme 日志，got %d", len(globex))
+	}
+}
+
+// TestListLogsDataserviceTarget 验证日志按 targetType 维度路由：
+// targetType=dataservice 走 TargetType/TargetID 过滤；否则走原 appID 维度（向后兼容）。
+func TestListLogsDataserviceTarget(t *testing.T) {
+	s := NewStore()
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	s.logs["t-acme"] = []observability.LogEntry{
+		{ID: "l1", TargetType: observability.TargetDataservice, TargetID: "ds-1", Level: observability.LevelError, Message: "conn refused", Timestamp: time.Now()},
+		{ID: "l2", AppID: "app-x", Level: observability.LevelInfo, Message: "app log", Timestamp: time.Now()},
+	}
+	// dataservice 维度查：只命中 ds-1 的 l1
+	got, err := s.ListLogs(ctx, "", observability.TargetDataservice, "ds-1", "", "", 10)
+	if err != nil {
+		t.Fatalf("ListLogs: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "l1" {
+		t.Fatalf("dataservice 维度期望命中 l1，实际 %+v", got)
+	}
+	// app 维度查（appID 非空，targetType 空）：只命中 app-x 的 l2
+	got2, _ := s.ListLogs(ctx, "app-x", "", "", "", "", 10)
+	if len(got2) != 1 || got2[0].ID != "l2" {
+		t.Fatalf("app 维度期望命中 l2，实际 %+v", got2)
 	}
 }
 

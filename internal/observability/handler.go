@@ -106,7 +106,7 @@ func (h *Handler) serveLogs(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	logs, err := h.repo.ListLogs(r.Context(), q.Get("appId"), q.Get("level"), q.Get("q"), limit)
+	logs, err := h.repo.ListLogs(r.Context(), q.Get("appId"), q.Get("targetType"), q.Get("targetId"), q.Get("level"), q.Get("q"), limit)
 	if err != nil {
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
@@ -203,7 +203,8 @@ func (h *Handler) serveAlerts(w http.ResponseWriter, r *http.Request) {
 	if !h.allow(w, r, PermObservabilityRead) {
 		return
 	}
-	alerts, err := h.repo.ListAlerts(r.Context())
+	q := r.URL.Query()
+	alerts, err := h.repo.ListAlerts(r.Context(), q.Get("targetType"), q.Get("targetId"))
 	if err != nil {
 		httputil.WriteInternalError(w, err)
 		return

@@ -145,7 +145,8 @@ func (s *Store) DeleteAlertRule(ctx context.Context, id string) error {
 
 // ListAlerts 即时评估 enabled 规则对匹配 series 当前值超阈值者生成 firing 告警。
 // 降级模式 series 为空（无 mock 指标），返空；接真实后端时 series 由 real store 提供。
-func (s *Store) ListAlerts(ctx context.Context) ([]observability.Alert, error) {
+// targetType/targetId 非空时按维度过滤（仅返回匹配的 firing 告警）。
+func (s *Store) ListAlerts(ctx context.Context, targetType, targetId string) ([]observability.Alert, error) {
 	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
@@ -165,6 +166,13 @@ func (s *Store) ListAlerts(ctx context.Context) ([]observability.Alert, error) {
 				continue
 			}
 			if r.Breached(series.Current) {
+				// 维度过滤：targetType/targetId 非空时仅保留匹配的告警。
+				if targetType != "" && series.TargetType != targetType {
+					continue
+				}
+				if targetId != "" && series.TargetID != targetId {
+					continue
+				}
 				alerts = append(alerts, observability.Alert{
 					RuleID:     r.ID,
 					RuleName:   r.Name,
@@ -191,7 +199,8 @@ func (s *Store) ListAlerts(ctx context.Context) ([]observability.Alert, error) {
 }
 
 // ListLogs 应用日志查询（过滤，不补点）。降级模式返空。按时间倒序返回。
-func (s *Store) ListLogs(ctx context.Context, appID, level, q string, limit int) ([]observability.LogEntry, error) {
+// targetType=dataservice 走 TargetType/TargetID 维度；否则走原 appID 维度（向后兼容）。
+func (s *Store) ListLogs(ctx context.Context, appID, targetType, targetID, level, q string, limit int) ([]observability.LogEntry, error) {
 	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
@@ -209,8 +218,18 @@ func (s *Store) ListLogs(ctx context.Context, appID, level, q string, limit int)
 	out := make([]observability.LogEntry, 0, len(all))
 	qlower := strings.ToLower(q)
 	for _, l := range all {
-		if appID != "" && l.AppID != appID {
-			continue
+		// targetType=dataservice 走 TargetType/TargetID 维度；否则走原 appID 维度（向后兼容）。
+		if targetType == observability.TargetDataservice {
+			if l.TargetType != observability.TargetDataservice {
+				continue
+			}
+			if targetID != "" && l.TargetID != targetID {
+				continue
+			}
+		} else {
+			if appID != "" && l.AppID != appID {
+				continue
+			}
 		}
 		if level != "" && l.Level != level {
 			continue

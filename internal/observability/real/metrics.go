@@ -160,9 +160,53 @@ func toFloat(v any) (float64, bool) {
 	return 0, false
 }
 
+// metricDef 描述一个领域指标的 Prometheus 查询（query_range 用）。
+type metricDef struct {
+	promQL, unit string
+	scale        float64
+}
+
+// dataserviceDefs 构造数据服务 Pod 的全部指标 PromQL（按 ns + pod/dsID 限定，多租户隔离）。
+// 抽成函数供单测验证 PromQL 构造（real 模式无 fake Prometheus 测试基建）。
+//
+// 指标分两类标签过滤：
+//  1. 容器级（cAdvisor/kubelet）：按 pod=<dsID>-0 过滤（cAdvisor 带 pod label）。
+//  2. 引擎业务指标（exporter 自产）：不带 pod label，按 paas_aitoys_dataservice=<dsID>
+//     过滤（prometheus scrape relabel 注入此 label，见 prometheus-values.yaml）。
+//
+// 指标来源：
+//  1. 容器级（cAdvisor）：CPU/内存/磁盘IO/网络IO，container="main"（引擎主容器）。
+//  2. PVC 用量（kubelet_volume_stats）：无需 exporter，PVC 名 = data-<pod>。
+//  3. 引擎业务指标：sidecar exporter（container=exporter）或引擎内置 /metrics。
+//     全查所有引擎指标名，Prometheus 无该 metric → 返空 series（诚实降级，前端按 kind 选展示）。
+func dataserviceDefs(ns, pod, dsID string) map[string]metricDef {
+	return map[string]metricDef{
+		observability.MetricCPU: {fmt.Sprintf("sum(rate(container_cpu_usage_seconds_total{namespace=%q,pod=%q,container=\"main\"}[5m]))", ns, pod), "cores", 1},
+		observability.MetricMem: {fmt.Sprintf("container_memory_working_set_bytes{namespace=%q,pod=%q,container=\"main\"}", ns, pod), "MiB", 1.0 / 1048576},
+		// 磁盘 IO：读+写速率合计（container_fs 按 container 维度，仅 main 容器）。
+		observability.MetricDiskIO: {fmt.Sprintf("sum(rate(container_fs_reads_bytes_total{namespace=%q,pod=%q,container=\"main\"}[5m]) + rate(container_fs_writes_bytes_total{namespace=%q,pod=%q,container=\"main\"}[5m]))", ns, pod, ns, pod), "KB/s", 1.0 / 1024},
+		// 网络 IO：收+发速率合计（container_network 在 pod 级，不带 container label）。
+		observability.MetricNetIO: {fmt.Sprintf("sum(rate(container_network_receive_bytes_total{namespace=%q,pod=%q}[5m]) + rate(container_network_transmit_bytes_total{namespace=%q,pod=%q}[5m]))", ns, pod, ns, pod), "KB/s", 1.0 / 1024},
+		// PVC 磁盘使用率 %（kubelet volume metrics，无需 exporter；PVC 名 data-<pod>）。
+		observability.MetricDiskUsage: {fmt.Sprintf("kubelet_volume_stats_used_bytes{namespace=%q,persistentvolumeclaim=%q} / clamp_min(kubelet_volume_stats_capacity_bytes{namespace=%q,persistentvolumeclaim=%q}, 1) * 100", ns, "data-"+pod, ns, "data-"+pod), "%", 1},
+		// 引擎业务指标：exporter 自产不带 pod label，按 paas_aitoys_dataservice=<dsID> 过滤
+		// （prometheus relabel 注入）。全查所有引擎指标名，无该 metric → 返空降级。
+		// connections：DB 连接数 / 缓存连接数 / MQ 连接数（pg/redis/mysql/nats）。
+		observability.MetricConnections: {fmt.Sprintf("max(pg_stat_activity_count{namespace=%q,paas_aitoys_dataservice=%q,state=\"active\"}) or max(redis_connected_clients{namespace=%q,paas_aitoys_dataservice=%q}) or max(mysql_threads_connected{namespace=%q,paas_aitoys_dataservice=%q}) or max(gnatsd_connz_num_connections{namespace=%q,paas_aitoys_dataservice=%q})", ns, dsID, ns, dsID, ns, dsID, ns, dsID), "", 1},
+		// qps：DB 事务 / 缓存命令（pg/redis）。
+		observability.MetricQPS: {fmt.Sprintf("sum(rate(pg_stat_database_xact_commit{namespace=%q,paas_aitoys_dataservice=%q}[5m])) or sum(rate(redis_commands_processed_total{namespace=%q,paas_aitoys_dataservice=%q}[5m]))", ns, dsID, ns, dsID), "/s", 1},
+		// hit_rate：缓存命中率（redis exporter）。
+		observability.MetricHitRate: {fmt.Sprintf("redis_keyspace_hit_rate{namespace=%q,paas_aitoys_dataservice=%q}", ns, dsID), "%", 1},
+		// lag：MQ 消息速率（nats gnatsd 入站消息）。
+		observability.MetricLag: {fmt.Sprintf("sum(rate(gnatsd_connz_in_msgs{namespace=%q,paas_aitoys_dataservice=%q}[5m]))", ns, dsID), "/s", 1},
+		// vectors：向量数（qdrant 内置 /metrics）。
+		observability.MetricVectors: {fmt.Sprintf("qdrant_collection_vectors_count{namespace=%q,paas_aitoys_dataservice=%q}", ns, dsID), "", 1},
+	}
+}
+
 // listDataserviceMetrics 查数据服务 Pod 的 cAdvisor 指标（CPU 核数 / 内存 MiB）。
 // targetID = 数据服务 K8s 资源名（领域 ID）；StatefulSet Pod 名 = <targetID>-0。
-// 仅 CPU/内存（数据服务无通用 RPS/延迟埋点）；后端不可达返空切片 + 日志（降级，不 5xx）。
+// 含 PVC 用量 + 引擎业务指标（详见 dataserviceDefs）；后端不可达返空切片 + 日志（降级，不 5xx）。
 func (s *MetricsStore) listDataserviceMetrics(ctx context.Context, targetID, name string) ([]observability.MetricSeries, error) {
 	out := make([]observability.MetricSeries, 0)
 	if targetID == "" {
@@ -171,21 +215,14 @@ func (s *MetricsStore) listDataserviceMetrics(ctx context.Context, targetID, nam
 	tid, _ := tenant.TenantFrom(ctx)
 	ns := tenant.Namespace(tid) // paas-<tenant>，多租户隔离：防跨租户同名 Pod 串数据
 	pod := targetID + "-0"
-	type metricDef struct {
-		promQL, unit string
-		scale        float64
-	}
-	defs := map[string]metricDef{
-		observability.MetricCPU: {fmt.Sprintf("sum(rate(container_cpu_usage_seconds_total{namespace=%q,pod=%q,container=\"main\"}[5m]))", ns, pod), "cores", 1},
-		observability.MetricMem: {fmt.Sprintf("container_memory_working_set_bytes{namespace=%q,pod=%q,container=\"main\"}", ns, pod), "MiB", 1.0 / 1048576},
-		// 磁盘 IO：读+写速率合计（container_fs 按 container 维度，仅 main 容器）。
-		observability.MetricDiskIO: {fmt.Sprintf("sum(rate(container_fs_reads_bytes_total{namespace=%q,pod=%q,container=\"main\"}[5m]) + rate(container_fs_writes_bytes_total{namespace=%q,pod=%q,container=\"main\"}[5m]))", ns, pod, ns, pod), "KB/s", 1.0 / 1024},
-		// 网络 IO：收+发速率合计（container_network 在 pod 级，不带 container label）。
-		observability.MetricNetIO: {fmt.Sprintf("sum(rate(container_network_receive_bytes_total{namespace=%q,pod=%q}[5m]) + rate(container_network_transmit_bytes_total{namespace=%q,pod=%q}[5m]))", ns, pod, ns, pod), "KB/s", 1.0 / 1024},
-	}
+	defs := dataserviceDefs(ns, pod, targetID)
 	names := []string{name}
 	if name == "" {
-		names = []string{observability.MetricCPU, observability.MetricMem, observability.MetricDiskIO, observability.MetricNetIO}
+		names = []string{
+			observability.MetricCPU, observability.MetricMem, observability.MetricDiskIO, observability.MetricNetIO,
+			observability.MetricDiskUsage,
+			observability.MetricConnections, observability.MetricQPS, observability.MetricHitRate, observability.MetricLag, observability.MetricVectors,
+		}
 	}
 	now := time.Now()
 	end := now.Unix()
@@ -267,10 +304,6 @@ func (s *MetricsStore) listAppMetrics(ctx context.Context, appID, name string) (
 	ns := tenant.Namespace(tid) // paas-<tenant>，多租户隔离（空 tid 兜底 paas-x）
 	// Pod 名正则：wl-<id1>-.* | wl-<id2>-.* （Deployment 名 = wl-<id>，Pod = <deploy>-<hash>-<hash>）。
 	podRegex := appPodRegex(ids)
-	type metricDef struct {
-		promQL, unit string
-		scale        float64
-	}
 	// cAdvisor 指标限定本租户 ns + 本应用 pod 名正则 + 排除 pause/空容器。
 	lbl := fmt.Sprintf(`{namespace=%q,pod=~%q,container!="POD",container!=""}`, ns, podRegex)
 	// 应用自暴露的 RED 指标（http_requests_total / http_request_duration_seconds）按 ns + pod 正则聚合。

@@ -52,15 +52,22 @@ type lokiResponse struct {
 // （`|~ "(?i)\berror\b"` 等），非严格——仅缩小范围，不保证命中所有该级别日志。
 //
 // Loki 按时间倒序返回；截断 limit。后端不可达 / lister 未注入降级返空。
-func (s *LogsStore) ListLogs(ctx context.Context, appID, level, q string, limit int) ([]observability.LogEntry, error) {
+func (s *LogsStore) ListLogs(ctx context.Context, appID, targetType, targetID, level, q string, limit int) ([]observability.LogEntry, error) {
 	if limit <= 0 || limit > observability.MaxLogs {
 		limit = 100
 	}
 	tid, _ := tenant.TenantFrom(ctx)
 	ns := tenant.Namespace(tid) // paas-<tenant>，多租户隔离（空 tid 兜底 paas-x）
-	// Pod 名正则：appID 指定时解析其工作负载 ID；否则匹配全部 wl-.* Pod（本租户）。
+	// Pod 名正则：按 targetType 选维度。
+	//   - dataservice：数据服务 STS Pod 名 = <ds-id>-0（StatefulSet Pod，多副本 <ds-id>-N）
+	//   - app：appID 指定时解析其工作负载 ID；否则匹配全部 wl-.* Pod（本租户）。
 	podRegex := "wl-.*"
-	if appID != "" {
+	if targetType == observability.TargetDataservice {
+		if targetID == "" {
+			return []observability.LogEntry{}, nil // dataservice 需指定 targetID
+		}
+		podRegex = regexp.QuoteMeta(targetID) + "-\\d+"
+	} else if appID != "" {
 		if s.lister == nil {
 			return []observability.LogEntry{}, nil // 应用级需 lister
 		}
@@ -108,14 +115,22 @@ func (s *LogsStore) ListLogs(ctx context.Context, appID, level, q string, limit 
 			}
 			tsNs, _ := strconv.ParseInt(val[0], 10, 64)
 			msg := val[1]
-			out = append(out, observability.LogEntry{
+			le := observability.LogEntry{
 				ID:        fmt.Sprintf("%s/%s", pod, val[0]),
-				AppID:     appID, // appID 来自查询参数（stream 已按 ns+pod 正则限定，无 paas_aitoys_app label）
 				Level:     inferLevel(msg),
 				Message:   msg,
 				TraceID:   r.Stream["trace_id"],
 				Timestamp: time.Unix(0, tsNs),
-			})
+			}
+			// 维度归属：dataservice 填 TargetType/TargetID；app 填 AppID
+			// （stream 已按 ns+pod 正则限定，无 paas_aitoys_app label，故维度来自查询参数）。
+			if targetType == observability.TargetDataservice {
+				le.TargetType = observability.TargetDataservice
+				le.TargetID = targetID
+			} else {
+				le.AppID = appID
+			}
+			out = append(out, le)
 		}
 	}
 	if len(out) > limit {
