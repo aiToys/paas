@@ -57,6 +57,29 @@ extraScrapeConfigs: |
         target_label: __address__
         replacement: $1:8080
 
+  # 数据服务引擎 exporter sidecar（db.postgres/mysql、cache.redis/valkey、mq.nats）。
+  # reconciler 给 STS 注入 exporter sidecar（端口名 exporter@9100，复用主容器 Secret 凭证），
+  # 产 pg_stat_activity_count / redis_connected_clients / nats_connz_connections 等业务指标。
+  # 仅抓 PaaS 托管 Pod 的 exporter 端口（managed-by=paas + 端口名 exporter）；minio/qdrant/meili
+  # 内置 /metrics 走主容器 svc 端口，不经此 job（其指标名不同，real/metrics 查不到自然降级空）。
+  # 多租户隔离：namespace + paas_aitoys_tenant label 透传，real/metrics 按租户 ns 限定查询。
+  - job_name: 'kubernetes-pods-exporter'
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      - action: keep
+        source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_managed_by]
+        regex: paas
+      - action: keep
+        source_labels: [__meta_kubernetes_pod_container_port_name]
+        regex: exporter
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_label_paas_aitoys_tenant]
+        target_label: paas_aitoys_tenant
+      - source_labels: [__meta_kubernetes_pod_label_paas_aitoys_dataservice]
+        target_label: paas_aitoys_dataservice
+
 server:
   retention: "7d"
   persistentVolume:

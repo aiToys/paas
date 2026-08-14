@@ -9,6 +9,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/aitoys/paas/api/core/v1alpha1"
@@ -390,4 +391,162 @@ func hasOwner(refs []metav1.OwnerReference, kind string) bool {
 		}
 	}
 	return false
+}
+
+// containsStr 报告 s 是否在 slice 中。
+func containsStr(slice []string, s string) bool {
+	for _, x := range slice {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+// reconcileDS 建 DataService CR 并跑一次 Reconcile，返回 client（供调用方断言 STS/Secret）。
+func reconcileDS(t *testing.T, d *v1alpha1.DataService) client.Client {
+	t.Helper()
+	scheme := newScheme(t)
+	cl := clientfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(d).
+		WithStatusSubresource(&v1alpha1.DataService{}).
+		Build()
+	r := &DataServiceReconciler{Client: cl, Scheme: scheme}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: d.Name, Namespace: d.Namespace}}); err != nil {
+		t.Fatalf("Reconcile 失败: %v", err)
+	}
+	return cl
+}
+
+// TestExporterSidecarInjectedForPostgres 验证 postgres STS 注入 exporter sidecar。
+func TestExporterSidecarInjectedForPostgres(t *testing.T) {
+	d := &v1alpha1.DataService{
+		ObjectMeta: metav1.ObjectMeta{Name: "ds-pg", Namespace: "default"},
+		Spec: v1alpha1.DataServiceSpec{Kind: "db", Engine: "postgres", Name: "ds-pg", TenantID: "t-acme",
+			Connection: map[string]string{"user": "u", "password": "p", "database": "db"}},
+	}
+	cl := reconcileDS(t, d)
+	var sts appsv1.StatefulSet
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "ds-pg", Namespace: "default"}, &sts); err != nil {
+		t.Fatalf("取 STS 失败: %v", err)
+	}
+	names := []string{}
+	for _, c := range sts.Spec.Template.Spec.Containers {
+		names = append(names, c.Name)
+	}
+	if !containsStr(names, "exporter") {
+		t.Fatalf("postgres 应注入 exporter sidecar，实际容器：%v", names)
+	}
+	// exporter 容器应有端口名 exporter@9100 + DATA_SOURCE_NAME env。
+	var exp *corev1.Container
+	for i := range sts.Spec.Template.Spec.Containers {
+		if sts.Spec.Template.Spec.Containers[i].Name == "exporter" {
+			exp = &sts.Spec.Template.Spec.Containers[i]
+		}
+	}
+	if exp == nil || len(exp.Ports) == 0 || exp.Ports[0].Name != "exporter" || exp.Ports[0].ContainerPort != 9100 {
+		t.Fatalf("exporter 端口应为 exporter@9100，got %+v", exp)
+	}
+	hasDSN := false
+	for _, e := range exp.Env {
+		if e.Name == "DATA_SOURCE_NAME" {
+			hasDSN = true
+		}
+	}
+	if !hasDSN {
+		t.Fatalf("postgres exporter 应有 DATA_SOURCE_NAME env")
+	}
+	// exporter 应显式 --web.listen-address=:9100（默认端口各异，强制统一对齐声明的 9100 + scrape job）。
+	listenOK := false
+	for _, a := range exp.Args {
+		if a == "--web.listen-address=:9100" {
+			listenOK = true
+		}
+	}
+	if !listenOK {
+		t.Fatalf("postgres exporter 应 --web.listen-address=:9100，got args=%v", exp.Args)
+	}
+}
+
+// TestNoSidecarForMinio 验证 minio（内置 metrics）不注入 exporter sidecar。
+func TestNoSidecarForMinio(t *testing.T) {
+	d := &v1alpha1.DataService{
+		ObjectMeta: metav1.ObjectMeta{Name: "ds-minio", Namespace: "default"},
+		Spec: v1alpha1.DataServiceSpec{Kind: "storage", Engine: "minio", Name: "ds-minio", TenantID: "t-acme",
+			Connection: map[string]string{"accessKey": "a", "secretKey": "b"}},
+	}
+	cl := reconcileDS(t, d)
+	var sts appsv1.StatefulSet
+	_ = cl.Get(context.Background(), types.NamespacedName{Name: "ds-minio", Namespace: "default"}, &sts)
+	for _, c := range sts.Spec.Template.Spec.Containers {
+		if c.Name == "exporter" {
+			t.Fatalf("minio 不应注入 exporter sidecar（内置 metrics）")
+		}
+	}
+}
+
+// TestExporterSidecarForRedisAndNATS 验证 cache/mq 也注入 sidecar。
+func TestExporterSidecarForRedisAndNATS(t *testing.T) {
+	for _, tc := range []struct {
+		name, kind, engine string
+		conn               map[string]string
+	}{
+		{"redis", "cache", "redis", map[string]string{"password": "p"}},
+		{"nats", "mq", "nats", map[string]string{"token": "t"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &v1alpha1.DataService{
+				ObjectMeta: metav1.ObjectMeta{Name: "ds-" + tc.name, Namespace: "default"},
+				Spec:       v1alpha1.DataServiceSpec{Kind: tc.kind, Engine: tc.engine, Name: "ds-" + tc.name, TenantID: "t-acme", Connection: tc.conn},
+			}
+			cl := reconcileDS(t, d)
+			var sts appsv1.StatefulSet
+			_ = cl.Get(context.Background(), types.NamespacedName{Name: "ds-" + tc.name, Namespace: "default"}, &sts)
+			if !containsStsContainer(&sts, "exporter") {
+				t.Fatalf("%s 应注入 exporter sidecar", tc.name)
+			}
+		})
+	}
+}
+
+func containsStsContainer(sts *appsv1.StatefulSet, name string) bool {
+	for _, c := range sts.Spec.Template.Spec.Containers {
+		if c.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// TestExporterImageCoverage 验证 exporterImage 按 kind+engine 选镜像（内置 metrics 返空）。
+func TestExporterImageCoverage(t *testing.T) {
+	cases := map[string]string{
+		"db|postgres": "prometheuscommunity/postgres-exporter:v0.15.0",
+		"db|mysql":    "prom/mysqld-exporter:v0.15.1",
+		"cache|redis": "oliver006/redis_exporter:v1.62.0",
+		"cache|valkey": "oliver006/redis_exporter:v1.62.0",
+		"mq|nats":     "natsio/prometheus-nats-exporter:0.16.0",
+		"storage|minio": "", // 内置 metrics
+		"vector|qdrant":  "",
+		"search|meilisearch": "",
+	}
+	for k, want := range cases {
+		kind := k
+		engine := ""
+		for i := 0; i < len(k); i++ {
+			if k[i] == '|' {
+				kind = k[:i]
+				engine = k[i+1:]
+				break
+			}
+		}
+		if got := exporterImage(kind, engine, ""); got != want {
+			t.Errorf("exporterImage(%q,%q)=%q, want %q", kind, engine, got, want)
+		}
+	}
+	// registry 内网化：去 repo 前缀。
+	if got := exporterImage("db", "postgres", "hub.wang.dd:5000"); got != "hub.wang.dd:5000/library/postgres-exporter:v0.15.0" {
+		t.Errorf("registry 内网化错误: %s", got)
+	}
 }

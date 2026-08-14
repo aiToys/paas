@@ -253,3 +253,66 @@ func TestDetailMasksSecret(t *testing.T) {
 		t.Fatalf("host 不应为空或掩码: %q", detail.Connection["host"])
 	}
 }
+
+// fakePodReader 是可控的 PodReader（注入 PodInfo 供 servePods 测试）。
+type fakePodReader struct {
+	pods []dataservice.PodInfo
+	err  error
+}
+
+func (f fakePodReader) Pods(ctx context.Context, ns, id string) ([]dataservice.PodInfo, error) {
+	return f.pods, f.err
+}
+
+// TestServePodsReturnsInstances 验证 pods 端点返 reader 的 Pod 列表。
+func TestServePodsReturnsInstances(t *testing.T) {
+	repo := dsmemory.NewStore()
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	d, _ := repo.Create(ctx, dataservice.DataService{Kind: "db", Name: "pg1", Spec: map[string]string{"engine": "postgres"}, EnvID: "env1"})
+	h := dataservice.NewHandler(repo, dataservice.WithPodReader(fakePodReader{pods: []dataservice.PodInfo{{Name: "pg1-0", Status: "Running", Ready: "1/1"}}}))
+	r := newReq(http.MethodGet, "/api/dataservices/"+d.ID+"/pods", "", "t-acme")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != 200 {
+		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	}
+	var pods []dataservice.PodInfo
+	decodeData(t, w, &pods)
+	if len(pods) != 1 || pods[0].Name != "pg1-0" || pods[0].Ready != "1/1" {
+		t.Fatalf("期望 pg1-0 ready=1/1，实际 %+v", pods)
+	}
+}
+
+// TestServePodsNilReaderReturnsEmpty 验证集群外（nil reader）降级返空切片 200。
+func TestServePodsNilReaderReturnsEmpty(t *testing.T) {
+	repo := dsmemory.NewStore()
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	d, _ := repo.Create(ctx, dataservice.DataService{Kind: "db", Name: "pg1", Spec: map[string]string{"engine": "postgres"}, EnvID: "env1"})
+	h := dataservice.NewHandler(repo) // 无 PodReader
+	r := newReq(http.MethodGet, "/api/dataservices/"+d.ID+"/pods", "", "t-acme")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != 200 {
+		t.Fatalf("nil reader 应降级 200，code=%d", w.Code)
+	}
+	var pods []dataservice.PodInfo
+	decodeData(t, w, &pods)
+	if len(pods) != 0 {
+		t.Fatalf("nil reader 应返空切片，got %d", len(pods))
+	}
+}
+
+// TestServePodsCrossTenantNotFound 验证越权校验：跨租户访问他人数据服务 pods 统一 NotFound 不泄漏。
+func TestServePodsCrossTenantNotFound(t *testing.T) {
+	repo := dsmemory.NewStore()
+	acme := tenant.WithTenant(context.Background(), "t-acme")
+	d, _ := repo.Create(acme, dataservice.DataService{Kind: "db", Name: "pg1", Spec: map[string]string{"engine": "postgres"}, EnvID: "env1"})
+	h := dataservice.NewHandler(repo, dataservice.WithPodReader(fakePodReader{pods: []dataservice.PodInfo{{Name: "pg1-0"}}}))
+	// globex 访问 acme 的数据服务。
+	r := newReq(http.MethodGet, "/api/dataservices/"+d.ID+"/pods", "", "t-globex")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("跨租户应 404 不泄漏，got %d", w.Code)
+	}
+}

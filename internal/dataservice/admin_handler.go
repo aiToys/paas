@@ -25,6 +25,24 @@ type InstanceReader interface {
 	Instances(ctx context.Context, namespace, serviceName string) ([]InstanceInfo, error)
 }
 
+// PodInfo 是数据服务的一个运行实例（Pod 级），用于依赖资源排障。对齐 workload.Instance 字段语义。
+type PodInfo struct {
+	Name     string `json:"name"`            // Pod 名
+	Status   string `json:"status"`          // Pending/Running/Failed/Unknown
+	Ready    string `json:"ready,omitempty"` // "1/1"
+	Restarts int    `json:"restarts"`        // 重启次数
+	Node     string `json:"node,omitempty"`  // 节点
+	IP       string `json:"ip,omitempty"`    // Pod IP
+	Age      string `json:"age,omitempty"`   // 启动至今时长（人类可读）
+	Message  string `json:"message,omitempty"` // 状态原因
+}
+
+// PodReader 读数据服务运行 Pod（排障用）。cmd/core 桥接 K8s clientset。
+// nil 或读不到时返空（集群外降级），不报错。
+type PodReader interface {
+	Pods(ctx context.Context, namespace, dataserviceID string) ([]PodInfo, error)
+}
+
 // TenantChecker 校验租户存在（admin 代建 body tenantId 必填校验）。cmd/core 桥接 identity.Repository。
 type TenantChecker interface {
 	Exists(ctx context.Context, tenantID string) error

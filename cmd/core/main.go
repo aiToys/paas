@@ -588,6 +588,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		dataservice.WithEnvResolver(stores.Environment),
 		dataservice.WithEngineRepo(stores.Engine),
 	}
+	if appliers.client != nil { // 集群内注入 Pod reader（pods 端点）；集群外 nil 降级返空
+		dsOpts = append(dsOpts, dataservice.WithPodReader(controller.NewK8sPodReader(appliers.client)))
+	}
 	if appliers.dsRestarter != nil { // typed nil 防御：*DSRestarter(nil) 包成接口后 != nil
 		dsOpts = append(dsOpts, dataservice.WithRestarter(appliers.dsRestarter))
 	}

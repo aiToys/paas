@@ -211,8 +211,8 @@ func containerFor(d *v1alpha1.DataService, image string) corev1.Container {
 	case "cache": // redis
 		c.Command = []string{"redis-server", "--requirepass", "$(REDIS_PASSWORD)"}
 		c.Env = []corev1.EnvVar{envFrom("REDIS_PASSWORD", "password")}
-	case "mq": // nats
-		c.Args = []string{"-auth", "$(NATS_TOKEN)"}
+	case "mq": // nats：-m 8222 开 HTTP 监控端口（供 exporter 采集 varz/connz）
+		c.Args = []string{"-auth", "$(NATS_TOKEN)", "-m", "8222"}
 		c.Env = []corev1.EnvVar{envFrom("NATS_TOKEN", "token")}
 	case "storage": // minio：entrypoint=minio，用 Args 传子命令（Command 会覆盖 entrypoint 致 server 找不到）
 		c.Args = []string{"server", "/data", "--console-address", ":9001"}
@@ -228,7 +228,99 @@ func containerFor(d *v1alpha1.DataService, image string) corev1.Container {
 	return c
 }
 
-// DataServiceReconciler watch DataService CRD，把期望状态落到 K8s（Secret+Service+StatefulSet）并回写 status。
+// exporterImage 按 Kind+Engine 选 exporter 镜像（sidecar 注入用）。
+// minio/qdrant/meilisearch 引擎内置 /metrics（无需 sidecar）返空。
+// registry 非空时内网化（与 engineImage 同款 library/<name>:<tag>，去 repo 前缀）。
+// 节点拉不到 docker.io 时配 PAAS_IMAGE_REGISTRY，exporter 镜像需先推 <registry>/library/。
+func exporterImage(kind, engine, registry string) string {
+	var img string
+	switch kind {
+	case "db":
+		switch engine {
+		case "postgres":
+			img = "prometheuscommunity/postgres-exporter:v0.15.0"
+		case "mysql":
+			img = "prom/mysqld-exporter:v0.15.1"
+		}
+	case "cache": // redis/valkey 共用
+		img = "oliver006/redis_exporter:v1.62.0"
+	case "mq":
+		if engine == "nats" {
+			img = "natsio/prometheus-nats-exporter:0.16.0"
+		}
+	}
+	if img == "" {
+		return "" // storage/vector/search 引擎内置 metrics，无 sidecar
+	}
+	if registry == "" {
+		return img
+	}
+	name := img
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	return registry + "/library/" + name
+}
+
+// exporterSidecar 按 Kind+Engine 构造 exporter sidecar 容器（无则返 nil）。
+// 凭证复用主容器 Secret（secretKeyRef，不重新生成）；sidecar 名固定 exporter，端口 9100。
+// exporter 经 localhost 连主容器（同 Pod），故凭证 env 既供 exporter 连库又供其自身读取。
+func exporterSidecar(d *v1alpha1.DataService, registry string) *corev1.Container {
+	img := exporterImage(d.Spec.Kind, d.Spec.Engine, registry)
+	if img == "" {
+		return nil // 引擎内置 metrics，无 sidecar
+	}
+	secretName := d.Name + "-secret"
+	ref := func(key string) *corev1.SecretKeySelector {
+		return &corev1.SecretKeySelector{LocalObjectReference: corev1.LocalObjectReference{Name: secretName}, Key: key}
+	}
+	envFrom := func(name, key string) corev1.EnvVar {
+		return corev1.EnvVar{Name: name, ValueFrom: &corev1.EnvVarSource{SecretKeyRef: ref(key)}}
+	}
+	port := dataservice.EnginePort(d.Spec.Kind, d.Spec.Engine)
+	c := &corev1.Container{
+		Name:            "exporter",
+		Image:           img,
+		ImagePullPolicy: corev1.PullAlways,
+		Ports:           []corev1.ContainerPort{{Name: "exporter", ContainerPort: 9100}},
+		Resources:       defaultResources(),
+	}
+	switch d.Spec.Kind {
+	case "db":
+		if d.Spec.Engine == "postgres" {
+			// pg exporter 连库串：经 localhost 连同 Pod 的 postgres，凭证从 Secret 取。
+			// K8s env 的 $(VAR) 引用要求被引用 env 先于引用者定义，故凭证 env 必须排在 DSN 之前。
+			c.Env = []corev1.EnvVar{
+				envFrom("POSTGRES_USER", "user"),
+				envFrom("POSTGRES_PASSWORD", "password"),
+				envFrom("POSTGRES_DB", "database"),
+				{Name: "DATA_SOURCE_NAME", Value: fmt.Sprintf("postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:%d/$(POSTGRES_DB)?sslmode=disable", port)},
+			}
+			// postgres-exporter 默认监听 9187，强制 9100 与声明端口 + scrape job 对齐。
+			c.Args = []string{"--web.listen-address=:9100"}
+		} else { // mysql
+			c.Env = []corev1.EnvVar{
+				envFrom("MYSQL_ROOT_PASSWORD", "password"),
+				{Name: "DATA_SOURCE_NAME", Value: fmt.Sprintf("root:$(MYSQL_ROOT_PASSWORD)@(localhost:%d)/", port)},
+			}
+			// mysqld-exporter 默认 9104，强制 9100 对齐。
+			c.Args = []string{"--web.listen-address=:9100"}
+		}
+	case "cache": // redis/valkey
+		c.Env = []corev1.EnvVar{
+			{Name: "REDIS_ADDR", Value: fmt.Sprintf("redis://localhost:%d", port)},
+			envFrom("REDIS_PASSWORD", "password"),
+		}
+		// redis_exporter 默认 9121，强制 9100 对齐。
+		c.Args = []string{"--web.listen-address=:9100"}
+	case "mq": // nats exporter：连 nats 的 HTTP 监控端口（默认 8222）采集 varz/connz。
+		// 用法：prometheus-nats-exporter <flags> url（server URL 是末尾位置参数）。
+		// -port 9100 对齐声明端口 + scrape job；-varz/-connz/-serverz 指定采集端点。
+		// 监控端口由主容器 -m 8222 开启。
+		c.Args = []string{"-port", "9100", "-varz", "-connz", "-serverz", "http://localhost:8222"}
+	}
+	return c
+}
 // 数据服务有状态，统一落 StatefulSet（稳定网络标识）；ClusterIP Service 供应用访问；Secret 存凭证供 Pod env 引用。
 type DataServiceReconciler struct {
 	client.Client
@@ -353,9 +445,13 @@ func (r *DataServiceReconciler) applyStatefulSet(ctx context.Context, d *v1alpha
 				},
 			}}
 		}
+		containers := []corev1.Container{containerFor(d, image)}
+		if sc := exporterSidecar(d, os.Getenv("PAAS_IMAGE_REGISTRY")); sc != nil {
+			containers = append(containers, *sc) // 引擎 exporter sidecar（db/cache/mq），内置 metrics 引擎跳过
+		}
 		tmpl := corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{Labels: labels},
-			Spec:       corev1.PodSpec{Containers: []corev1.Container{containerFor(d, image)}},
+			Spec:       corev1.PodSpec{Containers: containers},
 		}
 		setDisplayName(&tmpl.ObjectMeta, d.Spec.Name) // Pod 继承注解，kubectl get pod -o wide 可见
 		sts.Spec.Template = tmpl

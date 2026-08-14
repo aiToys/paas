@@ -50,6 +50,7 @@ type Handler struct {
 	engineRepo  EngineRepository // 创建实例时按 engineID 解析 kind/engine/mode/connection
 	envResolver EnvTypeResolver
 	restarter   Restarter
+	podReader   PodReader // pods 端点读运行 Pod（排障用）；nil 时返空降级
 	Authorize   func(r *http.Request, perm string) bool
 }
 
@@ -78,6 +79,11 @@ func WithRestarter(r Restarter) HandlerOpt {
 // WithEngineRepo 注入引擎目录仓储，Create 时按 engineID 解析 kind/engine/mode/connection。
 func WithEngineRepo(r EngineRepository) HandlerOpt {
 	return func(h *Handler) { h.engineRepo = r }
+}
+
+// WithPodReader 注入 Pod 读取器（K8s 模式查 STS Pod）；nil 时 pods 端点返空降级。
+func WithPodReader(r PodReader) HandlerOpt {
+	return func(h *Handler) { h.podReader = r }
 }
 
 // resolveFromEngine 按 d.EngineID 从引擎目录解析 kind/engine/mode/connection，回填到 DataService。
@@ -234,6 +240,8 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request) {
 		h.serveScale(w, r, id)
 	case "upgrade":
 		h.serveUpgrade(w, r, id)
+	case "pods":
+		h.servePods(w, r, id)
 	default:
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
@@ -454,4 +462,32 @@ func (h *Handler) serveUpgrade(w http.ResponseWriter, r *http.Request, id string
 	}
 	updated.Connection = MaskConnection(updated.Connection)
 	httputil.WriteData(w, updated)
+}
+
+// servePods 处理 GET /api/dataservices/{id}/pods：返该数据服务的运行 Pod（排障用）。
+// 越权校验：先 Get 数据服务确认租户归属（repo.Get 自带 ctx tenant 过滤，跨租户统一 NotFound 不泄漏）。
+// reader nil（集群外）返空切片 200（降级，与 restart 同款）。
+func (h *Handler) servePods(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodGet {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.allow(w, r, PermDataServiceRead) {
+		return
+	}
+	if _, err := h.repo.Get(r.Context(), id); err != nil {
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
+		return
+	}
+	if h.podReader == nil {
+		httputil.WriteData(w, []PodInfo{}) // 集群外降级返空
+		return
+	}
+	// namespace 传空，reader 内部从 ctx tenant 解析（paas-<tenant>，多租户隔离）。
+	pods, err := h.podReader.Pods(r.Context(), "", id)
+	if err != nil {
+		httputil.WriteData(w, []PodInfo{}) // best-effort 降级
+		return
+	}
+	httputil.WriteData(w, pods)
 }
