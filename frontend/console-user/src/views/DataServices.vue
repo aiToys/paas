@@ -9,6 +9,7 @@ import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
+import { useUrlState } from '@/composables/useUrlState'
 
 type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
 
@@ -31,6 +32,13 @@ const metas = ref<KindMeta[]>([])
 const engines = ref<Engine[]>([])
 const items = ref<DataService[]>([])
 const loading = ref(false)
+// 名称/ID 搜索过滤（进 URL ?q=，分享链接带筛选）
+const { value: searchQ } = useUrlState('q', '')
+const filteredItems = computed(() => {
+  const kw = searchQ.value.toLowerCase().trim()
+  if (!kw) return items.value
+  return items.value.filter((i) => (i.name ?? '').toLowerCase().includes(kw) || (i.id ?? '').toLowerCase().includes(kw))
+})
 
 const meta = computed(() => metas.value.find((m) => m.kind === props.kind))
 // 当前 kind 的 enabled 引擎（用户创建时选）
@@ -172,11 +180,14 @@ onMounted(load)
         <h2>{{ meta?.label ?? '数据服务' }}</h2>
         <p class="sub">资源中心 · {{ meta?.label }} 实例管理（租户私有，生产写需管理员）</p>
       </div>
-      <el-button type="primary" @click="openCreate">+ 创建{{ meta?.label ?? '' }}</el-button>
+      <div class="head-actions">
+        <el-input v-model="searchQ" placeholder="搜索名称或 ID…" clearable style="width: 220px" />
+        <el-button type="primary" @click="openCreate">+ 创建{{ meta?.label ?? '' }}</el-button>
+      </div>
     </div>
 
     <section class="block" v-loading="loading">
-      <el-table :data="items" size="small" empty-text="暂无实例，可点击右上角创建" row-class-name="clickable-row" @row-click="goDetail">
+      <el-table :data="filteredItems" size="small" empty-text="暂无实例，可点击右上角创建" row-class-name="clickable-row" @row-click="goDetail">
         <el-table-column label="名称" min-width="160">
           <template #default="{ row }"><span class="mono">{{ row.name }}</span></template>
         </el-table-column>
@@ -271,6 +282,7 @@ onMounted(load)
 .ds-page { max-width: 1100px; margin: 0 auto; }
 .page-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
 .page-head h2 { margin: 0 0 4px; font-size: 18px; }
+.head-actions { display: flex; align-items: center; gap: 12px; }
 .sub { margin: 0; font-size: 12.5px; color: var(--text-dim); }
 .block { margin-bottom: 24px; }
 .spec-grid { display: flex; flex-wrap: wrap; gap: 6px 18px; }

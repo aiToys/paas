@@ -30,10 +30,35 @@ interface MetricSeries {
   targetType: string; targetId: string; name: string; unit: string
   current: number; points: MetricPoint[]
 }
-interface LogEntry { id: string; appId: string; level: string; message: string; traceId?: string; timestamp: string }
+interface LogEntry { id: string; level: string; message: string; traceId?: string; timestamp: string }
 interface Workload { id: string; name: string; type: string; replicas: number; ready: number; status: string }
 interface DataService { id: string; kind: string; name: string; status: string }
-interface DepMetric { id: string; kind: string; name: string; status: string; cpu?: MetricSeries; mem?: MetricSeries; disk?: MetricSeries; net?: MetricSeries }
+interface PodInfo { name: string; status: string; ready?: string; restarts: number; node?: string; age?: string }
+interface AlertItem { ruleName: string; severity: string; metricName: string; value: number }
+// DepMetric：依赖资源排障单元。计算指标（cpu/mem/disk_io/net_io）+ 引擎业务指标
+// （connections/qps/hit_rate/lag/vectors）+ PVC 用量 + 运行 Pod + 告警 + 最近日志。
+interface DepMetric {
+  id: string; kind: string; name: string; status: string
+  cpu?: MetricSeries; mem?: MetricSeries; disk_io?: MetricSeries; net_io?: MetricSeries
+  connections?: MetricSeries; qps?: MetricSeries; hit_rate?: MetricSeries; lag?: MetricSeries; vectors?: MetricSeries
+  diskUsage?: number // PVC 用量 %
+  pods: PodInfo[]; alerts: AlertItem[]; logs: LogEntry[]
+}
+
+// 按 kind 动态选指标（替代写死 cpu/mem/disk_io/net_io）：数据服务无 HTTP 流量，
+// 故不取 rps/latency；引擎业务指标按 kind 选（db 连接数/QPS、cache 命中率、mq 堆积、vector 向量数）。
+interface MetricDef { name: keyof DepMetric; label: string }
+const DEP_METRICS: Record<string, MetricDef[]> = {
+  db:      [{ name: 'cpu', label: 'CPU' }, { name: 'mem', label: '内存' }, { name: 'connections', label: '连接数' }, { name: 'qps', label: 'QPS' }, { name: 'disk_io', label: '磁盘IO' }, { name: 'net_io', label: '网络IO' }],
+  cache:   [{ name: 'cpu', label: 'CPU' }, { name: 'mem', label: '内存' }, { name: 'hit_rate', label: '命中率' }, { name: 'qps', label: 'QPS' }, { name: 'connections', label: '连接数' }],
+  mq:      [{ name: 'cpu', label: 'CPU' }, { name: 'mem', label: '内存' }, { name: 'connections', label: '连接数' }, { name: 'lag', label: '堆积' }, { name: 'qps', label: 'QPS' }],
+  storage: [{ name: 'cpu', label: 'CPU' }, { name: 'mem', label: '内存' }, { name: 'disk_io', label: '磁盘IO' }, { name: 'net_io', label: '网络IO' }],
+  vector:  [{ name: 'cpu', label: 'CPU' }, { name: 'mem', label: '内存' }, { name: 'qps', label: '检索QPS' }, { name: 'vectors', label: '向量数' }, { name: 'disk_io', label: '磁盘IO' }],
+  search:  [{ name: 'cpu', label: 'CPU' }, { name: 'mem', label: '内存' }, { name: 'qps', label: 'QPS' }, { name: 'disk_io', label: '磁盘IO' }],
+}
+function depMetricDefs(kind: string): MetricDef[] {
+  return DEP_METRICS[kind] ?? DEP_METRICS.storage
+}
 
 const activeTab = ref<'instance' | 'deps'>('instance')
 const metrics = ref<MetricSeries[]>([])
@@ -73,6 +98,26 @@ const dsKinds = new Set(['db', 'cache', 'mq', 'storage', 'vector', 'search'])
 const depBindings = computed(() => props.bindings.filter((b) => dsKinds.has(b.type)))
 
 const fmtVal = (v: number) => (v >= 100 ? Math.round(v).toString() : v.toFixed(1))
+
+// depMetricSeries/Val/Unit：按 metric 名取 DepMetric 上的 series（计算 + 业务指标统一访问）。
+function depMetricSeries(d: DepMetric, name: keyof DepMetric): MetricSeries | undefined {
+  return d[name] as MetricSeries | undefined
+}
+function depMetricVal(d: DepMetric, name: keyof DepMetric): string {
+  const s = depMetricSeries(d, name)
+  return s ? fmtVal(s.current) : '—'
+}
+function depMetricUnit(d: DepMetric, name: keyof DepMetric): string {
+  return depMetricSeries(d, name)?.unit ?? ''
+}
+// goDep 下钻数据服务详情（带 ?app= 上下文，DataServiceDetail 支持）。
+function goDep(d: DepMetric) {
+  router.push(`/resources/${d.kind}/${d.id}?app=${props.appId}`)
+}
+// podClass 按 Pod 状态着色（Running 绿 / Failed 红 / 其他黄）。
+function podClass(p: PodInfo): string {
+  return p.status === 'Running' ? 'ok' : p.status === 'Failed' ? 'err' : 'warn'
+}
 
 // spanRows：trace 的 span 树形 flatten（带 depth），驱动 v-for 树形缩进渲染。
 function spanRows(row: Trace) {
@@ -134,14 +179,24 @@ async function loadDeps() {
     }
     const out: DepMetric[] = []
     await Promise.all(targets.map(async (ds) => {
-      const r = await fetchAuth(`/api/observability/metrics?targetType=dataservice&targetId=${ds.id}`)
-      const series: MetricSeries[] = r.ok ? (await r.json()).data ?? [] : []
+      // 并行拉指标 + Pod + 告警 + 最近日志（排障单元四要素）。
+      const [mR, podsR, alertsR, logsR] = await Promise.all([
+        fetchAuth(`/api/observability/metrics?targetType=dataservice&targetId=${ds.id}`),
+        fetchAuth(`/api/dataservices/${ds.id}/pods`),
+        fetchAuth(`/api/observability/alerts?targetType=dataservice&targetId=${ds.id}`),
+        fetchAuth(`/api/observability/logs?targetType=dataservice&targetId=${ds.id}&limit=3`),
+      ])
+      const series: MetricSeries[] = mR.ok ? (await mR.json()).data ?? [] : []
+      const find = (n: string) => series.find((m) => m.name === n)
       out.push({
         id: ds.id, kind: ds.kind, name: ds.name, status: ds.status,
-        cpu: series.find((m) => m.name === 'cpu'),
-        mem: series.find((m) => m.name === 'mem'),
-        disk: series.find((m) => m.name === 'disk_io'),
-        net: series.find((m) => m.name === 'net_io'),
+        cpu: find('cpu'), mem: find('mem'), disk_io: find('disk_io'), net_io: find('net_io'),
+        connections: find('connections'), qps: find('qps'), hit_rate: find('hit_rate'),
+        lag: find('lag'), vectors: find('vectors'),
+        diskUsage: find('disk_usage')?.current,
+        pods: podsR.ok ? (await podsR.json()).data ?? [] : [],
+        alerts: alertsR.ok ? (await alertsR.json()).data ?? [] : [],
+        logs: logsR.ok ? (await logsR.json()).data ?? [] : [],
       })
     }))
     deps.value = out
@@ -301,37 +356,32 @@ watch(() => props.bindings, () => loadDeps(), { deep: true })
                 <span class="dep-kind">{{ kindLabel[d.kind] || d.kind }}</span>
                 <span class="dep-name mono">{{ d.name }}</span>
                 <el-tag :type="d.status === 'running' ? 'success' : 'info'" size="small">{{ d.status }}</el-tag>
+                <span v-if="d.diskUsage != null" class="dep-pvc">磁盘 {{ Math.round(d.diskUsage) }}%</span>
+                <el-button text type="primary" size="small" class="dep-go" @click="goDep(d)">详情 →</el-button>
               </div>
               <div class="dep-metrics">
-                <div class="dep-metric">
-                  <span class="dm-label">CPU</span>
-                  <span class="mono dm-value">{{ d.cpu ? fmtVal(d.cpu.current) : '—' }}<span class="dm-unit">{{ d.cpu?.unit || '' }}</span></span>
-                  <div v-if="d.cpu" class="spark">
-                    <span v-for="(h, idx) in sparkHeights(d.cpu.points)" :key="idx" class="spark-bar" :style="{ height: h + '%' }" />
-                  </div>
-                </div>
-                <div class="dep-metric">
-                  <span class="dm-label">内存</span>
-                  <span class="mono dm-value">{{ d.mem ? fmtVal(d.mem.current) : '—' }}<span class="dm-unit">{{ d.mem?.unit || '' }}</span></span>
-                  <div v-if="d.mem" class="spark">
-                    <span v-for="(h, idx) in sparkHeights(d.mem.points)" :key="idx" class="spark-bar" :style="{ height: h + '%' }" />
-                  </div>
-                </div>
-                <div class="dep-metric">
-                  <span class="dm-label">磁盘 IO</span>
-                  <span class="mono dm-value">{{ d.disk ? fmtVal(d.disk.current) : '—' }}<span class="dm-unit">{{ d.disk?.unit || '' }}</span></span>
-                  <div v-if="d.disk" class="spark">
-                    <span v-for="(h, idx) in sparkHeights(d.disk.points)" :key="idx" class="spark-bar" :style="{ height: h + '%' }" />
-                  </div>
-                </div>
-                <div class="dep-metric">
-                  <span class="dm-label">网络 IO</span>
-                  <span class="mono dm-value">{{ d.net ? fmtVal(d.net.current) : '—' }}<span class="dm-unit">{{ d.net?.unit || '' }}</span></span>
-                  <div v-if="d.net" class="spark">
-                    <span v-for="(h, idx) in sparkHeights(d.net.points)" :key="idx" class="spark-bar" :style="{ height: h + '%' }" />
+                <div v-for="m in depMetricDefs(d.kind)" :key="m.name" class="dep-metric">
+                  <span class="dm-label">{{ m.label }}</span>
+                  <span class="mono dm-value">{{ depMetricVal(d, m.name) }}<span class="dm-unit">{{ depMetricUnit(d, m.name) }}</span></span>
+                  <div v-if="depMetricSeries(d, m.name)" class="spark">
+                    <span v-for="(h, idx) in sparkHeights(depMetricSeries(d, m.name)!.points)" :key="idx" class="spark-bar" :style="{ height: h + '%' }" />
                   </div>
                 </div>
               </div>
+              <div v-if="d.pods.length" class="dep-pods">
+                <span v-for="p in d.pods" :key="p.name" class="pod-chip" :class="podClass(p)">
+                  ●{{ p.status }}<span v-if="p.ready"> · {{ p.ready }}</span><span v-if="p.restarts"> · {{ p.restarts }}重启</span>
+                </span>
+              </div>
+              <div v-if="d.alerts.length" class="dep-alerts">
+                <span v-for="a in d.alerts" :key="a.ruleName" class="alert-chip" :class="a.severity">⚠ {{ a.ruleName }} ({{ a.metricName }}={{ Math.round(a.value) }})</span>
+              </div>
+              <div v-if="d.logs.length" class="dep-logs">
+                <div v-for="l in d.logs" :key="l.id" class="log-line" :class="l.level">
+                  <span class="log-lvl">{{ l.level }}</span> <span class="mono">{{ l.message.slice(0, 120) }}</span>
+                </div>
+              </div>
+              <el-button text type="primary" size="small" @click="goDep(d)">查看完整监控/日志/告警 →</el-button>
             </div>
           </div>
           <div v-else-if="!depsLoading" class="empty">该应用未绑定数据服务，或数据服务暂无指标</div>
@@ -400,4 +450,16 @@ watch(() => props.bindings, () => loadDeps(), { deep: true })
 .dm-value { font-size: 14px; font-weight: 600; }
 .dm-unit { font-size: 11px; font-weight: 400; color: var(--text-faint); margin-left: 3px; }
 .dep-metric .spark { height: 22px; margin-top: 0; }
+.dep-pvc { font-size: 11px; color: var(--text-dim); margin-left: 4px; }
+.dep-go { margin-left: auto; }
+.dep-pods { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.pod-chip { font-size: 11px; padding: 1px 6px; border-radius: 3px; background: var(--surface-2, var(--surface)); }
+.pod-chip.ok { color: var(--brand); } .pod-chip.err { color: var(--danger); } .pod-chip.warn { color: var(--warning); }
+.dep-alerts { margin-top: 8px; }
+.alert-chip { font-size: 11px; margin-right: 8px; }
+.alert-chip.critical { color: var(--danger); } .alert-chip.warning { color: var(--warning); }
+.dep-logs { margin-top: 8px; max-height: 60px; overflow: auto; }
+.log-line { font-size: 11px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.log-line.error { color: var(--danger); }
+.log-lvl { font-weight: 600; margin-right: 4px; }
 </style>

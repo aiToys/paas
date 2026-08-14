@@ -24,6 +24,12 @@ function onSearch() {
 let prodTimer: number | undefined
 onMounted(async () => {
   await envStore.loadEnvs()
+  // 从 URL ?env=<id> 恢复环境上下文（分享链接保留环境，一次）。
+  const q = route.query.env as string
+  if (q) {
+    const found = envStore.envs.find((e) => e.id === q)
+    if (found) await envStore.switchEnv(found)
+  }
   prodTimer = window.setInterval(() => {
     if (envStore.checkProdTimeout()) {
       ElMessageBox.alert('生产会话已超时，已自动切回。如需继续操作生产请重新进入。', '生产超时', { type: 'info' })
@@ -31,6 +37,18 @@ onMounted(async () => {
   }, 5000)
 })
 onUnmounted(() => { if (prodTimer) window.clearInterval(prodTimer) })
+
+// envStore.currentEnvId → URL：环境切换写 ?env=<id>（分享链接带环境上下文）。
+// 用 router.replace 避免历史栈膨胀；切回全部环境时省略 query（URL 干净）。
+watch(
+  () => envStore.currentEnvId,
+  (id) => {
+    const cur = (route.query.env as string) ?? ''
+    if ((id || '') !== cur) {
+      router.replace({ query: { ...route.query, env: id || undefined } })
+    }
+  },
+)
 
 const session = useSessionStore()
 // 当前身份视角（来自会话 profile）：用户名 + 首字母。

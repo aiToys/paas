@@ -366,20 +366,10 @@ function onEnvChanged() {
   load()
 }
 onMounted(async () => {
-  // 确保 env 列表已加载：深链直接打开 /workloads?env=xxx 时 envStore.envs 可能仍空
-  // （App.vue 的 loadEnvs 与本组件 onMounted 并发，谁先完成不确定）。
+  // 确保 env 列表已加载（App.vue 也加载，并发时兜底）。
+  // 环境上下文从 ?env= 恢复统一由 App.vue 处理（避免重复 switchEnv + 二次生产确认弹窗）。
   if (!envStore.envs.length) {
     await envStore.loadEnvs()
-  }
-  // 环境视图跳转携带 ?env= 预选环境
-  const q = route.query.env as string
-  if (q) {
-    const found = envStore.envs.find((e) => e.id === q)
-    if (found) {
-      await envStore.switchEnv(found)
-    } else {
-      ElMessage.warning(`指定的环境「${q}」不存在`)
-    }
   }
   loadApps()
   load()

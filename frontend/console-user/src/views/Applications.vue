@@ -3,11 +3,12 @@
 // 每个应用卡片显示「在当前 scope 环境的部署徽标」（前端聚合应用 + 工作负载）。
 // scope 全部时显示「部署在 N 个环境」。环境切换统一走顶栏，本页无环境控件。
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
+import { useUrlState } from '@/composables/useUrlState'
 
 // 新建应用弹窗：POST /api/applications（name+env+desc，ID 后端生成 + ApplyDefaults 补展示）。
 const createVisible = ref(false)
@@ -78,11 +79,11 @@ const workloads = ref<Workload[]>([])
 const loading = ref(true)
 const envStore = useEnvStore()
 const router = useRouter()
-const route = useRoute()
 
-// 应用名/ID 过滤（顶栏搜索框 ?q=）
+// 应用名/ID 过滤（搜索词进 URL ?q=，分享链接带筛选）
+const { value: searchQ } = useUrlState('q', '')
 const filteredApps = computed(() => {
-  const q = (route.query.q ?? '').toString().toLowerCase().trim()
+  const q = searchQ.value.toLowerCase().trim()
   if (!q) return apps.value
   return apps.value.filter((a) => a.name.toLowerCase().includes(q) || a.id.toLowerCase().includes(q))
 })
@@ -161,6 +162,11 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
 <template>
   <div class="page">
     <div class="toolbar">
+      <input
+        v-model="searchQ"
+        class="search-input"
+        placeholder="搜索应用名或 ID…"
+      />
       <div class="right">
         <span class="count mono">{{ apps.length }} 个应用</span>
         <button class="new-btn" @click="openCreate">+ 新建应用</button>
@@ -269,8 +275,22 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
 .toolbar {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
+  gap: 12px;
   margin-bottom: 20px;
+}
+.search-input {
+  flex: 0 1 280px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+.search-input:focus {
+  border-color: var(--brand);
 }
 .right {
   display: flex;

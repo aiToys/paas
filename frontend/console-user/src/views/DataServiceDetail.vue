@@ -133,11 +133,24 @@ const connectionFields = computed(() => {
   ]
 })
 
-// 指标卡：4 个（CPU/内存/RPS/延迟），未返回的指标显示「-」
-const metricOrder = ['cpu', 'mem', 'rps', 'latency']
-const metricLabel: Record<string, string> = { cpu: 'CPU', mem: '内存', rps: '请求/秒', latency: 'P95 延迟' }
+// 指标卡：按 kind 动态选（数据服务无 HTTP 流量，移除无意义的 rps/latency，
+// 改取引擎业务指标：db 连接数/QPS、cache 命中率、mq 堆积、vector 向量数）。
+// 未返回的指标（exporter 未就绪）显示「-」，诚实降级不造伪。
+const METRIC_ORDER: Record<string, string[]> = {
+  db: ['cpu', 'mem', 'connections', 'qps', 'disk_io', 'net_io'],
+  cache: ['cpu', 'mem', 'hit_rate', 'qps', 'connections'],
+  mq: ['cpu', 'mem', 'connections', 'lag', 'qps'],
+  storage: ['cpu', 'mem', 'disk_io', 'net_io'],
+  vector: ['cpu', 'mem', 'qps', 'vectors', 'disk_io'],
+  search: ['cpu', 'mem', 'qps', 'disk_io'],
+}
+const metricLabel: Record<string, string> = {
+  cpu: 'CPU', mem: '内存', connections: '连接数', qps: 'QPS', hit_rate: '命中率',
+  lag: '堆积', vectors: '向量数', disk_io: '磁盘IO', net_io: '网络IO',
+}
+const metricOrder = computed(() => METRIC_ORDER[props.kind] ?? ['cpu', 'mem', 'disk_io', 'net_io'])
 const cards = computed(() =>
-  metricOrder.map((name) => {
+  metricOrder.value.map((name) => {
     const m = metrics.value.find((x) => x.name === name)
     return {
       name,
