@@ -54,3 +54,4 @@ examples/recommend
 examples/statsworker
 examples/chatbot
 **/tsconfig.tsbuildinfo
+docs/*.png
