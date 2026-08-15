@@ -146,7 +146,8 @@ func (r *releaseBridge) LatestReadyImage(ctx context.Context, appID string) (str
 	if err != nil {
 		return "", err
 	}
-	for i := len(list) - 1; i >= 0; i-- { // 倒序取最新一条 ready
+	// ListImages 按 BuiltAt 倒序（新→旧，memory/pg 一致），正序取第一条 ready 即最新。
+	for i := range list {
 		if list[i].Status == devops.ImageReady {
 			return list[i].ID, nil
 		}

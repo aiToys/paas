@@ -43,3 +43,14 @@ dist/
 paas-shop-*.png
 # Go 编译产物
 examples/traffic-gen/traffic-gen
+examples/product
+examples/recommend
+examples/statsworker
+# examples 本地编译产物（go build 默认输出名）
+examples/bff
+examples/mcp
+examples/product
+examples/recommend
+examples/statsworker
+examples/chatbot
+**/tsconfig.tsbuildinfo

@@ -1,33 +1,42 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-
-interface Product {
-  id: number
-  name: string
-  price: number
-  category: string
-  stock: number
-  description: string
-}
+import type { Product } from './types'
+import { fmtPrice } from './format'
+import SearchBar from './components/SearchBar.vue'
+import ProductCard from './components/ProductCard.vue'
+import DetailDrawer from './components/DetailDrawer.vue'
+import ChatWindow from './components/ChatWindow.vue'
+import NotificationCenter from './components/NotificationCenter.vue'
 
 const products = ref<Product[]>([])
 const recommends = ref<Product[]>([])
 const loading = ref(false)
 const error = ref('')
 
-// 客服弹窗
-const chatOpen = ref(false)
-const chatMessages = ref<{ role: 'user' | 'assistant'; content: string; reasoning?: string }[]>([])
-const chatInput = ref('')
-const chatLoading = ref(false)
-const showReasoning = ref<Record<number, boolean>>({})
+// 搜索状态 + 全量分类（首次全量加载后缓存，搜索过滤后不重算）
+const searchQ = ref('')
+const searchCategory = ref('')
+const allCategories = ref<string[]>([])
 
-async function loadProducts() {
+// 商品详情抽屉选中项 + 客服弹窗 ref
+const selected = ref<Product | null>(null)
+const chatRef = ref<InstanceType<typeof ChatWindow> | null>(null)
+
+async function loadProducts(q?: string, category?: string) {
   loading.value = true
   error.value = ''
   try {
-    const resp = await fetch('/api/products')
-    products.value = await resp.json()
+    const params = new URLSearchParams()
+    if (q) params.set('q', q)
+    if (category) params.set('category', category)
+    params.set('limit', '50')
+    const resp = await fetch('/api/products?' + params.toString())
+    const data: Product[] = await resp.json()
+    // 首次全量加载（无过滤）时派生分类缓存
+    if (!q && !category && allCategories.value.length === 0) {
+      allCategories.value = [...new Set(data.map(p => p.category))]
+    }
+    products.value = data
   } catch (e) {
     error.value = '商品加载失败'
   } finally {
@@ -43,67 +52,16 @@ async function loadRecommend() {
   } catch {}
 }
 
-function openChat() {
-  chatOpen.value = true
-  if (chatMessages.value.length === 0) {
-    chatMessages.value.push({ role: 'assistant', content: '你好！我是 PaasShop 智能客服，可以帮你查商品、了解售后政策。试试问「有什么键盘推荐」或「退货政策」' })
-  }
+function onSearch(q: string, category: string) {
+  searchQ.value = q
+  searchCategory.value = category
+  loadProducts(q, category)
 }
 
-async function sendChat() {
-  const msg = chatInput.value.trim()
-  if (!msg || chatLoading.value) return
-  chatInput.value = ''
-  chatMessages.value.push({ role: 'user', content: msg })
-  const assistantIdx = chatMessages.value.length
-  chatMessages.value.push({ role: 'assistant', content: '', reasoning: '' })
-  chatLoading.value = true
-
-  try {
-    const resp = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-      body: JSON.stringify({ message: msg, userId: 'web-user' }),
-    })
-    if (!resp.body) throw new Error('no body')
-    const reader = resp.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() || ''
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue
-        const payload = line.slice(6).trim()
-        if (payload === '[DONE]') continue
-        try {
-          const chunk = JSON.parse(payload)
-          const delta = chunk.choices?.[0]?.delta
-          if (delta?.reasoning_content) {
-            chatMessages.value[assistantIdx].reasoning += delta.reasoning_content
-          }
-          if (delta?.content) {
-            chatMessages.value[assistantIdx].content += delta.content
-          }
-        } catch {}
-      }
-    }
-  } catch (e) {
-    chatMessages.value[assistantIdx].content = '客服服务暂不可用，请稍后重试。'
-  } finally {
-    chatLoading.value = false
-  }
-}
-
-function toggleReasoning(idx: number) {
-  showReasoning.value[idx] = !showReasoning.value[idx]
-}
-
-function fmtPrice(p: number) {
-  return '¥' + p.toFixed(2)
+// 抽屉「问客服」：关抽屉 + 打开客服并预填问题（不自动发送）
+function onAsk(p: Product) {
+  selected.value = null
+  chatRef.value?.openWith(`${p.name}怎么样`)
 }
 
 onMounted(() => {
@@ -117,24 +75,19 @@ onMounted(() => {
     <header class="hdr">
       <div class="logo">🛍️ PaasShop</div>
       <div class="tag">智能商品服务 · 演示微服务 + AI 客服 + 全链路可观测</div>
-      <button class="chat-btn" @click="openChat">💬 智能客服</button>
+      <NotificationCenter />
+      <button class="chat-btn" @click="chatRef?.open()">💬 智能客服</button>
     </header>
 
     <main class="main">
       <section class="products">
         <h2>全部商品（bff → product → postgres）</h2>
+        <SearchBar :categories="allCategories" @search="onSearch" />
         <div v-if="loading" class="empty">加载中…</div>
         <div v-else-if="error" class="empty err">{{ error }}</div>
+        <div v-else-if="products.length === 0" class="empty">未找到匹配商品</div>
         <div v-else class="grid">
-          <div v-for="p in products" :key="p.id" class="card">
-            <div class="card-cat">{{ p.category }}</div>
-            <div class="card-name">{{ p.name }}</div>
-            <div class="card-desc">{{ p.description }}</div>
-            <div class="card-foot">
-              <span class="price">{{ fmtPrice(p.price) }}</span>
-              <span class="stock">库存 {{ p.stock }}</span>
-            </div>
-          </div>
+          <ProductCard v-for="p in products" :key="p.id" :product="p" @click="selected = p" />
         </div>
       </section>
 
@@ -150,30 +103,8 @@ onMounted(() => {
       </aside>
     </main>
 
-    <!-- 客服弹窗 -->
-    <div v-if="chatOpen" class="chat-mask" @click.self="chatOpen = false">
-      <div class="chat-win">
-        <div class="chat-hdr">
-          <span>💬 智能客服</span>
-          <button class="chat-close" @click="chatOpen = false">×</button>
-        </div>
-        <div class="chat-body">
-          <div v-for="(m, i) in chatMessages" :key="i" :class="['msg', m.role]">
-            <div v-if="m.role === 'assistant' && m.reasoning" class="reasoning">
-              <button class="rs-btn" @click="toggleReasoning(i)">
-                {{ showReasoning[i] ? '▼' : '▶' }} 思考过程
-              </button>
-              <div v-if="showReasoning[i]" class="rs-content">{{ m.reasoning }}</div>
-            </div>
-            <div class="msg-content">{{ m.content || (chatLoading && i === chatMessages.length - 1 ? '思考中…' : '') }}</div>
-          </div>
-        </div>
-        <div class="chat-input">
-          <input v-model="chatInput" placeholder="试试：有什么键盘推荐 / 退货政策" @keyup.enter="sendChat" :disabled="chatLoading" />
-          <button @click="sendChat" :disabled="chatLoading || !chatInput.trim()">发送</button>
-        </div>
-      </div>
-    </div>
+    <DetailDrawer :product="selected" @close="selected = null" @ask="onAsk" />
+    <ChatWindow ref="chatRef" />
   </div>
 </template>
 
@@ -189,14 +120,6 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
 .main { display: grid; grid-template-columns: 1fr 320px; gap: 24px; padding: 24px 32px; }
 .products h2, .rec h2 { font-size: 16px; margin-bottom: 16px; color: #5a6a7a; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }
-.card { background: #fff; border-radius: 12px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); transition: transform .2s; }
-.card:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,.12); }
-.card-cat { display: inline-block; background: #eef; color: #667eea; font-size: 11px; padding: 2px 8px; border-radius: 4px; margin-bottom: 8px; }
-.card-name { font-size: 16px; font-weight: 600; margin-bottom: 6px; }
-.card-desc { font-size: 13px; color: #8a9bae; margin-bottom: 12px; min-height: 36px; }
-.card-foot { display: flex; justify-content: space-between; align-items: center; }
-.price { color: #e74c3c; font-weight: 700; font-size: 18px; }
-.stock { font-size: 12px; color: #95a5a6; }
 .rec { background: #fff; border-radius: 12px; padding: 20px; height: fit-content; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
 .rec-list { display: flex; flex-direction: column; gap: 10px; }
 .rec-item { display: flex; justify-content: space-between; padding: 10px; background: #f8f9fb; border-radius: 8px; }
@@ -204,22 +127,4 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
 .rec-price { color: #e74c3c; font-weight: 600; }
 .empty { color: #95a5a6; font-size: 14px; padding: 20px; }
 .err { color: #e74c3c; }
-.chat-mask { position: fixed; inset: 0; background: rgba(0,0,0,.3); display: flex; align-items: flex-end; justify-content: flex-end; padding: 24px; z-index: 100; }
-.chat-win { background: #fff; width: 400px; max-width: 100%; height: 560px; border-radius: 16px; display: flex; flex-direction: column; box-shadow: 0 8px 32px rgba(0,0,0,.2); }
-.chat-hdr { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid #eee; font-weight: 600; }
-.chat-close { background: none; border: none; font-size: 24px; cursor: pointer; color: #95a5a6; }
-.chat-body { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
-.msg { max-width: 85%; }
-.msg.user { align-self: flex-end; }
-.msg.assistant { align-self: flex-start; }
-.msg.user .msg-content { background: #667eea; color: #fff; }
-.msg.assistant .msg-content { background: #f0f2f5; color: #2c3e50; }
-.msg-content { padding: 10px 14px; border-radius: 12px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
-.reasoning { margin-bottom: 6px; }
-.rs-btn { background: none; border: 1px dashed #bbb; color: #888; font-size: 12px; padding: 2px 8px; border-radius: 4px; cursor: pointer; }
-.rs-content { margin-top: 4px; padding: 8px; background: #fffaeb; border-left: 3px solid #fbbf24; font-size: 12px; color: #92660a; border-radius: 4px; white-space: pre-wrap; }
-.chat-input { display: flex; gap: 8px; padding: 12px; border-top: 1px solid #eee; }
-.chat-input input { flex: 1; border: 1px solid #ddd; border-radius: 8px; padding: 8px 12px; font-size: 14px; }
-.chat-input button { background: #667eea; color: #fff; border: none; border-radius: 8px; padding: 0 18px; cursor: pointer; font-size: 14px; }
-.chat-input button:disabled { opacity: .5; cursor: not-allowed; }
 </style>

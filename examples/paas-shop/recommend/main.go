@@ -13,8 +13,10 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/aitoys/paas-examples/paas-shop/internal/observ"
@@ -30,10 +32,11 @@ type Product struct {
 }
 
 var (
-	rdb         *redis.Client
-	httpClient  = observ.NewClient()
-	productURL  string // product 服务地址
-	cacheTTL    = 5 * time.Minute
+	rdb        *redis.Client
+	httpClient = observ.NewClient()
+	productURL string        // product 服务地址
+	cacheTTL   time.Duration // main 里从 RECOMMEND_CACHE_TTL env 读
+	recCount   int           // main 里从 RECOMMEND_COUNT env 读
 )
 
 func main() {
@@ -60,6 +63,23 @@ func main() {
 		productURL = "http://paas-shop-product:8081" // 同 ns 短名（K8s DNS）
 	}
 	slog.Info("recommend 服务就绪", "redis", maskRedis(redisURL), "product", productURL)
+
+	// 业务配置读 appconfig 注入的 env（缺省值保证未配可用）
+	cacheTTL = 5 * time.Minute
+	if v := os.Getenv("RECOMMEND_CACHE_TTL"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cacheTTL = time.Duration(n) * time.Second
+		}
+	}
+	recCount = 3
+	if v := os.Getenv("RECOMMEND_COUNT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			recCount = n
+		}
+	}
+
+	// NATS consumer：订阅 shop-events，商品变更时失效推荐缓存（事件驱动一致性）
+	go startCacheInvalidator(os.Getenv("NATS_URL"))
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthz)
@@ -118,7 +138,7 @@ func recommendHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3. 简单推荐：随机取 3 个（按 userID 确定性 seed）
-	recs := pickRandom(all, userID, 3)
+	recs := pickRandom(all, userID, recCount)
 
 	// 4. 写缓存
 	if data, err := json.Marshal(recs); err == nil {
@@ -150,6 +170,48 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// startCacheInvalidator 订阅 shop-events，收到商品变更/seed 事件时 DEL recommend:* 失效缓存。
+// NATS_URL 空时降级（不订阅，缓存仅靠 TTL 过期，向后兼容未绑 MQ）。
+func startCacheInvalidator(natsURL string) {
+	if natsURL == "" {
+		slog.Warn("NATS_URL 未设置，recommend 缓存失效仅靠 TTL（MQ 链路不可用）")
+		return
+	}
+	nc, err := nats.Connect(natsURL,
+		nats.ReconnectWait(2*time.Second),
+		nats.MaxReconnects(-1),
+	)
+	if err != nil {
+		slog.Warn("NATS 连接失败，缓存失效仅靠 TTL", "err", err)
+		return
+	}
+	// QueueSubscribe + group=recommend-consumer：多副本 clustering 分担（与平台 consumer group 名一致）
+	_, err = nc.QueueSubscribe("shop-events", "recommend-consumer", func(msg *nats.Msg) {
+		var evt struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(msg.Data, &evt); err != nil {
+			return
+		}
+		// product.changed / product.bulk-seed 都触发全量失效（按 category 精细失效留后续）
+		if evt.Type == "product.changed" || evt.Type == "product.bulk-seed" {
+			iter := rdb.Scan(context.Background(), 0, "recommend:*", 0).Iterator()
+			var deleted int64
+			for iter.Next(context.Background()) {
+				if err := rdb.Del(context.Background(), iter.Val()).Err(); err == nil {
+					deleted++
+				}
+			}
+			slog.Info("MQ 事件失效推荐缓存", "type", evt.Type, "deleted", deleted)
+		}
+	})
+	if err != nil {
+		slog.Warn("NATS 订阅失败", "err", err)
+		return
+	}
+	slog.Info("recommend 已订阅 shop-events（recommend-consumer group）")
 }
 
 func maskRedis(url string) string {

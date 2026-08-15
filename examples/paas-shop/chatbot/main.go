@@ -1,11 +1,11 @@
-// paas-shop AI 客服服务：演示「MaaS 推理 + 平台知识库 RAG + Function Calling 工具」。
+// paas-shop AI 客服服务：演示「调平台 Agent（MaaS 虚拟模型）+ SSE 流式透传 + 多轮对话记忆」。
 //
 // 平台能力组合：
-//   - MaaS：调平台 /v1/chat/completions（airouter 真实推理，流式 SSE）
-//   - 知识库：调平台 /api/knowledgebases/{id}/retrieve（真向量检索 + score 排序，airouter embedding）
-//   - 工具：function calling 定义 get_product，LLM 决策调用 -> 调 product 服务
+//   - MaaS：调平台 /v1/chat/completions，model 用平台 Agent 虚拟模型（agent:<id>，PAAS_AGENT_MODEL），
+//     工具调用/知识库检索由平台 Agent 侧编排，chatbot 只透传 SSE（content + reasoning_content）。
+//   - 记忆：按 userId 保存多轮对话历史（memory 进程内 / redis 共享，PAAS_MEMORY_MODE）。
 //
-// 调用链路：bff -> chatbot -> MaaS(平台 airouter) + 平台 KB(检索) + product(工具)。
+// 调用链路：bff -> chatbot -> MaaS(平台 Agent 虚拟模型)。
 package main
 
 import (
@@ -18,38 +18,111 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"regexp"
-	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"github.com/aitoys/paas-examples/paas-shop/internal/observ"
 )
 
 var (
-	gatewayURL   string // 平台 /v1/chat/completions + /api/knowledgebases 入口（paas-core）
-	apiKey        string // 平台 API Key
-	kbID         string // 平台知识库 ID（PAAS_KB_ID），空则 RAG 降级
-	productURL   string // product 服务（工具调用目标）
+	gatewayURL   string // 平台 /v1/chat/completions 入口（paas-core）
+	apiKey       string // 平台 API Key
+	agentModel   string // 平台 Agent 虚拟模型（agent:<id>，PAAS_AGENT_MODEL 必填）
+	memoryMode   string // memory（默认）/ redis
+	store        historyStore
 	httpClient   = observ.NewClient()
-	streamClient = observ.NewStreamingClient() // 调平台 gateway 用（airouter 长 reasoning 超 10s）
-	model        string
+	streamClient = observ.NewStreamingClient() // 调平台 gateway 用（agent 长 reasoning 超 10s）
 )
 
-// FAQ 是本地兜底种子（仅当平台 KB 未配时作 memory 上下文，不再直连 qdrant）。
-type FAQ struct {
-	Question string   `json:"question"`
-	Answer   string   `json:"answer"`
-	Keywords []string `json:"keywords"`
+// chatMsg 是对话历史的一条消息（OpenAI role/content 形态）。
+type chatMsg struct {
+	Role    string
+	Content string
 }
 
-// fallbackFAQ 是平台 KB 不可用时的降级上下文（演示连续性，非真 RAG）。
-var fallbackFAQ = []FAQ{
-	{Question: "退货政策是什么", Answer: "支持 7 天无理由退货，商品需保持完好。", Keywords: []string{"退货", "退", "return"}},
-	{Question: "发货时间", Answer: "下单后 24 小时内发货，顺丰包邮。", Keywords: []string{"发货", "物流", "快递"}},
-	{Question: "保修政策", Answer: "整机保修 1 年，外设保修 6 个月。", Keywords: []string{"保修", "维修", "售后"}},
-	{Question: "支付方式", Answer: "支持微信、支付宝、银行卡，支持花呗分期。", Keywords: []string{"支付", "付款", "花呗"}},
-	{Question: "发票", Answer: "支持电子发票和纸质发票，下单时可备注。", Keywords: []string{"发票", "开票"}},
+// toMsgs 把 chatMsg 序列化为 OpenAI messages 请求体形态。
+func toMsgs(msgs []chatMsg) []map[string]any {
+	out := make([]map[string]any, 0, len(msgs))
+	for _, m := range msgs {
+		out = append(out, map[string]any{"role": m.Role, "content": m.Content})
+	}
+	return out
+}
+
+// trimHistory 裁剪对话历史到 max 条：保 msgs[0]（system 在首）+ 连续 max-1 条窗口；
+// 窗口起点从末尾回退对齐到 user（assistant 开头语义不完整），找不到 user 则从 msgs[1] 起。
+func trimHistory(msgs []chatMsg, max int) []chatMsg {
+	if len(msgs) <= max {
+		return msgs
+	}
+	start := len(msgs) - (max - 1)
+	for start > 1 && msgs[start].Role != "user" {
+		start--
+	}
+	return append([]chatMsg{msgs[0]}, msgs[start:start+max-1]...)
+}
+
+// --- 记忆（小接口 + 两实现）---
+
+// historyStore 是按 userId 的多轮对话记忆。
+type historyStore interface {
+	Load(ctx context.Context, userID string) []chatMsg
+	Append(ctx context.Context, userID string, user, assistant string)
+}
+
+// memHistory 是进程内记忆（默认；重启丢失，演示够用）。
+type memHistory struct {
+	mu   sync.Mutex
+	data map[string][]chatMsg
+}
+
+func newMemHistory() *memHistory { return &memHistory{data: map[string][]chatMsg{}} }
+
+func (m *memHistory) Load(_ context.Context, userID string) []chatMsg {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]chatMsg{}, m.data[userID]...)
+}
+
+func (m *memHistory) Append(_ context.Context, userID, user, assistant string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.data[userID] = trimHistory(append(m.data[userID], chatMsg{"user", user}, chatMsg{"assistant", assistant}), 20)
+}
+
+// redisHistory 是 Redis 共享记忆（key chat:history:<userId>，TTL 24h）。
+type redisHistory struct {
+	rdb *redis.Client
+}
+
+func (r *redisHistory) Load(ctx context.Context, userID string) []chatMsg {
+	b, err := r.rdb.Get(ctx, "chat:history:"+userID).Bytes()
+	if err != nil {
+		slog.Warn("redis 记忆读取失败，降级为空历史", "err", err)
+		return nil
+	}
+	var msgs []chatMsg
+	if err := json.Unmarshal(b, &msgs); err != nil {
+		slog.Warn("redis 记忆解析失败，降级为空历史", "err", err)
+		return nil
+	}
+	return msgs
+}
+
+func (r *redisHistory) Append(ctx context.Context, userID, user, assistant string) {
+	msgs := append(r.Load(ctx, userID), chatMsg{"user", user}, chatMsg{"assistant", assistant})
+	msgs = trimHistory(msgs, 20)
+	b, err := json.Marshal(msgs)
+	if err != nil {
+		slog.Warn("redis 记忆序列化失败", "err", err)
+		return
+	}
+	if err := r.rdb.SetEx(ctx, "chat:history:"+userID, b, 24*time.Hour).Err(); err != nil {
+		slog.Warn("redis 记忆写入失败", "err", err)
+	}
 }
 
 func main() {
@@ -72,25 +145,35 @@ func main() {
 	if apiKey == "" {
 		apiKey = os.Getenv("PAAS_API_KEY")
 	}
-	kbID = os.Getenv("PAAS_KB_ID") // 平台知识库 ID（空则 RAG 降级为 fallback 上下文）
-	productURL = os.Getenv("PRODUCT_SERVICE_URL")
-	if productURL == "" {
-		productURL = "http://paas-shop-product:8081"
-	}
-	model = os.Getenv("PAAS_MODEL")
-	if model == "" {
-		model = "glm-5.2"
+	agentModel = os.Getenv("PAAS_AGENT_MODEL")
+	if agentModel == "" {
+		slog.Error("PAAS_AGENT_MODEL 未设置（chatbot 需平台 Agent 虚拟模型 agent:<id>）")
+		os.Exit(1)
 	}
 	if apiKey == "" {
 		slog.Error("PAAS_API_KEY 未设置（chatbot 需平台 API Key 调 MaaS）")
 		os.Exit(1)
 	}
 
-	if err := ensureKB(context.Background()); err != nil {
-		slog.Error("知识库初始化失败", "err", err)
-		os.Exit(1)
+	memoryMode = "memory"
+	redisURL := os.Getenv("REDIS_URL")
+	if os.Getenv("PAAS_MEMORY_MODE") == "redis" {
+		if redisURL == "" {
+			slog.Warn("PAAS_MEMORY_MODE=redis 但 REDIS_URL 为空，降级 memory 模式")
+		} else {
+			rdb := redis.NewClient(&redis.Options{Addr: redisURL})
+			if err := rdb.Ping(context.Background()).Err(); err != nil {
+				slog.Error("redis 连接失败", "addr", redisURL, "err", err)
+				os.Exit(1)
+			}
+			store = &redisHistory{rdb: rdb}
+			memoryMode = "redis"
+		}
 	}
-	slog.Info("chatbot 服务就绪", "gateway", gatewayURL, "model", model, "kbId", kbID, "product", productURL)
+	if store == nil {
+		store = newMemHistory()
+	}
+	slog.Info("chatbot 服务就绪", "gateway", gatewayURL, "agentModel", agentModel, "memory", memoryMode)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthz)
@@ -111,7 +194,7 @@ func healthz(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-// chatHandler 处理客服对话：RAG 检索 -> 第一次 LLM 决策（含 tools）-> 工具执行 -> 第二次流式透传。
+// chatHandler 处理客服对话：加载多轮历史 -> 调平台 Agent（虚拟模型）-> SSE 透传 -> 落记忆。
 func chatHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -129,172 +212,19 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 		req.UserID = "anon"
 	}
 
-	// 1. RAG 检索平台知识库（真向量检索；未配 KB 降级为 fallback 上下文）
-	kbContext := retrieveKB(r.Context(), req.Message)
-
-	// 2. 构造 messages（system 含客服人设 + 知识库上下文）
-	system := "你是 PaasShop 智能客服，友好专业。只回答商品、订单、售后相关问题。" +
-		"可调用 get_product 工具查询商品详情。回答简洁。\n\n【知识库参考】\n" + kbContext
-	messages := []map[string]any{
-		{"role": "system", "content": system},
-		{"role": "user", "content": req.Message},
+	// 历史 + 本轮 user 消息（system 人设在历史首条，Append 时保证）
+	hist := store.Load(r.Context(), req.UserID)
+	if len(hist) == 0 || hist[0].Role != "system" {
+		hist = append([]chatMsg{{"system", "你是 PaasShop 智能客服，友好专业。只回答商品、订单、售后相关问题。回答简洁。"}}, hist...)
 	}
+	msgs := append(hist, chatMsg{"user", req.Message})
 
-	// 3. 第一次 non-stream 决策（带 tools）
-	resp1, err := callLLM(r.Context(), messages, true, false)
-	if err != nil {
-		slog.Error("第一次 LLM 调用失败", "err", err)
-		http.Error(w, "MaaS 不可用", http.StatusServiceUnavailable)
-		return
-	}
-	// 兼容文本式 function calling：GLM 等模型不返回标准 tool_calls 结构，而在 content 里
-	// 输出 <tool_call>{...}</tool_call> 标签。无标准 tool_calls 时从 content 解析补充。
-	if len(resp1.ToolCalls) == 0 {
-		resp1.ToolCalls = parseToolCallsFromContent(resp1.Content)
-	}
-
-	// 4. 处理 tool_calls（function calling）
-	if len(resp1.ToolCalls) > 0 {
-		// assistant 消息只保留 tool_calls（OpenAI 规范：tool_calls 时 content 置空），
-		// 避免第一轮 content 里的思考碎片污染第二轮上下文。
-		messages = append(messages, map[string]any{
-			"role":       "assistant",
-			"content":    "",
-			"tool_calls": resp1.ToolCalls,
-		})
-		for _, tc := range resp1.ToolCalls {
-			result := executeTool(r.Context(), tc)
-			messages = append(messages, map[string]any{
-				"role":         "tool",
-				"tool_call_id": tc.ID,
-				"content":      result,
-			})
-			slog.Info("工具调用", "tool", tc.Function.Name, "args", tc.Function.Arguments, "result_len", len(result))
-		}
-		// 5. 第二次流式（透传 SSE）
-		streamLLM(w, r.Context(), messages)
-		return
-	}
-
-	// 无 tool_calls：直接把第一次的 content 流式输出（模拟打字效果）
-	streamContent(w, resp1.Content)
+	streamAgent(w, r.Context(), req.UserID, req.Message, msgs)
 }
 
-// callLLM 调平台 /v1/chat/completions。withTools 决定是否带 function 定义，stream 决定流式。
-func callLLM(ctx context.Context, messages []map[string]any, withTools, stream bool) (*LLMResp, error) {
-	body := map[string]any{
-		"model":    model,
-		"messages": messages,
-		"stream":   stream,
-	}
-	if withTools {
-		body["tools"] = []map[string]any{
-			{"type": "function", "function": map[string]any{
-				"name":        "get_product",
-				"description": "查询商品详情（价格、库存、分类、描述）",
-				"parameters": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"id": map[string]any{"type": "integer", "description": "商品 ID"},
-					},
-					"required": []string{"id"},
-				},
-			}},
-		}
-	}
-	data, _ := json.Marshal(body)
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, gatewayURL+"/v1/chat/completions", bytes.NewReader(data))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	if stream {
-		req.Header.Set("Accept", "text/event-stream")
-	}
-	resp, err := streamClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("LLM status %d: %s", resp.StatusCode, string(b))
-	}
-	// 平台 gateway 即便 stream:false 也以 SSE 返回（见 core gateway openai.go：Stream 硬编码 true），
-	// 非 stream 路径同样按 SSE 解析：逐行读 `data: <json>`，累积 delta.content + delta.tool_calls 分片，
-	// 组装成 LLMResp。tool_calls 流式按 index 分片（首帧含 id/name，后续帧拼 arguments 增量）。
-	var out LLMResp
-	var content strings.Builder
-	byIdx := map[int]*ToolCall{}
-	var order []int
-	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-	for sc.Scan() {
-		line := sc.Text()
-		if !strings.HasPrefix(line, "data:") {
-			continue
-		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "" || payload == "[DONE]" {
-			continue
-		}
-		var chunk struct {
-			Choices []struct {
-				Delta struct {
-					Content   string `json:"content"`
-					ToolCalls []struct {
-						Index    int    `json:"index"`
-						ID       string `json:"id"`
-						Type     string `json:"type"`
-						Function struct {
-							Name      string `json:"name"`
-							Arguments string `json:"arguments"`
-						} `json:"function"`
-					} `json:"tool_calls"`
-				} `json:"delta"`
-			} `json:"choices"`
-		}
-		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-			continue // 跳过非 JSON 帧（心跳/异常），不中断累积
-		}
-		if len(chunk.Choices) == 0 {
-			continue
-		}
-		d := chunk.Choices[0].Delta
-		if d.Content != "" {
-			content.WriteString(d.Content)
-		}
-		for _, dtc := range d.ToolCalls {
-			tc, ok := byIdx[dtc.Index]
-			if !ok {
-				tc = &ToolCall{}
-				byIdx[dtc.Index] = tc
-				order = append(order, dtc.Index)
-			}
-			if dtc.ID != "" {
-				tc.ID = dtc.ID
-			}
-			if dtc.Type != "" {
-				tc.Type = dtc.Type
-			}
-			if dtc.Function.Name != "" {
-				tc.Function.Name = dtc.Function.Name
-			}
-			tc.Function.Arguments += dtc.Function.Arguments
-		}
-	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("read sse: %w", err)
-	}
-	out.Content = content.String()
-	out.ToolCalls = make([]ToolCall, 0, len(order))
-	for _, i := range order {
-		out.ToolCalls = append(out.ToolCalls, *byIdx[i])
-	}
-	return &out, nil
-}
-
-// streamLLM 流式调平台，透传 SSE chunks 到前端。
-func streamLLM(w http.ResponseWriter, ctx context.Context, messages []map[string]any) {
-	body := map[string]any{"model": model, "messages": messages, "stream": true}
+// streamAgent 流式调平台 Agent 虚拟模型，透传 SSE chunks 到前端，并累积 assistant 文本落记忆。
+func streamAgent(w http.ResponseWriter, ctx context.Context, userID, userMsg string, msgs []chatMsg) {
+	body := map[string]any{"model": agentModel, "messages": toMsgs(msgs), "stream": true}
 	data, _ := json.Marshal(body)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, gatewayURL+"/v1/chat/completions", bytes.NewReader(data))
 	req.Header.Set("Content-Type", "application/json")
@@ -306,11 +236,18 @@ func streamLLM(w http.ResponseWriter, ctx context.Context, messages []map[string
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		slog.Error("Agent 调用失败", "status", resp.StatusCode, "body", string(b))
+		http.Error(w, "MaaS 不可用", http.StatusServiceUnavailable)
+		return
+	}
 
 	flusher, _ := w.(http.Flusher)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no")
+	var assistant strings.Builder
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -324,209 +261,32 @@ func streamLLM(w http.ResponseWriter, ctx context.Context, messages []map[string
 			if flusher != nil {
 				flusher.Flush()
 			}
+			store.Append(ctx, userID, userMsg, assistant.String())
 			return
 		}
-		// 透传 chunk（含 content + reasoning_content）
+		// 透传 chunk（含 content + reasoning_content 帧——reasoning 原样透传不解析）
 		fmt.Fprintf(w, "data: %s\n\n", payload)
 		if flusher != nil {
 			flusher.Flush()
 		}
-	}
-}
-
-// streamContent 模拟流式输出非流式 content（打字效果）。
-func streamContent(w http.ResponseWriter, content string) {
-	flusher, _ := w.(http.Flusher)
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-Accel-Buffering", "no")
-	// 包装成 OpenAI SSE chunk 格式（前端复用解析逻辑）
-	for _, r := range content {
-		chunk := map[string]any{
-			"choices": []map[string]any{{
-				"delta": map[string]any{"content": string(r)},
-				"index":  0,
-			}},
+		// 累积 assistant content（供记忆；reasoning_content 不入记忆）
+		var chunk struct {
+			Choices []struct {
+				Delta struct {
+					Content string `json:"content"`
+				} `json:"delta"`
+			} `json:"choices"`
 		}
-		b, _ := json.Marshal(chunk)
-		fmt.Fprintf(w, "data: %s\n\n", string(b))
-		if flusher != nil {
-			flusher.Flush()
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			continue // 跳过非 JSON 帧（心跳/异常），不中断透传
+		}
+		if len(chunk.Choices) > 0 {
+			assistant.WriteString(chunk.Choices[0].Delta.Content)
 		}
 	}
-	fmt.Fprint(w, "data: [DONE]\n\n")
-	if flusher != nil {
-		flusher.Flush()
+	if err := scanner.Err(); err != nil {
+		slog.Warn("SSE 流中断", "err", err)
 	}
-}
-
-// executeTool 执行 function calling 工具（get_product -> 调 product 服务）。
-func executeTool(ctx context.Context, tc ToolCall) string {
-	if tc.Function.Name != "get_product" {
-		return `{"error":"unknown tool"}`
-	}
-	// 兼容模型实际输出的参数名（schema 定义 id，GLM 常输出 product_id）+ int/string 型数字。
-	// json.Number 兼容 {"id": 1}（int）与 {"id": "1"}（string），避免 int→string 类型不匹配报错。
-	var args struct {
-		ID        json.Number `json:"id"`
-		ProductID json.Number `json:"product_id"`
-	}
-	if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
-		return `{"error":"invalid args"}`
-	}
-	pidStr := args.ID.String()
-	if pidStr == "" {
-		pidStr = args.ProductID.String()
-	}
-	pid, _ := strconv.Atoi(pidStr)
-	if pid == 0 {
-		return `{"error":"invalid product id"}`
-	}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/products/%d", productURL, pid), nil)
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return fmt.Sprintf(`{"error":"product unavailable: %v"}`, err)
-	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
-	return string(b)
-}
-
-// toolCallRe 匹配 GLM 等模型文本式 function calling 的 <tool_call>{...}</tool_call> 标签。
-var toolCallRe = regexp.MustCompile(`(?s)<tool_call>\s*(\{.*?\})\s*</tool_call>`)
-
-// parseToolCallsFromContent 从 content 解析文本式 tool_call 标签为 ToolCall 切片。
-// GLM 等模型不返回 OpenAI 标准 tool_calls 结构，而在 content 里输出标签；本函数把标签里的
-// {name, arguments} 归一化为 ToolCall（arguments 转字符串，与标准 tool_calls 一致）。
-func parseToolCallsFromContent(content string) []ToolCall {
-	matches := toolCallRe.FindAllStringSubmatch(content, -1)
-	if len(matches) == 0 {
-		return nil
-	}
-	var out []ToolCall
-	for i, m := range matches {
-		var raw struct {
-			Name      string          `json:"name"`
-			Arguments json.RawMessage `json:"arguments"`
-		}
-		if err := json.Unmarshal([]byte(m[1]), &raw); err != nil || raw.Name == "" {
-			continue
-		}
-		tc := ToolCall{ID: fmt.Sprintf("call_text_%d", i), Type: "function"}
-		tc.Function.Name = raw.Name
-		tc.Function.Arguments = strings.TrimSpace(string(raw.Arguments))
-		out = append(out, tc)
-	}
-	return out
-}
-
-// --- 知识库（平台 KB retrieve API）---
-
-// ensureKB 校验 KB 配置。kbID 空则降级（fallback 上下文），非空记日志。
-func ensureKB(ctx context.Context) error {
-	_ = ctx
-	if kbID == "" {
-		slog.Warn("PAAS_KB_ID 未设置，RAG 降级为 fallback 上下文（非真向量检索）")
-		return nil
-	}
-	slog.Info("KB RAG 就绪", "kbId", kbID, "retrieve", gatewayURL+"/api/knowledgebases/"+kbID+"/retrieve")
-	return nil
-}
-
-// retrieveKB 调平台 /api/knowledgebases/{id}/retrieve（真向量检索 + score 排序）。
-// 失败/未配 KB 降级为 fallback 上下文（演示连续性，chatbot 仍可推理）。
-func retrieveKB(ctx context.Context, query string) string {
-	if kbID == "" {
-		return buildFallbackContext(query)
-	}
-	body, _ := json.Marshal(map[string]string{"query": query})
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, gatewayURL+"/api/knowledgebases/"+kbID+"/retrieve", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		slog.Warn("KB retrieve 失败，降级 fallback", "err", err)
-		return buildFallbackContext(query)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		slog.Warn("KB retrieve 非 200，降级 fallback", "status", resp.StatusCode)
-		return buildFallbackContext(query)
-	}
-	var out struct {
-		Data []struct {
-			Chunk struct {
-				Content string `json:"content"`
-			} `json:"chunk"`
-			Score float32 `json:"score"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return buildFallbackContext(query)
-	}
-	var b strings.Builder
-	for _, h := range out.Data {
-		if strings.TrimSpace(h.Chunk.Content) != "" {
-			fmt.Fprintf(&b, "- %s\n", h.Chunk.Content)
-		}
-	}
-	if b.Len() == 0 {
-		return "（无匹配知识库条目）"
-	}
-	return b.String()
-}
-
-// buildFallbackContext 在平台 KB 不可用时用本地 fallback FAQ 关键词匹配作降级上下文。
-func buildFallbackContext(query string) string {
-	q := strings.ToLower(query)
-	var b strings.Builder
-	matched := false
-	for _, f := range fallbackFAQ {
-		kws := append([]string{strings.ToLower(f.Question)}, f.Keywords...)
-		hit := false
-		for _, k := range kws {
-			if k != "" && strings.Contains(q, strings.ToLower(k)) {
-				hit = true
-				break
-			}
-		}
-		if hit {
-			fmt.Fprintf(&b, "Q: %s\nA: %s\n\n", f.Question, f.Answer)
-			matched = true
-		}
-	}
-	if !matched {
-		return "（无匹配知识库条目）"
-	}
-	return b.String()
-}
-
-// --- LLM 响应解析 ---
-
-type LLMResp struct {
-	Choices []struct {
-		Message struct {
-			Content   string     `json:"content"`
-			ToolCalls []ToolCall `json:"tool_calls"`
-		} `json:"message"`
-	} `json:"choices"`
-	Content   string
-	ToolCalls []ToolCall
-}
-
-func (r *LLMResp) Message() map[string]any {
-	return map[string]any{
-		"role":       "assistant",
-		"content":    r.Content,
-		"tool_calls": r.ToolCalls,
-	}
-}
-
-type ToolCall struct {
-	ID       string `json:"id"`
-	Type     string `json:"type"`
-	Function struct {
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-	} `json:"function"`
+	// 流异常结束（无 [DONE]）：已累积部分仍落记忆（宁少丢勿全丢）
+	store.Append(ctx, userID, userMsg, assistant.String())
 }

@@ -103,26 +103,94 @@ fi
 echo "=== §7 知识库资源创建完成 ==="
 
 echo "=== §8 AI Agent + MCP 工具（平台 Agent runtime 多轮 function calling）==="
-# 8.1 创建 Prompt（商品客服人设）
-curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/prompts" -d \
-  '{"name":"shop-cs","template":"你是 {{brand}} 智能客服。规则：\n1. 回答商品/订单/售后相关问题\n2. 查商品详情调 query_product，查订单调 query_order，退款调 refund_order\n3. 不确定时诚实告知，不编造\n4. 友好简洁\n\n用户问题：{{question}}","variables":["brand","question"]}' \
-  | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',{});print('  prompt:',d.get('id'),'v'+str(d.get('version')),'active:',d.get('active'))" 2>/dev/null
+# 8.1 Prompt：无占位符人设（平台不渲染模板变量，问题描述由 user 消息携带）；已存在则 PUT 更新，否则 POST 创建
+PROMPT_ID=$(curl -s -H "$H" "$B/api/prompts" | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',[]);items=d if isinstance(d,list) else d.get('items',[]);print(next((p['id'] for p in items if p.get('name')=='shop-cs'),''))" 2>/dev/null)
+PROMPT_BODY='{"name":"shop-cs","template":"你是 PaasShop 智能客服，友好专业。规则：\n1. 回答商品、订单、售后相关问题\n2. 找商品/推荐/比价用 search_products；已知商品 ID 查详情用 query_product；查订单用 query_order；退款用 refund_order\n3. 不确定时诚实告知，不编造\n4. 回答简洁","variables":[]}'
+if [ -n "$PROMPT_ID" ]; then
+  curl -s -X PUT -H "$H" -H "Content-Type: application/json" "$B/api/prompts/$PROMPT_ID" -d "$PROMPT_BODY" >/dev/null && echo "  prompt updated: $PROMPT_ID"
+else
+  curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/prompts" -d "$PROMPT_BODY" \
+    | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',{});print('  prompt:',d.get('id'))" 2>/dev/null
+fi
 
-# 8.2 创建 MCP 工具（指向 paas-shop-mcp 服务，含 query_product/query_order/refund_order）
-TOOL_ID=$(curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/tools" -d \
-  '{"name":"shop-tools","description":"PaasShop 商品/订单工具（query_product/query_order/refund_order）","type":"mcp","config":{"serverURL":"http://paas-shop-mcp.paas-t-acme.svc.cluster.local","apiKey":""},"enabled":true}' \
-  | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',{});print(d.get('id',''))" 2>/dev/null)
-echo "  tool: $TOOL_ID"
+# 8.2 4 个 Tool 实体（已验证 runtime.go:141-146 按 mt.Name == t.Name 匹配——
+#     Tool 实体 name 必须与 MCP server 工具名逐字一致，不能加 shop- 前缀）
+MCP_URL="http://paas-shop-mcp.paas-t-acme.svc.cluster.local"
+TOOL_IDS=""
+for t in \
+  "query_product:查商品详情（按商品 ID 返回名称/价格/库存）" \
+  "search_products:搜索商品（按关键字/分类，用于找商品/推荐/比价）" \
+  "query_order:查询订单状态（按订单号返回详情）" \
+  "refund_order:对订单发起退款" ; do
+  TNAME="${t%%:*}"; TDESC="${t#*:}"
+  TID=$(curl -s -H "$H" "$B/api/tools" | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',[]);items=d if isinstance(d,list) else d.get('items',[]);print(next((x['id'] for x in items if x.get('name')=='$TNAME'),''))" 2>/dev/null)
+  BODY="{\"name\":\"$TNAME\",\"description\":\"$TDESC\",\"type\":\"mcp\",\"config\":{\"serverURL\":\"$MCP_URL\",\"apiKey\":\"\"},\"enabled\":true}"
+  if [ -n "$TID" ]; then
+    curl -s -X PUT -H "$H" -H "Content-Type: application/json" "$B/api/tools/$TID" -d "$BODY" >/dev/null
+  else
+    TID=$(curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/tools" -d "$BODY" | python3 -c "import sys,json;print(json.load(sys.stdin).get('data',{}).get('id',''))" 2>/dev/null)
+  fi
+  echo "  tool: $TNAME -> $TID"
+  TOOL_IDS="$TOOL_IDS \"$TID\""
+done
+# 旧 shop-tools 单实体删除（实体名 shop-tools 匹配不到 MCP 工具，已废）
+OLD_TOOL=$(curl -s -H "$H" "$B/api/tools" | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',[]);items=d if isinstance(d,list) else d.get('items',[]);print(next((x['id'] for x in items if x.get('name')=='shop-tools'),''))" 2>/dev/null)
+[ -n "$OLD_TOOL" ] && curl -s -X DELETE -H "$H" "$B/api/tools/$OLD_TOOL" >/dev/null && echo "  deleted old tool: shop-tools"
 
-# 8.3 创建 Agent（绑 KB + 工具 + Prompt，虚拟模型 model=agent:{id} 经平台 runtime 推理）
-KB_ARG="[]"
-[ -n "$KB_ID" ] && KB_ARG="[\"$KB_ID\"]"
-AGENT_ID=$(curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/agents" -d \
-  "{\"name\":\"shop-agent\",\"description\":\"PaasShop 商品客服 Agent（RAG+MCP工具+记忆）\",\"model\":\"glm-5.2\",\"promptRef\":\"shop-cs\",\"tools\":[\"$TOOL_ID\"],\"knowledgeBases\":$KB_ARG,\"maxSteps\":5,\"enabled\":true}" \
-  | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',{});print(d.get('id',''))" 2>/dev/null)
-echo "  agent: $AGENT_ID (virtual model: agent:$AGENT_ID)"
+# 8.3 shop-agent：已存在则 PUT 更新 tools，否则 POST 创建（虚拟模型 model=agent:{id} 经平台 runtime 推理）
+AGENT_ID=$(curl -s -H "$H" "$B/api/agents" | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',[]);items=d if isinstance(d,list) else d.get('items',[]);print(next((a['id'] for a in items if a.get('name')=='shop-agent'),''))" 2>/dev/null)
+KB_ARG="[]"; [ -n "$KB_ID" ] && KB_ARG="[\"$KB_ID\"]"
+AGENT_BODY="{\"name\":\"shop-agent\",\"description\":\"PaasShop 商品客服 Agent（RAG+MCP 工具）\",\"model\":\"glm-5.2\",\"promptRef\":\"shop-cs\",\"tools\":[$TOOL_IDS],\"knowledgeBases\":$KB_ARG,\"maxSteps\":5,\"enabled\":true}"
+if [ -n "$AGENT_ID" ]; then
+  curl -s -X PUT -H "$H" -H "Content-Type: application/json" "$B/api/agents/$AGENT_ID" -d "$AGENT_BODY" >/dev/null && echo "  agent updated: $AGENT_ID"
+else
+  AGENT_ID=$(curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/agents" -d "$AGENT_BODY" | python3 -c "import sys,json;print(json.load(sys.stdin).get('data',{}).get('id',''))" 2>/dev/null)
+  echo "  agent: $AGENT_ID"
+fi
 echo "PAAS_AGENT_ID=$AGENT_ID"
 echo "=== §8 Agent 资源创建完成 ==="
+
+echo "=== §8.4 chatbot env 注入（PAAS_AGENT_MODEL）==="
+curl -s -o /dev/null -X POST -H "$H" -H "Content-Type: application/json" "$B/api/applications/$APP/configs" -d \
+  "{\"key\":\"PAAS_AGENT_MODEL\",\"value\":\"agent:$AGENT_ID\",\"type\":\"env\",\"envId\":\"$ENV_TEST\"}" && echo "  cfg: PAAS_AGENT_MODEL=agent:$AGENT_ID"
+
+echo "=== §4 消息队列（shop-mq NATS 数据服务 + topic + consumer group）==="
+# 4.1 创建 shop-mq 数据服务（NATS，reconciler 建 StatefulSet + Service）
+MQ_ID=$(curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/dataservices" -d \
+  "{\"kind\":\"mq\",\"name\":\"shop-mq\",\"engineId\":\"nats-managed\",\"spec\":{\"partitions\":\"3\"},\"storageGb\":1,\"envId\":\"$ENV_TEST\"}" \
+  | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',{});print(d.get('id',''))" 2>/dev/null)
+echo "  mq: $MQ_ID"
+# 4.2 等 shop-mq running（reconciler 建 NATS STS，readiness probe 驱动 status）
+for i in $(seq 1 30); do
+  STATUS=$(curl -s -H "$H" "$B/api/dataservices/$MQ_ID" | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',{});print(d.get('status',''))" 2>/dev/null)
+  echo "  mq status: $STATUS"
+  [ "$STATUS" = "running" ] && break
+  sleep 3
+done
+# 4.3 创建 topic（shop-events，product 发订单/商品事件到此，recommend 消费刷新缓存）
+TOPIC_ID=$(curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/mq-topics" -d \
+  "{\"mqId\":\"$MQ_ID\",\"name\":\"shop-events\",\"partitions\":3,\"retention\":\"7d\"}" \
+  | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',{});print(d.get('id',''))" 2>/dev/null)
+echo "  topic: $TOPIC_ID"
+# 4.4 创建 consumer group（recommend-consumer，recommend 服务订阅消费）
+curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/consumer-groups" -d \
+  "{\"topicId\":\"$TOPIC_ID\",\"name\":\"recommend-consumer\",\"mode\":\"clustering\"}" \
+  | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',{});print('  group:',d.get('id'),d.get('name'))" 2>/dev/null
+echo "PAAS_MQ_ID=$MQ_ID  TOPIC_ID=$TOPIC_ID"
+echo "=== §4 消息队列创建完成 ==="
+
+echo "=== §8.5 数据服务绑定（shop-db/cache/mq 注入 env 到 paas-shop workload）==="
+# 注：shop-mq 数据服务已在前段 §4 创建，绑定可直接解析
+# binding_injector 按 type 注入：db->DATABASE_URL, cache->REDIS_URL, mq->NATS_URL
+# 应用级绑定，注入到应用所有 workload（product/recommend/statsworker 各取所需 env）
+for ds in \
+  '{"type":"db","name":"shop-db"}' \
+  '{"type":"cache","name":"shop-cache"}' \
+  '{"type":"mq","name":"shop-mq"}'; do
+  curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/applications/$APP/bindings" -d "$ds" \
+    | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',{});bs=d.get('bindings',[]);print('  binding:',bs[-1].get('type'),bs[-1].get('name') if bs else 'exists')" 2>/dev/null
+done
+echo "=== §8.5 数据服务绑定完成 ==="
 
 echo "=== §9 DevOps CI/CD（CodeRepo -> BuildRun -> Image，平台构建链路）==="
 # 9.1 创建 external CodeRepo（指向 aitoys/paas GitHub，含 examples/paas-shop 代码）
@@ -134,7 +202,7 @@ echo "  repo: $REPO_ID"
 #     共用 Dockerfile.backend + buildContext=examples/，靠 buildArgs.SERVICE 区分构建目标。
 #     每个 SERVICE 一次 BuildRun → 各自独立 tag（buildArgs 哈希区分，见 builder.buildTag）→ 独立 digest 镜像。
 #     frontend 是 nginx SPA（独立 Dockerfile），单独构建。
-for SVC in product recommend chatbot bff; do
+for SVC in product recommend chatbot bff statsworker mcp; do
   echo "  build service: $SVC"
   curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/applications/$APP/buildruns" -d \
     "{\"repoId\":\"$REPO_ID\",\"branch\":\"main\",\"trigger\":\"manual\",\"buildArgs\":{\"SERVICE\":\"$SVC\"}}" \
@@ -167,6 +235,20 @@ REGISTRY="${REGISTRY:?设置 REGISTRY 为你的集群 registry 地址，如 <nod
 for kv in "SHOP_BFF_URL:http://paas-shop-bff:8080" "CORE_URL:http://paas-core.paas.svc.cluster.local" "API_KEY:sk-acme-dev" "AGENT_MODEL:agent:$AGENT_ID" "MICRO_INTERVAL:300" "AGENT_INTERVAL:3600"; do
   K="${kv%%:*}"; V="${kv#*:}"
   TYPE="env"; [ "$K" = "API_KEY" ] && TYPE="secret"
+  curl -s -o /dev/null -X POST -H "$H" -H "Content-Type: application/json" "$B/api/applications/$APP/configs" -d \
+    "{\"key\":\"$K\",\"value\":\"$V\",\"type\":\"$TYPE\",\"envId\":\"$ENV_TEST\"}" && echo "  cfg: $K"
+done
+
+# paas-shop 业务 appconfig（与 deploy-paas-shop.sh §4 一致，幂等）
+for kv in \
+  "PRODUCT_PAGE_SIZE:20:env" \
+  "RECOMMEND_COUNT:3:env" \
+  "RECOMMEND_CACHE_TTL:300:env" \
+  "PAAS_APPCONFIG_URL:http://paas-core.paas.svc.cluster.local:env" \
+  "PAAS_APP_ID:paas-shop:env" \
+  "PAAS_ENV_ID:$ENV_TEST:env" \
+  "PAAS_API_KEY:sk-acme-dev:secret"; do
+  K="${kv%%:*}"; REST="${kv#*:}"; V="${REST%:*}"; TYPE="${REST##*:}"
   curl -s -o /dev/null -X POST -H "$H" -H "Content-Type: application/json" "$B/api/applications/$APP/configs" -d \
     "{\"key\":\"$K\",\"value\":\"$V\",\"type\":\"$TYPE\",\"envId\":\"$ENV_TEST\"}" && echo "  cfg: $K"
 done
@@ -230,28 +312,3 @@ for ds in shop-db shop-cache shop-kb; do
     | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',{});print('  backup '+('$ds')+':',d.get('id'),'size=',d.get('sizeMB'),'MB status=',d.get('status'))" 2>/dev/null
 done
 echo "=== §6 备份创建完成 ==="
-
-echo "=== §4 消息队列（shop-mq NATS 数据服务 + topic + consumer group）==="
-# 4.1 创建 shop-mq 数据服务（NATS，reconciler 建 StatefulSet + Service）
-MQ_ID=$(curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/dataservices" -d \
-  "{\"kind\":\"mq\",\"name\":\"shop-mq\",\"engineId\":\"nats-managed\",\"spec\":{\"partitions\":\"3\"},\"storageGb\":1,\"envId\":\"$ENV_TEST\"}" \
-  | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',{});print(d.get('id',''))" 2>/dev/null)
-echo "  mq: $MQ_ID"
-# 4.2 等 shop-mq running（reconciler 建 NATS STS，readiness probe 驱动 status）
-for i in $(seq 1 30); do
-  STATUS=$(curl -s -H "$H" "$B/api/dataservices/$MQ_ID" | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',{});print(d.get('status',''))" 2>/dev/null)
-  echo "  mq status: $STATUS"
-  [ "$STATUS" = "running" ] && break
-  sleep 3
-done
-# 4.3 创建 topic（shop-events，product 发订单/商品事件到此，recommend 消费刷新缓存）
-TOPIC_ID=$(curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/mq-topics" -d \
-  "{\"mqId\":\"$MQ_ID\",\"name\":\"shop-events\",\"partitions\":3,\"retention\":\"7d\"}" \
-  | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',{});print(d.get('id',''))" 2>/dev/null)
-echo "  topic: $TOPIC_ID"
-# 4.4 创建 consumer group（recommend-consumer，recommend 服务订阅消费）
-curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/consumer-groups" -d \
-  "{\"topicId\":\"$TOPIC_ID\",\"name\":\"recommend-consumer\",\"mode\":\"clustering\"}" \
-  | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',{});print('  group:',d.get('id'),d.get('name'))" 2>/dev/null
-echo "PAAS_MQ_ID=$MQ_ID  TOPIC_ID=$TOPIC_ID"
-echo "=== §4 消息队列创建完成 ==="

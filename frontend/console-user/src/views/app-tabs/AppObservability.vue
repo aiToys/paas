@@ -15,6 +15,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { fetchAuth } from '@/api'
+import { useUrlState } from '@/composables/useUrlState'
 import {
   type Span, type Trace,
   buildSpanTree, flattenSpanTree, spanWidth, spanLeft, spanChips, errSpanCount,
@@ -24,6 +25,9 @@ type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
 
 const props = defineProps<{ appId: string; bindings: { type: string; name: string }[] }>()
 const router = useRouter()
+
+// 可观测内部子 tab（应用实例/依赖资源）进 URL ?otab=，分享直达对应子视图。
+const { value: activeTab } = useUrlState<'instance' | 'deps'>('otab', 'instance')
 
 interface MetricPoint { ts: string; value: number }
 interface MetricSeries {
@@ -60,7 +64,6 @@ function depMetricDefs(kind: string): MetricDef[] {
   return DEP_METRICS[kind] ?? DEP_METRICS.storage
 }
 
-const activeTab = ref<'instance' | 'deps'>('instance')
 const metrics = ref<MetricSeries[]>([])
 const logs = ref<LogEntry[]>([])
 const traces = ref<Trace[]>([])
@@ -439,19 +442,19 @@ watch(() => props.bindings, () => loadDeps(), { deep: true })
 .span-exc { margin: 4px 2px; padding: 6px 8px; border-left: 3px solid var(--danger); background: var(--danger-soft); border-radius: 4px; }
 .exc-msg { font-size: 12px; color: var(--danger); font-weight: 600; }
 .exc-stack { margin: 4px 0 0; padding: 6px; font-size: 11px; color: var(--text-dim); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow: auto; }
-.dep-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.dep-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
 .dep-card { padding: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); }
-.dep-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
-.dep-kind { font-size: 12px; color: var(--text-dim); }
-.dep-name { flex: 1; font-size: 13px; font-weight: 600; }
-.dep-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 16px; }
-.dep-metric { display: grid; grid-template-columns: 40px 90px 1fr; align-items: center; gap: 8px; }
-.dm-label { font-size: 12px; color: var(--text-faint); }
+.dep-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-bottom: 10px; }
+.dep-kind { font-size: 11px; color: var(--text-dim); padding: 1px 6px; border-radius: 3px; background: var(--surface-2, var(--surface)); }
+.dep-name { font-size: 13px; font-weight: 600; margin-right: auto; }
+.dep-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 14px; }
+.dep-metric { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.dm-label { font-size: 11px; color: var(--text-faint); }
 .dm-value { font-size: 14px; font-weight: 600; }
 .dm-unit { font-size: 11px; font-weight: 400; color: var(--text-faint); margin-left: 3px; }
-.dep-metric .spark { height: 22px; margin-top: 0; }
-.dep-pvc { font-size: 11px; color: var(--text-dim); margin-left: 4px; }
-.dep-go { margin-left: auto; }
+.dep-metric .spark { height: 18px; margin-top: 2px; }
+.dep-pvc { font-size: 11px; color: var(--text-dim); margin-left: 2px; }
+.dep-go { margin-left: 4px; }
 .dep-pods { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .pod-chip { font-size: 11px; padding: 1px 6px; border-radius: 3px; background: var(--surface-2, var(--surface)); }
 .pod-chip.ok { color: var(--brand); } .pod-chip.err { color: var(--danger); } .pod-chip.warn { color: var(--warning); }

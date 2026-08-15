@@ -402,6 +402,11 @@ func TestStrOrAndGetStringMap(t *testing.T) {
 // engine.Advance 用 run.StageRuns[i].Input 作 stage.Params（不再读 Pipeline.Stages）。
 // 测试直接调 CreateRun 不走 triggerRun，故模板无需真实存在。
 func seedPipeline(t *testing.T, s *memoryStore, name, appID, kind string, stages []StageDef) PipelineRun {
+	return seedPipelineBranch(t, s, name, appID, kind, stages, "main")
+}
+
+// seedPipelineBranch 同 seedPipeline，分支可指定（baseline merge 场景需 feature 分支）。
+func seedPipelineBranch(t *testing.T, s *memoryStore, name, appID, kind string, stages []StageDef, branch string) PipelineRun {
 	t.Helper()
 	ctx := acmeCtxEngine()
 	p, err := s.CreatePipeline(ctx, Pipeline{
@@ -415,7 +420,7 @@ func seedPipeline(t *testing.T, s *memoryStore, name, appID, kind string, stages
 		stageRuns[i] = StageRun{Index: i, Type: st.Type, Name: st.Name, Status: StagePending, Input: st.Params}
 	}
 	r, err := s.CreateRun(ctx, PipelineRun{
-		PipelineID: p.ID, AppID: p.AppID, Branch: "main", Commit: "abc123", RepoID: "repo-1",
+		PipelineID: p.ID, AppID: p.AppID, Branch: branch, Commit: "abc123", RepoID: "repo-1",
 		Trigger: "manual", Status: RunRunning, CurrentStage: 0, StageRuns: stageRuns,
 	})
 	if err != nil {
@@ -612,12 +617,13 @@ func TestEngineBaselineVersion(t *testing.T) {
 
 func TestEngineBaselineMergeConflict(t *testing.T) {
 	s := NewMemoryStore()
-	r := seedPipeline(t, s, "p-conflict", "app-conflict", KindCI, []StageDef{
+	// 用 feature 分支触发（≠ mainBranch=main），使 merge 真正被调用以测冲突路径。
+	r := seedPipelineBranch(t, s, "p-conflict", "app-conflict", KindCI, []StageDef{
 		{Name: "部署", Type: StageDeploy, Params: map[string]any{
 			"envId": "env-dev", "imageSource": ImageSelected, "imageId": "img-1",
 		}},
 		{Name: "基线", Type: StageBaseline, Params: map[string]any{"mainBranch": "main"}},
-	})
+	}, "feature-x")
 
 	eng := &Engine{
 		Pipelines: s, Runs: s, Builds: fakeBuilder{},
@@ -1004,5 +1010,37 @@ func TestAbortClearsRunningStage(t *testing.T) {
 	}
 	if got.StageRuns[1].Status != StageAborted {
 		t.Errorf("残留 running stage 应标 aborted，got %s", got.StageRuns[1].Status)
+	}
+}
+
+// TestEngineBaselineSameBranchSkipsMerge 同分支（run.Branch == mainBranch）明确跳过合并，
+// 不对 Gitea 发 head==base 的 PR（历史 bug：422 错误被吞、stage 假绿）。
+func TestEngineBaselineSameBranchSkipsMerge(t *testing.T) {
+	s := NewMemoryStore()
+	r := seedPipeline(t, s, "p-same", "app-same", KindCI, []StageDef{
+		{Name: "部署", Type: StageDeploy, Params: map[string]any{
+			"envId": "env-dev", "imageSource": ImageSelected, "imageId": "img-1",
+		}},
+		{Name: "基线", Type: StageBaseline, Params: map[string]any{"mainBranch": "main", "mergeMode": "squash"}},
+	})
+
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: &fakeReleaser{},
+		Gitea: &fakeGiteaMerger{mergeSHA: "sha-same"}} // 若被调用返回成功 sha
+	if err := eng.Advance(acmeCtxEngine(), r.ID); err != nil {
+		t.Fatalf("Advance 失败: %v", err)
+	}
+	run, _ := s.GetRun(acmeCtxEngine(), r.ID)
+	if run.Status != RunSucceeded {
+		t.Fatalf("期望 succeeded，got %s", run.Status)
+	}
+	sr := run.StageRuns[1]
+	if sr.Status != StageSuccess || sr.Error != "" {
+		t.Fatalf("同分支跳过应 success 无 error，got status=%s error=%q", sr.Status, sr.Error)
+	}
+	if _, ok := sr.Output[OutMergeSHA]; ok {
+		t.Error("同分支跳过不应产出 mergeSHA")
+	}
+	if !strings.Contains(sr.Log, "无变更可合并") {
+		t.Errorf("日志应含明确跳过说明，got %q", sr.Log)
 	}
 }

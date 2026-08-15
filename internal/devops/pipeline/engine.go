@@ -455,6 +455,15 @@ func (e *Engine) execBaseline(ctx context.Context, run *PipelineRun, stage Stage
 		sr.FinishedAt = time.Now()
 		return true, nil
 	}
+	// run 分支与主干相同（如直接从 main 触发 CD）时无变更可合，明确跳过——
+	// 避免对 Gitea 发 head==base 的 PR 拿 422「无差异」，错误吞进 sr.Error 造成 stage 假绿、日志仅一行。
+	if run.Branch == mainBranch {
+		logf(sr, "run 分支 %s 与主干相同，无变更可合并，跳过", run.Branch)
+		sr.Output = out
+		sr.Status = StageSuccess
+		sr.FinishedAt = time.Now()
+		return true, nil
+	}
 	logf(sr, "合并 %s -> %s", run.Branch, mainBranch)
 	owner, repo, err := e.Gitea.ResolveRepo(ctx, run.AppID)
 	if err == nil {

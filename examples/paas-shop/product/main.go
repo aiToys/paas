@@ -19,6 +19,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/aitoys/paas-examples/paas-shop/internal/natspub"
 	"github.com/aitoys/paas-examples/paas-shop/internal/observ"
 )
 
@@ -27,11 +28,13 @@ type Product struct {
 	Name        string  `json:"name"`
 	Price       float64 `json:"price"`
 	Category    string  `json:"category"`
-	Stock       int     `json:"stock"`
-	Description string  `json:"description"`
+	Stock       int       `json:"stock"`
+	Description string    `json:"description"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 var db *sql.DB
+var pub *natspub.Publisher
 
 func main() {
 	shutdown := observ.Init("paas-shop-product")
@@ -53,6 +56,10 @@ func main() {
 		slog.Error("PG ping 失败", "err", err, "dsn", maskDSN(dsn))
 		os.Exit(1)
 	}
+	// NATS producer（shop-mq 绑定注入 NATS_URL；空则降级 stub，不阻断）。
+	// 必须在 migrateAndSeed 之前初始化：seed 完成时要发 product.bulk-seed 事件。
+	pub = natspub.Connect(os.Getenv("NATS_URL"))
+	defer pub.Close()
 	if err := migrateAndSeed(ctx(10)); err != nil {
 		slog.Error("建表/seed 失败", "err", err)
 		os.Exit(1)
@@ -89,10 +96,19 @@ func migrateAndSeed(ctx context.Context) error {
 		price NUMERIC(10,2) NOT NULL,
 		category TEXT NOT NULL,
 		stock INT NOT NULL DEFAULT 0,
-		description TEXT NOT NULL DEFAULT ''
+		description TEXT NOT NULL DEFAULT '',
+		created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 	)`)
 	if err != nil {
 		return fmt.Errorf("建表: %w", err)
+	}
+	// category 索引加速按分类搜索/过滤
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_products_category ON products(category)`); err != nil {
+		return fmt.Errorf("建索引: %w", err)
+	}
+	// 存量库补列（已部署 PG 增量，ADD COLUMN IF NOT EXISTS 幂等）
+	if _, err := db.ExecContext(ctx, `ALTER TABLE products ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now()`); err != nil {
+		return fmt.Errorf("补列: %w", err)
 	}
 	var count int
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM products`).Scan(&count); err != nil {
@@ -116,6 +132,14 @@ func migrateAndSeed(ctx context.Context) error {
 		}
 	}
 	slog.Info("seed 完成", "count", len(seeds))
+	if pub != nil {
+		payload, _ := json.Marshal(map[string]any{
+			"type":  "product.bulk-seed",
+			"count": len(seeds),
+			"at":    time.Now().UTC().Format(time.RFC3339),
+		})
+		_ = pub.Publish("shop-events", payload)
+	}
 	return nil
 }
 
@@ -131,7 +155,11 @@ func healthz(w http.ResponseWriter, _ *http.Request) {
 func productsHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		rows, err := db.QueryContext(r.Context(), `SELECT id,name,price,category,stock,description FROM products ORDER BY id`)
+		q := r.URL.Query().Get("q")
+		category := r.URL.Query().Get("category")
+		limit := pageSizeFromEnv(r, 20)
+		query, args := buildSearchQuery(q, category, limit)
+		rows, err := db.QueryContext(r.Context(), query, args...)
 		if err != nil {
 			slog.Error("query products", "err", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -141,7 +169,7 @@ func productsHandler(w http.ResponseWriter, r *http.Request) {
 		out := []Product{}
 		for rows.Next() {
 			var p Product
-			if err := rows.Scan(&p.ID, &p.Name, &p.Price, &p.Category, &p.Stock, &p.Description); err != nil {
+			if err := rows.Scan(&p.ID, &p.Name, &p.Price, &p.Category, &p.Stock, &p.Description, &p.CreatedAt); err != nil {
 				slog.Error("scan", "err", err)
 				continue
 			}
@@ -166,6 +194,8 @@ func productsHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
+		// 发商品变更事件到 shop-events（recommend 订阅失效缓存）
+		publishProductEvent("product.changed", p)
 		writeJSON(w, http.StatusCreated, p)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -185,8 +215,8 @@ func productDetailHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	var p Product
 	err = db.QueryRowContext(r.Context(),
-		`SELECT id,name,price,category,stock,description FROM products WHERE id=$1`, id).
-		Scan(&p.ID, &p.Name, &p.Price, &p.Category, &p.Stock, &p.Description)
+		`SELECT id,name,price,category,stock,description,created_at FROM products WHERE id=$1`, id).
+		Scan(&p.ID, &p.Name, &p.Price, &p.Category, &p.Stock, &p.Description, &p.CreatedAt)
 	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -197,6 +227,65 @@ func productDetailHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, p)
+}
+
+// publishProductEvent 发商品事件到 shop-events topic（NATS 降级时静默丢弃）。
+func publishProductEvent(eventType string, p Product) {
+	if pub == nil {
+		return
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"type":      eventType,
+		"productId": p.ID,
+		"name":      p.Name,
+		"category":  p.Category,
+		"at":        time.Now().UTC().Format(time.RFC3339),
+	})
+	if err := pub.Publish("shop-events", payload); err != nil {
+		slog.Warn("发 NATS 事件失败", "type", eventType, "err", err)
+	} else {
+		slog.Info("发 NATS 事件", "type", eventType, "productId", p.ID)
+	}
+}
+
+// buildSearchQuery 拼商品搜索 SQL（参数化防注入）。q→name ILIKE，category→精确，limit→分页。
+func buildSearchQuery(q, category string, limit int) (string, []any) {
+	base := "SELECT id,name,price,category,stock,description,created_at FROM products"
+	where := ""
+	args := []any{}
+	if q != "" {
+		where += "name ILIKE $" + strconv.Itoa(len(args)+1)
+		args = append(args, "%"+q+"%")
+	}
+	if category != "" {
+		if where != "" {
+			where += " AND "
+		}
+		where += "category = $" + strconv.Itoa(len(args)+1)
+		args = append(args, category)
+	}
+	if where != "" {
+		base += " WHERE " + where
+	}
+	base += " ORDER BY created_at DESC LIMIT $" + strconv.Itoa(len(args)+1)
+	args = append(args, limit)
+	return base, args
+}
+
+// pageSizeFromEnv 读 PRODUCT_PAGE_SIZE appconfig 注入的 env，缺省 20，上限 100。
+func pageSizeFromEnv(r *http.Request, fallback int) int {
+	v := r.URL.Query().Get("limit")
+	if v == "" {
+		v = os.Getenv("PRODUCT_PAGE_SIZE")
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	if n > 100 {
+		return 100
+	}
+	return n
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
