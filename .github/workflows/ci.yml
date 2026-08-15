@@ -25,6 +25,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+      - name: 前端 embed 占位（internal/web //go:embed all:dist 编译期需目录存在）
+        run: mkdir -p internal/web/dist && echo placeholder > internal/web/dist/index.html
       - uses: golangci/golangci-lint-action@v7
         with:
           version: v2.12.2
