@@ -39,6 +39,7 @@ import (
 	"github.com/aitoys/paas/internal/dataservice"
 	"github.com/aitoys/paas/internal/devops"
 	"github.com/aitoys/paas/internal/devops/builder"
+	"github.com/aitoys/paas/internal/devops/change"
 	"github.com/aitoys/paas/internal/devops/gitea"
 	"github.com/aitoys/paas/internal/devops/pipeline"
 	"github.com/aitoys/paas/internal/devops/registry"
@@ -533,6 +534,31 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// 应用创建后置 hook：自动建默认流水线绑定（tpl-ci/tpl-cd），best-effort。
 	appHandler.OnAppCreate = defaultPipelineBinder(stores.Pipeline, stores.Pipeline)
 
+	// 变更管理（单变更 + 集成批次，trunk-based 编排）：service 桥接 gitea client（分支/merge）+
+	// pipeline 包（批次触发 CI/CD run）；handler 注入审计 + prod:write（approve 门禁）。
+	// gitea client 未配置时（env 未配 PAAS_GITEA_URL）创建变更/集成批次报 503 降级，不 panic。
+	changeRunBridge := &runTriggerBridge{
+		pipes: stores.Pipeline, runs: stores.Pipeline, templates: stores.Pipeline,
+		resolver: &paramResolverBridge{apps: stores.Application, envs: stores.Environment, repos: stores.DevOpsRepos},
+		repos:    &repoResolverBridge{repos: stores.DevOpsRepos},
+		engine:   pipeEngine,
+		rels:     stores.DevOpsReleases,
+	}
+	changeLookup := changeRepoLookup(stores.DevOpsRepos)
+	changeSvc := change.NewService(stores.Change,
+		change.WithGitea(&giteaBrancherBridge{client: giteaClient}),
+		change.WithRunTrigger(changeRunBridge),
+		change.WithRunReader(changeRunBridge),
+		change.WithRepoLookup(changeLookup),
+	)
+	changeHandler := change.NewHandler(changeSvc, stores.Change,
+		change.WithAuthorize(func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }),
+		change.WithAudit(&identityAuditAdapter{store: stores.Security}),
+		change.WithActorFn(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
+		change.WithProdWrite(func(r *http.Request) bool { return gateway.RequestAllowed(r, "prod:write") }),
+		change.WithHandlerRepoLookup(changeLookup),
+	)
+
 	// 应用配置（工作负载级 env/Secret）：注入 environment store（prod 写校验）。
 	// Secret 后端明文存储，API 返回固定掩码；与配置中心（服务治理，运行时动态）严格区分。
 	appconfigHandler := appconfig.NewHandler(stores.AppConfig, appconfig.WithEnvResolver(stores.Environment))
@@ -705,6 +731,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 					return
 				case "pipelines":
 					pipelineHandler.ServeHTTP(w, r)
+					return
+				case "changes", "batches":
+					changeHandler.ServeHTTP(w, r)
 					return
 				case "configs":
 					appconfigHandler.ServeHTTP(w, r)
@@ -1022,6 +1051,22 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("POST", "/api/pipelineruns/{id}/stages/{idx}/approve", apiroute.Tags("流水线"), apiroute.Summary("审批/人工确认通过（恢复 paused run）"), apiroute.Perm("pipeline:write"))
 	reg.Operation("POST", "/api/pipelineruns/{id}/abort", apiroute.Tags("流水线"), apiroute.Summary("终止运行"), apiroute.Perm("pipeline:write"))
 	reg.Operation("POST", "/api/pipelineruns/{id}/retry", apiroute.Tags("流水线"), apiroute.Summary("重试失败运行（从失败阶段重新推进）"), apiroute.Perm("pipeline:write"))
+	// 变更管理（单变更 + 集成批次，trunk-based 编排）
+	reg.Operation("GET", "/api/applications/{id}/changes", apiroute.Tags("变更管理"), apiroute.Summary("变更列表（?status=）"), apiroute.Perm("pipeline:read"), apiroute.WithResp([]change.Change{}))
+	reg.Operation("POST", "/api/applications/{id}/changes", apiroute.Tags("变更管理"), apiroute.Summary("创建变更（createBranch=true 平台代建分支）"), apiroute.Perm("pipeline:write"), apiroute.WithReqBody(change.Change{}), apiroute.WithResp(change.Change{}))
+	reg.Operation("GET", "/api/applications/{id}/changes/{cid}", apiroute.Tags("变更管理"), apiroute.Summary("变更详情"), apiroute.Perm("pipeline:read"), apiroute.WithResp(change.Change{}))
+	reg.Operation("DELETE", "/api/applications/{id}/changes/{cid}", apiroute.Tags("变更管理"), apiroute.Summary("放弃变更（open→abandoned）"), apiroute.Perm("pipeline:write"))
+	reg.Operation("GET", "/api/applications/{id}/batches", apiroute.Tags("变更管理"), apiroute.Summary("集成批次列表（?status=）"), apiroute.Perm("pipeline:read"), apiroute.WithResp([]change.IntegrationBatch{}))
+	reg.Operation("POST", "/api/applications/{id}/batches", apiroute.Tags("变更管理"), apiroute.Summary("创建集成批次"), apiroute.Perm("pipeline:write"), apiroute.WithReqBody(change.IntegrationBatch{}), apiroute.WithResp(change.IntegrationBatch{}))
+	reg.Operation("GET", "/api/applications/{id}/batches/{bid}", apiroute.Tags("变更管理"), apiroute.Summary("批次详情（惰性推进 testing/releasing 终态）"), apiroute.Perm("pipeline:read"), apiroute.WithResp(change.IntegrationBatch{}))
+	reg.Operation("DELETE", "/api/applications/{id}/batches/{bid}", apiroute.Tags("变更管理"), apiroute.Summary("放弃批次（批内变更回 open）"), apiroute.Perm("pipeline:write"))
+	reg.Operation("POST", "/api/applications/{id}/batches/{bid}/changes", apiroute.Tags("变更管理"), apiroute.Summary("变更入批"), apiroute.Perm("pipeline:write"), apiroute.WithReqBody(struct {
+		ChangeID string `json:"changeId"`
+	}{}), apiroute.WithResp(change.IntegrationBatch{}))
+	reg.Operation("DELETE", "/api/applications/{id}/batches/{bid}/changes/{cid}", apiroute.Tags("变更管理"), apiroute.Summary("变更出批"), apiroute.Perm("pipeline:write"), apiroute.WithResp(change.IntegrationBatch{}))
+	reg.Operation("POST", "/api/applications/{id}/batches/{bid}/integrate", apiroute.Tags("变更管理"), apiroute.Summary("集成（重建集成分支+有序 merge+触发 CI）"), apiroute.Perm("pipeline:write"), apiroute.WithResp(change.IntegrationBatch{}))
+	reg.Operation("POST", "/api/applications/{id}/batches/{bid}/approve", apiroute.Tags("变更管理"), apiroute.Summary("审批通过（tested→releasing，需 prod:write）"), apiroute.Perm("pipeline:write"), apiroute.WithResp(change.IntegrationBatch{}))
+	reg.Operation("POST", "/api/applications/{id}/batches/{bid}/release", apiroute.Tags("变更管理"), apiroute.Summary("发布（逐个 merge 到 main+触发 CD）"), apiroute.Perm("pipeline:write"), apiroute.WithResp(change.IntegrationBatch{}))
 	// 应用配置
 	reg.Operation("GET", "/api/applications/{id}/configs", apiroute.Tags("应用配置"), apiroute.Summary("应用配置项（掩码）"), apiroute.Perm("config:read"), apiroute.WithResp([]appconfig.ConfigItem{}))
 	reg.Operation("POST", "/api/applications/{id}/configs", apiroute.Tags("应用配置"), apiroute.Summary("新增/更新配置项"), apiroute.Perm("config:write"), apiroute.WithReqBody(appconfig.ConfigItem{}), apiroute.WithResp(appconfig.ConfigItem{}))

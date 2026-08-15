@@ -51,6 +51,8 @@ import (
 	dsmemory "github.com/aitoys/paas/internal/dataservice/memory"
 	dspg "github.com/aitoys/paas/internal/dataservice/pg"
 	"github.com/aitoys/paas/internal/devops"
+	"github.com/aitoys/paas/internal/devops/change"
+	changepg "github.com/aitoys/paas/internal/devops/change/pg"
 	"github.com/aitoys/paas/internal/devops/builder"
 	devopsmemory "github.com/aitoys/paas/internal/devops/memory"
 	devopspg "github.com/aitoys/paas/internal/devops/pg"
@@ -109,6 +111,7 @@ type Stores struct {
 	Agent          agent.Repository
 	Eval           eval.Repository
 	Pipeline       pipeline.Store
+	Change         change.Repository
 }
 
 // buildAllStores 选择持久化后端、构造全模块 store 并完成 seed。
@@ -166,6 +169,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		msgRepo := messaging.Repository(msgmemory.NewStore())
 		bkRepo := backup.Repository(bkmemory.NewStore())
 		pipelineStore := pipeline.NewPGStore(db.Pool())
+		changeRepo := changepg.NewStore(db)
 
 		seedPGAllIfEmpty(ctx, idb, appRepo, envRepo, appcfgRepo, rawDs, rawWl,
 			devopsRepo, govRepo, ccRepo, billingRepo, secRepo)
@@ -209,6 +213,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 			Agent:          agentRepo,
 			Eval:           evalRepo,
 			Pipeline:       pipelineStore,
+			Change:         changeRepo,
 		}
 		return stores, db.Close, nil
 	}
@@ -250,6 +255,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 	msgRepo := messaging.Repository(msgmemory.NewStore())
 	bkRepo := backup.Repository(bkmemory.NewStore())
 	pipelineStore := pipeline.NewMemoryStore()
+	changeRepo := change.NewMemoryStore()
 	// 平台预置流水线模板（全租户共享，不门控 demo seed，生产也需预置）
 	if err := pipeline.SeedTemplates(ctx, pipelineStore); err != nil {
 		log.Printf("[seed] pipeline 模板失败: %v", err)
@@ -281,6 +287,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		Agent:          agentRepo,
 		Eval:           evalmemory.NewStore(),
 		Pipeline:       pipelineStore,
+		Change:         changeRepo,
 	}
 	return stores, nil, nil
 }
