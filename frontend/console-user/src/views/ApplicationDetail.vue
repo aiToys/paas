@@ -7,6 +7,7 @@ import { fetchAuth, fetchJSON } from '@/api'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import AppRepositories from './app-tabs/AppRepositories.vue'
 import AppPipelines from './app-tabs/AppPipelines.vue'
+import AppChanges from './app-tabs/AppChanges.vue'
 import AppBuilds from './app-tabs/AppBuilds.vue'
 import AppImages from './app-tabs/AppImages.vue'
 import AppReleases from './app-tabs/AppReleases.vue'
@@ -262,9 +263,9 @@ async function unbind(b: Binding) {
 const tabGroups = [
   { label: '运行态', tabs: ['概览', '部署', '服务治理', '可观测'] as const },
   { label: '资源', tabs: ['资源绑定', '配置', '用量'] as const },
-  { label: 'DevOps', tabs: ['流水线', '代码仓库', '构建', '镜像', '发布'] as const },
+  { label: 'DevOps', tabs: ['流水线', '变更', '代码仓库', '构建', '镜像', '发布'] as const },
 ]
-type TabName = '概览' | '部署' | '服务治理' | '可观测' | '资源绑定' | '配置' | '用量' | '流水线' | '代码仓库' | '构建' | '镜像' | '发布'
+type TabName = '概览' | '部署' | '服务治理' | '可观测' | '资源绑定' | '配置' | '用量' | '流水线' | '变更' | '代码仓库' | '构建' | '镜像' | '发布'
 
 // tab 名 ↔ URL query 值的双向映射（query 用英文短名，避免中文 URL 编码臃肿 + 利于分享）。
 const TAB_TO_Q: Record<TabName, string> = {
@@ -276,6 +277,7 @@ const TAB_TO_Q: Record<TabName, string> = {
   配置: 'configs',
   用量: 'usage',
   流水线: 'pipelines',
+  变更: 'changes',
   代码仓库: 'repositories',
   构建: 'builds',
   镜像: 'images',
@@ -583,6 +585,11 @@ async function deleteApp() {
       <!-- 可观测 -->
       <div v-else-if="activeTab === '可观测'">
         <AppObservability :app-id="app.id" :bindings="app.bindings ?? []" />
+      </div>
+
+      <!-- 变更（火车发车模型：变更 + 集成批次） -->
+      <div v-else-if="activeTab === '变更'">
+        <AppChanges :app-id="app.id" />
       </div>
 
       <!-- 代码仓库 -->

@@ -1,6 +1,8 @@
 <script setup lang="ts">
-// 流水线运行视图：拉取 PipelineRun 详情 + 5s 轮询 + approve/abort + stage 展开日志区。
-// 轮询仅运行中/暂停时持续；终态自动停止。断连静默重试下次。
+// 流水线运行视图（横向阶段轨道版）：运行摘要条 + 横向 stage 轨道 + 选中阶段详情面板。
+// 轨道节点圆图标 + 连线表达「流」：已完成实线着色（绿/红）、未到灰虚线——一眼看出走到哪、卡在哪。
+// 点节点切换下方详情面板（错误/输出物/日志）；build 日志保留 SSE 实时流 + 终态全量。
+// 5s 轮询仅运行中/暂停持续，终态自动停止。断连静默重试下次。
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -24,13 +26,26 @@ const runStatusType = (s?: string): string => {
   const m: Record<string, string> = { succeeded: 'success', failed: 'danger', aborted: 'info', running: 'warning', paused: 'warning' }
   return m[s || ''] || 'info'
 }
-const stageStatusType = (s: string): string => {
-  const m: Record<string, string> = { succeeded: 'success', failed: 'danger', aborted: 'info', running: 'warning', waiting: 'warning', pending: 'info', skipped: 'info' }
-  return m[s] || 'info'
-}
 const stageIcon = (s: string): string => {
   const m: Record<string, string> = { succeeded: '✓', failed: '✗', aborted: '⏹', running: '◌', pending: '·', waiting: '⏸', skipped: '–' }
   return m[s] || '·'
+}
+// 节点圆 + 已完成连线段的状态色（Element 色彩变量）
+const stageColorVar = (s: string): string => {
+  const m: Record<string, string> = {
+    succeeded: 'var(--el-color-success)',
+    failed: 'var(--el-color-danger)',
+    aborted: 'var(--el-color-info)',
+    running: 'var(--el-color-primary)',
+    waiting: 'var(--el-color-warning)',
+  }
+  return m[s] || 'var(--el-text-color-disabled)'
+}
+// 节点状态小字
+const stageStatusLabel = (s: StageRun): string => {
+  const m: Record<string, string> = { running: '运行中', waiting: '等待审批', pending: '等待', skipped: '已跳过', aborted: '已中止' }
+  if (m[s.status]) return m[s.status]
+  return stageDuration(s)
 }
 
 const isTerminal = computed(() => {
@@ -123,7 +138,7 @@ function stopPolling() {
 
 watch(() => props.runId, async () => {
   closeBuildLogStream()
-  expandedIdx.value = null
+  selectedIdx.value = null
   logCache.value = {}
   await load()
   if (!isTerminal.value) startPolling()
@@ -135,14 +150,12 @@ onMounted(async () => {
 })
 onUnmounted(stopPolling)
 
-// stage 展开日志区：同一时间只展开一个 stage（KISS）。
-// expandedIdx=当前展开的 stage.index；logCache 缓存已拉取的日志（key=stage.index）。
-// build stage 展开时：终态拉 BuildRun.Log 全量；运行中开 EventSource 实时流（SSE follow Pod logs）。
-const expandedIdx = ref<number | null>(null)
+// ---- 选中阶段详情面板（点轨道节点切换，同一时间一个；KISS） ----
+const selectedIdx = ref<number | null>(null)
 const logLoading = ref(false)
 const logCache = ref<Record<number, string>>({})
 const logBoxRef = ref<HTMLDivElement | null>(null)
-// build 实时日志 EventSource（构建中 follow Pod logs；折叠/切走/卸载时 close 防泄漏）
+// build 实时日志 EventSource（构建中 follow Pod logs；切走/卸载时 close 防泄漏）
 let buildLogES: EventSource | null = null
 
 function closeBuildLogStream() {
@@ -152,16 +165,29 @@ function closeBuildLogStream() {
   }
 }
 
-async function toggleExpand(s: StageRun) {
-  if (expandedIdx.value === s.index) {
-    expandedIdx.value = null
-    closeBuildLogStream()
-    return
+// 选中态默认跟随当前执行 stage（run 加载后自动定位到「正在发生」的节点）
+function autoSelect() {
+  if (selectedIdx.value !== null) return
+  const r = run.value
+  if (!r) return
+  // 优先失败/运行中节点，否则最后一个已完成
+  const fail = r.stageRuns.find((s) => s.status === 'failed')
+  if (fail) { selectedIdx.value = fail.index; selectStage(fail); return }
+  if (!isTerminal.value && r.currentStage < r.stageRuns.length) {
+    selectedIdx.value = r.currentStage
+    selectStage(r.stageRuns[r.currentStage])
   }
-  // 切到新 stage，先关旧流
+}
+
+async function toggleNode(s: StageRun) {
+  if (selectedIdx.value === s.index) { selectedIdx.value = null; return }
+  selectedIdx.value = s.index
+  await selectStage(s)
+}
+
+// selectStage 拉日志：build stage 有 buildRunId 时（运行中开 SSE 实时流；终态拉全量）。
+async function selectStage(s: StageRun) {
   closeBuildLogStream()
-  expandedIdx.value = s.index
-  // build stage：有 buildRunId 时拉日志（运行中开 EventSource 实时流；终态拉全量）
   const bid = buildRunIdOf(s)
   if (s.type === 'build' && bid && logCache.value[s.index] === undefined) {
     logLoading.value = true
@@ -231,7 +257,11 @@ function logTextOf(s: StageRun): string {
   return s.log || '（暂无日志）'
 }
 
-// run 切换时清缓存（已在上方 watch 内处理：closeBuildLogStream + 清 expandedIdx/logCache）
+const selectedStage = computed<StageRun | null>(() => {
+  const r = run.value
+  if (!r || selectedIdx.value === null) return null
+  return r.stageRuns.find((s) => s.index === selectedIdx.value) || null
+})
 
 // stage 输出已知 key 的中文标签
 const OUTPUT_LABELS: Record<string, string> = {
@@ -242,7 +272,7 @@ const OUTPUT_LABELS: Record<string, string> = {
   mergeSha: '合并 SHA',
 }
 
-function outputEntries(s: StageRun): Array<[string, string]> {
+function outputEntries(s: StageRun): Array<[key: string, string]> {
   if (!s.output) return []
   return Object.entries(s.output).map(([k, v]) => [OUTPUT_LABELS[k] || k, String(v ?? '')])
 }
@@ -260,6 +290,26 @@ function stageDuration(s: StageRun): string {
 function shortCommit(c?: string): string {
   return c ? c.slice(0, 8) : '-'
 }
+
+// 连线状态：指向节点 i 的线段，i-1 与 i 都达终态（succeeded/failed/aborted/skipped）则实线着色
+const FLOW_DONE = ['succeeded', 'failed', 'aborted', 'skipped']
+function connectorDone(i: number): boolean {
+  const r = run.value
+  if (!r || i === 0) return false
+  const prev = r.stageRuns[i - 1]
+  return FLOW_DONE.includes(prev?.status || '')
+}
+function connectorColor(i: number): string {
+  const r = run.value
+  if (!r) return 'var(--el-border-color-lighter)'
+  const prev = r.stageRuns[i - 1]
+  // 上一节点失败，连线红（流到这里断了）；否则绿
+  if (prev?.status === 'failed') return 'var(--el-color-danger)'
+  return 'var(--el-color-success)'
+}
+
+// run 数据变化时自动定位选中节点（首次加载 + 轮询补选）
+watch(() => run.value?.id, autoSelect)
 </script>
 
 <template>
@@ -280,34 +330,44 @@ function shortCommit(c?: string): string {
         </div>
       </div>
 
-      <!-- stage 时间线 -->
-      <el-timeline class="run-timeline">
-        <el-timeline-item v-for="s in run.stageRuns" :key="s.index"
-          :type="stageStatusType(s.status)" :hollow="s.status === 'pending' || s.status === 'skipped'"
-          :timestamp="stageDuration(s)" placement="top">
-          <div class="stage-card" :class="{ current: s.index === run.currentStage && !isTerminal }">
-            <div class="stage-head" @click="toggleExpand(s)">
-              <span class="stage-icon">{{ stageIcon(s.status) }}</span>
-              <span class="expand-icon">{{ expandedIdx === s.index ? '▾' : '▸' }}</span>
-              <span class="stage-name">{{ s.name }}</span>
-              <el-tag v-if="laneOf(s)" size="small" :type="laneOf(s) === 'default' ? 'info' : 'warning'">
-                lane: {{ laneOf(s) }}
-              </el-tag>
-              <el-tag size="small" :type="stageStatusType(s.status)">{{ s.status }}</el-tag>
+      <!-- 横向阶段轨道：节点圆 + 连线（已完成实线着色 / 未到灰虚线） -->
+      <div class="stage-rail">
+        <template v-for="(s, i) in run.stageRuns" :key="s.index">
+          <div v-if="i > 0" class="rail-connector"
+            :class="{ done: connectorDone(i) }"
+            :style="connectorDone(i) ? { background: connectorColor(i) } : {}" />
+          <div class="rail-node" :class="{ selected: selectedIdx === s.index, current: s.index === run.currentStage && !isTerminal }"
+            @click="toggleNode(s)">
+            <div class="node-circle" :style="{ borderColor: stageColorVar(s.status), color: stageColorVar(s.status) }"
+              :class="{ pulse: s.status === 'running' }">
+              {{ stageIcon(s.status) }}
             </div>
-            <div v-if="s.error" class="stage-error">⚠ {{ s.error }}</div>
-            <div v-if="outputEntries(s).length" class="stage-output">
-              <div v-for="[k, v] in outputEntries(s)" :key="k" class="out-item">
-                <span class="out-key">{{ k }}：</span><span class="out-val">{{ v }}</span>
-              </div>
-            </div>
-            <!-- 展开日志区：build stage 拉 BuildRun 全量日志；其它 stage 用 stage.log -->
-            <div v-if="expandedIdx === s.index" class="stage-log" v-loading="logLoading && s.type === 'build'">
-              <div ref="logBoxRef" class="log-block">{{ logTextOf(s) }}</div>
-            </div>
+            <div class="node-name">{{ s.name }}</div>
+            <div class="node-status">{{ stageStatusLabel(s) }}</div>
+            <el-tag v-if="laneOf(s) && laneOf(s) !== 'default'" size="small" type="warning" class="node-lane">
+              {{ laneOf(s) }}
+            </el-tag>
           </div>
-        </el-timeline-item>
-      </el-timeline>
+        </template>
+      </div>
+
+      <!-- 选中阶段详情面板 -->
+      <div v-if="selectedStage" class="stage-panel">
+        <div class="panel-head">
+          <span class="panel-icon" :style="{ color: stageColorVar(selectedStage.status) }">{{ stageIcon(selectedStage.status) }}</span>
+          <span class="panel-name">{{ selectedStage.name }}</span>
+          <span class="panel-duration">{{ stageDuration(selectedStage) }}</span>
+        </div>
+        <div v-if="selectedStage.error" class="stage-error">⚠ {{ selectedStage.error }}</div>
+        <div v-if="outputEntries(selectedStage).length" class="stage-output">
+          <div v-for="[k, v] in outputEntries(selectedStage)" :key="k" class="out-item">
+            <span class="out-key">{{ k }}：</span><span class="out-val">{{ v }}</span>
+          </div>
+        </div>
+        <div class="stage-log" v-loading="logLoading && selectedStage.type === 'build'">
+          <div ref="logBoxRef" class="log-block">{{ logTextOf(selectedStage) }}</div>
+        </div>
+      </div>
     </template>
     <el-empty v-else-if="!loading" description="运行不存在或已删除" />
   </div>
@@ -317,7 +377,7 @@ function shortCommit(c?: string): string {
 .run-view { padding: 16px 20px; }
 .run-summary {
   display: flex; justify-content: space-between; align-items: center;
-  padding: 12px 16px; margin-bottom: 16px;
+  padding: 12px 16px; margin-bottom: 20px;
   background: var(--el-fill-color-light); border-radius: 6px;
 }
 .summary-left { display: flex; align-items: center; gap: 12px; }
@@ -326,22 +386,57 @@ function shortCommit(c?: string): string {
 .summary-right { display: flex; align-items: center; gap: 12px; }
 .summary-right .time { font-size: 12px; color: var(--el-text-color-secondary); }
 
-.run-timeline { padding-left: 4px; }
-.stage-card {
-  padding: 8px 12px; border: 1px solid var(--el-border-color-lighter); border-radius: 6px;
-  background: var(--el-bg-color);
+/* ---- 横向阶段轨道 ---- */
+.stage-rail {
+  display: flex; align-items: flex-start;
+  padding: 8px 4px 16px; margin-bottom: 16px;
+  overflow-x: auto; /* 阶段多时横向滚动 */
 }
-.stage-card.current { border-color: var(--el-color-primary); box-shadow: 0 0 0 2px var(--el-color-primary-light-8); }
-.stage-head { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
-.stage-icon { font-weight: 600; width: 16px; text-align: center; }
-.expand-icon { width: 12px; color: var(--el-text-color-secondary); font-size: 12px; }
-.stage-name { font-weight: 500; flex: 1; }
-.stage-error { margin-top: 6px; padding: 6px 8px; font-size: 12px; color: var(--el-color-danger); background: var(--el-color-danger-light-9); border-radius: 4px; word-break: break-all; }
-.stage-output { margin-top: 8px; padding: 8px; background: var(--el-fill-color-lighter); border-radius: 4px; }
+.rail-node {
+  display: flex; flex-direction: column; align-items: center;
+  min-width: 96px; cursor: pointer; user-select: none;
+  padding: 6px 8px; border-radius: 6px;
+  border: 1px solid transparent;
+}
+.rail-node:hover { background: var(--el-fill-color-light); }
+.rail-node.selected { border-color: var(--el-color-primary-light-5); background: var(--el-color-primary-light-9); }
+.node-circle {
+  width: 34px; height: 34px; border-radius: 50%;
+  border: 2px solid; display: flex; align-items: center; justify-content: center;
+  font-size: 15px; font-weight: 600; background: var(--el-bg-color);
+  margin-bottom: 6px;
+}
+.node-circle.pulse { animation: node-pulse 1.4s ease-in-out infinite; }
+@keyframes node-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--el-color-primary-light-7); }
+  50% { box-shadow: 0 0 0 7px var(--el-color-primary-light-9); }
+}
+.node-name { font-size: 13px; font-weight: 500; color: var(--el-text-color-primary); text-align: center; }
+.node-status { font-size: 11.5px; color: var(--el-text-color-secondary); margin-top: 2px; min-height: 15px; }
+.node-lane { margin-top: 4px; transform: scale(0.85); }
+.rail-connector {
+  flex: 1 1 0; min-width: 28px; height: 2px; margin-top: 23px; /* 6+34/2 对齐圆心 */
+  background: var(--el-border-color-lighter);
+  border-bottom: none;
+}
+.rail-connector:not(.done) {
+  background: repeating-linear-gradient(90deg, var(--el-border-color-lighter) 0 6px, transparent 6px 12px);
+}
+
+/* ---- 选中阶段详情面板 ---- */
+.stage-panel {
+  border: 1px solid var(--el-border-color-lighter); border-radius: 6px;
+  background: var(--el-bg-color); padding: 12px 16px;
+}
+.panel-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.panel-icon { font-weight: 600; }
+.panel-name { font-weight: 600; font-size: 14px; }
+.panel-duration { font-size: 12px; color: var(--el-text-color-secondary); margin-left: 4px; }
+.stage-error { margin-bottom: 8px; padding: 6px 8px; font-size: 12px; color: var(--el-color-danger); background: var(--el-color-danger-light-9); border-radius: 4px; word-break: break-all; }
+.stage-output { margin-bottom: 8px; padding: 8px; background: var(--el-fill-color-lighter); border-radius: 4px; }
 .out-item { font-size: 12px; line-height: 1.8; }
 .out-key { color: var(--el-text-color-secondary); }
 .out-val { font-family: monospace; color: var(--el-text-color-primary); word-break: break-all; }
-.stage-log { margin-top: 8px; }
 .log-block {
   max-height: 320px; overflow-y: auto;
   padding: 8px 10px; font-family: monospace; font-size: 12px; line-height: 1.6;

@@ -205,7 +205,10 @@ onUnmounted(() => {
             <template #default="{ row }">{{ currentStageName(row) }}</template>
           </el-table-column>
           <el-table-column label="分支" width="110">
-            <template #default="{ row }"><span class="mono">{{ row.branch }}</span></template>
+            <template #default="{ row }">
+              <el-tag v-if="row.branch?.startsWith('integration/')" size="small" type="warning">集成</el-tag>
+              <span class="mono">{{ row.branch }}</span>
+            </template>
           </el-table-column>
           <el-table-column label="版本" width="100">
             <template #default="{ row }">
