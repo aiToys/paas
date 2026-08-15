@@ -1,0 +1,129 @@
+// notifications.go 通知聚合（L1 站内通知）：实时扫描批次/runs/变更状态拼装「需要用户关注」事件。
+//
+// 设计：无持久化（YAGNI）——每次 GET 实时聚合当前态，已读状态存前端 localStorage。
+// 事件源：
+//   - 批次 conflict（集成冲突，error）
+//   - 批次 testing/releasing（进行中，info）
+//   - run failed（error）/ paused（等审批，warning）
+//   - 变更 released（发布完成，info）
+package change
+
+import (
+	"context"
+	"fmt"
+	"sort"
+)
+
+// 通知类型。
+const (
+	NotifBatchConflict = "batch_conflict"
+	NotifBatchTesting  = "batch_testing"
+	NotifBatchReleasing = "batch_releasing"
+	NotifRunFailed     = "run_failed"
+	NotifRunPaused     = "run_paused"
+	NotifChangeReleased = "change_released"
+)
+
+// Notification 单条通知（camelCase json，前端直取）。
+type Notification struct {
+	ID         string `json:"id"`         // 稳定 ID（targetType:targetID[:status]，前端记已读用）
+	Type       string `json:"type"`
+	Severity   string `json:"severity"`   // error|warning|info
+	Title      string `json:"title"`
+	AppID      string `json:"appId"`
+	TargetType string `json:"targetType"` // batch|run|change（跳转目标类型）
+	TargetID   string `json:"targetId"`
+	At         string `json:"at"`
+}
+
+// NotificationItem run 最小字段（RunLister 只暴露列表所需，避免 change→pipeline 全量依赖）。
+type RunStatusItem struct {
+	ID      string
+	AppID   string
+	Status  string // running|paused|succeeded|failed|aborted
+	Current string // 当前 stage 名
+}
+
+// RunLister 通知聚合对 run 的最小依赖（cmd/core 桥接 pipeline ListRuns）。
+type RunLister interface {
+	ListRunStatuses(ctx context.Context) ([]RunStatusItem, error)
+}
+
+// Notifications 聚合通知（tenant 内，按 at 倒序）。
+func Notifications(ctx context.Context, repo Repository, runs RunLister) ([]Notification, error) {
+	var out []Notification
+	batches, err := repo.ListBatches(ctx, "", "")
+	if err != nil {
+		return nil, err
+	}
+	for _, b := range batches {
+		switch b.Status {
+		case BatchConflict:
+			out = append(out, Notification{
+				ID: "batch:" + b.ID + ":conflict", Type: NotifBatchConflict, Severity: "error",
+				Title: fmt.Sprintf("批次「%s」集成冲突，需解决后重新集成", b.Title), AppID: b.AppID,
+				TargetType: "batch", TargetID: b.ID, At: b.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			})
+		case BatchTesting:
+			out = append(out, Notification{
+				ID: "batch:" + b.ID + ":testing", Type: NotifBatchTesting, Severity: "info",
+				Title: fmt.Sprintf("批次「%s」集成测试进行中", b.Title), AppID: b.AppID,
+				TargetType: "batch", TargetID: b.ID, At: b.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			})
+		case BatchReleasing:
+			out = append(out, Notification{
+				ID: "batch:" + b.ID + ":releasing", Type: NotifBatchReleasing, Severity: "info",
+				Title: fmt.Sprintf("批次「%s」正在发布", b.Title), AppID: b.AppID,
+				TargetType: "batch", TargetID: b.ID, At: b.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			})
+		case BatchTested:
+			out = append(out, Notification{
+				ID: "batch:" + b.ID + ":tested", Type: NotifRunPaused, Severity: "warning",
+				Title: fmt.Sprintf("批次「%s」测试通过，待审批发布", b.Title), AppID: b.AppID,
+				TargetType: "batch", TargetID: b.ID, At: b.CreatedAt.Format("2006-01-02T15:04:05Z"),
+			})
+		}
+	}
+
+	// runs：failed / paused（含 approve 门禁等待）。
+	// 租户过滤双保险：bridge 的 ListRuns 已按 ctx 过滤，此处再以批次归属应用集合过滤，
+	// 防 lister 实现遗漏租户语义时跨租户泄漏（fail-closed）。
+	if runs != nil {
+		apps := map[string]bool{}
+		for _, b := range batches {
+			apps[b.AppID] = true
+		}
+		items, err := runs.ListRunStatuses(ctx)
+		if err == nil { // 读失败降级跳过（通知非关键路径）
+			for _, r := range items {
+				if !apps[r.AppID] {
+					continue // 本租户无该应用（跨租户/脏数据），跳过
+				}
+				switch r.Status {
+				case "failed":
+					out = append(out, Notification{
+						ID: "run:" + r.ID + ":failed", Type: NotifRunFailed, Severity: "error",
+						Title: fmt.Sprintf("流水线运行失败（%s）", r.Current), AppID: r.AppID,
+						TargetType: "run", TargetID: r.ID, At: "",
+					})
+				case "paused":
+					out = append(out, Notification{
+						ID: "run:" + r.ID + ":paused", Type: NotifRunPaused, Severity: "warning",
+						Title: fmt.Sprintf("流水线等待审批（%s）", r.Current), AppID: r.AppID,
+						TargetType: "run", TargetID: r.ID, At: "",
+					})
+				}
+			}
+		}
+	}
+
+	// 排序：error > warning > info，同级按时间倒序（字符串比较 ISO 时间即倒序需先按 severity）
+	sev := map[string]int{"error": 0, "warning": 1, "info": 2}
+	sort.SliceStable(out, func(i, j int) bool {
+		if sev[out[i].Severity] != sev[out[j].Severity] {
+			return sev[out[i].Severity] < sev[out[j].Severity]
+		}
+		return out[i].At > out[j].At
+	})
+	return out, nil
+}

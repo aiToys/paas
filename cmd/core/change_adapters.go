@@ -106,6 +106,25 @@ func (b *runTriggerBridge) GetRunStatus(ctx context.Context, runID string) (stri
 	return run.Status, nil
 }
 
+// ListRunStatuses 全租户 failed/paused run 状态列表（change.Notifications 通知聚合用）。
+func (b *runTriggerBridge) ListRunStatuses(ctx context.Context) ([]change.RunStatusItem, error) {
+	out := []change.RunStatusItem{}
+	for _, st := range []string{"failed", "paused"} {
+		runs, err := b.runs.ListRuns(ctx, "", "", st)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range runs {
+			cur := ""
+			if r.CurrentStage >= 0 && r.CurrentStage < len(r.StageRuns) {
+				cur = r.StageRuns[r.CurrentStage].Name
+			}
+			out = append(out, change.RunStatusItem{ID: r.ID, AppID: r.AppID, Status: r.Status, Current: cur})
+		}
+	}
+	return out, nil
+}
+
 // FindPipeline 取应用指定 kind 的流水线 ID（app 第一条匹配 kind）。
 // 未找到返空串（service 层转 ErrNoCIPipeline）。
 func (b *runTriggerBridge) FindPipeline(ctx context.Context, appID, kind string) (string, error) {

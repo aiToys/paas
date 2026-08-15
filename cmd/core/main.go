@@ -557,6 +557,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		change.WithActorFn(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
 		change.WithProdWrite(func(r *http.Request) bool { return gateway.RequestAllowed(r, "prod:write") }),
 		change.WithHandlerRepoLookup(changeLookup),
+		change.WithRunLister(changeRunBridge),
 	)
 
 	// 应用配置（工作负载级 env/Secret）：注入 environment store（prod 写校验）。
@@ -760,9 +761,10 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	mux.Handle("/api/admin/pipeline-templates/", auth(pipelineHandler))
 	mux.Handle("/api/pipelineruns", auth(pipelineHandler))
 	mux.Handle("/api/pipelineruns/", auth(pipelineHandler))
-	// 变更/批次跨应用列表（DevOps 中心档案室，tenant 内，与 /api/buildruns 同款语义）。
+	// 变更/批次跨应用列表 + 通知聚合（DevOps 中心档案室/值班台，tenant 内，与 /api/buildruns 同款语义）。
 	mux.Handle("/api/changes", auth(changeHandler))
 	mux.Handle("/api/batches", auth(changeHandler))
+	mux.Handle("/api/notifications", auth(changeHandler))
 	// admin 跨租户 PipelineRun 总览（super_admin，handler 内 platformAdmin 判定，与 admin 模板同款）。
 	mux.Handle("/api/admin/pipelineruns", auth(pipelineHandler))
 	// webhook 触发端点（无 auth 中间件，token 鉴权）：Gitea push event -> 触发 pipeline run。
@@ -1021,6 +1023,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/buildruns", apiroute.Tags("DevOps"), apiroute.Summary("跨应用构建列表"), apiroute.Perm("build:read"), apiroute.WithResp([]devops.BuildRun{}))
 	reg.Operation("GET", "/api/changes", apiroute.Tags("变更管理"), apiroute.Summary("跨应用变更列表（?appId=&status=）"), apiroute.Perm("pipeline:read"), apiroute.WithResp([]change.Change{}))
 	reg.Operation("GET", "/api/batches", apiroute.Tags("变更管理"), apiroute.Summary("跨应用集成批次列表（?appId=&status=）"), apiroute.Perm("pipeline:read"), apiroute.WithResp([]change.IntegrationBatch{}))
+	reg.Operation("GET", "/api/notifications", apiroute.Tags("变更管理"), apiroute.Summary("站内通知聚合（批次冲突/进行中/待审批 + run 失败/暂停，实时拼装无持久化）"), apiroute.Perm("pipeline:read"), apiroute.WithResp([]change.Notification{}))
 	reg.Operation("GET", "/api/buildruns/{id}", apiroute.Tags("DevOps"), apiroute.Summary("构建详情（含日志）"), apiroute.Perm("build:read"), apiroute.WithResp(devops.BuildRun{}))
 	reg.Operation("GET", "/api/buildruns/{id}/logs/stream", apiroute.Tags("DevOps"), apiroute.Summary("构建实时日志（SSE follow，构建中逐行流式）"), apiroute.Perm("build:read"))
 	reg.Operation("GET", "/api/images", apiroute.Tags("DevOps"), apiroute.Summary("跨应用镜像列表"), apiroute.Perm("image:read"), apiroute.WithResp([]devops.Image{}))

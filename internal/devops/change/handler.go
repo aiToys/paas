@@ -54,6 +54,8 @@ type Handler struct {
 	// audit 审计记录器（nil 跳过）。
 	audit   AuditRecorder
 	actorFn func(r *http.Request) string
+	// runLister 通知聚合读 run 状态（nil 降级只通知批次侧）。
+	runLister RunLister
 }
 
 // HandlerOpt 配置 Handler。
@@ -80,6 +82,9 @@ func WithProdWrite(f func(r *http.Request) bool) HandlerOpt {
 // WithHandlerRepoLookup 注入内置仓库解析（批次创建定位 RepoID）。
 // 命名区别于 Service 同名选项（同包共存，避免 redeclare）。
 func WithHandlerRepoLookup(f RepoLookup) HandlerOpt { return func(h *Handler) { h.repoLookup = f } }
+
+// WithRunLister 注入 run 状态列表（通知聚合用）。
+func WithRunLister(rl RunLister) HandlerOpt { return func(h *Handler) { h.runLister = rl } }
 
 // NewHandler 构造 Handler。
 func NewHandler(svc *Service, repo Repository, opts ...HandlerOpt) *Handler {
@@ -127,7 +132,7 @@ func (h *Handler) ownBatch(w http.ResponseWriter, r *http.Request, appID, bid st
 	return b, true
 }
 
-// ServeGlobal 分发 /api/changes 与 /api/batches（跨应用列表，DevOps 中心档案室用）。
+// ServeGlobal 分发 /api/changes、/api/batches、/api/notifications（跨应用只读，DevOps 中心用）。
 // 只读列表：appId query 可选过滤，tenant 内跨应用（与 /api/buildruns 同款语义）。
 func (h *Handler) ServeGlobal(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -144,6 +149,8 @@ func (h *Handler) ServeGlobal(w http.ResponseWriter, r *http.Request) {
 		list, err = h.repo.ListChanges(r.Context(), q.Get("appId"), q.Get("status"))
 	case "/api/batches":
 		list, err = h.repo.ListBatches(r.Context(), q.Get("appId"), q.Get("status"))
+	case "/api/notifications":
+		list, err = Notifications(r.Context(), h.repo, h.runLister)
 	default:
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 		return
