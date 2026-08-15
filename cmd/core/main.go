@@ -16,12 +16,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aitoys/paas/internal/ai/knowledgebase"
-	"github.com/aitoys/paas/internal/ai/tool"
-	"github.com/aitoys/paas/internal/ai/prompt"
 	"github.com/aitoys/paas/internal/ai/agent"
 	"github.com/aitoys/paas/internal/ai/eval"
 	"github.com/aitoys/paas/internal/ai/guardrail"
+	"github.com/aitoys/paas/internal/ai/knowledgebase"
+	"github.com/aitoys/paas/internal/ai/prompt"
+	"github.com/aitoys/paas/internal/ai/tool"
 	"github.com/aitoys/paas/internal/apiroute"
 	"github.com/aitoys/paas/internal/appconfig"
 	"github.com/aitoys/paas/internal/backup"
@@ -46,8 +46,8 @@ import (
 	"github.com/aitoys/paas/internal/governance"
 	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/internal/maas"
-	"github.com/aitoys/paas/internal/metrics"
 	"github.com/aitoys/paas/internal/messaging"
+	"github.com/aitoys/paas/internal/metrics"
 	"github.com/aitoys/paas/internal/observability"
 	"github.com/aitoys/paas/internal/observability/tracing"
 	"github.com/aitoys/paas/internal/security"
@@ -137,7 +137,9 @@ func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, metrics
 				return
 			case <-time.After(2 * time.Second):
 			}
-			reconcileWorkloadDrift(ctx, stores.Workload, appliers.workload)
+			if _, _, _, err := reconcileWorkloadDrift(ctx, stores.Workload, appliers.workload); err != nil {
+				log.Printf("[drift] 工作负载对账失败: %v", err)
+			}
 		}()
 	}
 	srv := serveHTTP(gw, meter, stores, appliers, metricsReg)
@@ -484,12 +486,12 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	var giteaClient *gitea.Client
 	if u := os.Getenv("PAAS_GITEA_URL"); u != "" {
 		giteaClient = gitea.New(u, os.Getenv("PAAS_GITEA_USER"), os.Getenv("PAAS_GITEA_PASSWORD"))
-		log.Printf("[devops] gitea client: %s", u)
+		log.Printf("[devops] gitea client: %s", u) //nolint:gosec // URL 来自运维 env，非用户输入
 	}
 	var registryClient *registry.Client
 	if u := os.Getenv("PAAS_REGISTRY"); u != "" {
 		registryClient = registry.New(u)
-		log.Printf("[devops] registry client: %s", u)
+		log.Printf("[devops] registry client: %s", u) //nolint:gosec // URL 来自运维 env，非用户输入
 	}
 	devopsHandler := devops.NewHandler(stores.DevOpsRepos, stores.DevOpsBuilds, stores.DevOpsImages, stores.DevOpsReleases,
 		devops.WithEnvResolver(stores.Environment),
@@ -510,7 +512,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	giteaBridgeInst := &giteaBridge{repos: stores.DevOpsRepos, gitea: giteaClient}
 	pipeEngine := &pipeline.Engine{
 		Pipelines: stores.Pipeline, Runs: stores.Pipeline,
-		Builds:   &buildBridge{builds: stores.DevOpsBuilds},
+		Builds: &buildBridge{builds: stores.DevOpsBuilds},
 		Releases: &releaseBridge{
 			releases: stores.DevOpsReleases, images: stores.DevOpsImages,
 			workloads: stores.Workload, envs: stores.Environment,
@@ -1311,7 +1313,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	rootHandler := metrics.HTTPMiddleware(metricsReg, reg.RegisteredPaths())(recoveryMiddleware(csrfMiddleware(mux)))
 	srv := &http.Server{
 		Addr: ":8080",
-		Handler:          securityHeadersMiddleware(otelhttp.NewHandler(rootHandler, "http.server",
+		Handler: securityHeadersMiddleware(otelhttp.NewHandler(rootHandler, "http.server",
 			otelhttp.WithFilter(skipTelemetryPaths))),
 		ReadHeaderTimeout: 10 * time.Second, // 防 Slowloris 慢速头部攻击
 	}

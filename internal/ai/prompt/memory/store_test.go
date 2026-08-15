@@ -67,7 +67,7 @@ func TestDeleteActivePromotesLatest(t *testing.T) {
 	s := memory.NewStore()
 	ctx := ctxT("t-a")
 	p1, _ := s.Create(ctx, prompt.Prompt{Name: "p", Template: "v1"})
-	s.Create(ctx, prompt.Prompt{Name: "p", Template: "v2"})
+	_, _ = s.Create(ctx, prompt.Prompt{Name: "p", Template: "v2"})
 	p3, _ := s.Create(ctx, prompt.Prompt{Name: "p", Template: "v3"}) // active=v3
 	// 删 active v3 → 应激活 v2（最新剩余）
 	if err := s.Delete(ctx, p3.ID); err != nil {

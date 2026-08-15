@@ -174,9 +174,7 @@ func (s *Store) ListAllAuditLogs(ctx context.Context) ([]security.AuditLog, erro
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]security.AuditLog, 0, len(s.audits))
-	for _, l := range s.audits {
-		out = append(out, l)
-	}
+	out = append(out, s.audits...)
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].TenantID != out[j].TenantID {
 			return out[i].TenantID < out[j].TenantID

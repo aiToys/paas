@@ -30,19 +30,19 @@ func (f fakeBuilder) PollBuildRun(ctx context.Context, buildID string) (devops.B
 }
 
 type fakeReleaser struct {
-	imageID    string // LatestReadyImage 返回
+	imageID   string // LatestReadyImage 返回
 	latestErr error
-	deployErr error // Deploy 错误（可选）
-	pollErr   error // PollWorkloadReady 错误（可选，模拟 deploy 后探活失败）
+	deployErr error  // Deploy 错误（可选）
+	pollErr   error  // PollWorkloadReady 错误（可选，模拟 deploy 后探活失败）
 	domain    string // Deploy/WorkloadDomain 返回（空则默认 wl-{id}.svc.cluster.local)
 
 	deployLane string // Deploy 收到的 lane（断言用）
 	deployPort int    // Deploy 收到的 port（断言用）
 
-	promoteRel  devops.Release // Promote 返回（空则默认 Release{ID:"rel-promoted"}）
-	promoteErr  error
-	versionIDs  []string // SetVersion 收到的 releaseIDs（最后一次）
-	versionSet  string   // SetVersion 收到的 version
+	promoteRel devops.Release // Promote 返回（空则默认 Release{ID:"rel-promoted"}）
+	promoteErr error
+	versionIDs []string // SetVersion 收到的 releaseIDs（最后一次）
+	versionSet string   // SetVersion 收到的 version
 }
 
 func (f *fakeReleaser) CreateRelease(ctx context.Context, input devops.ReleaseInput) (devops.Release, error) {
@@ -114,11 +114,11 @@ func (p *publishCapturingReleaser) Publish(ctx context.Context, appID, imageID, 
 
 // fakeGiteaMerger 桥接 GiteaMerger（baseline merge 测试）。
 type fakeGiteaMerger struct {
-	owner     string
-	repo      string
-	repoErr   error
-	mergeSHA  string
-	mergeErr  error
+	owner    string
+	repo     string
+	repoErr  error
+	mergeSHA string
+	mergeErr error
 }
 
 func (g *fakeGiteaMerger) ResolveRepo(ctx context.Context, appID string) (string, string, error) {
@@ -371,9 +371,9 @@ func TestResolvePriorOutput(t *testing.T) {
 
 func TestStrOrAndGetStringMap(t *testing.T) {
 	params := map[string]any{
-		"envId":   "env-prod",
-		"empty":   "",
-		"num":     42,
+		"envId":     "env-prod",
+		"empty":     "",
+		"num":       42,
 		"buildArgs": map[string]any{"KEY1": "v1", "KEY2": "v2", "BAD": 99},
 	}
 	if got := strOr(params, "envId", "def"); got != "env-prod" {
@@ -628,7 +628,7 @@ func TestEngineBaselineMergeConflict(t *testing.T) {
 	eng := &Engine{
 		Pipelines: s, Runs: s, Builds: fakeBuilder{},
 		Releases: &fakeReleaser{},
-		Gitea:   &fakeGiteaMerger{mergeErr: gitea.ErrMergeConflict},
+		Gitea:    &fakeGiteaMerger{mergeErr: gitea.ErrMergeConflict},
 	}
 	if err := eng.Advance(acmeCtxEngine(), r.ID); err != nil {
 		t.Fatalf("Advance 失败: %v", err)

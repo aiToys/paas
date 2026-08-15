@@ -24,10 +24,10 @@ import (
 )
 
 type Product struct {
-	ID          int     `json:"id"`
-	Name        string  `json:"name"`
-	Price       float64 `json:"price"`
-	Category    string  `json:"category"`
+	ID          int       `json:"id"`
+	Name        string    `json:"name"`
+	Price       float64   `json:"price"`
+	Category    string    `json:"category"`
 	Stock       int       `json:"stock"`
 	Description string    `json:"description"`
 	CreatedAt   time.Time `json:"created_at"`
@@ -71,8 +71,8 @@ func main() {
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		observ.MetricsHandler().ServeHTTP(w, r)
 	})
-	mux.HandleFunc("/products", productsHandler)          // GET 列表 / POST 创建
-	mux.HandleFunc("/products/", productDetailHandler)     // GET /products/{id}
+	mux.HandleFunc("/products", productsHandler)       // GET 列表 / POST 创建
+	mux.HandleFunc("/products/", productDetailHandler) // GET /products/{id}
 
 	h := observ.Recover(observ.Handler("product", mux))
 	addr := ":8081"

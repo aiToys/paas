@@ -28,7 +28,7 @@ type Decision struct {
 }
 
 // Allow / Block 是便捷构造。
-func Allow() Decision             { return Decision{Allowed: true} }
+func Allow() Decision              { return Decision{Allowed: true} }
 func Block(reason string) Decision { return Decision{Allowed: false, Reason: reason} }
 
 // Guard 输入/输出护栏抽象（依赖倒置，runtime 注入；nil 视为全放行）。

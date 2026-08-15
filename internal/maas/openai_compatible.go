@@ -13,12 +13,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aitoys/paas/internal/httputil"
-	"github.com/aitoys/paas/pkg/provider"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/aitoys/paas/internal/httputil"
+	"github.com/aitoys/paas/pkg/provider"
 )
 
 // chatTracer 标记一次 LLM 调用（gen_ai.operation.name=chat），作为 agent.run 的子 span。
@@ -36,14 +37,14 @@ func readBodySnippet(r io.Reader) string {
 // openaiReq 是 OpenAI 兼容协议的请求体（仅取推理所需字段）。
 // DeepSeek / 通义千问 DashScope 兼容模式 / OpenAI 三家同构。
 type openaiReq struct {
-	Model        string             `json:"model"`
-	Messages     []provider.Message `json:"messages"`
-	Stream       bool               `json:"stream"`
-	StreamOptions *streamOpt        `json:"stream_options,omitempty"` // 流末返 usage（token 用量）
-	Tools        []provider.ToolDef `json:"tools,omitempty"`
-	ToolChoice   string             `json:"tool_choice,omitempty"`
-	Temperature  *float64           `json:"temperature,omitempty"`
-	MaxTokens    *int               `json:"max_tokens,omitempty"`
+	Model         string             `json:"model"`
+	Messages      []provider.Message `json:"messages"`
+	Stream        bool               `json:"stream"`
+	StreamOptions *streamOpt         `json:"stream_options,omitempty"` // 流末返 usage（token 用量）
+	Tools         []provider.ToolDef `json:"tools,omitempty"`
+	ToolChoice    string             `json:"tool_choice,omitempty"`
+	Temperature   *float64           `json:"temperature,omitempty"`
+	MaxTokens     *int               `json:"max_tokens,omitempty"`
 }
 
 // streamOpt 启用流末 usage 返回（OpenAI 兼容 stream_options.include_usage）。
@@ -361,7 +362,7 @@ func (p *OpenAICompatibleProvider) embedBatch(ctx context.Context, apiKey string
 	if err != nil {
 		return classifyErr(err, 0)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		snippet := readBodySnippet(resp.Body)
 		log.Printf("[maas] embedding 上游 %s model=%s 返回 %d: %s", p.vendor, p.upstreamModel, resp.StatusCode, snippet)

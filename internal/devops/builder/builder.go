@@ -26,13 +26,13 @@ type Params struct {
 	BuildID      string
 	Commit       string // 已知则直接用；空则 real 路径 clone 后取 HEAD
 	Branch       string
-	GitURL       string // real 路径 clone 源
-	Dockerfile   string // 空则 Dockerfile（仓库根）
-	BuildContext string // 空则 .
-	Registry     string // 镜像仓库地址（real 推送目标，空则 registry.paas.local）
-	GitToken     string // 可选：私有仓库 HTTPS token（注入 git URL）
-	RegistryUser string // 可选：docker login 用户名
-	RegistryPass string // 可选：docker login 密码
+	GitURL       string            // real 路径 clone 源
+	Dockerfile   string            // 空则 Dockerfile（仓库根）
+	BuildContext string            // 空则 .
+	Registry     string            // 镜像仓库地址（real 推送目标，空则 registry.paas.local）
+	GitToken     string            // 可选：私有仓库 HTTPS token（注入 git URL）
+	RegistryUser string            // 可选：docker login 用户名
+	RegistryPass string            // 可选：docker login 密码
 	BuildArgs    map[string]string // 可选：docker build --build-arg K=V（如 SERVICE=product）
 }
 

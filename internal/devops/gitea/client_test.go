@@ -23,7 +23,7 @@ func fakeGitea(t *testing.T, mergeStatus int) (*httptest.Server, *Client, *strin
 			// 创建 PR -> 201 {number, head.sha}
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusCreated)
-			io.WriteString(w, `{"number":1,"head":{"sha":"head-sha"}}`)
+			_, _ = io.WriteString(w, `{"number":1,"head":{"sha":"head-sha"}}`)
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/merge"):
 			// merge PR -> 记录 Do + 返 mergeStatus
 			b, _ := io.ReadAll(r.Body)
@@ -36,7 +36,7 @@ func fakeGitea(t *testing.T, mergeStatus int) (*httptest.Server, *Client, *strin
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/commits"):
 			// ListCommits -> 返最新 commit SHA
 			w.Header().Set("Content-Type", "application/json")
-			io.WriteString(w, `[{"sha":"merge-sha","commit":{"message":"m","author":{"name":"a","date":"d"}}}]`)
+			_, _ = io.WriteString(w, `[{"sha":"merge-sha","commit":{"message":"m","author":{"name":"a","date":"d"}}}]`)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}

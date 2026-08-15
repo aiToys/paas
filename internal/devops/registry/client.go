@@ -112,8 +112,8 @@ func (c *Client) headDigest(ctx context.Context, name, tag string) (string, erro
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("manifests HEAD %s/%s 返回 %d", name, tag, resp.StatusCode)
 	}
@@ -132,7 +132,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body io.Reader
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrRegistryUnavailable, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK:

@@ -551,9 +551,9 @@ func (h *Handler) serveBuildLogsStream(w http.ResponseWriter, r *http.Request, i
 	writeSSE := func(line string) {
 		// SSE data 行：日志内的换行需转义为多 data 行（SSE 规范，事件以空行结尾）
 		for _, l := range strings.Split(line, "\n") {
-			fmt.Fprintf(w, "data: %s\n", l)
+			_, _ = fmt.Fprintf(w, "data: %s\n", l)
 		}
-		fmt.Fprint(w, "\n")
+		_, _ = fmt.Fprint(w, "\n")
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -564,7 +564,7 @@ func (h *Handler) serveBuildLogsStream(w http.ResponseWriter, r *http.Request, i
 		if b.Log != "" {
 			writeSSE(b.Log)
 		}
-		fmt.Fprint(w, "event: end\ndata: terminal\n\n")
+		_, _ = fmt.Fprint(w, "event: end\ndata: terminal\n\n")
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -573,7 +573,7 @@ func (h *Handler) serveBuildLogsStream(w http.ResponseWriter, r *http.Request, i
 
 	// 运行中：follow Pod logs
 	if h.logStreamer == nil {
-		fmt.Fprint(w, "event: error\ndata: 实时日志不可用（非集群部署）\n\n")
+		_, _ = fmt.Fprint(w, "event: error\ndata: 实时日志不可用（非集群部署）\n\n")
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -589,20 +589,20 @@ func (h *Handler) serveBuildLogsStream(w http.ResponseWriter, r *http.Request, i
 			break
 		}
 		if !errors.Is(err, builder.ErrNoBuildPod) {
-			fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error())
+			_, _ = fmt.Fprintf(w, "event: error\ndata: %s\n\n", err.Error()) //nolint:gosec // SSE text/event-stream 非 HTML 上下文，错误已脱敏
 			if flusher != nil {
 				flusher.Flush()
 			}
 			return
 		}
 		if time.Now().After(deadlineWait) {
-			fmt.Fprint(w, "event: error\ndata: 构建 Pod 未就绪（超时）\n\n")
+			_, _ = fmt.Fprint(w, "event: error\ndata: 构建 Pod 未就绪（超时）\n\n")
 			if flusher != nil {
 				flusher.Flush()
 			}
 			return
 		}
-		fmt.Fprint(w, ": heartbeat\n\n") // SSE 注释行保连接
+		_, _ = fmt.Fprint(w, ": heartbeat\n\n") // SSE 注释行保连接
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -612,7 +612,7 @@ func (h *Handler) serveBuildLogsStream(w http.ResponseWriter, r *http.Request, i
 			return
 		}
 	}
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 	// 逐块读 + SSE 转发（每行一个 data）。
 	// stream.Read 阻塞，ctx 取消时 client-go Stream 内部使 Read 返 error（依赖此机制退出）。
 	// 区分「客户端断连」（ctx.Err!=nil，静默退出不发 end，避免对已断连连接 Write）与「流正常结束」（发 end）。
@@ -628,7 +628,7 @@ func (h *Handler) serveBuildLogsStream(w http.ResponseWriter, r *http.Request, i
 				return
 			}
 			// 流结束（Pod 完成/上游断连）：发 end 事件，前端转轮询拉终态全量
-			fmt.Fprint(w, "event: end\ndata: stream-closed\n\n")
+			_, _ = fmt.Fprint(w, "event: end\ndata: stream-closed\n\n")
 			if flusher != nil {
 				flusher.Flush()
 			}

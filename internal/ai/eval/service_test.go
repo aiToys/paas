@@ -25,8 +25,8 @@ func TestServiceRunAll(t *testing.T) {
 	store := memory.NewStore()
 	ctx := tenant.WithTenant(context.Background(), "t-a")
 	// 两条用例：一条 contains 通过，一条 exact 失败。
-	store.Create(ctx, eval.EvalCase{AgentID: "ag", Name: "c1", Input: "q1", Expected: "天气", MatchType: eval.MatchContains})
-	store.Create(ctx, eval.EvalCase{AgentID: "ag", Name: "c2", Input: "q2", Expected: "晴朗", MatchType: eval.MatchExact})
+	_, _ = store.Create(ctx, eval.EvalCase{AgentID: "ag", Name: "c1", Input: "q1", Expected: "天气", MatchType: eval.MatchContains})
+	_, _ = store.Create(ctx, eval.EvalCase{AgentID: "ag", Name: "c2", Input: "q2", Expected: "晴朗", MatchType: eval.MatchExact})
 
 	svc := eval.NewService(store, fakeRunner{output: "今天天气不错"})
 	results, err := svc.RunAll(ctx, "ag")
@@ -61,7 +61,7 @@ func TestServiceRunAll(t *testing.T) {
 func TestServiceRunAllNoRunner(t *testing.T) {
 	store := memory.NewStore()
 	ctx := tenant.WithTenant(context.Background(), "t-a")
-	store.Create(ctx, eval.EvalCase{AgentID: "ag", Input: "q", Expected: "x", MatchType: eval.MatchContains})
+	_, _ = store.Create(ctx, eval.EvalCase{AgentID: "ag", Input: "q", Expected: "x", MatchType: eval.MatchContains})
 	svc := eval.NewService(store, nil)
 	if _, err := svc.RunAll(ctx, "ag"); err == nil {
 		t.Fatal("runner nil 应返错")

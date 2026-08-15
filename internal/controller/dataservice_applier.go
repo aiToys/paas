@@ -54,12 +54,12 @@ func (a *DataServiceK8sApplier) Apply(ctx context.Context, d dataservice.DataSer
 		}
 		// 实例浅管理字段投影（nil/零值时 reconciler 用默认）。
 		if d.Replicas != nil {
-			r := int32(*d.Replicas)
+			r := int32(*d.Replicas) //nolint:gosec // int32 是 CRD 字段类型，值域用户配置小整数
 			crd.Spec.Replicas = &r
 		}
 		crd.Spec.CPU = d.CPU
 		crd.Spec.Memory = d.Memory
-		crd.Spec.StorageGB = int32(d.StorageGB)
+		crd.Spec.StorageGB = int32(d.StorageGB) //nolint:gosec // int32 是 CRD 字段类型，值域 GB 级小整数
 		crd.Spec.Image = d.Image
 		return nil
 	})

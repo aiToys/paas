@@ -118,7 +118,7 @@ func TestDSSpecJSONBRoundTrip(t *testing.T) {
 		name string
 		spec map[string]string
 	}{
-		{"multi-keys", map[string]string{"engine": "redis", "mode": "cluster", "maxmemory_mb": "2048"}},
+		{"multi-keys", map[string]string{"engine": "mysql", "mode": "cluster", "maxmemory_mb": "2048"}},
 		{"empty-map", map[string]string{}},
 		{"chinese-value", map[string]string{"engine": "postgres", "备注": "订单库-生产"}},
 		{"nil-map", nil},
@@ -239,6 +239,12 @@ func TestDSListKindFilter(t *testing.T) {
 	mk := func(id, kind string) dataservice.DataService {
 		d := sampleDS(id, id)
 		d.Kind = kind
+		// 引擎须与 Kind 匹配（managed 白名单校验）。
+		d.Spec["engine"] = map[string]string{
+			dataservice.KindDB:    "postgres",
+			dataservice.KindCache: "redis",
+			dataservice.KindMQ:    "nats",
+		}[kind]
 		return d
 	}
 	for _, d := range []dataservice.DataService{

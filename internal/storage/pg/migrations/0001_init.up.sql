@@ -416,21 +416,26 @@ CREATE TABLE IF NOT EXISTS maas_vendors (
 --   未设 app.tenant_id → current_setting 返 NULL → 放行（不破坏查询层过滤路径）
 --   已设 app.tenant_id → DB 强制按租户过滤（纵深防御，绕过查询层也安全）
 ALTER TABLE applications ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS apps_tenant_isolation ON applications;
 CREATE POLICY apps_tenant_isolation ON applications
   USING (tenant_id = current_setting('app.tenant_id', true) OR current_setting('app.tenant_id', true) IS NULL);
 
 ALTER TABLE workloads ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS wl_tenant_isolation ON workloads;
 CREATE POLICY wl_tenant_isolation ON workloads
   USING (tenant_id = current_setting('app.tenant_id', true) OR current_setting('app.tenant_id', true) IS NULL);
 
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS users_tenant_isolation ON users;
 CREATE POLICY users_tenant_isolation ON users
   USING (tenant_id = current_setting('app.tenant_id', true) OR current_setting('app.tenant_id', true) IS NULL);
 
 ALTER TABLE data_services ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS ds_tenant_isolation ON data_services;
 CREATE POLICY ds_tenant_isolation ON data_services
   USING (tenant_id = current_setting('app.tenant_id', true) OR current_setting('app.tenant_id', true) IS NULL);
 
 ALTER TABLE environments ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS env_tenant_isolation ON environments;
 CREATE POLICY env_tenant_isolation ON environments
   USING (tenant_id = current_setting('app.tenant_id', true) OR current_setting('app.tenant_id', true) IS NULL);

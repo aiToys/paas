@@ -26,9 +26,9 @@ import (
 // （前缀剥离）超出标准 Ingress 表达力，需 ingress controller 专属 annotation，本轮不下发（保互换性）。
 type K8sRouteApplier struct {
 	client.Client
-	Routes       governance.RouteStore  // 重建需 ListRoutes 同 host 全部 Route
+	Routes       governance.RouteStore   // 重建需 ListRoutes 同 host 全部 Route
 	Services     governance.ServiceStore // Route.ServiceID → Service.Name + Port
-	IngressClass string                 // PAAS_INGRESS_CLASS（默认 nginx，dev hermes）；空=不设 ingressClassName
+	IngressClass string                  // PAAS_INGRESS_CLASS（默认 nginx，dev hermes）；空=不设 ingressClassName
 }
 
 // NewK8sRouteApplier 创建 applier。RouteStore/ServiceStore 用裸 governance Repository（不持 ApplyRepo，

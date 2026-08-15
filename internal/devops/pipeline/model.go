@@ -24,15 +24,15 @@ var (
 
 // Kind 流水线分类（UI 分组 + 职责划分）。
 const (
-	KindCI     = "ci"     // 测试联调流水线：build→deploy(test 泳道)→test（无版本、无合并）
-	KindCD     = "cd"     // 上线发布流水线：approve→deploy(prod 基线)→release(版本)→baseline(合并主干)
+	KindCI     = "ci" // 测试联调流水线：build→deploy(test 泳道)→test（无版本、无合并）
+	KindCD     = "cd" // 上线发布流水线：approve→deploy(prod 基线)→release(版本)→baseline(合并主干)
 	KindCustom = "custom"
 )
 
 // RunStatus PipelineRun 状态机。
 const (
 	RunRunning   = "running"
-	RunPaused    = "paused"    // 等 approve/test-manual
+	RunPaused    = "paused" // 等 approve/test-manual
 	RunSucceeded = "succeeded"
 	RunFailed    = "failed"
 	RunAborted   = "aborted"
@@ -60,7 +60,7 @@ const (
 	StageTest     = "test"
 	StageApprove  = "approve"
 	StagePromote  = "promote"
-	StageRelease  = "release"  // 打版本号里程碑（git tag + Image.version），不部署
+	StageRelease  = "release" // 打版本号里程碑（git tag + Image.version），不部署
 	StageBaseline = "baseline"
 )
 
@@ -87,17 +87,17 @@ type StageDef struct {
 // ParamDef 模板参数声明（admin 模板编辑器文档化；运行时靠占位符解析，此字段非必填）。
 type ParamDef struct {
 	Name        string `json:"name"`
-	Type        string `json:"type,omitempty"`        // string|env|repo
-	Default     any    `json:"default,omitempty"`     // 默认值（可含占位符 {{app.env.test}} 等）
+	Type        string `json:"type,omitempty"`    // string|env|repo
+	Default     any    `json:"default,omitempty"` // 默认值（可含占位符 {{app.env.test}} 等）
 	Description string `json:"description,omitempty"`
 }
 
 // PipelineTrigger 流水线触发配置（manual / webhook / cron）。
 type PipelineTrigger struct {
-	Type     string   `json:"type"`              // manual|webhook|cron
-	Branch   string   `json:"branch,omitempty"`  // webhook: 分支 glob（如 "main" 或 "feature-*"；空=全部分支）
-	Events   []string `json:"events,omitempty"`  // webhook: ["push"]（保留字段，当前仅处理 push）
-	Token    string   `json:"token,omitempty"`   // webhook: URL token（持久化供端点验证；get/list 时清空不返回前端）
+	Type     string   `json:"type"`               // manual|webhook|cron
+	Branch   string   `json:"branch,omitempty"`   // webhook: 分支 glob（如 "main" 或 "feature-*"；空=全部分支）
+	Events   []string `json:"events,omitempty"`   // webhook: ["push"]（保留字段，当前仅处理 push）
+	Token    string   `json:"token,omitempty"`    // webhook: URL token（持久化供端点验证；get/list 时清空不返回前端）
 	Schedule string   `json:"schedule,omitempty"` // cron: 5 字段表达式（如 "0 2 * * *"）
 }
 
@@ -135,8 +135,8 @@ type Pipeline struct {
 	TenantID       string          `json:"tenantId"`
 	AppID          string          `json:"appId"`
 	Name           string          `json:"name"`
-	Kind           string           `json:"kind"`
-	TemplateID     string           `json:"templateId,omitempty"`
+	Kind           string          `json:"kind"`
+	TemplateID     string          `json:"templateId,omitempty"`
 	ParamOverrides map[string]any  `json:"paramOverrides,omitempty"` // app 覆盖模板默认参数
 	Trigger        PipelineTrigger `json:"trigger"`
 	Disabled       bool            `json:"disabled,omitempty"`
@@ -164,25 +164,25 @@ type PipelineRun struct {
 
 // StageRun 单阶段执行记录（输出链载体）。
 type StageRun struct {
-	Index     int            `json:"index"`
-	Type      string         `json:"type"`
-	Name      string         `json:"name"`
-	Status    string         `json:"status"`
-	Input     map[string]any `json:"input,omitempty"`
-	Output    map[string]any `json:"output,omitempty"`
-	StartedAt time.Time      `json:"startedAt,omitempty"`
-	FinishedAt time.Time     `json:"finishedAt,omitempty"`
-	Error     string         `json:"error,omitempty"`
-	Log       string         `json:"log,omitempty"` // 执行过程关键事件（append-only，logf helper 写入）
+	Index      int            `json:"index"`
+	Type       string         `json:"type"`
+	Name       string         `json:"name"`
+	Status     string         `json:"status"`
+	Input      map[string]any `json:"input,omitempty"`
+	Output     map[string]any `json:"output,omitempty"`
+	StartedAt  time.Time      `json:"startedAt,omitempty"`
+	FinishedAt time.Time      `json:"finishedAt,omitempty"`
+	Error      string         `json:"error,omitempty"`
+	Log        string         `json:"log,omitempty"` // 执行过程关键事件（append-only，logf helper 写入）
 }
 
 // StageRun Output 已知 key（stage 输出链）。
 const (
-	OutImageID       = "imageId"
-	OutReleaseID     = "releaseId"
+	OutImageID        = "imageId"
+	OutReleaseID      = "releaseId"
 	OutWorkloadDomain = "workloadDomain"
-	OutVersion       = "version"
-	OutMergeSHA      = "mergeSha"
+	OutVersion        = "version"
+	OutMergeSHA       = "mergeSha"
 )
 
 // Validate Pipeline 基本校验（绑定模型：校验 TemplateID，不校验 Stages--运行时从模板解析）。

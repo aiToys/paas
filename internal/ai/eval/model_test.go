@@ -7,7 +7,7 @@ import (
 func TestMatch(t *testing.T) {
 	cases := []struct {
 		matchType, expected, output string
-		wantPass                     bool
+		wantPass                    bool
 	}{
 		{MatchContains, "天气", "今天天气不错", true},
 		{MatchContains, "RAIN", "it is raining", true}, // 大小写不敏感
@@ -44,4 +44,3 @@ func TestValidate(t *testing.T) {
 		t.Fatal("非法正则应校验失败")
 	}
 }
-

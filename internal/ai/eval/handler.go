@@ -10,7 +10,7 @@ import (
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
 const (
-	PermEvalRead  = "agent:read"  // 评估用例随 Agent 权限
+	PermEvalRead  = "agent:read" // 评估用例随 Agent 权限
 	PermEvalWrite = "agent:write"
 )
 
@@ -23,8 +23,8 @@ const (
 //	DELETE /api/agent-evals/{id}       删用例
 //	POST   /api/agent-evals/run?agentId=  跑某 Agent 全部用例（返 []EvalResult）
 type Handler struct {
-	repo    Repository
-	service *Service
+	repo      Repository
+	service   *Service
 	Authorize func(r *http.Request, perm string) bool
 }
 

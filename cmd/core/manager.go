@@ -24,14 +24,14 @@ import (
 // k8sAppliers 聚合 K8s 数据面 applier（workload + dataservice），供各 repo 装饰。
 // clientset + namespace 额外供 builder.K8sJob 创建构建 Job + 取 Pod 日志。
 // wlReconciler 暴露 WorkloadReconciler 引用，供 stores 构造完成后延迟注入 AppConfigLookup
-//（startManager 先于 buildAllStores，stores 就绪后才能装 appconfig 桥接）。
+// （startManager 先于 buildAllStores，stores 就绪后才能装 appconfig 桥接）。
 type k8sAppliers struct {
-	workload      workload.Applier
-	dataservice   dataservice.Applier
-	dsRestarter   *controller.DSRestarter // 数据服务实例滚动重启（patch STS），nil=集群外降级
-	clientset     kubernetes.Interface    // 供 builder.K8sJob（create Job + pods/log）；nil=K8s 不可用
-	wlReconciler  *controller.WorkloadReconciler
-	client        client.Client           // controller-runtime typed client（供 route applier 聚合 Ingress）
+	workload     workload.Applier
+	dataservice  dataservice.Applier
+	dsRestarter  *controller.DSRestarter // 数据服务实例滚动重启（patch STS），nil=集群外降级
+	clientset    kubernetes.Interface    // 供 builder.K8sJob（create Job + pods/log）；nil=K8s 不可用
+	wlReconciler *controller.WorkloadReconciler
+	client       client.Client // controller-runtime typed client（供 route applier 聚合 Ingress）
 }
 
 // startManager 启 controller-runtime manager（K8s 数据面），自动检测配置来源：

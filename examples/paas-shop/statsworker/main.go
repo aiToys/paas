@@ -5,12 +5,13 @@
 // appconfig 通常只读注入 workload，本 worker 演示「业务回写 appconfig」反向能力。
 //
 // 环境变量（平台绑定/注入）：
-//   DATABASE_URL       - shop-db 绑定注入
-//   PAAS_APPCONFIG_URL - 平台 core base（http://paas-core.paas.svc.cluster.local）
-//   PAAS_API_KEY       - 写 appconfig 权限的 Key（appconfig secret 注入）
-//   PAAS_APP_ID        - 应用 ID（默认 paas-shop）
-//   PAAS_ENV_ID        - 环境 ID
-//   PAAS_STATS_INTERVAL - 缺省跑一次退出（CronJob 单次语义）；非空（如 10m）则循环 sleep，供 service 模式可选
+//
+//	DATABASE_URL       - shop-db 绑定注入
+//	PAAS_APPCONFIG_URL - 平台 core base（http://paas-core.paas.svc.cluster.local）
+//	PAAS_API_KEY       - 写 appconfig 权限的 Key（appconfig secret 注入）
+//	PAAS_APP_ID        - 应用 ID（默认 paas-shop）
+//	PAAS_ENV_ID        - 环境 ID
+//	PAAS_STATS_INTERVAL - 缺省跑一次退出（CronJob 单次语义）；非空（如 10m）则循环 sleep，供 service 模式可选
 package main
 
 import (

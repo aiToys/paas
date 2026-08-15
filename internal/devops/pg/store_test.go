@@ -224,7 +224,7 @@ func TestBuildRunRunner(t *testing.T) {
 	if final.FinishedAt.IsZero() {
 		t.Errorf("FinishedAt 应非零")
 	}
-	if !strings.Contains(final.Log, "推送镜像") {
+	if !strings.Contains(final.Log, "docker push") {
 		t.Errorf("Log 应含构建日志, got: %s", final.Log)
 	}
 
@@ -558,9 +558,9 @@ func TestRollbackNoPrevious(t *testing.T) {
 	// 直接灌一条没有 PreviousImageID 的发布
 	now := time.Now()
 	_, err := s.db.Pool().Exec(ctx,
-		`INSERT INTO releases (`+releaseCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+		`INSERT INTO releases (`+releaseCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
 		"rel-noprev", "t-acme", "app-cs", "env-test", "img-x", "sha256:x",
-		devops.StrategyRolling, devops.ReleaseSucceeded, "wl-x", "", false, now, "u")
+		devops.StrategyRolling, devops.ReleaseSucceeded, "wl-x", "", false, now, "u", "", "", "", "")
 	if err != nil {
 		t.Fatalf("灌发布失败: %v", err)
 	}

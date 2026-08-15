@@ -28,9 +28,9 @@ type chatReq struct {
 }
 
 type deltaMessage struct {
-	Role             string             `json:"role,omitempty"`
-	Content          string             `json:"content,omitempty"`
-	ReasoningContent string             `json:"reasoning_content,omitempty"` // 推理模型思考过程（透传给前端）
+	Role             string `json:"role,omitempty"`
+	Content          string `json:"content,omitempty"`
+	ReasoningContent string `json:"reasoning_content,omitempty"` // 推理模型思考过程（透传给前端）
 	// ToolCalls 流式工具调用增量（finish_reason=tool_calls 时透传给客户端，OpenAI 兼容）。
 	ToolCalls []provider.ToolCall `json:"tool_calls,omitempty"`
 }

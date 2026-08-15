@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/aitoys/paas/pkg/labels"
-	"github.com/aitoys/paas/pkg/tenant"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/aitoys/paas/pkg/labels"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // restartedAtKey 是触发 STS 滚动重建的 annotation key。
@@ -43,14 +44,14 @@ func (r *DSRestarter) Restart(ctx context.Context, id string) error {
 	}
 	sts := &appsv1.StatefulSet{ObjectMeta: metav1.ObjectMeta{Name: id, Namespace: tenant.Namespace(tid)}}
 	patchBase := client.MergeFrom(sts.DeepCopy())
-	if sts.ObjectMeta.Annotations == nil {
-		sts.ObjectMeta.Annotations = map[string]string{}
+	if sts.Annotations == nil {
+		sts.Annotations = map[string]string{}
 	}
-	if sts.Spec.Template.ObjectMeta.Annotations == nil {
-		sts.Spec.Template.ObjectMeta.Annotations = map[string]string{}
+	if sts.Spec.Template.Annotations == nil {
+		sts.Spec.Template.Annotations = map[string]string{}
 	}
 	nonce := time.Now().UTC().Format(time.RFC3339Nano)
-	sts.Spec.Template.ObjectMeta.Annotations[restartedAtKey] = nonce
+	sts.Spec.Template.Annotations[restartedAtKey] = nonce
 	if err := r.Patch(ctx, sts, patchBase); err != nil {
 		return fmt.Errorf("patch statefulset %s for restart: %w", id, err)
 	}

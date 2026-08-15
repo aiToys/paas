@@ -110,7 +110,7 @@ func TestPipelineCrossTenantIsolation(t *testing.T) {
 	var resp struct {
 		Data []Pipeline `json:"data"`
 	}
-	json.Unmarshal(rec.Body.Bytes(), &resp)
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	if len(resp.Data) != 0 {
 		t.Fatalf("跨租户期望空列表，got %d 条", len(resp.Data))
 	}
@@ -158,7 +158,7 @@ func TestPipelineUpdateDelete(t *testing.T) {
 	var updated struct {
 		Data Pipeline `json:"data"`
 	}
-	json.Unmarshal(rec.Body.Bytes(), &updated)
+	_ = json.Unmarshal(rec.Body.Bytes(), &updated)
 	if updated.Data.Name != "p1-renamed" {
 		t.Fatalf("更新后 name 期望 p1-renamed，got %s", updated.Data.Name)
 	}
@@ -205,7 +205,7 @@ func TestTemplateList(t *testing.T) {
 	var resp struct {
 		Data []PipelineTemplate `json:"data"`
 	}
-	json.Unmarshal(rec.Body.Bytes(), &resp)
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	if len(resp.Data) < 2 {
 		t.Fatalf("期望至少 2 平台预置模板，got %d", len(resp.Data))
 	}
@@ -286,7 +286,7 @@ func TestRunManualTriggerAndAdvance(t *testing.T) {
 	var resp struct {
 		Data PipelineRun `json:"data"`
 	}
-	json.Unmarshal(rec.Body.Bytes(), &resp)
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	if resp.Data.Status != RunRunning {
 		t.Fatalf("新建 run 期望 running，got %s", resp.Data.Status)
 	}
@@ -332,7 +332,7 @@ func TestRunApproveFlow(t *testing.T) {
 	var resp struct {
 		Data PipelineRun `json:"data"`
 	}
-	json.Unmarshal(rec.Body.Bytes(), &resp)
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	runID := resp.Data.ID
 
 	// 等暂停
@@ -516,7 +516,7 @@ func TestRunAbort(t *testing.T) {
 	var resp struct {
 		Data PipelineRun `json:"data"`
 	}
-	json.Unmarshal(rec.Body.Bytes(), &resp)
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	runID := resp.Data.ID
 
 	// 等 paused
@@ -581,7 +581,7 @@ func TestAdminTemplateCRUD(t *testing.T) {
 		t.Fatalf("admin create 期望 201，got %d body %s", rec.Code, rec.Body.String())
 	}
 	var created PipelineTemplate
-	json.Unmarshal(rec.Body.Bytes(), &struct {
+	_ = json.Unmarshal(rec.Body.Bytes(), &struct {
 		Data *PipelineTemplate `json:"data"`
 	}{Data: &created})
 	if created.Builtin {
@@ -647,7 +647,7 @@ func TestPipelineWebhookTrigger(t *testing.T) {
 	var resp struct {
 		Data Pipeline `json:"data"`
 	}
-	json.Unmarshal(rec.Body.Bytes(), &resp)
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	pid := resp.Data.ID
 	token := resp.Data.Trigger.Token
 	if token == "" {
@@ -661,7 +661,7 @@ func TestPipelineWebhookTrigger(t *testing.T) {
 	var get1 struct {
 		Data Pipeline `json:"data"`
 	}
-	json.Unmarshal(rec.Body.Bytes(), &get1)
+	_ = json.Unmarshal(rec.Body.Bytes(), &get1)
 	if get1.Data.Trigger.Token == "" {
 		t.Fatal("get pipeline 应返回 trigger token（同租户可见）")
 	}
@@ -714,7 +714,7 @@ func TestPipelineWebhookTrigger(t *testing.T) {
 	var resp2 struct {
 		Data Pipeline `json:"data"`
 	}
-	json.Unmarshal(rec2.Body.Bytes(), &resp2)
+	_ = json.Unmarshal(rec2.Body.Bytes(), &resp2)
 	req = httptest.NewRequest(http.MethodPost, "/api/webhooks/pipeline/"+resp2.Data.ID+"?token=x", strings.NewReader(pushBody))
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

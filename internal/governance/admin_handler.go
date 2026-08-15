@@ -17,8 +17,8 @@ import (
 	"net/http"
 	"strings"
 
-	adminutil "github.com/aitoys/paas/internal/web/admin"
 	"github.com/aitoys/paas/internal/httputil"
+	adminutil "github.com/aitoys/paas/internal/web/admin"
 )
 
 // AdminAuditRecorder admin 写操作审计（依赖倒置，避免 governance->security）。
@@ -32,9 +32,9 @@ type AdminAuditRecorder = adminutil.AuditRecorder // admin 写操作审计（依
 //
 // 绕过 prod:write（super_admin 有权干预生产），但写操作必记审计。
 type AdminHandler struct {
-	repo     Repository
-	audit    AdminAuditRecorder
-	actorOf  func(*http.Request) string
+	repo    Repository
+	audit   AdminAuditRecorder
+	actorOf func(*http.Request) string
 }
 
 // AdminHandlerOpt admin handler 配置。

@@ -7,8 +7,8 @@ import (
 	"net/http"
 	"strings"
 
-	adminutil "github.com/aitoys/paas/internal/web/admin"
 	"github.com/aitoys/paas/internal/httputil"
+	adminutil "github.com/aitoys/paas/internal/web/admin"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
@@ -48,10 +48,14 @@ func NewAdminHandler(repo Repository, opts ...AdminHandlerOpt) *AdminHandler {
 }
 
 // WithAdminTenants 注入租户校验器。
-func WithAdminTenants(c AdminTenantChecker) AdminHandlerOpt { return func(h *AdminHandler) { h.tenants = c } }
+func WithAdminTenants(c AdminTenantChecker) AdminHandlerOpt {
+	return func(h *AdminHandler) { h.tenants = c }
+}
 
 // WithAdminAudit 注入审计 recorder。
-func WithAdminAudit(a AdminAuditRecorder) AdminHandlerOpt { return func(h *AdminHandler) { h.audit = a } }
+func WithAdminAudit(a AdminAuditRecorder) AdminHandlerOpt {
+	return func(h *AdminHandler) { h.audit = a }
+}
 
 // WithAdminActor 注入 actor 提取器（取 super_admin UserID 作审计 actor）。
 func WithAdminActor(f func(*http.Request) string) AdminHandlerOpt {

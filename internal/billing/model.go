@@ -18,13 +18,13 @@ var ErrQuotaExceeded = errors.New("配额超限")
 
 // 计费资源维度（账单与配额的 key）。
 const (
-	ResApplications  = "applications"  // 应用数
-	ResWorkloads     = "workloads"     // 工作负载数
-	ResModels        = "models"        // 模型部署数
-	ResDataservices  = "dataservices"  // 数据服务实例数
-	ResGPU           = "gpu"           // GPU 卡·小时
-	ResTokens        = "tokens"        // token（千次）
-	ResStorage       = "storage_gb"    // 存储 GB
+	ResApplications = "applications" // 应用数
+	ResWorkloads    = "workloads"    // 工作负载数
+	ResModels       = "models"       // 模型部署数
+	ResDataservices = "dataservices" // 数据服务实例数
+	ResGPU          = "gpu"          // GPU 卡·小时
+	ResTokens       = "tokens"       // token（千次）
+	ResStorage      = "storage_gb"   // 存储 GB
 )
 
 // PriceTable 是各资源的平台级 mock 单价（元/单位）。
@@ -65,10 +65,10 @@ type ResourceQuota struct {
 // 应用级 API Key 调用 /v1 时，gateway 把 appID 注入 ctx，IncUsage 据此归位。
 // 账单可按应用拆"订单应用用了多少 token / 推荐应用用了多少"。
 type ResourceUsage struct {
-	TenantID  string             `json:"tenantId,omitempty"`
-	Counts    map[string]int     `json:"counts"`
+	TenantID  string                    `json:"tenantId,omitempty"`
+	Counts    map[string]int            `json:"counts"`
 	ByApp     map[string]map[string]int `json:"byApp,omitempty"`
-	UpdatedAt time.Time          `json:"updatedAt"`
+	UpdatedAt time.Time                 `json:"updatedAt"`
 }
 
 // BillItem 账单明细项。

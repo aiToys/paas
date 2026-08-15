@@ -40,7 +40,7 @@ type AdminHandler struct {
 	quota    QuotaCheckFunc
 	audit    AdminAuditRecorder
 	actorOf  func(*http.Request) string
-	applier  Applier // 可选；注入后支持 drift 修复（POST /reconcile 补投影 PG 有行无 CRD 的 Workload）
+	applier  Applier                                    // 可选；注入后支持 drift 修复（POST /reconcile 补投影 PG 有行无 CRD 的 Workload）
 	fillStat func(ctx context.Context, list []Workload) // 便于测试注入 stub；默认走 status.FillStatus
 }
 
@@ -70,7 +70,9 @@ func WithAdminStatusReader(r StatusReader) AdminHandlerOpt {
 func WithAdminQuota(f QuotaCheckFunc) AdminHandlerOpt { return func(h *AdminHandler) { h.quota = f } }
 
 // WithAdminAudit 注入审计 recorder。
-func WithAdminAudit(a AdminAuditRecorder) AdminHandlerOpt { return func(h *AdminHandler) { h.audit = a } }
+func WithAdminAudit(a AdminAuditRecorder) AdminHandlerOpt {
+	return func(h *AdminHandler) { h.audit = a }
+}
 
 // WithAdminActor 注入 actor 提取器（取 super_admin UserID 作审计 actor）。
 func WithAdminActor(f func(*http.Request) string) AdminHandlerOpt {
@@ -80,11 +82,6 @@ func WithAdminActor(f func(*http.Request) string) AdminHandlerOpt {
 // WithAdminApplier 注入 K8s 数据面 applier，启用 drift 修复端点（POST /api/admin/workloads/reconcile）。
 // 注入后 super_admin 可手动触发「PG 有行无 CRD」的 Workload 补投影（CreateOrUpdate 幂等）。
 func WithAdminApplier(a Applier) AdminHandlerOpt { return func(h *AdminHandler) { h.applier = a } }
-
-// withAdminFillStat 仅供测试：替换 fillStatus 实现。
-func withAdminFillStat(f func(ctx context.Context, list []Workload)) AdminHandlerOpt {
-	return func(h *AdminHandler) { h.fillStat = f }
-}
 
 // ServeHTTP 按路径分发 admin 请求。
 func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -281,7 +278,7 @@ func (h *AdminHandler) serveLogs(w http.ResponseWriter, r *http.Request, id stri
 	}
 	var tail int64
 	if t := r.URL.Query().Get("tail"); t != "" {
-		fmt.Sscanf(t, "%d", &tail)
+		_, _ = fmt.Sscanf(t, "%d", &tail)
 	}
 	if tail <= 0 {
 		tail = 1000
@@ -293,7 +290,7 @@ func (h *AdminHandler) serveLogs(w http.ResponseWriter, r *http.Request, id stri
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	// 覆盖默认 json Content-Type（ServeHTTP 入口设的 application/json）。
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("X-Accel-Buffering", "no")

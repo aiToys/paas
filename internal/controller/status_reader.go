@@ -207,10 +207,10 @@ func (r *K8sStatusReader) PodLogs(ctx context.Context, workloadID, podName strin
 	// 越权校验：取 Pod 确认其 label 同时含本租户 + 本 workload，否则拒绝（不泄漏存在性，统一 not found）。
 	pod, err := r.clientset.CoreV1().Pods(tenant.Namespace(tid)).Get(ctx, podName, metav1.GetOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("Pod 不存在: %s", podName)
+		return nil, fmt.Errorf("pod 不存在: %s", podName)
 	}
 	if pod.Labels[labels.KeyTenant] != tid || pod.Labels[labels.KeyWorkload] != workloadID {
-		return nil, fmt.Errorf("Pod 不存在: %s", podName)
+		return nil, fmt.Errorf("pod 不存在: %s", podName)
 	}
 	opts := &corev1.PodLogOptions{
 		Previous: previous,

@@ -13,8 +13,8 @@ import (
 
 func TestResolveFromURL(t *testing.T) {
 	cases := []struct {
-		url     string
-		wantBase string
+		url       string
+		wantBase  string
 		wantToken string
 	}{
 		{"paas://paas-core.paas.svc/dp?token=sk-1", "http://paas-core.paas.svc/dp", "sk-1"},

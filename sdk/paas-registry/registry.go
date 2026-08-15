@@ -19,8 +19,8 @@ import (
 // paasRegistry 实现 zeus registry 三接口（Registrar + Discovery + Watcher）。
 // 数据源 = PaaS /dp/ API（真源 K8s Endpoints）。仿 zeus examples/20-full-demo gwdisc 的轮询发现模式。
 type paasRegistry struct {
-	base   string       // 数据面 API 根（如 http://paas-core.paas.svc/dp）
-	token  string       // dp token（API Key，Authorization: Bearer）
+	base   string // 数据面 API 根（如 http://paas-core.paas.svc/dp）
+	token  string // dp token（API Key，Authorization: Bearer）
 	client *http.Client
 }
 

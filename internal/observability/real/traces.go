@@ -40,9 +40,9 @@ type jaegerTraceResponse struct {
 }
 
 type jaegerTrace struct {
-	TraceID   string                 `json:"traceID"`
-	Spans     []jaegerSpan           `json:"spans"`
-	Processes map[string]jaegerProc  `json:"processes"`
+	TraceID   string                `json:"traceID"`
+	Spans     []jaegerSpan          `json:"spans"`
+	Processes map[string]jaegerProc `json:"processes"`
 }
 
 type jaegerSpan struct {
@@ -363,4 +363,3 @@ func tagBool(t jaegerTag) bool {
 	// 兜底：type 字符串形如 "true"。
 	return strings.EqualFold(strings.TrimSpace(string(t.Value)), "true")
 }
-

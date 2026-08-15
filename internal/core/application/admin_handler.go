@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"strings"
 
-	adminutil "github.com/aitoys/paas/internal/web/admin"
 	"github.com/aitoys/paas/internal/httputil"
+	adminutil "github.com/aitoys/paas/internal/web/admin"
 )
 
 // AdminAuditRecorder admin 写操作审计（依赖倒置，避免 application->security）。
@@ -59,10 +59,14 @@ func NewAdminHandler(repo Repository, opts ...AdminHandlerOpt) *AdminHandler {
 func WithAdminQuota(f QuotaCheckFunc) AdminHandlerOpt { return func(h *AdminHandler) { h.quota = f } }
 
 // WithAdminCascade 注入跨 store 级联清理（删应用前清关联资源）。
-func WithAdminCascade(c CascadeDeleter) AdminHandlerOpt { return func(h *AdminHandler) { h.cascade = c } }
+func WithAdminCascade(c CascadeDeleter) AdminHandlerOpt {
+	return func(h *AdminHandler) { h.cascade = c }
+}
 
 // WithAdminAudit 注入审计 recorder。
-func WithAdminAudit(a AdminAuditRecorder) AdminHandlerOpt { return func(h *AdminHandler) { h.audit = a } }
+func WithAdminAudit(a AdminAuditRecorder) AdminHandlerOpt {
+	return func(h *AdminHandler) { h.audit = a }
+}
 
 // WithAdminActor 注入 actor 提取器（取 super_admin UserID 作审计 actor）。
 func WithAdminActor(f func(*http.Request) string) AdminHandlerOpt {

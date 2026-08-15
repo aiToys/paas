@@ -60,7 +60,6 @@ func TestK8sReaderTenantIsolation(t *testing.T) {
 //   - lane 空或 default → 直接返 default 基线（向后兼容）
 //   - 跨租户访问 feature 泳道 → 返空不泄漏（不降级到他人基线）
 //
-//
 //nolint:staticcheck // corev1.Endpoints 在 K8s v0.36 仍主流；EndpointSlice 迁移留后续
 func TestK8sReaderLaneFallback(t *testing.T) {
 	const featureIP = "10.1.0.1"

@@ -321,6 +321,7 @@ func exporterSidecar(d *v1alpha1.DataService, registry string) *corev1.Container
 	}
 	return c
 }
+
 // 数据服务有状态，统一落 StatefulSet（稳定网络标识）；ClusterIP Service 供应用访问；Secret 存凭证供 Pod env 引用。
 type DataServiceReconciler struct {
 	client.Client

@@ -146,7 +146,7 @@ func TestHandlerDocumentUploadAndRetrieve(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, _ = fw.Write([]byte("测试内容" + repeatStr("数据", 300)))
-	mw.Close()
+	_ = mw.Close()
 
 	req := httptest.NewRequest("POST", "/api/knowledgebases/"+kb.ID+"/documents", body).WithContext(ctx)
 	req.Header.Set("Content-Type", mw.FormDataContentType())

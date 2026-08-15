@@ -358,6 +358,7 @@ func (s *Store) CreateRoute(ctx context.Context, r governance.Route) (governance
 // UpdateRoute 混合更新语义（PUT 全量替换的变体）：
 //   - 必填字段（Path/ServiceID/Methods）：非空才覆盖（部分更新，防 PUT 漏传误清）
 //   - 可清空字段（StripPath/Enabled bool / Host 字符串）：直接覆盖（允许从有值改回默认/空）
+//
 // bool 字段无法区分"未设"与"false"，故直接覆盖是唯一选择；Host 直接覆盖允许从有域名改回不限 Host。
 // 合并后复 Validate，防 PUT 用空 methods 绕过 Create 时的非空不变量。
 func (s *Store) UpdateRoute(ctx context.Context, r governance.Route) (governance.Route, error) {

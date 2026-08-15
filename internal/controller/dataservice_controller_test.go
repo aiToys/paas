@@ -241,9 +241,9 @@ func TestReconcileNATS(t *testing.T) {
 // TestEngineImageLightEngines 验证 qdrant/meilisearch 返非空镜像（本轮替换 milvus/es 占位）。
 func TestEngineImageLightEngines(t *testing.T) {
 	cases := map[string]string{
-		"vector|qdrant":      "qdrant/qdrant:v1.12.4",
-		"search|meilisearch": "meilisearch/meilisearch:v1.10",
-		"vector|milvus":      "", // 已弃用重型引擎返空 -> reconciler 走 failed
+		"vector|qdrant":        "qdrant/qdrant:v1.12.4",
+		"search|meilisearch":   "meilisearch/meilisearch:v1.10",
+		"vector|milvus":        "", // 已弃用重型引擎返空 -> reconciler 走 failed
 		"search|elasticsearch": "",
 	}
 	for k, want := range cases {
@@ -271,7 +271,7 @@ func TestReconcileQdrant(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "ds-qdrant", Namespace: "default"},
 		Spec: v1alpha1.DataServiceSpec{
 			TenantID: "t-acme", Kind: "vector", Engine: "qdrant", Name: "ds-qdrant",
-			StorageGB: 20,
+			StorageGB:  20,
 			Connection: map[string]string{"api_key": "ak-xxx"},
 		},
 	}
@@ -367,7 +367,7 @@ func TestReconcileDataserviceImageOverride(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "ds-up", Namespace: "default"},
 		Spec: v1alpha1.DataServiceSpec{
 			TenantID: "t-acme", Kind: "vector", Engine: "qdrant", Name: "ds-up",
-			Image: "qdrant/qdrant:v1.13.0", // 覆盖默认 v1.12.4
+			Image:      "qdrant/qdrant:v1.13.0", // 覆盖默认 v1.12.4
 			Connection: map[string]string{"api_key": "ak"},
 		},
 	}
@@ -522,13 +522,13 @@ func containsStsContainer(sts *appsv1.StatefulSet, name string) bool {
 // TestExporterImageCoverage 验证 exporterImage 按 kind+engine 选镜像（内置 metrics 返空）。
 func TestExporterImageCoverage(t *testing.T) {
 	cases := map[string]string{
-		"db|postgres": "prometheuscommunity/postgres-exporter:v0.15.0",
-		"db|mysql":    "prom/mysqld-exporter:v0.15.1",
-		"cache|redis": "oliver006/redis_exporter:v1.62.0",
-		"cache|valkey": "oliver006/redis_exporter:v1.62.0",
-		"mq|nats":     "natsio/prometheus-nats-exporter:0.16.0",
-		"storage|minio": "", // 内置 metrics
-		"vector|qdrant":  "",
+		"db|postgres":        "prometheuscommunity/postgres-exporter:v0.15.0",
+		"db|mysql":           "prom/mysqld-exporter:v0.15.1",
+		"cache|redis":        "oliver006/redis_exporter:v1.62.0",
+		"cache|valkey":       "oliver006/redis_exporter:v1.62.0",
+		"mq|nats":            "natsio/prometheus-nats-exporter:0.16.0",
+		"storage|minio":      "", // 内置 metrics
+		"vector|qdrant":      "",
 		"search|meilisearch": "",
 	}
 	for k, want := range cases {

@@ -34,7 +34,10 @@ func NewEngineHandler(repo EngineRepository) *EngineHandler {
 func (h *EngineHandler) SetAdminAudit(a AdminAuditRecorder) *EngineHandler { h.audit = a; return h }
 
 // SetAdminActor 注入 actor 提取器（取 super_admin UserID 作审计 actor）。
-func (h *EngineHandler) SetAdminActor(f func(*http.Request) string) *EngineHandler { h.actorOf = f; return h }
+func (h *EngineHandler) SetAdminActor(f func(*http.Request) string) *EngineHandler {
+	h.actorOf = f
+	return h
+}
 
 // recordAudit best-effort 记审计（平台级引擎 tenantID=""，identityAuditAdapter 转 "platform" 落库）。
 func (h *EngineHandler) recordAudit(r *http.Request, action, resourceID, detail string) {

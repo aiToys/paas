@@ -265,7 +265,7 @@ func TestWLCreateMissingTenantRejected(t *testing.T) {
 func TestWLListMissingTenantRejected(t *testing.T) {
 	db := newTestDB(t)
 	s := NewStore(db)
-	if _, err := s.List(noTenantCtx(), "", "", ""); err == nil {
+	if _, err := s.List(noTenantCtx(), "", "", "", "", ""); err == nil {
 		t.Fatal("List 缺失租户应拒绝")
 	}
 }
@@ -280,11 +280,11 @@ func TestWLTenantIsolation(t *testing.T) {
 	if _, err := s.Get(globexCtx(), "wl-iso"); err == nil {
 		t.Fatal("跨租户 Get 应 not found")
 	}
-	if list, _ := s.List(globexCtx(), "", "", ""); len(list) != 0 {
+	if list, _ := s.List(globexCtx(), "", "", "", "", ""); len(list) != 0 {
 		t.Fatalf("globex 应 0 条, got %d", len(list))
 	}
 	// 跨租户过滤也隔离：globex 列 env-acme-test 应 0 条。
-	if list, _ := s.List(globexCtx(), "env-acme-test", "", ""); len(list) != 0 {
+	if list, _ := s.List(globexCtx(), "env-acme-test", "", "", "", ""); len(list) != 0 {
 		t.Fatalf("globex 跨租户 env 过滤应 0 条, got %d", len(list))
 	}
 	// 跨租户 Delete 返回错误。

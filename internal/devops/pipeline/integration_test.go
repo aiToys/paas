@@ -58,8 +58,8 @@ func resetSchema(t *testing.T, db *pg.DB) {
 	}
 }
 
-func acmeCtx() context.Context   { return tenant.WithTenant(context.Background(), "t-acme") }
-func globexCtx() context.Context { return tenant.WithTenant(context.Background(), "t-globex") }
+func acmeCtx() context.Context     { return tenant.WithTenant(context.Background(), "t-acme") }
+func globexCtx() context.Context   { return tenant.WithTenant(context.Background(), "t-globex") }
 func noTenantCtx() context.Context { return context.Background() }
 
 // samplePipeline 构造一个 Pipeline 样本（不带 ID/TenantID，由 Create 补）。

@@ -35,8 +35,8 @@ type BuildRunner interface {
 // Releaser 桥接 devops ReleaseRepository + workload readiness + ImageRepository。
 type Releaser interface {
 	CreateRelease(ctx context.Context, input devops.ReleaseInput) (devops.Release, error)
-	PollWorkloadReady(ctx context.Context, workloadID string) error // 阻塞到 ready 或超时
-	WorkloadDomain(ctx context.Context, workloadID string) string    // 拼探活 URL
+	PollWorkloadReady(ctx context.Context, workloadID string) error     // 阻塞到 ready 或超时
+	WorkloadDomain(ctx context.Context, workloadID string) string       // 拼探活 URL
 	LatestReadyImage(ctx context.Context, appID string) (string, error) // app 最新 ready Image（CD 用）
 	// Promote 晋升源 release 到下一环境（adapter 内部经 environment.NextPromoteTarget 算 target）。
 	Promote(ctx context.Context, srcReleaseID string) (devops.Release, error)
@@ -79,7 +79,7 @@ type Engine struct {
 // Abort 时 cancel 传播给 PollBuildRun 阻塞调用。
 func (e *Engine) Start(ctx context.Context, runID string) {
 	tid, _ := tenant.TenantFrom(ctx)
-	runCtx, cancel := context.WithCancel(context.Background())
+	runCtx, cancel := context.WithCancel(context.Background()) //nolint:gosec // run 生命周期独立于触发请求；Abort 显式 cancel
 	runCtx = tenant.WithTenant(runCtx, tid)
 	e.mu.Lock()
 	if e.cancels == nil {
@@ -90,7 +90,7 @@ func (e *Engine) Start(ctx context.Context, runID string) {
 	go func() {
 		defer e.releaseCancel(runID)
 		if err := e.Advance(runCtx, runID); err != nil {
-			log.Printf("pipeline: advance run %s 失败: %v", runID, err)
+			log.Printf("pipeline: advance run %s 失败: %v", runID, err) //nolint:gosec // runID 平台生成
 		}
 	}()
 }
@@ -427,7 +427,7 @@ func (e *Engine) execPromote(ctx context.Context, run *PipelineRun, stage StageD
 	}
 	logf(sr, "已晋升到 %s", rel.ID)
 	sr.Output = map[string]any{
-		OutReleaseID:       rel.ID,
+		OutReleaseID:      rel.ID,
 		OutWorkloadDomain: e.Releases.WorkloadDomain(ctx, rel.WorkloadID),
 	}
 	sr.Status = StageSuccess
@@ -565,13 +565,13 @@ func pollHTTP(ctx context.Context, url string, timeout time.Duration) error {
 		if time.Now().After(deadline) {
 			return fmt.Errorf("探活超时")
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) //nolint:gosec // URL 为引擎内部拼出的 workload FQDN，非用户输入
 		if err != nil {
 			return err
 		}
-		resp, err := client.Do(req)
+		resp, err := client.Do(req) //nolint:gosec // URL 为引擎内部拼出的 workload FQDN，非用户输入
 		if err == nil {
-			resp.Body.Close()
+			_ = resp.Body.Close() //nolint:gosec
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				return nil
 			}

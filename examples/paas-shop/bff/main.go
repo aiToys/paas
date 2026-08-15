@@ -22,8 +22,8 @@ import (
 )
 
 var (
-	httpClient       = observ.NewClient()
-	streamClient     = observ.NewStreamingClient() // SSE 透传用（chatbot 客服链路含长 reasoning，无整体超时）
+	httpClient   = observ.NewClient()
+	streamClient = observ.NewStreamingClient() // SSE 透传用（chatbot 客服链路含长 reasoning，无整体超时）
 	productURL   = "http://paas-shop-product:8081"
 	recommendURL = "http://paas-shop-recommend:8082"
 	chatbotURL   = "http://paas-shop-chatbot:8083"
@@ -63,7 +63,7 @@ func buildMux(events *eventRing) *http.ServeMux {
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		observ.MetricsHandler().ServeHTTP(w, r)
 	})
-	mux.HandleFunc("/api/products", proxy(productURL+"/products"))       // GET 列表
+	mux.HandleFunc("/api/products", proxy(productURL+"/products"))        // GET 列表
 	mux.HandleFunc("/api/products/", proxyPrefix(productURL+"/products")) // GET /{id}
 	mux.HandleFunc("/api/recommend", proxy(recommendURL+"/recommend"))    // GET 推荐
 	mux.HandleFunc("/api/chat", chatProxy)                                // POST SSE 透传

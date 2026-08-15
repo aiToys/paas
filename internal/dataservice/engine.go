@@ -4,8 +4,8 @@ import "context"
 
 // Engine 模式（决定实例形态与连接来源）。
 const (
-	EngineModeManaged          = "managed"           // 平台拉起独占实例（轻量引擎）
-	EngineModeExternalShared   = "external-shared"   // admin 配共享集群连接，用户复用（多租户共享集群）
+	EngineModeManaged           = "managed"            // 平台拉起独占实例（轻量引擎）
+	EngineModeExternalShared    = "external-shared"    // admin 配共享集群连接，用户复用（多租户共享集群）
 	EngineModeExternalDedicated = "external-dedicated" // 用户自填连接（独占外部实例）
 )
 
@@ -22,15 +22,15 @@ var validEngineModes = map[string]struct{}{
 //   - external-shared：DataService.Connection 复制 Engine.Connection（共享集群）+ 用户 logical name。
 //   - external-dedicated：用户填自己的连接。
 type Engine struct {
-	ID          string            `json:"id"`                    // milvus-shared / pg-managed / qdrant-managed
-	Kind        string            `json:"kind"`                  // db|cache|mq|storage|vector|search
-	Engine      string            `json:"engine"`                // postgres|milvus|qdrant|...
-	Label       string            `json:"label"`                 // 展示名「共享 Milvus 集群（生产）」
+	ID          string            `json:"id"`     // milvus-shared / pg-managed / qdrant-managed
+	Kind        string            `json:"kind"`   // db|cache|mq|storage|vector|search
+	Engine      string            `json:"engine"` // postgres|milvus|qdrant|...
+	Label       string            `json:"label"`  // 展示名「共享 Milvus 集群（生产）」
 	Description string            `json:"description,omitempty"`
-	Mode        string            `json:"mode"`                  // managed | external-shared | external-dedicated
-	Enabled     bool              `json:"enabled"`               // 对用户可见开关（false=仅 admin 可见）
-	Connection  map[string]string `json:"connection,omitempty"`  // external-shared：共享集群连接（admin 配）
-	Order       int               `json:"order,omitempty"`       // 展示排序（小→大）
+	Mode        string            `json:"mode"`                 // managed | external-shared | external-dedicated
+	Enabled     bool              `json:"enabled"`              // 对用户可见开关（false=仅 admin 可见）
+	Connection  map[string]string `json:"connection,omitempty"` // external-shared：共享集群连接（admin 配）
+	Order       int               `json:"order,omitempty"`      // 展示排序（小→大）
 }
 
 // EngineRepository 是 Engine 持久化接口（平台级，无租户隔离）。

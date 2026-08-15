@@ -1,9 +1,10 @@
 // handler.go Pipeline HTTP handler：Pipeline/Template CRUD + 权限 + 审计。
 //
 // 路由（composite 按路径分发，参照 devops handler 模式）：
-//   /api/applications/{id}/pipelines[/{pid}]  GET/POST/PUT/DELETE
-//   /api/pipeline-templates                     GET
-//   /api/pipelineruns[...]                      Task 12（run/approve/abort）
+//
+//	/api/applications/{id}/pipelines[/{pid}]  GET/POST/PUT/DELETE
+//	/api/pipeline-templates                     GET
+//	/api/pipelineruns[...]                      Task 12（run/approve/abort）
 //
 // 响应契约统一 {data:T}/{error:msg}（httputil.WriteData/WriteServiceError）；
 // 权限经 Authorize 注入（依赖倒置，cmd/core 桥接 gateway.Require）；
@@ -422,9 +423,7 @@ func (h *Handler) serveAdminTemplates(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			t.Builtin = false // admin 创建必为非 builtin（builtin 走代码发版）
-			if t.TenantID == "" && t.Kind == "" {
-				// 平台级公共模板：保持 tenant_id 空（store 不强制）
-			}
+			// 平台级公共模板（tenant 空）无需补租户：store 对平台预置不强制 tenant_id。
 			saved, err := h.templates.CreateTemplate(r.Context(), t)
 			if err != nil {
 				httputil.WriteServiceError(w, toHTTPStatus(err), err)
@@ -468,10 +467,11 @@ func (h *Handler) serveAdminTemplates(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveRuns 处理 /api/pipelineruns[/{id}[/stages/{idx}/approve|/abort]]。
-//   GET  /api/pipelineruns?appId=&pipelineId=&status=  列表
-//   GET  /api/pipelineruns/{id}                       详情
-//   POST /api/pipelineruns/{id}/stages/{idx}/approve  恢复 paused run
-//   POST /api/pipelineruns/{id}/abort                 终止 run
+//
+//	GET  /api/pipelineruns?appId=&pipelineId=&status=  列表
+//	GET  /api/pipelineruns/{id}                       详情
+//	POST /api/pipelineruns/{id}/stages/{idx}/approve  恢复 paused run
+//	POST /api/pipelineruns/{id}/abort                 终止 run
 func (h *Handler) serveRuns(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/pipelineruns")
 	rest = strings.Trim(rest, "/")

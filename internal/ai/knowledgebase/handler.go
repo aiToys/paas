@@ -19,7 +19,7 @@ const (
 )
 
 const (
-	maxUploadSize  = 32 << 20 // 文档上传上限 32MB
+	maxUploadSize  = 32 << 20        // 文档上传上限 32MB
 	processTimeout = 5 * time.Minute // 文档解析+embedding+入库 超时
 )
 
@@ -217,7 +217,7 @@ func (h *Handler) serveDocumentUpload(w http.ResponseWriter, r *http.Request, kb
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
-	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
+	if err := r.ParseMultipartForm(maxUploadSize); err != nil { //nolint:gosec // 已由 MaxBytesReader+ParseMultipartForm(maxUploadSize) 限界
 		httputil.WriteError(w, http.StatusBadRequest, "解析上传失败（上限 32MB）: "+err.Error())
 		return
 	}
@@ -226,7 +226,7 @@ func (h *Handler) serveDocumentUpload(w http.ResponseWriter, r *http.Request, kb
 		httputil.WriteError(w, http.StatusBadRequest, "missing file")
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	mime := header.Header.Get("Content-Type")
 	if mime == "" {
@@ -255,7 +255,7 @@ func (h *Handler) serveDocumentUpload(w http.ResponseWriter, r *http.Request, kb
 		return
 	}
 	// 异步解析+索引（goroutine 派生 baseCtx，进程退出 cancel）
-	go h.processDocument(kb, doc)
+	go h.processDocument(kb, doc) //nolint:gosec // 有意异步：文档解析耗时，请求 ctx 已结束
 	httputil.WriteDataCreated(w, doc)
 }
 
@@ -276,7 +276,7 @@ func (h *Handler) processDocument(kb KnowledgeBase, doc Document) {
 		_ = h.repo.UpdateDocumentStatus(context.WithoutCancel(ctx), doc.ID, DocStatusFailed, 0, "读取原文失败: "+err.Error())
 		return
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	content, err := Parse(doc.MIME, rc)
 	if err != nil {
 		_ = h.repo.UpdateDocumentStatus(context.WithoutCancel(ctx), doc.ID, DocStatusFailed, 0, "解析失败: "+err.Error())

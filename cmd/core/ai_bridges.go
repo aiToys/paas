@@ -68,7 +68,7 @@ func (s *qdrantVectorStore) do(ctx context.Context, method, path string, body an
 	}
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("qdrant %d: %s", resp.StatusCode, string(b))
 	}
 	return resp.Body, nil
@@ -87,7 +87,7 @@ func fnv64(s string) uint64 {
 func (s *qdrantVectorStore) EnsureCollection(ctx context.Context, collection string, dim int) error {
 	// 先 GET 判存在（幂等，避免重复 PUT 报 409）
 	if rc, err := s.do(ctx, "GET", "/collections/"+collection, nil); err == nil {
-		rc.Close()
+		_ = rc.Close()
 		return nil
 	}
 	body := map[string]any{"vectors": map[string]any{"size": dim, "distance": "Cosine"}}
@@ -95,7 +95,7 @@ func (s *qdrantVectorStore) EnsureCollection(ctx context.Context, collection str
 	if err != nil {
 		return err
 	}
-	rc.Close()
+	_ = rc.Close()
 	return nil
 }
 
@@ -114,7 +114,7 @@ func (s *qdrantVectorStore) UpsertVectors(ctx context.Context, collection string
 	if err != nil {
 		return err
 	}
-	rc.Close()
+	_ = rc.Close()
 	return nil
 }
 
@@ -134,7 +134,7 @@ func (s *qdrantVectorStore) Search(ctx context.Context, collection string, query
 	if err != nil {
 		return nil, err
 	}
-	defer rc.Close()
+	defer func() { _ = rc.Close() }()
 	var res qdrantSearchResult
 	if err := json.NewDecoder(rc).Decode(&res); err != nil {
 		return nil, fmt.Errorf("解析 qdrant 响应失败: %w", err)
@@ -155,7 +155,7 @@ func (s *qdrantVectorStore) DeletePoints(ctx context.Context, collection string,
 	if err != nil {
 		return err
 	}
-	rc.Close()
+	_ = rc.Close()
 	return nil
 }
 
@@ -164,7 +164,7 @@ func (s *qdrantVectorStore) DeleteCollection(ctx context.Context, collection str
 	if err != nil {
 		return err
 	}
-	rc.Close()
+	_ = rc.Close()
 	return nil
 }
 

@@ -53,8 +53,8 @@ func TestBuildTagNoArgsBackwardCompat(t *testing.T) {
 // 否则 registry 同 tag 互相覆盖，各 BuildRun 记的 digest 与实际拉取内容不一致。
 func TestBuildTagDifferentArgsProduceDifferentTag(t *testing.T) {
 	base := Params{Branch: "main", Commit: "abcdef1234567890"}
-	product := buildTag(Params(base).withArgs(map[string]string{"SERVICE": "product"}))
-	recommend := buildTag(Params(base).withArgs(map[string]string{"SERVICE": "recommend"}))
+	product := buildTag(base.withArgs(map[string]string{"SERVICE": "product"}))
+	recommend := buildTag(base.withArgs(map[string]string{"SERVICE": "recommend"}))
 	if product == recommend {
 		t.Fatalf("不同 buildArgs 应产出不同 tag（多服务区分），均得 %s", product)
 	}
@@ -66,10 +66,11 @@ func TestBuildTagDifferentArgsProduceDifferentTag(t *testing.T) {
 
 // TestBuildTagSameArgsIdempotent 同 buildArgs 重构产出相同 tag（幂等，不产生垃圾 tag）。
 func TestBuildTagSameArgsIdempotent(t *testing.T) {
-	args := map[string]string{"SERVICE": "product", "VERSION": "1"}
-	p := Params{Branch: "main", Commit: "abcdef12", BuildArgs: args}
-	if buildTag(p) != buildTag(p) {
-		t.Fatal("同 buildArgs 重构 tag 应一致（幂等）")
+	// 两次独立构造（等值 map 不同实例），tag 应一致（幂等，不产生垃圾 tag）。
+	p1 := Params{Branch: "main", Commit: "abcdef12", BuildArgs: map[string]string{"SERVICE": "product", "VERSION": "1"}}
+	p2 := Params{Branch: "main", Commit: "abcdef12", BuildArgs: map[string]string{"VERSION": "1", "SERVICE": "product"}}
+	if buildTag(p1) != buildTag(p2) {
+		t.Fatalf("同 buildArgs 重构 tag 应一致（幂等），got %s vs %s", buildTag(p1), buildTag(p2))
 	}
 }
 

@@ -191,4 +191,3 @@ func TestParseJaegerTraceEmptySpans(t *testing.T) {
 		t.Fatalf("空 span trace 解析错误: %+v hasErr=%v", tr, hasErr)
 	}
 }
-

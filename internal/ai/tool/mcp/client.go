@@ -86,7 +86,7 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 	if err != nil {
 		return nil, fmt.Errorf("%w: mcp 请求失败: %v", provider.ErrUpstreamUnavailable, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("%w: mcp server %d", provider.ErrUpstreamUnavailable, resp.StatusCode)
 	}
@@ -181,7 +181,7 @@ func (c *Client) Invoke(ctx context.Context, name string, args map[string]any) (
 
 // factory 缓存（按 serverURL+apiKey 复用 client，避免每调用重建）。
 var (
-	clientCache   sync.Map // key -> *Client
+	clientCache sync.Map // key -> *Client
 )
 
 // GetClient 按 serverURL+apiKey 取/建 client（缓存）。

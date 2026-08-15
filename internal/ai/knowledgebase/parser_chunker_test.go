@@ -49,7 +49,7 @@ func TestParseUnsupported(t *testing.T) {
 }
 
 func TestChunkTextSizeOverlap(t *testing.T) {
-	content := "0123456789" // 10 字符
+	content := "0123456789"            // 10 字符
 	chunks := ChunkText(content, 4, 2) // size=4 overlap=2 step=2
 	// 切片：[0:4]="0123" [2:6]="2345" [4:8]="4567" [6:10]="6789" [8:10]... end=10 break
 	// 实际：i=0 end=4 "0123"; i=2 end=6 "2345"; i=4 end=8 "4567"; i=6 end=10 "6789"; end=10 break

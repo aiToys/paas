@@ -24,13 +24,13 @@ type Channel struct {
 	Endpoint string `json:"endpoint,omitempty"` // 供应商 BaseURL（如 https://api.deepseek.com）
 	Vendor   string `json:"vendor,omitempty"`   // 供应商展示名（openai/deepseek/qwen，观测用）
 	// 第三方供应商通道配置（mock/echo 通道为零值）。
-	UpstreamModel string   `json:"upstreamModel,omitempty"` // 供应商侧模型名（deepseek-chat / qwen-plus / gpt-4o）
-	CredentialRef string   `json:"credentialRef,omitempty"` // 凭证引用（security 平台级 Secret ID）
+	UpstreamModel string `json:"upstreamModel,omitempty"` // 供应商侧模型名（deepseek-chat / qwen-plus / gpt-4o）
+	CredentialRef string `json:"credentialRef,omitempty"` // 凭证引用（security 平台级 Secret ID）
 	// VendorID 关联预设供应商（Vendor.ID）：非空时由 handler 从 Vendor 解析 BaseURL/CredentialRef/Vendor
 	// 回填到本通道字段（「选供应商自动带入」，免去每次创建通道手填 BaseURL+凭证）。
 	// 为空时通道仍可用自身的 Endpoint/CredentialRef 直填（向后兼容）。
-	VendorID      string   `json:"vendorId,omitempty"`
-	impl          Provider `json:"-"`                       // 实际执行者
+	VendorID string   `json:"vendorId,omitempty"`
+	impl     Provider `json:"-"` // 实际执行者
 }
 
 // Impl 返回通道绑定的 Provider。

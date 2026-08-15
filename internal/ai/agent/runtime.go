@@ -8,6 +8,11 @@ import (
 	"net/http"
 	"strings"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/aitoys/paas/internal/ai/guardrail"
 	"github.com/aitoys/paas/internal/ai/knowledgebase"
 	"github.com/aitoys/paas/internal/ai/prompt"
@@ -15,10 +20,6 @@ import (
 	"github.com/aitoys/paas/internal/ai/tool/mcp"
 	"github.com/aitoys/paas/internal/maas"
 	"github.com/aitoys/paas/pkg/provider"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/trace"
 )
 
 // tracer 是 Agent 运行的 OTel tracer（noop tracer 未接后端时无开销）。
@@ -223,7 +224,7 @@ func (r *Runtime) Run(ctx context.Context, agentID string, msgs []provider.Messa
 	)
 	defer span.End()
 	if r.promptLogEnabled {
-		log.Printf("[ai] agent=%s model=%s inputChars=%d", agentID, a.Model, totalChars(msgs))
+		log.Printf("[ai] agent=%s model=%s inputChars=%d", agentID, a.Model, totalChars(msgs)) //nolint:gosec // agentID/模型名来自 admin 配置实体
 	}
 
 	err = r.runLoop(ctx, p, a, msgs, onChunk)
@@ -363,7 +364,7 @@ func (r *Runtime) ServeSSE(w http.ResponseWriter, ctx context.Context, agentID s
 	w.Header().Set("X-Accel-Buffering", "no")
 	writeSSE := func(payload any) {
 		b, _ := json.Marshal(payload)
-		fmt.Fprintf(w, "data: %s\n\n", b)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
 		flusher.Flush()
 	}
 	writeSSE(map[string]any{"choices": []map[string]any{{"delta": map[string]string{"role": "assistant"}}}})

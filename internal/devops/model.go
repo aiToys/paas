@@ -74,19 +74,19 @@ const (
 
 // CodeRepo 是应用绑定的代码仓库（Git）。归属应用，一个应用可绑多个仓库。
 type CodeRepo struct {
-	ID           string    `json:"id"`
-	TenantID     string    `json:"tenantId,omitempty"` // ctx 写入，请求体忽略
-	AppID        string    `json:"appId"`
-	GitURL       string    `json:"gitUrl"`                 // external：用户填的外部 git URL；internal：Gitea 建仓后回填内网 clone URL
-	Branch       string    `json:"branch"`
-	Dockerfile   string    `json:"dockerfile"`
-	BuildContext string    `json:"buildContext"`
-	Status       string    `json:"status"`
+	ID           string `json:"id"`
+	TenantID     string `json:"tenantId,omitempty"` // ctx 写入，请求体忽略
+	AppID        string `json:"appId"`
+	GitURL       string `json:"gitUrl"` // external：用户填的外部 git URL；internal：Gitea 建仓后回填内网 clone URL
+	Branch       string `json:"branch"`
+	Dockerfile   string `json:"dockerfile"`
+	BuildContext string `json:"buildContext"`
+	Status       string `json:"status"`
 	// Source 标识仓库来源（internal/external）。空视为 external（兼容历史数据）。
-	Source     string    `json:"source"`
+	Source string `json:"source"`
 	// GiteaOwner/GiteaRepo 仅 internal 有效：内置 Gitea 的 owner/repo（owner 固定 paas-bot）。
-	GiteaOwner string    `json:"giteaOwner,omitempty"`
-	GiteaRepo  string    `json:"giteaRepo,omitempty"`
+	GiteaOwner string `json:"giteaOwner,omitempty"`
+	GiteaRepo  string `json:"giteaRepo,omitempty"`
 	// CloneURL 含凭证的 git clone URL（internal：含 paas-bot basic auth；external 空）。
 	// json:"-" 永不序列化到响应（防凭证泄漏前端）；builder 内部 Go 调用直接读此字段。
 	CloneURL  string    `json:"-"`
@@ -150,10 +150,10 @@ func validateExternalGitURL(raw string) error {
 // isMetadataHost 判定是否云元数据/回环等高敏地址（builder 不得主动连）。
 func isMetadataHost(host string) bool {
 	h := strings.ToLower(host)
-	switch {
-	case h == "169.254.169.254", h == "metadata", h == "metadata.google.internal":
+	switch h {
+	case "169.254.169.254", "metadata", "metadata.google.internal":
 		return true
-	case h == "127.0.0.1", h == "localhost", h == "::1":
+	case "127.0.0.1", "localhost", "::1":
 		return true
 	}
 	return false
@@ -179,20 +179,20 @@ func validateBranch(b string) error {
 // BuildRun 是一次构建运行。mock CI runner 创建后异步流转 pending->running->success，
 // 成功产出 Image（回填 ImageID）；失败/进行中 ImageID 为空。
 type BuildRun struct {
-	ID         string    `json:"id"`
-	TenantID   string    `json:"tenantId,omitempty"`
-	AppID      string    `json:"appId"`
-	RepoID     string    `json:"repoId"`
-	Trigger    string    `json:"trigger"`
-	Commit     string    `json:"commit"`
-	Branch     string    `json:"branch"`
-	Message    string    `json:"message"`
-	Status     string    `json:"status"`
-	ImageID    string    `json:"imageId,omitempty"`
-	Log        string    `json:"log,omitempty"`
+	ID         string            `json:"id"`
+	TenantID   string            `json:"tenantId,omitempty"`
+	AppID      string            `json:"appId"`
+	RepoID     string            `json:"repoId"`
+	Trigger    string            `json:"trigger"`
+	Commit     string            `json:"commit"`
+	Branch     string            `json:"branch"`
+	Message    string            `json:"message"`
+	Status     string            `json:"status"`
+	ImageID    string            `json:"imageId,omitempty"`
+	Log        string            `json:"log,omitempty"`
 	BuildArgs  map[string]string `json:"buildArgs,omitempty"`
-	StartedAt  time.Time `json:"startedAt"`
-	FinishedAt time.Time `json:"finishedAt,omitempty"`
+	StartedAt  time.Time         `json:"startedAt"`
+	FinishedAt time.Time         `json:"finishedAt,omitempty"`
 }
 
 // Image 是构建产物。digest 是不可变真源（生产部署锁这个），tag 可变。
@@ -227,9 +227,9 @@ type Release struct {
 	PreviousImageID string    `json:"previousImageId,omitempty"` // 回滚指针
 	IsRollback      bool      `json:"isRollback"`
 	PromotedFrom    string    `json:"promotedFrom,omitempty"` // 晋升来源 release ID（非空=由 promote 产生）
-	Version         string    `json:"version,omitempty"` // 发布版本号（release stage 写入点）
-	LaneID          string    `json:"laneId,omitempty"`      // 部署到的泳道（default=基线）
-	SourceRunID     string    `json:"sourceRunId,omitempty"` // 由哪次 pipeline run 部署（追溯）
+	Version         string    `json:"version,omitempty"`      // 发布版本号（release stage 写入点）
+	LaneID          string    `json:"laneId,omitempty"`       // 部署到的泳道（default=基线）
+	SourceRunID     string    `json:"sourceRunId,omitempty"`  // 由哪次 pipeline run 部署（追溯）
 	CreatedAt       time.Time `json:"createdAt"`
 	CreatedBy       string    `json:"createdBy"`
 }
@@ -237,16 +237,16 @@ type Release struct {
 // ReleaseInput 是创建发布的输入。编排（找/建 Workload + 更新镜像 + 记录回滚指针）由
 // ReleaseRepository.CreateRelease 内部完成，调用方只提供意图。
 type ReleaseInput struct {
-	AppID     string `json:"appId"`
-	EnvID     string `json:"envId"`
-	LaneID    string `json:"laneId,omitempty"` // 部署到的泳道（空=default 基线，向后兼容）
-	Service   string `json:"service,omitempty"` // 部署到的服务（同 app 多服务场景，如 paas-shop product/recommend/...）；空=单服务（向后兼容）
-	ImageID   string `json:"imageId"`
-	Strategy  string `json:"strategy"`
+	AppID    string `json:"appId"`
+	EnvID    string `json:"envId"`
+	LaneID   string `json:"laneId,omitempty"`  // 部署到的泳道（空=default 基线，向后兼容）
+	Service  string `json:"service,omitempty"` // 部署到的服务（同 app 多服务场景，如 paas-shop product/recommend/...）；空=单服务（向后兼容）
+	ImageID  string `json:"imageId"`
+	Strategy string `json:"strategy"`
 	// Port/ContainerPort 仅在「新建基线 Workload」时设定（驱动 reconciler 建 Service，供 smoke 探活/服务发现）。
 	// 复用既有 Workload 时忽略（端口属 Workload 既有配置）。0 = 不建 Service（向后兼容）。
-	Port          int `json:"port,omitempty"`
-	ContainerPort int `json:"containerPort,omitempty"`
+	Port          int    `json:"port,omitempty"`
+	ContainerPort int    `json:"containerPort,omitempty"`
 	CreatedBy     string `json:"-"` // handler 从身份 ctx 注入，非用户提交
 }
 

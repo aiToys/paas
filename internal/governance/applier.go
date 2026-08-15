@@ -72,8 +72,8 @@ func (r *ApplyRepo) CreateRoute(ctx context.Context, route Route) (Route, error)
 // UpdateRoute 装饰：写成功后投影。Host 变更时新旧 host 都需重建（旧 host 可能剩其他 Route，
 // 新 host 加入新 path），故对旧+新 host 分别 Apply（去重在 applier 内自然幂等）。
 func (r *ApplyRepo) UpdateRoute(ctx context.Context, route Route) (Route, error) {
-	old, _ := r.Repository.GetRoute(ctx, route.ID) // 取旧 Host（忽略错误：不存在则无旧 host 需重建）
-	saved, err := r.Repository.UpdateRoute(ctx, route)
+	old, _ := r.Repository.GetRoute(ctx, route.ID)     //nolint:staticcheck // 显式走被装饰的 Repository，避免自调用递归
+	saved, err := r.Repository.UpdateRoute(ctx, route) //nolint:staticcheck // 显式走被装饰的 Repository
 	if err != nil {
 		return saved, err
 	}
@@ -93,7 +93,7 @@ func (r *ApplyRepo) UpdateRoute(ctx context.Context, route Route) (Route, error)
 // DeleteRoute 装饰：删成功后重建该 host 聚合 Ingress（无剩余则删整条）。
 func (r *ApplyRepo) DeleteRoute(ctx context.Context, id string) error {
 	// 取被删 Route 的 Host + tenant（删之前取，删后 GetRoute not found）。
-	old, err := r.Repository.GetRoute(ctx, id)
+	old, err := r.Repository.GetRoute(ctx, id) //nolint:staticcheck // 显式走被装饰的 Repository
 	if err != nil {
 		return err // not found 直接返，与裸 Repository 语义一致
 	}

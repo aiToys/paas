@@ -13,11 +13,11 @@ type DataServiceSpec struct {
 	TenantID string            `json:"tenantId"`
 	AppID    string            `json:"appId,omitempty"`
 	EnvID    string            `json:"envId"`
-	Kind     string            `json:"kind"`           // db|cache|mq|storage|vector|search
-	Name     string            `json:"name"`           // 租户内唯一
-	Engine   string            `json:"engine"`         // postgres|redis|kafka|minio|qdrant|meilisearch|...
+	Kind     string            `json:"kind"`             // db|cache|mq|storage|vector|search
+	Name     string            `json:"name"`             // 租户内唯一
+	Engine   string            `json:"engine"`           // postgres|redis|kafka|minio|qdrant|meilisearch|...
 	Source   string            `json:"source,omitempty"` // managed（平台托管）| external（接入外部，不部署）
-	Spec     map[string]string `json:"spec,omitempty"` // 原始表单字段（version/size_gb/...）
+	Spec     map[string]string `json:"spec,omitempty"`   // 原始表单字段（version/size_gb/...）
 	// 实例浅管理字段（控制面下发，reconciler 据此调 STS）：
 	//   - Replicas：副本数，nil/0 默认 1（写 0 = 停，scale 0）；多副本集群/HA 留后续。
 	//   - CPU/Memory：覆盖默认 resources request（空 = defaultResources）。

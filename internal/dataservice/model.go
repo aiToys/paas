@@ -162,8 +162,8 @@ type DataService struct {
 	Kind     string            `json:"kind"`
 	Name     string            `json:"name"` // 租户内唯一
 	Spec     map[string]string `json:"spec"`
-	Status   string            `json:"status"` // creating | running | stopped
-	Source   string            `json:"source"` // managed（平台托管）| external（接入外部实例）；空=managed
+	Status   string            `json:"status"`             // creating | running | stopped
+	Source   string            `json:"source"`             // managed（平台托管）| external（接入外部实例）；空=managed
 	EngineID string            `json:"engineId,omitempty"` // 关联 Engine 目录（kind/engine/mode/connection 由其决定）
 	EnvID    string            `json:"envId"`
 	AppID    string            `json:"appId,omitempty"` // 可选预留（Add-on 绑定）

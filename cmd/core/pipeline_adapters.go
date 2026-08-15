@@ -77,7 +77,7 @@ type releaseBridge struct {
 	images    devops.ImageRepository
 	workloads workload.Repository
 	envs      environment.Repository
-	gitea     giteaTagger // 可选，nil 时 Publish 跳过 git tag（仅回填 Image.Version）
+	gitea     giteaTagger           // 可选，nil 时 Publish 跳过 git tag（仅回填 Image.Version）
 	status    workload.StatusReader // 可选，nil 时 PollWorkloadReady 透传 store 原 Ready（集群外降级）
 }
 
@@ -302,8 +302,8 @@ func promoteTargetTypeBridge(envs environment.Repository) pipeline.PromoteTarget
 // paramResolverBridge 桥接 pipeline.ParamResolver -> environment（按 app 租户查 type 环境）+ codeRepo（internal repo）。
 // 用于模板占位符 {{app.env.test}}/{{app.env.prod}}/{{app.repo}} 解析。
 type paramResolverBridge struct {
-	apps application.Repository
-	envs environment.Repository
+	apps  application.Repository
+	envs  environment.Repository
 	repos devops.CodeRepoRepository
 }
 

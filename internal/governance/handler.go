@@ -43,6 +43,7 @@ type EnvTypeResolver = environment.EnvTypeResolver
 //	POST   /api/breakers                              创建熔断器（governance:write）
 //	PUT    /api/breakers/{id}                         更新熔断器（governance:write）
 //	DELETE /api/breakers/{id}                         删除熔断器（governance:write）
+//
 // InstanceDiscoverer 从数据面（K8s Endpoints 真源）发现服务真实运行实例。
 // 未注入时服务详情回退到手动注册表（governance.Instance 表）。
 // 注入后：服务详情优先返数据面 ready 实例（readiness probe 驱动），

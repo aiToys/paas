@@ -9,13 +9,14 @@
 // Agent 可引用上文（如「总结我刚才的咨询」）。Pod 重启历史丢失（演示可接受；生产用 redis 持久化）。
 //
 // 环境变量：
-//   CORE_URL        core API 地址（如 http://paas-core.paas.svc，Service port=80）
-//   API_KEY         平台 API Key（程序化调用，绑 developer 角色）
-//   AGENT_MODEL     Agent 虚拟模型（如 agent:xxx）
-//   SHOP_BFF_URL    paas-shop bff 根 URL（配了调 /api/products + /api/recommend 多端点，产全链路流量）
-//   REC_SVC_URL     推荐服务 URL（兼容单端点；SHOP_BFF_URL 优先）
-//   MICRO_INTERVAL  微服务调用间隔秒（默认 600）
-//   AGENT_INTERVAL  Agent 调用间隔秒（默认 3600；AI 推理按次计费，默认 1h 控成本）
+//
+//	CORE_URL        core API 地址（如 http://paas-core.paas.svc，Service port=80）
+//	API_KEY         平台 API Key（程序化调用，绑 developer 角色）
+//	AGENT_MODEL     Agent 虚拟模型（如 agent:xxx）
+//	SHOP_BFF_URL    paas-shop bff 根 URL（配了调 /api/products + /api/recommend 多端点，产全链路流量）
+//	REC_SVC_URL     推荐服务 URL（兼容单端点；SHOP_BFF_URL 优先）
+//	MICRO_INTERVAL  微服务调用间隔秒（默认 600）
+//	AGENT_INTERVAL  Agent 调用间隔秒（默认 3600；AI 推理按次计费，默认 1h 控成本）
 package main
 
 import (

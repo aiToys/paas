@@ -33,9 +33,9 @@ const (
 // Namespace 是配置的逻辑隔离单元（租户内唯一名，不绑定物理环境）。
 type Namespace struct {
 	ID        string    `json:"id"`
-	TenantID  string    `json:"tenantId,omitempty"`   // ctx 写入，请求体忽略
-	Name      string    `json:"name"`                 // 租户内唯一
-	ServiceID string    `json:"serviceId,omitempty"`  // 关联 governance Service（可选，空=不关联）；双向显示用
+	TenantID  string    `json:"tenantId,omitempty"`  // ctx 写入，请求体忽略
+	Name      string    `json:"name"`                // 租户内唯一
+	ServiceID string    `json:"serviceId,omitempty"` // 关联 governance Service（可选，空=不关联）；双向显示用
 	Desc      string    `json:"desc,omitempty"`
 	UpdatedAt time.Time `json:"updatedAt"`
 }

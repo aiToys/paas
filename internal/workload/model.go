@@ -46,12 +46,12 @@ type Workload struct {
 	Schedule string `json:"schedule,omitempty"` // cronjob 专属 cron 表达式
 	Command  string `json:"command,omitempty"`  // 启动命令（可选）
 	// Port 是 Service 对外暴露端口（service 类型且 >0 时建 K8s Service，让其他 Pod 能 DNS 解析）。
-	Port          int       `json:"port,omitempty"`
-	ContainerPort int       `json:"containerPort,omitempty"` // Pod 监听端口；0 时取 Port
+	Port          int `json:"port,omitempty"`
+	ContainerPort int `json:"containerPort,omitempty"` // Pod 监听端口；0 时取 Port
 	// Domain 是对外暴露域名（service 类型且非空时，reconciler 自动建 Ingress，host=Domain -> Service:Port）。
 	// 让平台用户经「工作负载 spec.domain」声明应用域名，无需手写 Ingress yaml。
-	Domain        string    `json:"domain,omitempty"`
-	CreatedAt     time.Time `json:"createdAt"`
+	Domain    string    `json:"domain,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // LaneDefault 是基线泳道的标识。基线 = 环境内稳定默认部署（每应用每环境唯一）。
@@ -91,14 +91,14 @@ func errInvalid(field string) error { return fieldErr{field: field} }
 // 数据面（K8s）为真源：StatusReader.Instances 查 Pod label paas.aitoys/workload=<id> 回填。
 // 非集群部署（无 clientset）返空切片（降级，与 List 状态回填同构）。
 type Instance struct {
-	Name      string    `json:"name"`               // Pod 名
-	Status    string    `json:"status"`             // Pending/Running/Succeeded/Failed/Unknown
-	Ready     string    `json:"ready,omitempty"`    // "1/1" 就绪/总数容器
-	Restarts  int       `json:"restarts"`           // 重启次数（ Containers 重启次数合计）
-	Node      string    `json:"node,omitempty"`     // 调度到的节点
-	IP        string    `json:"ip,omitempty"`       // Pod IP
+	Name      string    `json:"name"`                // Pod 名
+	Status    string    `json:"status"`              // Pending/Running/Succeeded/Failed/Unknown
+	Ready     string    `json:"ready,omitempty"`     // "1/1" 就绪/总数容器
+	Restarts  int       `json:"restarts"`            // 重启次数（ Containers 重启次数合计）
+	Node      string    `json:"node,omitempty"`      // 调度到的节点
+	IP        string    `json:"ip,omitempty"`        // Pod IP
 	StartedAt time.Time `json:"startedAt,omitempty"` // 启动时间
-	Message   string    `json:"message,omitempty"`  // 状态原因/事件（Pending/Failed 时有意义）
+	Message   string    `json:"message,omitempty"`   // 状态原因/事件（Pending/Failed 时有意义）
 }
 
 // Detail 是工作负载详情（GET /api/workloads/{id}）：期望态 + 实际运行实例聚合。

@@ -60,7 +60,7 @@ func (s *Store) namespace(tid string) string {
 
 // dsCols 与 model.DataService 字段顺序对齐（scan 列顺序必须一致）。
 // spec/connection 均为 JSONB map[string]string，分别对应 DataService.Spec / Connection。
-// 末尾列：实例浅管理字段（replicas 可空，cpu/memory/image NOT NULL DEFAULT ''，storage_gb DEFAULT 0）+
+// 末尾列：实例浅管理字段（replicas 可空，cpu/memory/image NOT NULL DEFAULT ”，storage_gb DEFAULT 0）+
 // source（managed|external，DEFAULT 'managed'）。
 const dsCols = `id, tenant_id, kind, name, spec, connection, status, source, engine_id, env_id, app_id, created_at, updated_at, replicas, cpu, memory, storage_gb, image`
 

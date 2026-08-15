@@ -30,7 +30,7 @@ var (
 	ErrRepoNotFound     = errors.New("仓库不存在")
 	ErrRepoExists       = errors.New("仓库已存在")
 	ErrUnauthorized     = errors.New("gitea 鉴权失败")
-	ErrMergeConflict     = errors.New("合并冲突，请手动解决")
+	ErrMergeConflict    = errors.New("合并冲突，请手动解决")
 )
 
 // Client 调 Gitea REST API（/api/v1）。baseURL 形如 http://gitea.paas.svc.cluster.local:3000。
@@ -94,11 +94,11 @@ type TreeNode struct {
 
 // FileContent 是单文件内容（contents API）。
 type FileContent struct {
-	Name    string `json:"name"`
-	Path    string `json:"path"`
-	Content string `json:"content"` // base64 编码
+	Name     string `json:"name"`
+	Path     string `json:"path"`
+	Content  string `json:"content"` // base64 编码
 	Encoding string `json:"encoding"`
-	Size    int64  `json:"size"`
+	Size     int64  `json:"size"`
 }
 
 // CreateRepo 在 paas-bot（owner = username）名下创建仓库。已存在返 ErrRepoExists。
@@ -137,8 +137,8 @@ func (c *Client) ListCommits(ctx context.Context, owner, name string, limit int)
 	}
 	p := fmt.Sprintf("/api/v1/repos/%s/%s/commits?limit=%d", pathEscape(owner), pathEscape(name), limit)
 	var raw []struct {
-		SHA     string `json:"sha"`
-		Commit  struct {
+		SHA    string `json:"sha"`
+		Commit struct {
 			Message string `json:"message"`
 			Author  struct {
 				Name string `json:"name"`
@@ -173,8 +173,8 @@ func (c *Client) GetTree(ctx context.Context, owner, name, ref string) ([]TreeNo
 	}
 	p := fmt.Sprintf("/api/v1/repos/%s/%s/git/trees/%s?recursive=1", pathEscape(owner), pathEscape(name), pathEscape(ref))
 	var resp struct {
-		Tree []TreeNode `json:"tree"`
-		Truncated bool   `json:"truncated"`
+		Tree      []TreeNode `json:"tree"`
+		Truncated bool       `json:"truncated"`
 	}
 	if err := c.doJSON(ctx, http.MethodGet, p, nil, &resp); err != nil {
 		return nil, err
@@ -230,7 +230,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 		// 网络不可达/超时 -> 降级标记
 		return fmt.Errorf("%w: %v", ErrGiteaUnavailable, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusCreated:
@@ -352,7 +352,7 @@ func (c *Client) doMerge(ctx context.Context, path string, body any) error {
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrGiteaUnavailable, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusCreated:
 		return nil

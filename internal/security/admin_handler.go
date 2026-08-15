@@ -16,8 +16,8 @@ import (
 	"net/http"
 	"strings"
 
-	adminutil "github.com/aitoys/paas/internal/web/admin"
 	"github.com/aitoys/paas/internal/httputil"
+	adminutil "github.com/aitoys/paas/internal/web/admin"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 

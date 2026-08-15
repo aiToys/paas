@@ -94,7 +94,7 @@ func (a *K8sApplier) EnsureIfMissing(ctx context.Context, w workload.Workload) (
 	}
 	ns := tenant.Namespace(w.TenantID)
 	var existing v1alpha1.Workload
-	err := a.Client.Get(ctx, client.ObjectKey{Name: w.ID, Namespace: ns}, &existing)
+	err := a.Get(ctx, client.ObjectKey{Name: w.ID, Namespace: ns}, &existing)
 	if err == nil {
 		// CRD 已存在：跳过，绝不覆盖既有运行态
 		return false, nil

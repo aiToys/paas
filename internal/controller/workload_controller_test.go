@@ -235,7 +235,7 @@ func TestReconcileServiceCreatesService(t *testing.T) {
 		t.Fatalf("container 应有 TCP readiness probe")
 	}
 	// service + port>0 应注入 Prometheus 自动发现注解（抓业务端口 /metrics，应用级 RED 指标数据源）
-	ann := dep.Spec.Template.ObjectMeta.Annotations
+	ann := dep.Spec.Template.Annotations
 	if ann["prometheus.io/scrape"] != "true" || ann["prometheus.io/port"] != "8080" || ann["prometheus.io/path"] != "/metrics" {
 		t.Fatalf("service Pod 应注 prometheus.io/scrape|port|path 注解, 实际 %v", ann)
 	}
@@ -260,7 +260,7 @@ func TestReconcileServiceNoPortSkipsService(t *testing.T) {
 	// port=0 不注 prometheus 注解（无业务端口可抓）
 	var dep appsv1.Deployment
 	_ = cl.Get(context.Background(), types.NamespacedName{Name: "wl-noport", Namespace: "default"}, &dep)
-	if a := dep.Spec.Template.ObjectMeta.Annotations; a != nil && a["prometheus.io/scrape"] == "true" {
+	if a := dep.Spec.Template.Annotations; a != nil && a["prometheus.io/scrape"] == "true" {
 		t.Fatalf("Port=0 不应注 prometheus.io/scrape, 实际 %v", a)
 	}
 }

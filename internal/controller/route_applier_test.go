@@ -41,7 +41,7 @@ func seedSvc(t *testing.T, store *govmemory.Store, tid, name string, port int) s
 func getIngress(applier *K8sRouteApplier, tid, host string) (*networkingv1.Ingress, error) {
 	ns := tenant.Namespace(tid)
 	ing := &networkingv1.Ingress{}
-	err := applier.Client.Get(context.Background(),
+	err := applier.Get(context.Background(),
 		types.NamespacedName{Name: "route-" + tenant.SanitizeName(host), Namespace: ns}, ing)
 	return ing, err
 }
@@ -91,8 +91,8 @@ func TestRouteApplierMultiRouteSameHostAggregates(t *testing.T) {
 	bff := seedSvc(t, store, tid, "bff", 8080)
 	product := seedSvc(t, store, tid, "product", 8081)
 
-	store.CreateRoute(ctx, governance.Route{Name: "r1", Host: "shop.local", Path: "/api", ServiceID: bff, Methods: []string{"GET"}, Enabled: true})
-	store.CreateRoute(ctx, governance.Route{Name: "r2", Host: "shop.local", Path: "/products", ServiceID: product, Methods: []string{"GET"}, Enabled: true})
+	_, _ = store.CreateRoute(ctx, governance.Route{Name: "r1", Host: "shop.local", Path: "/api", ServiceID: bff, Methods: []string{"GET"}, Enabled: true})
+	_, _ = store.CreateRoute(ctx, governance.Route{Name: "r2", Host: "shop.local", Path: "/products", ServiceID: product, Methods: []string{"GET"}, Enabled: true})
 
 	if err := applier.Apply(ctx, tid, "shop.local"); err != nil {
 		t.Fatalf("Apply: %v", err)
@@ -112,12 +112,12 @@ func TestRouteApplierNoEnabledRouteDeletesIngress(t *testing.T) {
 	tid := "t-acme"
 	ctx := tenant.WithTenant(context.Background(), tid)
 	svcID := seedSvc(t, store, tid, "bff", 8080)
-	store.CreateRoute(ctx, governance.Route{Name: "r1", Host: "shop.local", Path: "/api", ServiceID: svcID, Methods: []string{"GET"}, Enabled: true})
+	_, _ = store.CreateRoute(ctx, governance.Route{Name: "r1", Host: "shop.local", Path: "/api", ServiceID: svcID, Methods: []string{"GET"}, Enabled: true})
 
-	applier.Apply(ctx, tid, "shop.local") // 先建
+	_ = applier.Apply(ctx, tid, "shop.local") // 先建
 	// 禁用该 Route（Enabled=false）→ 重建应删 Ingress。
 	r, _ := store.ListRoutes(ctx, "")
-	store.UpdateRoute(ctx, governance.Route{ID: r[0].ID, Name: "r1", Host: "shop.local", Path: "/api", ServiceID: svcID, Methods: []string{"GET"}, Enabled: false})
+	_, _ = store.UpdateRoute(ctx, governance.Route{ID: r[0].ID, Name: "r1", Host: "shop.local", Path: "/api", ServiceID: svcID, Methods: []string{"GET"}, Enabled: false})
 
 	if err := applier.Apply(ctx, tid, "shop.local"); err != nil {
 		t.Fatalf("Apply: %v", err)
@@ -145,8 +145,8 @@ func TestRouteApplierServiceNotFoundSkipsPath(t *testing.T) {
 	ctx := tenant.WithTenant(context.Background(), tid)
 	bff := seedSvc(t, store, tid, "bff", 8080)
 	// 一条正常 + 一条指向不存在的 service。
-	store.CreateRoute(ctx, governance.Route{Name: "r1", Host: "shop.local", Path: "/api", ServiceID: bff, Methods: []string{"GET"}, Enabled: true})
-	store.CreateRoute(ctx, governance.Route{Name: "r2", Host: "shop.local", Path: "/bad", ServiceID: "no-such-svc", Methods: []string{"GET"}, Enabled: true})
+	_, _ = store.CreateRoute(ctx, governance.Route{Name: "r1", Host: "shop.local", Path: "/api", ServiceID: bff, Methods: []string{"GET"}, Enabled: true})
+	_, _ = store.CreateRoute(ctx, governance.Route{Name: "r2", Host: "shop.local", Path: "/bad", ServiceID: "no-such-svc", Methods: []string{"GET"}, Enabled: true})
 
 	if err := applier.Apply(ctx, tid, "shop.local"); err != nil {
 		t.Fatalf("Service 不存在应跳过不报错: %v", err)
@@ -166,7 +166,7 @@ func TestRouteApplierIdempotent(t *testing.T) {
 	tid := "t-acme"
 	ctx := tenant.WithTenant(context.Background(), tid)
 	svcID := seedSvc(t, store, tid, "bff", 8080)
-	store.CreateRoute(ctx, governance.Route{Name: "r1", Host: "shop.local", Path: "/api", ServiceID: svcID, Methods: []string{"GET"}, Enabled: true})
+	_, _ = store.CreateRoute(ctx, governance.Route{Name: "r1", Host: "shop.local", Path: "/api", ServiceID: svcID, Methods: []string{"GET"}, Enabled: true})
 
 	for i := 0; i < 3; i++ {
 		if err := applier.Apply(ctx, tid, "shop.local"); err != nil {
@@ -185,7 +185,7 @@ func TestRouteApplierDeleteEqualsRebuild(t *testing.T) {
 	tid := "t-acme"
 	ctx := tenant.WithTenant(context.Background(), tid)
 	bff := seedSvc(t, store, tid, "bff", 8080)
-	store.CreateRoute(ctx, governance.Route{Name: "r1", Host: "shop.local", Path: "/api", ServiceID: bff, Methods: []string{"GET"}, Enabled: true})
+	_, _ = store.CreateRoute(ctx, governance.Route{Name: "r1", Host: "shop.local", Path: "/api", ServiceID: bff, Methods: []string{"GET"}, Enabled: true})
 
 	// Delete 调用前 Route 仍在 → Delete(=Apply) 会重建（保留 Ingress，因为 Route 还在）。
 	if err := applier.Delete(ctx, tid, "shop.local"); err != nil {

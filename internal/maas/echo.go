@@ -53,7 +53,7 @@ func (EchoProvider) Embed(_ context.Context, texts []string) ([][]float32, error
 		// 简单 FNV-1a 派生：文本内容决定向量值，便于测试区分不同输入
 		var h uint32 = 2166136261
 		for _, c := range t {
-			h ^= uint32(c)
+			h ^= uint32(c) //nolint:gosec // 确定性 mock hash，输入为模型/文本 rune，溢出即哈希语义
 			h *= 16777619
 		}
 		for j := range v {

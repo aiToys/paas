@@ -16,7 +16,7 @@ type stubRepo struct {
 	apps []Application
 }
 
-func (s *stubRepo) List(context.Context) ([]Application, error) { return s.apps, nil }
+func (s *stubRepo) List(context.Context) ([]Application, error)    { return s.apps, nil }
 func (s *stubRepo) ListAll(context.Context) ([]Application, error) { return s.apps, nil }
 func (s *stubRepo) Get(_ context.Context, id string) (Application, error) {
 	for _, a := range s.apps {

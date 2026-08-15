@@ -257,7 +257,7 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 		}
 		var tail int64
 		if t := r.URL.Query().Get("tail"); t != "" {
-			fmt.Sscanf(t, "%d", &tail)
+			_, _ = fmt.Sscanf(t, "%d", &tail)
 		}
 		if tail <= 0 {
 			tail = 1000 // 默认最近 1000 行，避免全量拉爆内存
@@ -268,7 +268,7 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
-		defer rc.Close()
+		defer func() { _ = rc.Close() }()
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		// 禁缓冲：日志可能较大，边读边写。
 		w.Header().Set("X-Accel-Buffering", "no")

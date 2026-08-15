@@ -46,8 +46,8 @@ type EvalResult struct {
 	CaseID     string `json:"caseId"`
 	Name       string `json:"name"`
 	Passed     bool   `json:"passed"`
-	Output     string `json:"output"`     // Agent 实际输出
-	Reason     string `json:"reason"`      // 失败原因（Passed=false 时）
+	Output     string `json:"output"` // Agent 实际输出
+	Reason     string `json:"reason"` // 失败原因（Passed=false 时）
 	DurationMs int64  `json:"durationMs"`
 }
 

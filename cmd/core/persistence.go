@@ -14,21 +14,21 @@ import (
 	"os"
 	"strings"
 
-	"github.com/aitoys/paas/internal/ai/knowledgebase"
-	kbmemory "github.com/aitoys/paas/internal/ai/knowledgebase/memory"
-	kbpg "github.com/aitoys/paas/internal/ai/knowledgebase/pg"
-	"github.com/aitoys/paas/internal/ai/tool"
-	toolmemory "github.com/aitoys/paas/internal/ai/tool/memory"
-	toolpg "github.com/aitoys/paas/internal/ai/tool/pg"
-	"github.com/aitoys/paas/internal/ai/prompt"
-	promptmemory "github.com/aitoys/paas/internal/ai/prompt/memory"
-	promptpg "github.com/aitoys/paas/internal/ai/prompt/pg"
 	"github.com/aitoys/paas/internal/ai/agent"
 	agentmemory "github.com/aitoys/paas/internal/ai/agent/memory"
 	agentpg "github.com/aitoys/paas/internal/ai/agent/pg"
 	"github.com/aitoys/paas/internal/ai/eval"
 	evalmemory "github.com/aitoys/paas/internal/ai/eval/memory"
 	evalpg "github.com/aitoys/paas/internal/ai/eval/pg"
+	"github.com/aitoys/paas/internal/ai/knowledgebase"
+	kbmemory "github.com/aitoys/paas/internal/ai/knowledgebase/memory"
+	kbpg "github.com/aitoys/paas/internal/ai/knowledgebase/pg"
+	"github.com/aitoys/paas/internal/ai/prompt"
+	promptmemory "github.com/aitoys/paas/internal/ai/prompt/memory"
+	promptpg "github.com/aitoys/paas/internal/ai/prompt/pg"
+	"github.com/aitoys/paas/internal/ai/tool"
+	toolmemory "github.com/aitoys/paas/internal/ai/tool/memory"
+	toolpg "github.com/aitoys/paas/internal/ai/tool/pg"
 	"github.com/aitoys/paas/internal/appconfig"
 	appcfgmemory "github.com/aitoys/paas/internal/appconfig/memory"
 	appcfgpg "github.com/aitoys/paas/internal/appconfig/pg"
@@ -117,8 +117,8 @@ type Stores struct {
 // 横切依赖：devops store 依赖 workload.Repository（Release 编排找/建/更新 Workload），
 // 两路径下注入的 workload store 与 wlHandler 共享同一实例（用量/编排真源唯一）。
 func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(), error) {
-	devopsPipeline := newDevOpsPipeline(appliers)                           // PAAS_DEVOPS_BUILDER 选 k8s/process/mock
-	nsResolver := envNamespaceResolver{} // 数据服务连接 FQDN 用，按租户派生 ns
+	devopsPipeline := newDevOpsPipeline(appliers) // PAAS_DEVOPS_BUILDER 选 k8s/process/mock
+	nsResolver := envNamespaceResolver{}          // 数据服务连接 FQDN 用，按租户派生 ns
 	if dsn := os.Getenv("PAAS_DB_URL"); dsn != "" {
 		db, err := storagepg.Open(ctx, dsn)
 		if err != nil {

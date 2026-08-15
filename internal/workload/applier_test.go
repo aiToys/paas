@@ -16,7 +16,7 @@ type fakeRepo struct {
 func (f *fakeRepo) List(ctx context.Context, envID, appID, laneID, wtype, service string) ([]Workload, error) {
 	return nil, nil
 }
-func (f *fakeRepo) ListAll(ctx context.Context) ([]Workload, error) { return nil, nil }
+func (f *fakeRepo) ListAll(ctx context.Context) ([]Workload, error)      { return nil, nil }
 func (f *fakeRepo) Get(ctx context.Context, id string) (Workload, error) { return Workload{}, nil }
 func (f *fakeRepo) Create(ctx context.Context, w Workload) error {
 	if f.createErr != nil {
@@ -50,6 +50,7 @@ func (a *fakeApplier) Apply(ctx context.Context, w Workload) error {
 	a.applied = append(a.applied, w)
 	return nil
 }
+
 // EnsureIfMissing 测试桩：视为 CRD 总不存在，走 Apply 补建并报 created=true。
 func (a *fakeApplier) EnsureIfMissing(ctx context.Context, w Workload) (bool, error) {
 	a.applied = append(a.applied, w)

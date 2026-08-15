@@ -55,11 +55,11 @@ func TestMatchesTemplateTable(t *testing.T) {
 	}{
 		{"/api/applications/{id}", "/api/applications/app-1", true},
 		{"/api/applications", "/api/applications", true},
-		{"/api/applications/{id}", "/api/applications", false},      // 段数不等
-		{"/api/applications/{id}", "/api/applications/a/b", false},  // 段数不等
-		{"/v1/chat/completions", "/v1/chat/completions", true},      // 字面全对齐
-		{"/v1/chat/completions", "/v1/chat/other", false},           // 字面段不匹配
-		{"/api/{owner}/{repo}", "/api/foo/bar", true},               // 多占位
+		{"/api/applications/{id}", "/api/applications", false},     // 段数不等
+		{"/api/applications/{id}", "/api/applications/a/b", false}, // 段数不等
+		{"/v1/chat/completions", "/v1/chat/completions", true},     // 字面全对齐
+		{"/v1/chat/completions", "/v1/chat/other", false},          // 字面段不匹配
+		{"/api/{owner}/{repo}", "/api/foo/bar", true},              // 多占位
 	}
 	for _, c := range cases {
 		if got := matchesTemplate(c.tmpl, c.actual); got != c.want {

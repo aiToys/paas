@@ -27,13 +27,13 @@ type InstanceReader interface {
 
 // PodInfo 是数据服务的一个运行实例（Pod 级），用于依赖资源排障。对齐 workload.Instance 字段语义。
 type PodInfo struct {
-	Name     string `json:"name"`            // Pod 名
-	Status   string `json:"status"`          // Pending/Running/Failed/Unknown
-	Ready    string `json:"ready,omitempty"` // "1/1"
-	Restarts int    `json:"restarts"`        // 重启次数
-	Node     string `json:"node,omitempty"`  // 节点
-	IP       string `json:"ip,omitempty"`    // Pod IP
-	Age      string `json:"age,omitempty"`   // 启动至今时长（人类可读）
+	Name     string `json:"name"`              // Pod 名
+	Status   string `json:"status"`            // Pending/Running/Failed/Unknown
+	Ready    string `json:"ready,omitempty"`   // "1/1"
+	Restarts int    `json:"restarts"`          // 重启次数
+	Node     string `json:"node,omitempty"`    // 节点
+	IP       string `json:"ip,omitempty"`      // Pod IP
+	Age      string `json:"age,omitempty"`     // 启动至今时长（人类可读）
 	Message  string `json:"message,omitempty"` // 状态原因
 }
 
@@ -92,19 +92,27 @@ func NewAdminHandler(repo Repository, opts ...AdminHandlerOpt) *AdminHandler {
 }
 
 // WithAdminInstances 注入实例读取器（读 K8s Endpoints）。
-func WithAdminInstances(r InstanceReader) AdminHandlerOpt { return func(h *AdminHandler) { h.instances = r } }
+func WithAdminInstances(r InstanceReader) AdminHandlerOpt {
+	return func(h *AdminHandler) { h.instances = r }
+}
 
 // WithAdminRestarter 注入实例滚动重启器。
-func WithAdminRestarter(r Restarter) AdminHandlerOpt { return func(h *AdminHandler) { h.restarter = r } }
+func WithAdminRestarter(r Restarter) AdminHandlerOpt {
+	return func(h *AdminHandler) { h.restarter = r }
+}
 
 // WithAdminQuota 注入配额检查（消耗目标租户 dataservices 维度）。
 func WithAdminQuota(f QuotaCheckFunc) AdminHandlerOpt { return func(h *AdminHandler) { h.quota = f } }
 
 // WithAdminAudit 注入审计 recorder。
-func WithAdminAudit(a AdminAuditRecorder) AdminHandlerOpt { return func(h *AdminHandler) { h.audit = a } }
+func WithAdminAudit(a AdminAuditRecorder) AdminHandlerOpt {
+	return func(h *AdminHandler) { h.audit = a }
+}
 
 // WithAdminTenants 注入租户校验器。
-func WithAdminTenants(c TenantChecker) AdminHandlerOpt { return func(h *AdminHandler) { h.tenants = c } }
+func WithAdminTenants(c TenantChecker) AdminHandlerOpt {
+	return func(h *AdminHandler) { h.tenants = c }
+}
 
 // WithAdminActor 注入 actor 提取器（取 super_admin UserID 作审计 actor）。
 func WithAdminActor(f func(*http.Request) string) AdminHandlerOpt {
@@ -112,7 +120,9 @@ func WithAdminActor(f func(*http.Request) string) AdminHandlerOpt {
 }
 
 // WithAdminEngineRepo 注入引擎目录（代建按 engineId 解析）。
-func WithAdminEngineRepo(r EngineRepository) AdminHandlerOpt { return func(h *AdminHandler) { h.engineRepo = r } }
+func WithAdminEngineRepo(r EngineRepository) AdminHandlerOpt {
+	return func(h *AdminHandler) { h.engineRepo = r }
+}
 
 // ServeHTTP 按路径分发 admin 请求。
 func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

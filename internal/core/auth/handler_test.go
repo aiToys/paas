@@ -141,7 +141,7 @@ func TestMeFromCookie(t *testing.T) {
 	}, hSecret)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/auth/users/me", nil)
-	req.AddCookie(&http.Cookie{Name: AccessCookieName, Value: tok})
+	req.AddCookie(&http.Cookie{Name: AccessCookieName, Value: tok}) //nolint:gosec // 测试场景，Secure 由 PAAS_COOKIE_SECURE 控制
 	rec := httptest.NewRecorder()
 	h.Me(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)

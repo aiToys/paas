@@ -22,8 +22,8 @@ import (
 type dsBindingInjector struct {
 	dsRepo  dataservice.Repository
 	cfgRepo appconfig.Repository
-	appRepo application.Repository // 查应用剩余绑定，解绑时重新注入同 Kind 连接（避免误删仍需的 key）
-	idb     identity.Repository    // 模型绑定时创建应用级 API Key（用量归因到应用）
+	appRepo application.Repository   // 查应用剩余绑定，解绑时重新注入同 Kind 连接（避免误删仍需的 key）
+	idb     identity.Repository      // 模型绑定时创建应用级 API Key（用量归因到应用）
 	kbRepo  knowledgebase.Repository // 知识库绑定时注入 KB_ID/API_BASE
 }
 
@@ -40,7 +40,7 @@ func isDataserviceKind(t string) bool {
 
 // 模型绑定注入的固定 appconfig key（与数据服务连接 key 同维，TypeSecret）。
 const (
-	cfgKeyLLMAPIKey = "PAAS_LLM_API_KEY"  // 应用级 API Key 明文（调平台 /v1 用）
+	cfgKeyLLMAPIKey = "PAAS_LLM_API_KEY"  /* 应用级 API Key 明文（调平台 /v1 用）；env 变量名非凭证值 */ //nolint:gosec
 	cfgKeyLLMBase   = "PAAS_LLM_BASE_URL" // 平台推理 gateway URL
 )
 

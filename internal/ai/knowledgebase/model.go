@@ -33,11 +33,11 @@ type KnowledgeBase struct {
 	ID              string          `json:"id"`
 	TenantID        string          `json:"tenantId,omitempty"` // ctx 写入，请求体忽略
 	AppID           string          `json:"appId,omitempty"`    // 可选（绑定应用）
-	Name            string          `json:"name"`                // 租户内唯一
-	VectorStoreRef  string          `json:"vectorStoreRef"`      // dataservice vector 实例 ID
-	ObjectStoreRef  string          `json:"objectStoreRef"`      // dataservice storage 实例 ID
-	EmbeddingModel  string          `json:"embeddingModel"`      // MaaS model id（Capabilities 含 "embedding"）
-	EmbeddingDim    int             `json:"embeddingDim"`        // 向量维度（EnsureCollection 用，与模型对齐）
+	Name            string          `json:"name"`               // 租户内唯一
+	VectorStoreRef  string          `json:"vectorStoreRef"`     // dataservice vector 实例 ID
+	ObjectStoreRef  string          `json:"objectStoreRef"`     // dataservice storage 实例 ID
+	EmbeddingModel  string          `json:"embeddingModel"`     // MaaS model id（Capabilities 含 "embedding"）
+	EmbeddingDim    int             `json:"embeddingDim"`       // 向量维度（EnsureCollection 用，与模型对齐）
 	RetrieverConfig RetrieverConfig `json:"retrieverConfig,omitempty"`
 	CreatedAt       time.Time       `json:"createdAt"`
 	UpdatedAt       time.Time       `json:"updatedAt"`
@@ -78,10 +78,10 @@ type Document struct {
 	TenantID   string            `json:"tenantId,omitempty"`
 	Name       string            `json:"name"`
 	MIME       string            `json:"mime"`
-	Status     string            `json:"status"` // parsing | indexed | failed
-	ObjectKey  string            `json:"objectKey"`  // minio key（{kbID}/{docID}/{filename}）
+	Status     string            `json:"status"`    // parsing | indexed | failed
+	ObjectKey  string            `json:"objectKey"` // minio key（{kbID}/{docID}/{filename}）
 	ChunkCount int               `json:"chunkCount"`
-	Message    string            `json:"message,omitempty"` // failed 时错误原因
+	Message    string            `json:"message,omitempty"`  // failed 时错误原因
 	Metadata   map[string]string `json:"metadata,omitempty"` // {source,page,size,...}
 	CreatedAt  time.Time         `json:"createdAt"`
 }

@@ -22,6 +22,6 @@ const (
 
 // Annotation key（不进 selector，可变更，不触发 Pod 重建）。
 const (
-	KeyRestartedAt = Domain + "/restarted-at"  // 触发 STS 滚动重建（值变化 → Pod 重建）
-	KeyDisplayName = Domain + "/display-name"  // 用户起的展示名（kubectl describe 直观辨认）
+	KeyRestartedAt = Domain + "/restarted-at" // 触发 STS 滚动重建（值变化 → Pod 重建）
+	KeyDisplayName = Domain + "/display-name" // 用户起的展示名（kubectl describe 直观辨认）
 )

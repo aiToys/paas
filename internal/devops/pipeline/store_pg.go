@@ -516,7 +516,7 @@ func (s *pgStore) ListTemplates(ctx context.Context) ([]PipelineTemplate, error)
 }
 
 // GetTemplate 取单个。平台预置（tenant_id IS NULL）跨租户可见；租户自定义跨租户 NotFound。
-// 无租户 ctx（平台级 seed 升级路径）仅可访问平台预置（tid="" 时 SQL tenant_id='' 不匹配租户自定义）。
+// 无租户 ctx（平台级 seed 升级路径）仅可访问平台预置（tid="" 时 SQL tenant_id=” 不匹配租户自定义）。
 func (s *pgStore) GetTemplate(ctx context.Context, id string) (PipelineTemplate, error) {
 	tid, _ := tenant.TenantFrom(ctx)
 	var t PipelineTemplate

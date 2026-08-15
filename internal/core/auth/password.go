@@ -23,4 +23,3 @@ var dummyHash = func() string {
 	b, _ := bcrypt.GenerateFromPassword([]byte("paas-timing-attack-dummy"), 10)
 	return string(b)
 }()
-

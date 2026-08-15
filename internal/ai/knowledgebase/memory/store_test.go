@@ -148,9 +148,9 @@ func TestKBsCount(t *testing.T) {
 	s := NewStore()
 	ctxA := tenant.WithTenant(context.Background(), "t-acme")
 	ctxB := tenant.WithTenant(context.Background(), "t-globex")
-	s.Create(ctxA, mustKB("a1"))
-	s.Create(ctxA, mustKB("a2"))
-	s.Create(ctxB, mustKB("b1"))
+	_, _ = s.Create(ctxA, mustKB("a1"))
+	_, _ = s.Create(ctxA, mustKB("a2"))
+	_, _ = s.Create(ctxB, mustKB("b1"))
 	n, _ := s.KBsCount(ctxA)
 	if n != 3 { // 全表（不经租户过滤，seed 判空用）
 		t.Errorf("全表应 3，got %d", n)

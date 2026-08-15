@@ -166,8 +166,8 @@ func (s *Store) IncUsage(ctx context.Context, resource string, delta int) (billi
 	}
 	u.UpdatedAt = time.Now()
 	s.usage[tid] = u
-	u.Counts = cloneIntMap(u.Counts)         // 返回前深拷贝
-	u.ByApp = cloneByApp(u.ByApp)            // 深拷贝防外部污染
+	u.Counts = cloneIntMap(u.Counts) // 返回前深拷贝
+	u.ByApp = cloneByApp(u.ByApp)    // 深拷贝防外部污染
 	return u, nil
 }
 
