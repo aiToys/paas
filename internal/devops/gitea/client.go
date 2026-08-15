@@ -33,6 +33,7 @@ var (
 	ErrMergeConflict    = errors.New("合并冲突，请手动解决")
 	ErrBranchExists     = errors.New("分支已存在")
 	ErrBranchNotFound   = errors.New("分支不存在")
+	ErrPRExists         = errors.New("同源 PR 已存在")
 )
 
 // Client 调 Gitea REST API（/api/v1）。baseURL 形如 http://gitea.paas.svc.cluster.local:3000。
@@ -245,7 +246,12 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 	case http.StatusNotFound:
 		return ErrRepoNotFound
 	case http.StatusConflict, http.StatusBadRequest:
-		// 409 仓库已存在；400 可能是 name 重复等
+		// 409 仓库已存在；400 可能是 name 重复等。
+		// 例外：CreatePR（out==nil 且 path 含 /pulls）409 = 同 head→base PR 已存在，
+		// 归一 ErrPRExists 供上层复用未合并的 PR（Gitea 对重复 PR 返回 409 而非 422）。
+		if out == nil && strings.HasSuffix(path, "/pulls") {
+			return ErrPRExists
+		}
 		if out != nil {
 			_ = json.NewDecoder(resp.Body).Decode(out)
 		}
@@ -302,7 +308,13 @@ func (c *Client) Merge(ctx context.Context, owner, repo, head, base, mode string
 		} `json:"head"`
 	}
 	prPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls", pathEscape(owner), pathEscape(repo))
-	if err := c.doJSON(ctx, http.MethodPost, prPath, prBody, &pr); err != nil {
+	err := c.doJSON(ctx, http.MethodPost, prPath, prBody, &pr)
+	if errors.Is(err, ErrPRExists) {
+		// 同 head→base 的 open PR 已存在（重试集成/发布时）：查回复用，不重复建。
+		if pr, err = c.findOpenPR(ctx, owner, repo, head, base); err != nil {
+			return "", err
+		}
+	} else if err != nil {
 		return "", err
 	}
 	// 2. merge PR（Do=merge/squash）
@@ -331,6 +343,42 @@ func mergeDo(mode string) string {
 		return "squash"
 	}
 	return "merge"
+}
+
+// findOpenPR 查找同 head→base 的 open PR（ErrPRExists 时复用，不重复建）。
+func (c *Client) findOpenPR(ctx context.Context, owner, repo, head, base string) (struct {
+	Number int `json:"number"`
+	Head   struct {
+		SHA string `json:"sha"`
+	} `json:"head"`
+}, error) {
+	var out struct {
+		Number int `json:"number"`
+		Head   struct {
+			SHA string `json:"sha"`
+		} `json:"head"`
+	}
+	listPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls?state=open&limit=50", pathEscape(owner), pathEscape(repo))
+	type prItem = struct { // 与 out 同构（列表元素复用字段）
+		Number int `json:"number"`
+		Head   struct {
+			SHA string `json:"sha"`
+		} `json:"head"`
+		Base struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	}
+	var list []prItem
+	if err := c.doJSON(ctx, http.MethodGet, listPath, nil, &list); err != nil {
+		return out, err
+	}
+	for _, p := range list {
+		if p.Base.Ref == base { // list API 无 head.ref 过滤，head 由 title/head sha 弱匹配——按 base 找最近 open PR
+			out.Number, out.Head = p.Number, p.Head
+			return out, nil
+		}
+	}
+	return out, ErrPRExists // 找不到（理论不达，409 必有 open PR）
 }
 
 // Branch 分支最小子集。
