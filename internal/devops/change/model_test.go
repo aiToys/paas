@@ -1,6 +1,9 @@
 package change
 
 import (
+	"encoding/json"
+	"strings"
+	"time"
 	"context"
 	"testing"
 
@@ -96,5 +99,26 @@ func TestDeepCopyIsolation(t *testing.T) {
 	again, _ := s.GetBatch(ctx, b.ID)
 	if len(again.ChangeIDs) != 0 {
 		t.Fatal("ChangeIDs 应深拷贝隔离")
+	}
+}
+
+// TestChangeJSONCamelCase 回归（final review C1）：API 序列化必须 camelCase，
+// 前端 api/change.ts 按 camelCase 消费；无标签时 Go 默认 PascalCase 致前端全 undefined。
+func TestChangeJSONCamelCase(t *testing.T) {
+	b, err := json.Marshal(Change{AppID: "app-1", BatchID: "b1", ConflictWith: "c2", CreatedAt: time.Unix(0, 0).UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, key := range []string{`"appId"`, `"batchId"`, `"conflictWith"`, `"createdAt"`, `"branchCreated"`, `"baseBranch"`} {
+		if !strings.Contains(s, key) {
+			t.Fatalf("Change JSON 缺 %s: %s", key, s)
+		}
+	}
+	b2, _ := json.Marshal(IntegrationBatch{ChangeIDs: []string{"a"}, PipelineID: "p", RunID: "r", ReleaseIDs: []string{"x"}})
+	for _, key := range []string{`"changeIds"`, `"pipelineId"`, `"runId"`, `"releaseIds"`} {
+		if !strings.Contains(string(b2), key) {
+			t.Fatalf("IntegrationBatch JSON 缺 %s: %s", key, string(b2))
+		}
 	}
 }

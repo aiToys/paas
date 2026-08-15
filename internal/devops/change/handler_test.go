@@ -257,3 +257,20 @@ func TestHandlerAudit(t *testing.T) {
 		t.Fatalf("审计 actor/tenant 不符: %+v", audit.entries[0])
 	}
 }
+
+// TestHandlerCrossAppDenied 回归（final review I3）：URL appID 与资源归属不一致返 404
+// （同租户跨应用串读串写防护）。
+func TestHandlerCrossAppDenied(t *testing.T) {
+	h, _, _, _ := newTestHandler(t, nil, nil)
+	c := doJSON[Change](t, h, http.MethodPost, "/api/applications/app-1/changes",
+		`{"title":"t","type":"feat","branch":"feat/x","createBranch":true}`, http.StatusCreated)
+	// 用 app-2 的 URL 访问 app-1 的变更
+	for _, target := range []string{
+		"/api/applications/app-2/changes/" + c.ID,
+	} {
+		rec := doRaw(h, http.MethodGet, target, "")
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s 跨应用应 404，got %d", target, rec.Code)
+		}
+	}
+}

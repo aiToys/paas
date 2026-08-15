@@ -247,9 +247,9 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 		return ErrRepoNotFound
 	case http.StatusConflict, http.StatusBadRequest:
 		// 409 仓库已存在；400 可能是 name 重复等。
-		// 例外：CreatePR（out==nil 且 path 含 /pulls）409 = 同 head→base PR 已存在，
-		// 归一 ErrPRExists 供上层复用未合并的 PR（Gitea 对重复 PR 返回 409 而非 422）。
-		if out == nil && strings.HasSuffix(path, "/pulls") {
+		// 例外：POST /pulls 的 409 = 同 head→base PR 已存在，归一 ErrPRExists
+		// 供上层复用未合并的 PR（Gitea 对重复 PR 返回 409 而非 422；与 out 是否传无关）。
+		if method == http.MethodPost && strings.HasSuffix(path, "/pulls") {
 			return ErrPRExists
 		}
 		if out != nil {
@@ -346,6 +346,7 @@ func mergeDo(mode string) string {
 }
 
 // findOpenPR 查找同 head→base 的 open PR（ErrPRExists 时复用，不重复建）。
+// head+base 双匹配——仅按 base 匹配可能复用他人同 base 不同 head 的 PR（误合并无关分支）。
 func (c *Client) findOpenPR(ctx context.Context, owner, repo, head, base string) (struct {
 	Number int `json:"number"`
 	Head   struct {
@@ -359,9 +360,10 @@ func (c *Client) findOpenPR(ctx context.Context, owner, repo, head, base string)
 		} `json:"head"`
 	}
 	listPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls?state=open&limit=50", pathEscape(owner), pathEscape(repo))
-	type prItem = struct { // 与 out 同构（列表元素复用字段）
+	type prItem = struct { // 与 out 同构 + head/base ref（双匹配用）
 		Number int `json:"number"`
 		Head   struct {
+			Ref string `json:"ref"`
 			SHA string `json:"sha"`
 		} `json:"head"`
 		Base struct {
@@ -373,8 +375,9 @@ func (c *Client) findOpenPR(ctx context.Context, owner, repo, head, base string)
 		return out, err
 	}
 	for _, p := range list {
-		if p.Base.Ref == base { // list API 无 head.ref 过滤，head 由 title/head sha 弱匹配——按 base 找最近 open PR
-			out.Number, out.Head = p.Number, p.Head
+		if p.Base.Ref == base && p.Head.Ref == head {
+			out.Number = p.Number
+			out.Head.SHA = p.Head.SHA
 			return out, nil
 		}
 	}

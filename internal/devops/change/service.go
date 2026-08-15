@@ -403,7 +403,7 @@ func (s *Service) SyncBatchStatus(ctx context.Context, batchID string) (Integrat
 	if err != nil {
 		return IntegrationBatch{}, err
 	}
-	if s.readRuns == nil || b.RunID == "" {
+	if s.readRuns == nil || s.runs == nil || b.RunID == "" {
 		return b, nil // 无活跃 run，不推进
 	}
 	if !batchAllowed(b, BatchTesting, BatchReleasing) {

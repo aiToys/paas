@@ -1053,11 +1053,14 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("POST", "/api/pipelineruns/{id}/retry", apiroute.Tags("流水线"), apiroute.Summary("重试失败运行（从失败阶段重新推进）"), apiroute.Perm("pipeline:write"))
 	// 变更管理（单变更 + 集成批次，trunk-based 编排）
 	reg.Operation("GET", "/api/applications/{id}/changes", apiroute.Tags("变更管理"), apiroute.Summary("变更列表（?status=）"), apiroute.Perm("pipeline:read"), apiroute.WithResp([]change.Change{}))
-	reg.Operation("POST", "/api/applications/{id}/changes", apiroute.Tags("变更管理"), apiroute.Summary("创建变更（createBranch=true 平台代建分支）"), apiroute.Perm("pipeline:write"), apiroute.WithReqBody(change.Change{}), apiroute.WithResp(change.Change{}))
+	reg.Operation("POST", "/api/applications/{id}/changes", apiroute.Tags("变更管理"), apiroute.Summary("创建变更（createBranch=true 平台代建分支）"), apiroute.Perm("pipeline:write"), apiroute.WithReqBody(change.ChangeInput{}), apiroute.WithResp(change.Change{}))
 	reg.Operation("GET", "/api/applications/{id}/changes/{cid}", apiroute.Tags("变更管理"), apiroute.Summary("变更详情"), apiroute.Perm("pipeline:read"), apiroute.WithResp(change.Change{}))
 	reg.Operation("DELETE", "/api/applications/{id}/changes/{cid}", apiroute.Tags("变更管理"), apiroute.Summary("放弃变更（open→abandoned）"), apiroute.Perm("pipeline:write"))
 	reg.Operation("GET", "/api/applications/{id}/batches", apiroute.Tags("变更管理"), apiroute.Summary("集成批次列表（?status=）"), apiroute.Perm("pipeline:read"), apiroute.WithResp([]change.IntegrationBatch{}))
-	reg.Operation("POST", "/api/applications/{id}/batches", apiroute.Tags("变更管理"), apiroute.Summary("创建集成批次"), apiroute.Perm("pipeline:write"), apiroute.WithReqBody(change.IntegrationBatch{}), apiroute.WithResp(change.IntegrationBatch{}))
+	reg.Operation("POST", "/api/applications/{id}/batches", apiroute.Tags("变更管理"), apiroute.Summary("创建集成批次"), apiroute.Perm("pipeline:write"), apiroute.WithReqBody(struct {
+			Title  string `json:"title"`
+			Branch string `json:"branch"`
+		}{}), apiroute.WithResp(change.IntegrationBatch{}))
 	reg.Operation("GET", "/api/applications/{id}/batches/{bid}", apiroute.Tags("变更管理"), apiroute.Summary("批次详情（惰性推进 testing/releasing 终态）"), apiroute.Perm("pipeline:read"), apiroute.WithResp(change.IntegrationBatch{}))
 	reg.Operation("DELETE", "/api/applications/{id}/batches/{bid}", apiroute.Tags("变更管理"), apiroute.Summary("放弃批次（批内变更回 open）"), apiroute.Perm("pipeline:write"))
 	reg.Operation("POST", "/api/applications/{id}/batches/{bid}/changes", apiroute.Tags("变更管理"), apiroute.Summary("变更入批"), apiroute.Perm("pipeline:write"), apiroute.WithReqBody(struct {

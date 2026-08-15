@@ -84,7 +84,7 @@ func (s *MemoryStore) ListChanges(ctx context.Context, appID, status string) ([]
 		}
 		out = append(out, cloneChange(c))
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out, nil
 }
 
@@ -168,7 +168,7 @@ func (s *MemoryStore) ListBatches(ctx context.Context, appID, status string) ([]
 		}
 		out = append(out, cloneBatch(b))
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out, nil
 }
 
@@ -202,7 +202,8 @@ func (s *MemoryStore) CreateBatch(ctx context.Context, in IntegrationBatch) (Int
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, b := range s.batches {
-		if b.TenantID == tid && b.RepoID == in.RepoID && b.Branch == in.Branch {
+		// 唯一键 (tenant, branch)——与 PG idx_batches_tenant_branch 对齐（防两后端语义漂移）
+		if b.TenantID == tid && b.Branch == in.Branch {
 			return IntegrationBatch{}, ErrBatchExists
 		}
 	}

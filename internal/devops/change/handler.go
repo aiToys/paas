@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/aitoys/paas/internal/devops/gitea"
 	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/pkg/tenant"
 )
@@ -98,6 +99,34 @@ func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) boo
 	return false
 }
 
+// ownChange 校验变更归属 URL appID（同租户跨应用串读串写防护），不匹配按 not found 不泄漏。
+func (h *Handler) ownChange(w http.ResponseWriter, r *http.Request, appID, cid string) (Change, bool) {
+	c, err := h.repo.GetChange(r.Context(), cid)
+	if err != nil {
+		httputil.WriteServiceError(w, toHTTPStatus(err), err)
+		return Change{}, false
+	}
+	if c.AppID != appID {
+		httputil.WriteError(w, http.StatusNotFound, "not found")
+		return Change{}, false
+	}
+	return c, true
+}
+
+// ownBatch 同款（批次）。
+func (h *Handler) ownBatch(w http.ResponseWriter, r *http.Request, appID, bid string) (IntegrationBatch, bool) {
+	b, err := h.repo.GetBatch(r.Context(), bid)
+	if err != nil {
+		httputil.WriteServiceError(w, toHTTPStatus(err), err)
+		return IntegrationBatch{}, false
+	}
+	if b.AppID != appID {
+		httputil.WriteError(w, http.StatusNotFound, "not found")
+		return IntegrationBatch{}, false
+	}
+	return b, true
+}
+
 // ServeHTTP 分发 /api/applications/{id}/changes[...] 与 /api/applications/{id}/batches[...]。
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -163,6 +192,9 @@ func (h *Handler) serveChanges(w http.ResponseWriter, r *http.Request, appID str
 			if !h.allow(w, r, PermPipelineRead) {
 				return
 			}
+			if _, ok := h.ownChange(w, r, appID, cid); !ok {
+				return
+			}
 			c, err := h.repo.GetChange(ctx, cid)
 			if err != nil {
 				httputil.WriteServiceError(w, toHTTPStatus(err), err)
@@ -171,6 +203,9 @@ func (h *Handler) serveChanges(w http.ResponseWriter, r *http.Request, appID str
 			httputil.WriteData(w, c)
 		case http.MethodDelete:
 			if !h.allow(w, r, PermPipelineWrite) {
+				return
+			}
+			if _, ok := h.ownChange(w, r, appID, cid); !ok {
 				return
 			}
 			c, err := h.svc.AbandonChange(ctx, cid)
@@ -213,6 +248,17 @@ func (h *Handler) serveBatches(w http.ResponseWriter, r *http.Request, appID str
 	}
 
 	bid := parts[2]
+	// 批次子资源统一权限 + 归属校验（权限先行：403 优先于 404；归属不匹配 not found 不泄漏）。
+	perm := PermPipelineRead
+	if r.Method != http.MethodGet {
+		perm = PermPipelineWrite
+	}
+	if !h.allow(w, r, perm) {
+		return
+	}
+	if _, ok := h.ownBatch(w, r, appID, bid); !ok {
+		return
+	}
 	// /batches/{bid}（详情（惰性推进）/ 放弃）
 	if len(parts) == 3 {
 		switch r.Method {
@@ -248,6 +294,9 @@ func (h *Handler) serveBatches(w http.ResponseWriter, r *http.Request, appID str
 				httputil.WriteError(w, http.StatusBadRequest, "changeId required")
 				return
 			}
+			if _, ok := h.ownChange(w, r, appID, body.ChangeID); !ok {
+				return
+			}
 			b, err := h.svc.AddChangeToBatch(ctx, bid, body.ChangeID)
 			if err != nil {
 				httputil.WriteServiceError(w, toHTTPStatus(err), err)
@@ -257,6 +306,9 @@ func (h *Handler) serveBatches(w http.ResponseWriter, r *http.Request, appID str
 			httputil.WriteData(w, b)
 		case len(parts) == 5 && r.Method == http.MethodDelete:
 			if !h.allow(w, r, PermPipelineWrite) {
+				return
+			}
+			if _, ok := h.ownChange(w, r, appID, parts[4]); !ok {
 				return
 			}
 			b, err := h.svc.RemoveChangeFromBatch(ctx, bid, parts[4])
@@ -411,7 +463,8 @@ func toHTTPStatus(err error) int {
 		errors.Is(err, ErrNoCIPipeline):
 		return http.StatusNotFound
 	case errors.Is(err, ErrChangeExists), errors.Is(err, ErrBatchExists),
-		errors.Is(err, ErrBatchState), errors.Is(err, ErrMergeConflictBatch):
+		errors.Is(err, ErrBatchState), errors.Is(err, ErrMergeConflictBatch),
+		errors.Is(err, gitea.ErrBranchExists):
 		return http.StatusConflict
 	case errors.Is(err, ErrNoTenant):
 		return http.StatusBadRequest
