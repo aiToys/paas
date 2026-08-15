@@ -8,6 +8,7 @@ package dataplane
 
 import (
 	"context"
+	"strings"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
@@ -81,8 +82,9 @@ func (r *k8sEndpointsReader) Instances(ctx context.Context, namespace, serviceNa
 	if lane == "" || lane == LaneDefault {
 		return r.fetchInstances(ctx, namespace, serviceName, tid, LaneDefault)
 	}
-	// feature 泳道：优先查 <service>-<lane>（L1 Service 命名约定）。
-	featureName := serviceName + "-" + lane
+	// feature 泳道：优先查 <service>-<lane>（L1 Service 命名约定；清洗与 BaselineWorkloadName
+	// 同款——集成分支 lane 含 / 时 K8s Service 名已清洗为 -，两侧必须一致才能命中）。
+	featureName := dns1035Name(serviceName + "-" + lane)
 	insts, err := r.fetchInstances(ctx, namespace, featureName, tid, lane)
 	if err == nil && len(insts) > 0 {
 		return insts, nil
@@ -157,4 +159,24 @@ func endpointsToInstances(ep *corev1.Endpoints, resolvedLane string) []Instance 
 		}
 	}
 	return out
+}
+
+// dns1035Name 清洗为 K8s Service 名合法字符（与 devops.BaselineWorkloadName 同款规则，
+// feature 泳道 Endpoints 查询与 Service 命名两侧对齐；独立实现避免 dataplane→devops import）。
+func dns1035Name(name string) string {
+	var b []byte
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
+			b = append(b, byte(r))
+		case r >= 'A' && r <= 'Z':
+			b = append(b, byte(r-'A'+'a'))
+		default:
+			b = append(b, '-')
+		}
+	}
+	if len(b) > 63 {
+		b = b[:63]
+	}
+	return strings.Trim(string(b), "-")
 }

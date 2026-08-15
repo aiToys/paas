@@ -262,8 +262,9 @@ func errInvalid(field string) error { return fieldErr{field: field} }
 //   - 多服务（service 非空，如 product/recommend）：`<app>-<service>-svc[-<lane>]`
 //   - 单服务（service 空，向后兼容）：`<app>-svc[-<lane>]`
 //
-// lane=default 不带后缀；非 default（feature 泳道）追加 `-<lane>`。
-// 同 app×env×lane×service 唯一，reconciler 建同名 K8s Service（DNS 可达）。
+// lane=default 不带后缀；非 default（feature 泳道/集成分支名）追加 `-<lane>` 并清洗为
+// DNS-1035 合法字符（集成分支名含 /，如 integration/20260815-1 → integration-20260815-1），
+// 因该名即 K8s Service 名（DNS-1035）。同 app×env×lane×service 唯一。
 func BaselineWorkloadName(appID, service, lane string) string {
 	base := appID + "-svc"
 	if service != "" {
@@ -272,5 +273,30 @@ func BaselineWorkloadName(appID, service, lane string) string {
 	if lane != "" && lane != "default" {
 		base = base + "-" + lane
 	}
-	return base
+	return dns1035(base)
+}
+
+// dns1035 清洗为 K8s Service 名合法字符（DNS-1035：小写字母数字与 -，首字母，≤63）。
+// 大写转小写；其余非法字符替换为 -；首尾剔除非字母数字；截断 63。
+func dns1035(name string) string {
+	var b []byte
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
+			b = append(b, byte(r))
+		case r >= 'A' && r <= 'Z':
+			b = append(b, byte(r-'A'+'a'))
+		default:
+			b = append(b, '-')
+		}
+	}
+	if len(b) > 63 {
+		b = b[:63]
+	}
+	out := strings.Trim(string(b), "-")
+	// DNS-1035 要求首字符为字母：数字开头前缀 n（理论不达，appID 均 a-z 开头）
+	if out != "" && (out[0] < 'a' || out[0] > 'z') {
+		out = "n" + out
+	}
+	return out
 }
