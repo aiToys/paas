@@ -855,6 +855,20 @@ internal/dataservice/  领域(DataService + 6 Kind 常量 + KindMeta 表单元�
 - **测试**：governance pg `TestRouteHostRoundTrip`（Create/Update/清空 往返）+ configcenter pg `TestNamespaceServiceIDRoundTrip`（ServiceID 持久化 + ListNamespaces 过滤）。OpenAPI `WithReqBody(结构体)` 自动含新字段（reflector 自动生成 schema）。
 - **留后续**：Route Host 通配符匹配（`*.example.com`）、Host 数组化、实际 ingress/hermes 配置下发（数据面消费）、configcenter 配置变更通知 governance Service。
 
+### 变更管理（Change/IntegrationBatch，火车发车模型，2026-08-15）
+
+解决「多个变更合在一起测试、测试成功后同时上线」诉求。设计见 `docs/superpowers/specs/2026-08-15-change-management-design.md`。三实体：`Change`（feat/hotfix 分支粒度，open→integrated→tested→released/abandoned）+ `IntegrationBatch`（临时集成分支 `integration/YYYYMMDD-seq`，collecting→conflict/testing→tested→releasing→released/failed）+ 既有 `Release`（整批上线记录）。**流水线引擎零改动**：批次触发 CI 时 branch=集成分支名，deploy 泳道经 `{{run.branch}}` 占位符天然隔离（集成分支名即 lane）。
+
+- `internal/devops/change/`：model + Repository（memory/pg，migration 0027，JSONB change_ids 有序，唯一索引 tenant+repo+branch / tenant+branch）+ `Service` 编排（依赖倒置 `GiteaBrancher`/`RunTrigger`/`RunReader`/`RepoLookup`，cmd/core `change_adapters.go` 桥接 gitea.Client + pipeline 三仓储）。
+- **编排动作**：`CreateChangeWithBranch`（平台代建分支 main 派生 / 校验已有分支）；`Integrate`（删重建集成分支→按 ChangeIDs 顺序 merge→FindPipeline(ci)→TriggerAppRun(branch=集成分支)→testing；冲突→批次 conflict+`BatchConflictError`）；`Approve`（tested→releasing，handler 校验 prod:write）；`Release`（releasing 态逐个 merge 到 main→CD run branch=main）；`SyncBatchStatus` **惰性终态推进**（GET 批次详情时轮询 run 终态：testing succeeded→tested / failed→批内变更回 open 出批；releasing succeeded→released+ReleaseIDs 回填，无后台 goroutine）。
+- REST（`/api/applications/{id}/changes|batches[...]`，pipeline:read/write 权限 + approve 额外 prod:write）：变更 CRUD/放弃 + 批次 CRUD/放弃 + 入批/出批 + integrate/approve/release，OpenAPI 13 操作。审计 change_/batch_ 前缀全动作覆盖。
+- Gitea client 扩展：`CreateBranch/GetBranch/DeleteBranch` + `doBranch`（404→ErrBranchNotFound、**删除不存在分支 Gitea 返 500 "object does not exist" 归一 NotFound**——幂等重建依赖）；`Merge` 创建 PR 409（同源 PR 已存在）→ `ErrPRExists` + `findOpenPR` 复用（集成重试幂等）。
+- **lane 清洗（e2e 实测两连修）**：集成分支名含 `/`（如 `integration/20260815-1`）——① `labelsFor` 的 lane label 值经 `sanitizeLane`（K8s label 不许 `/`）；② `BaselineWorkloadName` 经 `dns1035`（Service 名 DNS-1035 不许 `/`，dataplane 泳道发现 `dns1035Name` 同款对齐，两侧一致才命中 Endpoints）。
+- 前端：`api/change.ts` + `AppChanges.vue`（应用详情「变更」tab：变更列表/创建弹窗展示 clone 命令 + 批次列表/创建 + 批次抽屉 el-steps 状态机 + 变更 chips 移出 + integrate/approve(confirmDangerous isProd)/release + 关联 run 跳转 + testing/releasing 10s 轮询）+ DevOps 运行记录 branch `integration/` 前缀显「集成」tag。
+- **e2e 全链路已验证（paas-shop）**：建分支→入批→integrate（merge+CI 构建真实 digest）→testing→deploy 泳道（清洗后 Service 名合法）→探活通过→tested→approve→release（merge main+CD run）→released+ReleaseIDs 回填+change released。
+- **留后续**：跨应用批次、变更级审批、冲突预检（merge 前干跑）、PR 实体/评审流、外部仓库变更、自动批次（定时发车）、release 阶段已合并分支 409 细分、批内变更 UI 拖拽排序。
+
+
 ## 前端架构
 
 三套独立 SPA，共享设计系统（Element Plus + 暗黑模式）：
