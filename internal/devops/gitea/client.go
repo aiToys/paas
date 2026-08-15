@@ -31,6 +31,8 @@ var (
 	ErrRepoExists       = errors.New("仓库已存在")
 	ErrUnauthorized     = errors.New("gitea 鉴权失败")
 	ErrMergeConflict    = errors.New("合并冲突，请手动解决")
+	ErrBranchExists     = errors.New("分支已存在")
+	ErrBranchNotFound   = errors.New("分支不存在")
 )
 
 // Client 调 Gitea REST API（/api/v1）。baseURL 形如 http://gitea.paas.svc.cluster.local:3000。
@@ -329,6 +331,95 @@ func mergeDo(mode string) string {
 		return "squash"
 	}
 	return "merge"
+}
+
+// Branch 分支最小子集。
+type Branch struct {
+	Name      string `json:"name"`
+	CommitSHA string `json:"-"` // 从 commit.id 提取
+}
+
+// CreateBranch 从 from 分支/commit 创建新分支（POST /repos/{o}/{r}/branches）。
+// 422（分支已存在）-> ErrBranchExists。
+func (c *Client) CreateBranch(ctx context.Context, owner, repo, branch, from string) error {
+	body := map[string]any{"new_branch_name": branch, "old_branch_name": from, "old_ref_name": from}
+	p := fmt.Sprintf("/api/v1/repos/%s/%s/branches", pathEscape(owner), pathEscape(repo))
+	return c.doBranch(ctx, http.MethodPost, p, body)
+}
+
+// GetBranch 查询分支（不存在返 ErrBranchNotFound）。
+func (c *Client) GetBranch(ctx context.Context, owner, repo, branch string) (Branch, error) {
+	var out struct {
+		Name   string `json:"name"`
+		Commit struct {
+			ID string `json:"id"`
+		} `json:"commit"`
+	}
+	p := fmt.Sprintf("/api/v1/repos/%s/%s/branches/%s", pathEscape(owner), pathEscape(repo), pathEscape(branch))
+	if err := c.doBranchJSON(ctx, http.MethodGet, p, nil, &out); err != nil {
+		return Branch{}, err
+	}
+	return Branch{Name: out.Name, CommitSHA: out.Commit.ID}, nil
+}
+
+// DeleteBranch 删除分支（集成分支重建用）。
+func (c *Client) DeleteBranch(ctx context.Context, owner, repo, branch string) error {
+	p := fmt.Sprintf("/api/v1/repos/%s/%s/branches/%s", pathEscape(owner), pathEscape(repo), pathEscape(branch))
+	return c.doBranch(ctx, http.MethodDelete, p, nil)
+}
+
+// doBranch 分支 API 请求（无响应体解码）。与 doMerge 同构：
+// 200/201/204 成功；404->ErrBranchNotFound；422->ErrBranchExists（POST 创建重复分支）；
+// 401/403->ErrUnauthorized；网络错->ErrGiteaUnavailable 包装。
+func (c *Client) doBranch(ctx context.Context, method, path string, body any) error {
+	return c.doBranchJSON(ctx, method, path, body, nil)
+}
+
+// doBranchJSON 分支 API 请求 + 可选响应解码（GetBranch 用）。
+func (c *Client) doBranchJSON(ctx context.Context, method, path string, body, out any) error {
+	if c.baseURL == "" {
+		return ErrGiteaUnavailable
+	}
+	var bodyReader io.Reader
+	if body != nil {
+		buf, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("编码请求体失败: %w", err)
+		}
+		bodyReader = bytes.NewReader(buf)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
+	if err != nil {
+		return ErrGiteaUnavailable
+	}
+	req.SetBasicAuth(c.username, c.password)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrGiteaUnavailable, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusCreated, http.StatusNoContent:
+		if out != nil {
+			if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+				return fmt.Errorf("解析响应失败: %w", err)
+			}
+		}
+		return nil
+	case http.StatusNotFound:
+		return ErrBranchNotFound
+	case http.StatusUnprocessableEntity:
+		return ErrBranchExists
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return ErrUnauthorized
+	default:
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("gitea branch %s %s 返回 %d: %s", method, path, resp.StatusCode, string(b))
+	}
 }
 
 // doMerge 合并 PR；200/201 成功，409 冲突 -> ErrMergeConflict

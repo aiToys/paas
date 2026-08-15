@@ -95,3 +95,54 @@ func TestMergeUnavailable(t *testing.T) {
 		t.Fatalf("期望 ErrGiteaUnavailable，got %v", err)
 	}
 }
+
+// fakeGitea 分支 API 模拟：记录调用 + 可注入状态码。
+// 既有测试若已有 fake server helper，复用其模式；否则新建。
+func TestBranchAPIs(t *testing.T) {
+	// CreateBranch 成功（201）
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/branches"):
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == "GET" && strings.Contains(r.URL.Path, "/branches/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"name": "feat/x", "commit": map[string]any{"id": "abc123"},
+			})
+		case r.Method == "DELETE" && strings.Contains(r.URL.Path, "/branches/"):
+			w.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "paas-bot", "pw")
+
+	if err := c.CreateBranch(context.Background(), "paas-bot", "app-1", "feat/x", "main"); err != nil {
+		t.Fatalf("CreateBranch: %v", err)
+	}
+	b, err := c.GetBranch(context.Background(), "paas-bot", "app-1", "feat/x")
+	if err != nil || b.Name != "feat/x" || b.CommitSHA != "abc123" {
+		t.Fatalf("GetBranch: %+v err=%v", b, err)
+	}
+	if err := c.DeleteBranch(context.Background(), "paas-bot", "app-1", "feat/x"); err != nil {
+		t.Fatalf("DeleteBranch: %v", err)
+	}
+}
+
+func TestBranchAPIErrors(t *testing.T) {
+	// CreateBranch 422 -> ErrBranchExists；GetBranch 404 -> ErrBranchNotFound
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "paas-bot", "pw")
+
+	if err := c.CreateBranch(context.Background(), "o", "r", "b", "main"); err != ErrBranchExists {
+		t.Fatalf("CreateBranch 422 期望 ErrBranchExists, got %v", err)
+	}
+	if _, err := c.GetBranch(context.Background(), "o", "r", "b"); err != ErrBranchNotFound {
+		t.Fatalf("GetBranch 404 期望 ErrBranchNotFound, got %v", err)
+	}
+}
