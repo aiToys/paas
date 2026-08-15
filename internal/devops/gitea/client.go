@@ -418,6 +418,11 @@ func (c *Client) doBranchJSON(ctx context.Context, method, path string, body, ou
 		return ErrUnauthorized
 	default:
 		b, _ := io.ReadAll(resp.Body)
+		// Gitea 删除不存在分支返 500 + "object does not exist"（非 404），
+		// 按语义归一为 ErrBranchNotFound（幂等删除依赖此容错）。
+		if resp.StatusCode == http.StatusInternalServerError && bytes.Contains(b, []byte("object does not exist")) {
+			return ErrBranchNotFound
+		}
 		return fmt.Errorf("gitea branch %s %s 返回 %d: %s", method, path, resp.StatusCode, string(b))
 	}
 }
