@@ -439,3 +439,41 @@ ALTER TABLE environments ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS env_tenant_isolation ON environments;
 CREATE POLICY env_tenant_isolation ON environments
   USING (tenant_id = current_setting('app.tenant_id', true) OR current_setting('app.tenant_id', true) IS NULL);
+
+-- 变更管理（与 0027 同款，新部署合并 schema；IF NOT EXISTS 幂等安全）
+CREATE TABLE IF NOT EXISTS changes (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    app_id TEXT NOT NULL,
+    repo_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    type TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    branch_created BOOLEAN NOT NULL DEFAULT FALSE,
+    base_branch TEXT NOT NULL DEFAULT 'main',
+    status TEXT NOT NULL,
+    batch_id TEXT NOT NULL DEFAULT '',
+    conflict_with TEXT NOT NULL DEFAULT '',
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_changes_tenant_repo_branch ON changes(tenant_id, repo_id, branch);
+
+CREATE TABLE IF NOT EXISTS integration_batches (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    app_id TEXT NOT NULL,
+    repo_id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    status TEXT NOT NULL,
+    change_ids JSONB NOT NULL DEFAULT '[]',
+    pipeline_id TEXT NOT NULL DEFAULT '',
+    run_id TEXT NOT NULL DEFAULT '',
+    release_ids JSONB NOT NULL DEFAULT '[]',
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL,
+    finished_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_batches_tenant_branch ON integration_batches(tenant_id, branch);
