@@ -21,6 +21,12 @@ func acmeReq(method, target, body string) *http.Request {
 
 func allowAll(*http.Request, string) bool { return true }
 
+// globexReq 跨租户请求（隔离断言用）。
+func globexReq(method, target, body string) *http.Request {
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	return req.WithContext(tenant.WithTenant(context.Background(), "t-globex"))
+}
+
 // fakeAuditRecorder 收集审计记录（断言 action/resourceID）。
 type fakeAuditRecorder struct {
 	actions []string // 已记录 action 序列
@@ -273,4 +279,85 @@ func TestHandlerCrossAppDenied(t *testing.T) {
 			t.Fatalf("%s 跨应用应 404，got %d", target, rec.Code)
 		}
 	}
+}
+
+// TestServeGlobalChangesBatches 跨应用列表：/api/changes 与 /api/batches 聚合 tenant 内
+// 全部应用的变更/批次（appId 过滤 + status 过滤 + 跨租户隔离返空）。
+func TestServeGlobalChangesBatches(t *testing.T) {
+	h, store, _, _ := newTestHandler(t, nil, nil)
+	// 两个应用各建一条变更 + 一条批次
+	c1 := doJSON[Change](t, h, http.MethodPost, "/api/applications/app-1/changes",
+		`{"title":"t1","type":"feat","branch":"feat/a","createBranch":true}`, http.StatusCreated)
+	c2 := doJSON[Change](t, h, http.MethodPost, "/api/applications/app-1/changes",
+		`{"title":"t2","type":"feat","branch":"feat/b","createBranch":true}`, http.StatusCreated)
+	_ = c2
+	b1 := doJSON[IntegrationBatch](t, h, http.MethodPost, "/api/applications/app-1/batches",
+		`{"title":"批1","branch":"integration/g1"}`, http.StatusCreated)
+
+	// 直接给 store 塞一条其他应用的变更（绕过 repoLookup fake 只认 app-1）
+	other, err := store.CreateChange(acmeCtx(), Change{AppID: "app-2", RepoID: "repo-1", Title: "t3", Type: "feat", Branch: "feat/c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 全局列表：3 条变更（app-1 两条 + app-2 一条）、1 条批次
+	listAll := doGlobal[[]Change](t, h, "/api/changes")
+	if len(listAll) != 3 {
+		t.Fatalf("全局变更应 3 条，got %d", len(listAll))
+	}
+	// appId 过滤
+	listApp2 := doGlobal[[]Change](t, h, "/api/changes?appId=app-2")
+	if len(listApp2) != 1 || listApp2[0].ID != other.ID {
+		t.Fatalf("appId=app-2 应只有 1 条，got %+v", listApp2)
+	}
+	// status 过滤
+	listOpen := doGlobal[[]Change](t, h, "/api/changes?status=open")
+	if len(listOpen) != 3 {
+		t.Fatalf("status=open 应 3 条，got %d", len(listOpen))
+	}
+	// 批次全局列表
+	batches := doGlobal[[]IntegrationBatch](t, h, "/api/batches")
+	if len(batches) != 1 || batches[0].ID != b1.ID {
+		t.Fatalf("全局批次应 1 条，got %+v", batches)
+	}
+	// 跨租户隔离：globex ctx 查询返空（不泄漏 acme 数据）
+	rec := httptest.NewRecorder()
+	h.ServeGlobal(rec, globexReq(http.MethodGet, "/api/changes", ""))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("期望 200，got %d", rec.Code)
+	}
+	var resp struct {
+		Data []Change `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Data) != 0 {
+		t.Fatalf("跨租户应返空，got %d", len(resp.Data))
+	}
+	// 未授权路径
+	denyAll := NewHandler(h.svc, h.repo, WithAuthorize(func(*http.Request, string) bool { return false }))
+	rec2 := httptest.NewRecorder()
+	denyAll.ServeGlobal(rec2, acmeReq(http.MethodGet, "/api/changes", ""))
+	if rec2.Code != http.StatusForbidden {
+		t.Fatalf("未授权应 403，got %d", rec2.Code)
+	}
+	_ = c1
+}
+
+// doGlobal 经 ServeGlobal 执行并解包。
+func doGlobal[T any](t *testing.T, h *Handler, target string) T {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeGlobal(rec, acmeReq(http.MethodGet, target, ""))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s 期望 200，got %d body %s", target, rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data T `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	return resp.Data
 }

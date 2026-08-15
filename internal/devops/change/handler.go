@@ -127,6 +127,34 @@ func (h *Handler) ownBatch(w http.ResponseWriter, r *http.Request, appID, bid st
 	return b, true
 }
 
+// ServeGlobal 分发 /api/changes 与 /api/batches（跨应用列表，DevOps 中心档案室用）。
+// 只读列表：appId query 可选过滤，tenant 内跨应用（与 /api/buildruns 同款语义）。
+func (h *Handler) ServeGlobal(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if !h.allow(w, r, PermPipelineRead) {
+		return
+	}
+	q := r.URL.Query()
+	var (
+		list any
+		err  error
+	)
+	switch r.URL.Path {
+	case "/api/changes":
+		list, err = h.repo.ListChanges(r.Context(), q.Get("appId"), q.Get("status"))
+	case "/api/batches":
+		list, err = h.repo.ListBatches(r.Context(), q.Get("appId"), q.Get("status"))
+	default:
+		httputil.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		httputil.WriteServiceError(w, toHTTPStatus(err), err)
+		return
+	}
+	httputil.WriteData(w, list)
+}
+
 // ServeHTTP 分发 /api/applications/{id}/changes[...] 与 /api/applications/{id}/batches[...]。
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
