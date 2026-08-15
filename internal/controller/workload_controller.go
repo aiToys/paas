@@ -91,10 +91,7 @@ func (r *WorkloadReconciler) dpEndpoint() string {
 // 注意：selector 仅创建时设（Deployment selector immutable），service label 后加不影响既有 selector 匹配
 // （MatchLabels 子集语义，Pod 多带 service label 仍匹配原 selector）。
 func labelsFor(w *v1alpha1.Workload) map[string]string {
-	lane := w.Spec.LaneID
-	if lane == "" {
-		lane = "default"
-	}
+	lane := sanitizeLane(w.Spec.LaneID)
 	m := map[string]string{
 		"app.kubernetes.io/managed-by": "paas",
 		labels.KeyTenant:               w.Spec.TenantID,
@@ -106,6 +103,33 @@ func labelsFor(w *v1alpha1.Workload) map[string]string {
 		m[labels.KeyService] = w.Spec.Service
 	}
 	return m
+}
+
+// sanitizeLane 泳道值清洗为合法 K8s label（集成分支名含 /，如 integration/20260815-1）。
+// 非 [A-Za-z0-9-_.] 字符替换为 -，截断 63 字符，首尾非字母数字剔除；空/清洗后空 → default。
+// 仅影响 label 值（Service 名等仍用原始 lane 派生，见 dataplane/endpoints.go）。
+func sanitizeLane(lane string) string {
+	if lane == "" {
+		return "default"
+	}
+	var b []byte
+	for _, r := range lane {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.':
+			b = append(b, byte(r))
+		default:
+			b = append(b, '-')
+		}
+	}
+	if len(b) > 63 {
+		b = b[:63]
+	}
+	out := strings.Trim(string(b), "-_.")
+	if out == "" {
+		return "default"
+	}
+	return out
 }
 
 // prometheusAnnotations 返回 service 类型工作负载 Pod 的 Prometheus 自动发现注解。
