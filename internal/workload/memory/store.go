@@ -24,7 +24,7 @@ type Store struct {
 type StoreOpt func(*Store)
 
 // WithImageRegistry 设置 seed 镜像的 registry 前缀。
-// 集群部署（PAAS_IMAGE_REGISTRY=hub.wang.dd:5000）时 seed 镜像拼内网地址让节点可拉；
+// 集群部署（PAAS_IMAGE_REGISTRY=registry.example.local:5000）时 seed 镜像拼内网地址让节点可拉；
 // 空（本地 dev）用公开名 nginx:stable（内存模式不投影 K8s，镜像真假无影响）。
 func WithImageRegistry(registry string) StoreOpt {
 	return func(s *Store) { s.imageRegistry = registry }

@@ -1,6 +1,6 @@
 // Package registry 提供镜像仓库（Docker Registry v2）的 API 客户端。
 //
-// 设计：PaaS 一站式--镜像库复用 hub.wang.dd:5000（裸 registry:2），平台出 UI。本客户端调
+// 设计：PaaS 一站式--镜像库复用 registry.example.local:5000（裸 registry:2），平台出 UI。本客户端调
 // registry v2 HTTP API（_catalog / tags/list / manifests），不依赖外部 SDK。registry 无 auth
 // （内网裸 registry）；若后续启 auth，扩展 Client 加 basicAuth 即可。
 //
@@ -30,13 +30,13 @@ var (
 	ErrDeleteDisabled      = errors.New("registry 未启用 delete API")
 )
 
-// Client 调 Docker Registry v2 API。baseURL 形如 http://hub.wang.dd:5000。
+// Client 调 Docker Registry v2 API。baseURL 形如 http://registry.example.local:5000。
 type Client struct {
 	baseURL string
 	http    *http.Client
 }
 
-// New 创建 registry 客户端。baseURL 形如 http://hub.wang.dd:5000 或 hub.wang.dd:5000（无 scheme
+// New 创建 registry 客户端。baseURL 形如 http://registry.example.local:5000 或 registry.example.local:5000（无 scheme
 // 时容错补 http://，因 PAAS_REGISTRY env 同时供 builder docker push 用，那里不需 scheme）。
 func New(baseURL string) *Client {
 	if baseURL != "" && !strings.Contains(baseURL, "://") {

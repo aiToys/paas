@@ -28,7 +28,7 @@ import (
 // 其余（mq 的 kafka/rabbitmq/rocketmq）返空 -> reconciler 走 failed 分支不拉起
 // （避免 port=0/缺 env 导致 K8s 拒绝创建 Service 死循环或容器 CrashLoopBackOff）。
 // engineImage 按 Kind+Engine 选默认容器镜像，registry 非空时用内网 registry（library/<name>:<tag>）。
-// 节点拉不到 docker.io 时配 PAAS_IMAGE_REGISTRY=hub.wang.dd:5000（引擎镜像需先推 <registry>/library/）。
+// 节点拉不到 docker.io 时配 PAAS_IMAGE_REGISTRY=registry.example.local:5000（引擎镜像需先推 <registry>/library/）。
 func engineImage(kind, engine, registry string) string {
 	var img string
 	switch kind {

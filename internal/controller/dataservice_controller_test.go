@@ -259,7 +259,7 @@ func TestEngineImageLightEngines(t *testing.T) {
 		}
 	}
 	// registry 非空时内网化（library/<name>:<tag>，去 repo 前缀）。
-	if got := engineImage("vector", "qdrant", "hub.wang.dd:5000"); got != "hub.wang.dd:5000/library/qdrant:v1.12.4" {
+	if got := engineImage("vector", "qdrant", "registry.example.local:5000"); got != "registry.example.local:5000/library/qdrant:v1.12.4" {
 		t.Errorf("qdrant registry 内网化错误: %s", got)
 	}
 }
@@ -546,7 +546,7 @@ func TestExporterImageCoverage(t *testing.T) {
 		}
 	}
 	// registry 内网化：去 repo 前缀。
-	if got := exporterImage("db", "postgres", "hub.wang.dd:5000"); got != "hub.wang.dd:5000/library/postgres-exporter:v0.15.0" {
+	if got := exporterImage("db", "postgres", "registry.example.local:5000"); got != "registry.example.local:5000/library/postgres-exporter:v0.15.0" {
 		t.Errorf("registry 内网化错误: %s", got)
 	}
 }

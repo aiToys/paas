@@ -27,7 +27,7 @@ import (
 // pods/log 子资源，故用 client-go kubernetes.Interface。
 type K8sJob struct {
 	Clientset    kubernetes.Interface
-	BuilderImage string // 默认 docker:git；内网 hub.wang.dd:5000/library/docker:git
+	BuilderImage string // 默认 docker:git；内网 registry.example.local:5000/library/docker:git
 	// 凭证/仓库（Params 字段为空时回退，与 Real 同款语义）。
 	Registry     string
 	GitToken     string

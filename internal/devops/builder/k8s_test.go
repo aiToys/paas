@@ -15,14 +15,14 @@ func TestBuildJobSpec(t *testing.T) {
 		Commit:       "c0ffee1234567890",
 		Branch:       "main",
 		GitURL:       "https://example.com/repo.git",
-		Registry:     "hub.wang.dd:5000",
+		Registry:     "registry.example.local:5000",
 		Dockerfile:   "Dockerfile",
 		BuildContext: ".",
 		RegistryUser: "u",
 		RegistryPass: "p",
 		BuildArgs:    map[string]string{"SERVICE": "product"},
 	}
-	job := buildJobSpec("docker:git", p, "paas-build-build-abc", "hub.wang.dd:5000/app-cs:main-c0ffee12", "https://x@git/repo.git")
+	job := buildJobSpec("docker:git", p, "paas-build-build-abc", "registry.example.local:5000/app-cs:main-c0ffee12", "https://x@git/repo.git")
 
 	if job.Name != "paas-build-build-abc" {
 		t.Errorf("Job.Name = %q, want paas-build-build-abc", job.Name)
@@ -61,7 +61,7 @@ func TestBuildJobSpec(t *testing.T) {
 		}
 		return "<missing>"
 	}
-	if envOf("REF") != "hub.wang.dd:5000/app-cs:main-c0ffee12" {
+	if envOf("REF") != "registry.example.local:5000/app-cs:main-c0ffee12" {
 		t.Errorf("REF env = %q", envOf("REF"))
 	}
 	if envOf("CLONE_URL") != "https://x@git/repo.git" {
