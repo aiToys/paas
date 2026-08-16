@@ -26,8 +26,10 @@ interface Release {
 }
 
 const router = useRouter()
+const route = useRoute()
 const envStore = useEnvStore()
-const tab = ref('board')
+// ?tab= 深链支持（详情页跳转定位，如构建详情→镜像库）
+const tab = ref((route.query.tab as string) || 'board')
 const builds = ref<BuildRun[]>([])
 // 镜像库实时视图：registry v2 catalog（PAAS_REGISTRY 配置的镜像仓库），展开行按需加载 tag + digest
 const registryRepos = ref<{ name: string }[]>([])

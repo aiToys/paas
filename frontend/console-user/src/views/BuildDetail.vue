@@ -18,7 +18,7 @@
           <div class="kv"><span>开始</span><span>{{ build.startedAt }}</span></div>
           <div class="kv"><span>结束</span><span>{{ build.finishedAt || '—' }}</span></div>
           <div v-if="build.imageId" class="kv"><span>产出镜像</span>
-            <a class="link mono" @click="emit('image', build.imageId!)">{{ build.imageId }}</a>
+            <a class="link mono" @click="router.push('/devops?tab=images')">{{ build.imageId }}</a>
           </div>
         </div>
       </section>
@@ -45,7 +45,6 @@ interface BuildRunFull {
 const route = useRoute()
 const router = useRouter()
 const build = ref<BuildRunFull>()
-const emit = defineEmits<{ (e: 'image', id: string): void }>()
 
 function goBack() {
   if (history.length > 1) history.back()
