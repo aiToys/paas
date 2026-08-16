@@ -3,7 +3,8 @@
 // target 选择（应用下拉）+ 4 指标卡（CPU/内存/RPS/延迟 当前值 + CSS sparkline 趋势）
 // + 告警规则列表（增删）+ 当前告警列表（即时评估，severity 着色）。
 // 惰性时序：每次加载后端补点；前端 10s 轮询刷新指标。
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { usePolling } from '@/composables/usePolling'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
@@ -228,15 +229,12 @@ async function deleteRule(r: AlertRule) {
   }
 }
 
-let timer: number | undefined
 onMounted(async () => {
   await loadApps()
   await loadAll()
-  timer = window.setInterval(() => loadAll(true), 10000) // 10s 轮询刷新指标/告警（silent 不闪烁）
 })
-onUnmounted(() => {
-  if (timer) window.clearInterval(timer)
-})
+// 10s 轮询刷新指标/告警（silent 不闪烁；页面不可见自动暂停）
+usePolling(() => loadAll(true), 10000)
 </script>
 
 <template>

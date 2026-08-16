@@ -5,6 +5,7 @@
 // 详情接口 GET /api/dataservices/{id} 返回掩码连接信息（password/secretKey/token/uri 敏感字段掩码）；
 // host/port/user/database 等非敏感字段明文可复制；应用绑定经后端自动注入 appconfig，无需手动复制凭证。
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { usePolling } from '@/composables/usePolling'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
@@ -251,7 +252,6 @@ const dsRules = computed(() =>
   rules.value.filter((r) => !r.targetId || r.targetId === ds.value?.id),
 )
 
-let timer: number | undefined
 let alive = false
 
 async function loadPollingData() {
@@ -282,14 +282,14 @@ async function bootstrap() {
 
 onMounted(async () => {
   await bootstrap()
-  // 10s 轮询指标/告警（与 Observability 同款）
-  timer = window.setInterval(loadPollingData, 10000)
 })
+
+// 10s 轮询指标/告警（与 Observability 同款；页面不可见自动暂停）
+usePolling(loadPollingData, 10000)
 
 onUnmounted(() => {
   // alive 守卫：防止卸载后异步回调仍写状态
   alive = false
-  if (timer) window.clearInterval(timer)
 })
 
 // 切换数据服务（kind/id 变化）时重新加载

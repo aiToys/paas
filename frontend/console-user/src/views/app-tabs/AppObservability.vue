@@ -12,7 +12,8 @@
 // 设计抉择（不造伪指标）：平台无法获知应用业务 KPI（订单/收入等需应用自定义埋点），
 // 故不设独立「业务监控」tab；推理 token/请求消耗已归「用量」tab，避免重复。
 // 流量健康（RPS/延迟/副本就绪）即业务相关的运行视图，归「应用实例」。
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { usePolling } from '@/composables/usePolling'
 import { useRouter } from 'vue-router'
 import { fetchAuth } from '@/api'
 import { useUrlState } from '@/composables/useUrlState'
@@ -212,13 +213,12 @@ function goDashboard() {
   router.push(`/platform/observability?app=${props.appId}`)
 }
 
-let timer: number | undefined
 onMounted(() => {
   loadAll()
   loadDeps()
-  timer = window.setInterval(() => { loadAll(true); if (activeTab.value === 'deps') loadDeps() }, 10000)
 })
-onUnmounted(() => { if (timer) window.clearInterval(timer) })
+// 10s 轮询（silent 不闪烁；页面不可见自动暂停）
+usePolling(() => { loadAll(true); if (activeTab.value === 'deps') loadDeps() }, 10000)
 watch(() => props.appId, () => { loadAll(); loadDeps() })
 watch(() => props.bindings, () => loadDeps(), { deep: true })
 </script>
