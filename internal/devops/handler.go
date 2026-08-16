@@ -361,7 +361,8 @@ func (h *Handler) serveRepoBrowse(w http.ResponseWriter, r *http.Request, repoID
 		httputil.WriteData(w, tree)
 	case "commits":
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		commits, err := h.giteaClient.ListCommits(r.Context(), owner, name, limit)
+		// branch 可选（变更收件箱看工作分支提交；空=默认分支）
+		commits, err := h.giteaClient.ListCommits(r.Context(), owner, name, limit, r.URL.Query().Get("branch"))
 		if err != nil {
 			h.writeGiteaErr(w, err)
 			return

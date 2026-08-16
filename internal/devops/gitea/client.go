@@ -133,12 +133,16 @@ func (c *Client) CloneURLWithAuth(owner, name string) string {
 		c.username, c.password, strings.TrimPrefix(c.baseURL, "http://"), owner, name)
 }
 
-// ListCommits 最近 N 条提交（Gitea commits API，倒序）。
-func (c *Client) ListCommits(ctx context.Context, owner, name string, limit int) ([]Commit, error) {
+// ListCommits 最近 N 条提交（Gitea commits API，倒序）。sha 非空时查指定分支/commit（变更收件箱看工作分支提交用）。
+func (c *Client) ListCommits(ctx context.Context, owner, name string, limit int, sha ...string) ([]Commit, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	p := fmt.Sprintf("/api/v1/repos/%s/%s/commits?limit=%d", pathEscape(owner), pathEscape(name), limit)
+	ref := ""
+	if len(sha) > 0 && sha[0] != "" {
+		ref = "&sha=" + url.QueryEscape(sha[0])
+	}
+	p := fmt.Sprintf("/api/v1/repos/%s/%s/commits?limit=%d%s", pathEscape(owner), pathEscape(name), limit, ref)
 	var raw []struct {
 		SHA    string `json:"sha"`
 		Commit struct {

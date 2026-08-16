@@ -36,7 +36,7 @@
           <div class="grid">
             <div class="kv"><span>工作负载</span><span class="mono">{{ workload.id }}</span></div>
             <div class="kv"><span>状态</span><el-tag size="small">{{ workload.status }}</el-tag></div>
-            <div class="kv"><span>副本</span><span>{{ workload.readyReplicas ?? 0 }} / {{ workload.replicas }}</span></div>
+            <div class="kv"><span>副本</span><span>{{ workload.ready ?? 0 }} / {{ workload.replicas }}</span></div>
             <div class="kv"><span>当前镜像</span><code class="mono">{{ workload.imageRef?.slice(0, 60) || '—' }}</code></div>
           </div>
           <div v-if="imageMismatch" class="mismatch">⚠️ 实际运行镜像与本发布记录不一致（可能已被后续发布/回滚覆盖）</div>
@@ -60,7 +60,8 @@ interface ReleaseFull {
   previousImageId?: string; sourceRunId?: string; createdAt: string; createdBy: string
 }
 interface WorkloadBrief {
-  id: string; status: string; replicas: number; readyReplicas?: number; imageRef?: string
+  id: string; status: string; replicas: number; ready: number; imageRef?: string
+  type?: string; laneId?: string
 }
 
 const route = useRoute()
@@ -104,14 +105,13 @@ async function load() {
     ElMessage.error('发布记录不存在')
     return
   }
-  // 对账：按 (appId, envId) 找基线 service 工作负载
+  // 对账：按 (appId, envId) 找基线 service 工作负载（列表端点是路径参数 /api/workloads/{appId}?envId=）
   try {
-    const wResp = await fetchAuth(`/api/workloads?appId=${release.value.appId}&envId=${release.value.envId}`)
+    const wResp = await fetchAuth(`/api/workloads/${release.value.appId}?envId=${release.value.envId}`)
     if (wResp.ok) {
       const wls = (await wResp.json())?.data ?? []
       // 基线 lane 的 service（发布编排找/建的即此）
-      workload.value = wls.find((w: WorkloadBrief & { laneId?: string; type?: string }) =>
-        w.type === 'service' && (w.laneId ?? 'default') === 'default')
+      workload.value = wls.find((w: WorkloadBrief) => w.type === 'service' && (w.laneId ?? 'default') === 'default')
     }
   } catch { /* 非关键 */ }
 }
