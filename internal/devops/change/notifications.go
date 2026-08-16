@@ -4,8 +4,8 @@
 // 事件源：
 //   - 批次 conflict（集成冲突，error）
 //   - 批次 testing/releasing（进行中，info）
+//   - 批次 tested（测试通过待审批，warning）
 //   - run failed（error）/ paused（等审批，warning）
-//   - 变更 released（发布完成，info）
 package change
 
 import (
@@ -16,12 +16,11 @@ import (
 
 // 通知类型。
 const (
-	NotifBatchConflict = "batch_conflict"
-	NotifBatchTesting  = "batch_testing"
+	NotifBatchConflict  = "batch_conflict"
+	NotifBatchTesting   = "batch_testing"
 	NotifBatchReleasing = "batch_releasing"
-	NotifRunFailed     = "run_failed"
-	NotifRunPaused     = "run_paused"
-	NotifChangeReleased = "change_released"
+	NotifRunFailed      = "run_failed"
+	NotifRunPaused      = "run_paused"
 )
 
 // Notification 单条通知（camelCase json，前端直取）。
@@ -36,12 +35,13 @@ type Notification struct {
 	At         string `json:"at"`
 }
 
-// NotificationItem run 最小字段（RunLister 只暴露列表所需，避免 change→pipeline 全量依赖）。
+// RunStatusItem run 最小字段（RunLister 只暴露列表所需，避免 change→pipeline 全量依赖）。
 type RunStatusItem struct {
 	ID      string
 	AppID   string
 	Status  string // running|paused|succeeded|failed|aborted
 	Current string // 当前 stage 名
+	At      string // 创建时间 ISO（通知展示/排序用）
 }
 
 // RunLister 通知聚合对 run 的最小依赖（cmd/core 桥接 pipeline ListRuns）。
@@ -86,31 +86,24 @@ func Notifications(ctx context.Context, repo Repository, runs RunLister) ([]Noti
 	}
 
 	// runs：failed / paused（含 approve 门禁等待）。
-	// 租户过滤双保险：bridge 的 ListRuns 已按 ctx 过滤，此处再以批次归属应用集合过滤，
-	// 防 lister 实现遗漏租户语义时跨租户泄漏（fail-closed）。
+	// 租户过滤由 bridge 的 ListRuns ctx 过滤保证（runTriggerBridge → pipeline ListRuns
+	// 强制 tenant_id）；不以批次归属应用作白名单——无批次应用的 failed/paused run 同样需通知。
 	if runs != nil {
-		apps := map[string]bool{}
-		for _, b := range batches {
-			apps[b.AppID] = true
-		}
 		items, err := runs.ListRunStatuses(ctx)
 		if err == nil { // 读失败降级跳过（通知非关键路径）
 			for _, r := range items {
-				if !apps[r.AppID] {
-					continue // 本租户无该应用（跨租户/脏数据），跳过
-				}
 				switch r.Status {
 				case "failed":
 					out = append(out, Notification{
 						ID: "run:" + r.ID + ":failed", Type: NotifRunFailed, Severity: "error",
 						Title: fmt.Sprintf("流水线运行失败（%s）", r.Current), AppID: r.AppID,
-						TargetType: "run", TargetID: r.ID, At: "",
+						TargetType: "run", TargetID: r.ID, At: r.At,
 					})
 				case "paused":
 					out = append(out, Notification{
 						ID: "run:" + r.ID + ":paused", Type: NotifRunPaused, Severity: "warning",
 						Title: fmt.Sprintf("流水线等待审批（%s）", r.Current), AppID: r.AppID,
-						TargetType: "run", TargetID: r.ID, At: "",
+						TargetType: "run", TargetID: r.ID, At: r.At,
 					})
 				}
 			}

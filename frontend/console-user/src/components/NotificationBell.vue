@@ -19,7 +19,7 @@
         <span class="dot"></span>
         <div class="body">
           <div class="title">{{ n.title }}</div>
-          <div class="meta">{{ appName(n.appId) }}</div>
+          <div class="meta mono">{{ n.appId }}</div>
         </div>
       </div>
     </div>
@@ -37,7 +37,6 @@ import Icon from '@/components/Icon.vue'
 const READ_KEY = 'paas:notif-read'
 const router = useRouter()
 const items = ref<Notification[]>([])
-const open = ref(false)
 let timer: number | undefined
 
 function readSet(): Set<string> {
@@ -45,8 +44,6 @@ function readSet(): Set<string> {
 }
 const isRead = (n: Notification) => readSet().has(n.id)
 const unread = computed(() => items.value.filter((n) => !isRead(n)).length)
-
-function appName(id: string) { return id }
 
 function markAllRead() {
   localStorage.setItem(READ_KEY, JSON.stringify([...readSet(), ...items.value.map((n) => n.id)]))

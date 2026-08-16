@@ -142,6 +142,14 @@ async function abandon() {
 }
 
 async function load() {
+  try {
+    await doLoad()
+  } catch (e: any) {
+    ElMessage.error(e?.message || '加载失败')
+  }
+}
+
+async function doLoad() {
   const id = route.params.id as string
   // 变更详情需要 appId 前缀；先跨应用列表定位归属应用
   const all = await listAllChanges()

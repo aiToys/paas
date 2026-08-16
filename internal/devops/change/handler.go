@@ -136,6 +136,10 @@ func (h *Handler) ownBatch(w http.ResponseWriter, r *http.Request, appID, bid st
 // 只读列表：appId query 可选过滤，tenant 内跨应用（与 /api/buildruns 同款语义）。
 func (h *Handler) ServeGlobal(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodGet {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
 	if !h.allow(w, r, PermPipelineRead) {
 		return
 	}

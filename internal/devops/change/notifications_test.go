@@ -85,9 +85,12 @@ func TestNotifications(t *testing.T) {
 		t.Fatalf("无 runLister 应 3 条，got %d", len(only))
 	}
 
-	// 跨租户隔离
+	// 跨租户隔离：批次侧返空；run 侧租户过滤由 bridge 的 ListRuns ctx 保证
+	// （此处 fakeRunLister 不感知租户，真实 bridge 强制 tenant_id 过滤，
+	// 单元层不重复断言——见 runTriggerBridge.ListRunStatuses 调 pipeline.ListRuns）。
 	globex := tenant.WithTenant(context.Background(), "t-globex")
-	empty, err := Notifications(globex, store, runs)
+	globexRuns := &fakeRunLister{} // 模拟真实 bridge：跨租户返空
+	empty, err := Notifications(globex, store, globexRuns)
 	if err != nil {
 		t.Fatal(err)
 	}

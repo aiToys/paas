@@ -110,17 +110,21 @@ const canIntegrate = computed(() => ['collecting', 'conflict', 'failed'].include
 const canAbandon = computed(() => ['collecting', 'conflict', 'failed'].includes(batch.value?.status ?? ''))
 
 async function load(silent = false) {
-  const id = route.params.id as string
-  const all = await listAllBatches()
-  const b = all.find((x) => x.id === id)
-  if (!b) {
-    if (!silent) ElMessage.error('批次不存在')
-    return
+  try {
+    const id = route.params.id as string
+    const all = await listAllBatches()
+    const b = all.find((x) => x.id === id)
+    if (!b) {
+      if (!silent) ElMessage.error('批次不存在')
+      return
+    }
+    batch.value = await getBatch(b.appId, b.id)
+    // 批内变更（批次详情触发后端惰性状态推进，回读最新）
+    const cs = await listAllChanges(b.appId)
+    changes.value = cs.filter((c) => batch.value!.changeIds.includes(c.id))
+  } catch (e: any) {
+    if (!silent) ElMessage.error(e?.message || '加载失败')
   }
-  batch.value = await getBatch(b.appId, b.id)
-  // 批内变更（批次详情触发后端惰性状态推进，回读最新）
-  const cs = await listAllChanges(b.appId)
-  changes.value = cs.filter((c) => batch.value!.changeIds.includes(c.id))
 }
 
 async function doAction(kind: 'integrate' | 'approve' | 'release') {
