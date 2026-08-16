@@ -868,6 +868,18 @@ internal/dataservice/  领域(DataService + 6 Kind 常量 + KindMeta 表单元�
 - **e2e 全链路已验证（paas-shop）**：建分支→入批→integrate（merge+CI 构建真实 digest）→testing→deploy 泳道（清洗后 Service 名合法）→探活通过→tested→approve→release（merge main+CD run）→released+ReleaseIDs 回填+change released。
 - **留后续**：跨应用批次、变更级审批、冲突预检（merge 前干跑）、PR 实体/评审流、外部仓库变更、自动批次（定时发车）、release 阶段已合并分支 409 细分、批内变更 UI 拖拽排序。
 
+### DevOps UX 业界优秀标准改造（值班台 + 收件箱 + 通知 + 对账，2026-08-16）
+
+解决「各模块不统一不完整、用户需在多列表间横跳」痛点，设计对标 GitLab MR 收件箱制 / Argo 持续对账。核心原则：**让用户只盯一个地方（值班台/通知），且只在需要时被打扰**。spec `docs/superpowers/specs/2026-08-16-devops-ux-excellence-design.md`。
+
+- **后端两轻量端点**：① `GET /api/changes|batches?appId=&status=` 跨应用列表（change.Handler.ServeGlobal，tenant 内跨应用与 /api/buildruns 同款语义，perm pipeline:read）；② `GET /api/notifications` 通知聚合（`internal/devops/change/notifications.go` 实时拼装无持久化——批次 conflict/testing/releasing/tested(待审批) + run failed/paused，severity error>warning>info 排序；run 通知以批次归属应用集合二次过滤 fail-closed 防跨租户泄漏；`RunLister` 依赖倒置接口，`runTriggerBridge.ListRunStatuses` 桥接）。
+- **单据一等公民**：五详情独立路由 `/devops/{changes|batches|builds|releases}/:id`（runs 已有）——ChangeDetail（**收件箱五段**：我的代码（分支+clone+commits）/集成批次/测试验证 el-steps/发布状态/时间线）、BatchDetail（el-steps 状态机 + 内联下一步操作 integrate/approve/release + 批内变更表 + 发布记录链接）、BuildDetail（全量日志 monospace + 产出镜像链接）、ReleaseDetail（信息 + 回滚 + **运行态对账卡**：按 (appId,envId) 找基线 workload 展示副本/实际镜像，digest 不一致警示已被覆盖）。详情间链路串联（change↔batch↔run↔release↔workload 双向可走）。
+- **DevOps 中心 = 值班台 + 档案室**：默认 tab 值班台（通知驱动三列：🔴失败待处理/⏸等审批/🏃进行中，点击直达详情，失败数 badge 上 tab；「一切正常 🎉」空态）+ 七 tab 档案室（值班台/运行/变更/批次/构建/镜像/发布），全单据行可进详情页。变更/批次此前在 DevOps 中心完全缺失（用户反馈核心缺口）。
+- **变更收件箱**：AppChanges 列表加「下一步」内联操作列（open 未入批→入批集成按钮 / conflict→解决冲突 / tested→待审批 / released→✓已上线），标题可点跳收件箱详情页。
+- **通知中心（L1）**：`NotificationBell.vue` 顶栏铃铛（message 图标）+ 未读红点（localStorage `paas:notif-read` 记已读 ID，通知 ID 稳定 `target:targetID:status`）+ severity 着色列表 + 点击跳对应详情 + 30s 轮询静默。
+- **明确不做（YAGNI）**：DAG 画布、完整评审流、通知持久化/订阅/Webhook 出站（L3）、漂移检测告警。
+- **横切**：新端点 OpenAPI 登记 + `{data:T}` + camelCase；notifications 权限 pipeline:read（登录态）；轮询全部 onUnmounted clearInterval。
+
 
 ## 前端架构
 
