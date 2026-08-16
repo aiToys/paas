@@ -29,10 +29,11 @@
 <script setup lang="ts">
 // 通知中心铃铛（L1 站内通知）：30s 轮询 /api/notifications 聚合事件，
 // 未读状态存 localStorage（通知 ID 稳定：targetType:targetID:status）。
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { listNotifications, type Notification } from '@/api/change'
 import { usePolling } from '@/composables/usePolling'
+import { useSessionStore } from '@/stores/session'
 import Icon from '@/components/Icon.vue'
 
 const READ_KEY = 'paas:notif-read'
@@ -69,12 +70,17 @@ function markOneRead(n: Notification) {
   persistRead()
 }
 
+const session = useSessionStore()
+
 async function load() {
-  try { items.value = await listNotifications() } catch { /* 非关键（未登录/网络失败静默） */ }
+  // 未登录跳过（防每 30s 一次注定 401 的无效请求）
+  if (!session.profile) return
+  try { items.value = await listNotifications() } catch { /* 非关键（网络失败静默） */ }
 }
 
-// 30s 轮询（页面不可见自动暂停）
+// 30s 轮询（页面不可见自动暂停）+ 登录成功立即拉一次（usePolling 启动时可能未登录）
 usePolling(load, 30000)
+watch(() => session.profile, (p) => { if (p) load() })
 </script>
 
 <style scoped>
