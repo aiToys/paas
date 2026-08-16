@@ -29,16 +29,16 @@
 <script setup lang="ts">
 // 通知中心铃铛（L1 站内通知）：30s 轮询 /api/notifications 聚合事件，
 // 未读状态存 localStorage（通知 ID 稳定：targetType:targetID:status）。
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { listNotifications, type Notification } from '@/api/change'
+import { usePolling } from '@/composables/usePolling'
 import Icon from '@/components/Icon.vue'
 
 const READ_KEY = 'paas:notif-read'
 const READ_MAX = 500 // 已读集合上限（防 localStorage 无界增长，超出裁剪最旧）
 const router = useRouter()
 const items = ref<Notification[]>([])
-let timer: number | undefined
 
 // 响应式已读集合（一次性读入，不再每渲染解析 localStorage）
 const readIds = ref<Set<string>>(new Set())
@@ -73,11 +73,8 @@ async function load() {
   try { items.value = await listNotifications() } catch { /* 非关键（未登录/网络失败静默） */ }
 }
 
-onMounted(() => {
-  load()
-  timer = window.setInterval(load, 30000)
-})
-onUnmounted(() => clearInterval(timer))
+// 30s 轮询（页面不可见自动暂停）
+usePolling(load, 30000)
 </script>
 
 <style scoped>

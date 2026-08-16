@@ -74,16 +74,16 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getBatch, listAllBatches, listAllChanges, integrateBatch, approveBatch, releaseBatch, abandonBatch, type IntegrationBatch, type Change } from '@/api/change'
+import { usePolling } from '@/composables/usePolling'
 
 const route = useRoute()
 const router = useRouter()
 const batch = ref<IntegrationBatch>()
 const changes = ref<Change[]>([])
-let timer: number | undefined
 
 function goBack() {
   if (history.length > 1) history.back()
@@ -158,14 +158,11 @@ async function doAbandon() {
   }
 }
 
-onMounted(() => {
-  load()
-  // testing/releasing 进行中 10s 轮询（GET 详情触发后端惰性推进）
-  timer = window.setInterval(() => {
-    if (['testing', 'releasing'].includes(batch.value?.status ?? '')) load(true)
-  }, 10000)
-})
-onUnmounted(() => clearInterval(timer))
+onMounted(load)
+// testing/releasing 进行中 10s 轮询（GET 详情触发后端惰性推进；页面不可见自动暂停）
+usePolling(() => {
+  if (['testing', 'releasing'].includes(batch.value?.status ?? '')) load(true)
+}, 10000)
 </script>
 
 <style scoped>

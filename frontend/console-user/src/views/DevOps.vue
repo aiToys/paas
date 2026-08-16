@@ -4,12 +4,13 @@
 // 打开就知道该干什么。其余六 tab 是档案室（排障视角的全量单据）：运行/变更/批次/构建/镜像/发布，
 // 每行可进独立详情页（/devops/{runs|changes|batches|builds|releases}/:id），详情间有链路串联。
 // 发布回滚走 useDangerConfirm（生产按目标 env.type 显式 isProd，覆盖顶栏 scope）。
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
+import { usePolling } from '@/composables/usePolling'
 import { listRuns, type PipelineRun } from '@/api/pipeline'
 import { listAllChanges, listAllBatches, listNotifications, type Change, type IntegrationBatch, type Notification } from '@/api/change'
 
@@ -157,19 +158,16 @@ async function load() {
   }
 }
 
-// 构建状态轮询（5s）+ 发布/运行/批次/通知轮询（10s，值班台与档案室共用）
-let buildTimer: number | undefined
-let pollTimer: number | undefined
-function startPoll() {
-  buildTimer = window.setInterval(loadBuilds, 5000)
-  pollTimer = window.setInterval(() => {
-    loadReleases()
-    loadRuns()
-    loadChanges()
-    loadBatches()
-    loadNotifications()
-  }, 10000)
-}
+// 构建状态轮询（5s）+ 发布/运行/批次/通知轮询（10s，值班台与档案室共用）。
+// 页面不可见自动暂停（usePolling 统一治理，防后台 tab 请求风暴）。
+usePolling(loadBuilds, 5000)
+usePolling(() => {
+  loadReleases()
+  loadRuns()
+  loadChanges()
+  loadBatches()
+  loadNotifications()
+}, 10000)
 
 // 重新构建（构建行操作：用原 repoId 触发新构建）。
 async function rebuild(row: BuildRun) {
@@ -217,11 +215,7 @@ function shortDigest(d: string) {
   return d && d.length > 19 ? d.slice(0, 19) + '…' : (d || '—')
 }
 
-onMounted(() => { load(); startPoll() })
-onUnmounted(() => {
-  if (buildTimer) clearInterval(buildTimer)
-  if (pollTimer) clearInterval(pollTimer)
-})
+onMounted(load)
 </script>
 
 <template>
