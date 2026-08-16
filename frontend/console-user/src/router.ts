@@ -202,6 +202,31 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '流水线运行' },
   },
   {
+    // DevOps 单据详情独立页（档案室 + 链路串联）。
+    path: '/devops/changes/:id',
+    name: 'change-detail',
+    component: () => import('@/views/ChangeDetail.vue'),
+    meta: { title: '变更详情' },
+  },
+  {
+    path: '/devops/batches/:id',
+    name: 'batch-detail',
+    component: () => import('@/views/BatchDetail.vue'),
+    meta: { title: '集成批次' },
+  },
+  {
+    path: '/devops/builds/:id',
+    name: 'build-detail',
+    component: () => import('@/views/BuildDetail.vue'),
+    meta: { title: '构建详情' },
+  },
+  {
+    path: '/devops/releases/:id',
+    name: 'release-detail',
+    component: () => import('@/views/ReleaseDetail.vue'),
+    meta: { title: '发布详情' },
+  },
+  {
     path: '/playground',
     name: 'playground',
     component: () => import('@/views/Playground.vue'),

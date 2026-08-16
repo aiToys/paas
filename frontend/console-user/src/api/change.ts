@@ -46,3 +46,19 @@ export const approveBatch = (appId: string, bid: string) =>
   fetchAuth(`/api/applications/${appId}/batches/${bid}/approve`, { method: 'POST' }).then(r => unwrap<IntegrationBatch>(r))
 export const releaseBatch = (appId: string, bid: string) =>
   fetchAuth(`/api/applications/${appId}/batches/${bid}/release`, { method: 'POST' }).then(r => unwrap<IntegrationBatch>(r))
+
+// ---------- 跨应用（DevOps 中心档案室 + 详情页） ----------
+
+export interface Notification {
+  id: string; type: string; severity: 'error' | 'warning' | 'info'
+  title: string; appId: string; targetType: 'batch' | 'run' | 'change'; targetId: string; at: string
+}
+
+export const listAllChanges = (appId = '', status = '') =>
+  fetchAuth(`/api/changes${appId || status ? `?${new URLSearchParams({ ...(appId && { appId }), ...(status && { status }) }).toString()}` : ''}`).then(r => unwrap<Change[]>(r))
+export const getChange = (appId: string, id: string) =>
+  fetchAuth(`/api/applications/${appId}/changes/${id}`).then(r => unwrap<Change>(r))
+export const listAllBatches = (appId = '', status = '') =>
+  fetchAuth(`/api/batches${appId || status ? `?${new URLSearchParams({ ...(appId && { appId }), ...(status && { status }) }).toString()}` : ''}`).then(r => unwrap<IntegrationBatch[]>(r))
+export const listNotifications = () =>
+  fetchAuth('/api/notifications').then(r => unwrap<Notification[]>(r))
