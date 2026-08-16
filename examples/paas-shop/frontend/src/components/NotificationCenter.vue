@@ -73,11 +73,25 @@ function toggle() {
 onMounted(() => {
   fetchEvents()
   timer = window.setInterval(fetchEvents, 10000)
+  // 页面不可见时暂停轮询（后台 tab 持续打点会污染 bff trace/指标，回可见立即补拉）
+  document.addEventListener('visibilitychange', onVisibility)
 })
+
+function onVisibility() {
+  if (document.hidden) {
+    if (timer) { clearInterval(timer); timer = undefined }
+  } else {
+    if (!timer) {
+      fetchEvents()
+      timer = window.setInterval(fetchEvents, 10000)
+    }
+  }
+}
 
 onUnmounted(() => {
   if (timer) clearInterval(timer)
   document.removeEventListener('click', onDocClick)
+  document.removeEventListener('visibilitychange', onVisibility)
 })
 </script>
 
