@@ -5,7 +5,7 @@
 // 每行可进独立详情页（/devops/{runs|changes|batches|builds|releases}/:id），详情间有链路串联。
 // 发布回滚走 useDangerConfirm（生产按目标 env.type 显式 isProd，覆盖顶栏 scope）。
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
