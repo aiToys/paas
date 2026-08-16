@@ -1,16 +1,17 @@
 <script setup lang="ts">
-// DevOps 中心：跨应用 CI/CD 指挥台。
-// 默认 tab=运行记录（流水线引擎：build/deploy/test/approve/promote/baseline），点行进独立运行详情页
-// （GitHub Actions 式全节点日志）。另含：构建 / 镜像库 / 发布（回滚）。
+// DevOps 中心：值班台 + 档案室。
+// 默认 tab=值班台（聚合「需要我关注」的进行中/失败/待审批三列，通知驱动，点击直达详情）——
+// 打开就知道该干什么。其余六 tab 是档案室（排障视角的全量单据）：运行/变更/批次/构建/镜像/发布，
+// 每行可进独立详情页（/devops/{runs|changes|batches|builds|releases}/:id），详情间有链路串联。
 // 发布回滚走 useDangerConfirm（生产按目标 env.type 显式 isProd，覆盖顶栏 scope）。
-// 环境逐级提升（promote）归流水线引擎 promote stage（运行记录 tab），本页不再提供旧的手动提升矩阵。
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import { listRuns, type PipelineRun } from '@/api/pipeline'
+import { listAllChanges, listAllBatches, listNotifications, type Change, type IntegrationBatch, type Notification } from '@/api/change'
 
 type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
 
@@ -26,15 +27,18 @@ interface Release {
 
 const router = useRouter()
 const envStore = useEnvStore()
-const tab = ref('runs')
+const tab = ref('board')
 const builds = ref<BuildRun[]>([])
 // 镜像库实时视图：registry v2 catalog（PAAS_REGISTRY 配置的镜像仓库），展开行按需加载 tag + digest
 const registryRepos = ref<{ name: string }[]>([])
 const expandedTags = ref<Record<string, { tag: string; digest: string }[]>>({})
 const releases = ref<Release[]>([])
 const recentRuns = ref<PipelineRun[]>([])
+const changes = ref<Change[]>([])
+const batches = ref<IntegrationBatch[]>([])
+const notifications = ref<Notification[]>([])
 const loading = ref(false)
-const busy = ref(false) // 重新构建/提升 进行中（防重复点击）
+const busy = ref(false) // 重新构建/回滚 进行中（防重复点击）
 
 const BUILD_STATUS: Record<string, { label: string; type: TagType }> = {
   pending: { label: '排队', type: 'info' },
@@ -54,11 +58,41 @@ const RUN_STATUS: Record<string, { label: string; type: TagType }> = {
   failed: { label: '失败', type: 'danger' },
   aborted: { label: '已中止', type: 'info' },
 }
+const CHANGE_STATUS: Record<string, { label: string; type: TagType }> = {
+  open: { label: '进行中', type: 'primary' },
+  integrated: { label: '已集成', type: 'success' },
+  tested: { label: '测试通过', type: 'success' },
+  released: { label: '已发布', type: 'success' },
+  reverted: { label: '已回退', type: 'warning' },
+  abandoned: { label: '已放弃', type: 'info' },
+}
+const BATCH_STATUS: Record<string, { label: string; type: TagType }> = {
+  collecting: { label: '收集中', type: 'info' },
+  conflict: { label: '集成冲突', type: 'danger' },
+  testing: { label: '测试中', type: 'warning' },
+  tested: { label: '待审批', type: 'warning' },
+  releasing: { label: '发布中', type: 'warning' },
+  released: { label: '已发布', type: 'success' },
+  failed: { label: '失败', type: 'danger' },
+  abandoned: { label: '已放弃', type: 'info' },
+}
 
 // 应用名映射：onMounted 时一次拉取应用列表建 Map。
 const appNames = ref<Record<string, string>>({})
 const appName = (id: string) => appNames.value[id] ?? id
 const envName = (id: string) => envStore.envs.find((e) => e.id === id)?.name ?? id
+
+// ---------- 值班台（默认 tab）：通知驱动三列 ----------
+const boardErrors = computed(() => notifications.value.filter((n) => n.severity === 'error'))
+const boardWarnings = computed(() => notifications.value.filter((n) => n.severity === 'warning'))
+const boardInfos = computed(() => notifications.value.filter((n) => n.severity === 'info'))
+const boardTotal = computed(() => boardErrors.value.length + boardWarnings.value.length + boardInfos.value.length)
+
+function notifGo(n: Notification) {
+  if (n.targetType === 'run') router.push(`/devops/runs/${n.targetId}`)
+  else if (n.targetType === 'batch') router.push(`/devops/batches/${n.targetId}`)
+  else router.push(`/devops/changes/${n.targetId}`)
+}
 
 async function loadAppNames() {
   const resp = await fetchAuth('/api/applications')
@@ -94,6 +128,15 @@ async function loadRuns() {
     recentRuns.value = [...all].sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt)).slice(0, 20)
   } catch { /* 非关键 */ }
 }
+async function loadChanges() {
+  try { changes.value = await listAllChanges() } catch { /* 非关键 */ }
+}
+async function loadBatches() {
+  try { batches.value = await listAllBatches() } catch { /* 非关键 */ }
+}
+async function loadNotifications() {
+  try { notifications.value = await listNotifications() } catch { /* 非关键 */ }
+}
 // 当前阶段名（运行中显示 stageRuns[currentStage].name）
 function currentStageName(r: PipelineRun): string {
   return r.stageRuns[r.currentStage]?.name ?? '-'
@@ -103,20 +146,26 @@ async function load() {
   loading.value = true
   try {
     if (!envStore.envs.length) await envStore.loadEnvs()
-    await Promise.all([loadBuilds(), loadRegistry(), loadReleases(), loadAppNames(), loadRuns()])
+    await Promise.all([
+      loadBuilds(), loadRegistry(), loadReleases(), loadAppNames(), loadRuns(),
+      loadChanges(), loadBatches(), loadNotifications(),
+    ])
   } finally {
     loading.value = false
   }
 }
 
-// 构建状态轮询（5s）+ 发布状态轮询（10s，流水线/发布/运行记录 tab 用）
+// 构建状态轮询（5s）+ 发布/运行/批次/通知轮询（10s，值班台与档案室共用）
 let buildTimer: number | undefined
-let releaseTimer: number | undefined
+let pollTimer: number | undefined
 function startPoll() {
   buildTimer = window.setInterval(loadBuilds, 5000)
-  releaseTimer = window.setInterval(() => {
+  pollTimer = window.setInterval(() => {
     loadReleases()
     loadRuns()
+    loadChanges()
+    loadBatches()
+    loadNotifications()
   }, 10000)
 }
 
@@ -169,7 +218,7 @@ function shortDigest(d: string) {
 onMounted(() => { load(); startPoll() })
 onUnmounted(() => {
   if (buildTimer) clearInterval(buildTimer)
-  if (releaseTimer) clearInterval(releaseTimer)
+  if (pollTimer) clearInterval(pollTimer)
 })
 </script>
 
@@ -178,14 +227,48 @@ onUnmounted(() => {
     <div class="page-head">
       <div>
         <h2>DevOps 中心</h2>
-        <p class="sub">跨应用 CI/CD 指挥台：流水线运行 · 构建 · 镜像 · 发布 · 回滚</p>
+        <p class="sub">值班台 + 档案室：待办一览 · 运行 · 变更 · 批次 · 构建 · 镜像 · 发布</p>
       </div>
       <el-button @click="load">刷新</el-button>
     </div>
 
     <el-tabs v-model="tab" class="devops-tabs">
-      <!-- 运行记录（默认）：跨应用最近流水线运行（新 pipeline 引擎：build/deploy/test/approve/promote/baseline）。
-           点「查看详情」进独立运行详情页（/devops/runs/:id，GitHub Actions 式全节点时间线 + stage 日志）。 -->
+      <!-- 值班台（默认）：三列「需要我关注」，点击直达详情——打开就知道该干什么 -->
+      <el-tab-pane name="board">
+        <template #label>
+          值班台
+          <el-badge v-if="boardErrors.length" :value="boardErrors.length" type="danger" class="board-badge" />
+        </template>
+        <p class="tab-hint">全租户需关注事件（10s 轮询）：🔴 失败待处理 · ⏸ 等审批 · 🏃 进行中。点击直达对应详情。</p>
+        <div v-if="!boardTotal" class="board-empty">
+          <el-empty description="一切正常，没有需要关注的事件 🎉" :image-size="80" />
+        </div>
+        <div v-else class="board">
+          <div class="board-col err">
+            <div class="col-head">🔴 失败待处理（{{ boardErrors.length }}）</div>
+            <div v-for="n in boardErrors" :key="n.id" class="board-item" @click="notifGo(n)">
+              <div class="item-title">{{ n.title }}</div>
+              <div class="item-meta">{{ appName(n.appId) }}</div>
+            </div>
+          </div>
+          <div class="board-col warn">
+            <div class="col-head">⏸ 等待审批（{{ boardWarnings.length }}）</div>
+            <div v-for="n in boardWarnings" :key="n.id" class="board-item" @click="notifGo(n)">
+              <div class="item-title">{{ n.title }}</div>
+              <div class="item-meta">{{ appName(n.appId) }}</div>
+            </div>
+          </div>
+          <div class="board-col info">
+            <div class="col-head">🏃 进行中（{{ boardInfos.length }}）</div>
+            <div v-for="n in boardInfos" :key="n.id" class="board-item" @click="notifGo(n)">
+              <div class="item-title">{{ n.title }}</div>
+              <div class="item-meta">{{ appName(n.appId) }}</div>
+            </div>
+          </div>
+        </div>
+      </el-tab-pane>
+
+      <!-- 运行记录：跨应用最近流水线运行。点「查看详情」进独立运行详情页。 -->
       <el-tab-pane label="运行记录" name="runs">
         <p class="tab-hint">最近流水线运行，点「查看详情」进运行详情页（全节点时间线 + 日志）。运行中/等待审批自动轮询（10s）。</p>
         <el-table :data="recentRuns" size="small" v-loading="loading" empty-text="暂无运行记录">
@@ -227,6 +310,74 @@ onUnmounted(() => {
         </el-table>
       </el-tab-pane>
 
+      <!-- 变更（档案室）：跨应用变更列表，点行进收件箱详情页 -->
+      <el-tab-pane label="变更" name="changes">
+        <el-table :data="changes" size="small" empty-text="暂无变更">
+          <el-table-column label="应用" width="140">
+            <template #default="{ row }">
+              <span class="mono clickable" @click="goApp(row.appId)">{{ appName(row.appId) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="title" label="标题" min-width="160" show-overflow-tooltip />
+          <el-table-column label="类型" width="80">
+            <template #default="{ row }">
+              <el-tag size="small" :type="row.type === 'hotfix' ? 'danger' : 'primary'">{{ row.type }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="分支" width="150">
+            <template #default="{ row }"><span class="mono">{{ row.branch }}</span></template>
+          </el-table-column>
+          <el-table-column label="状态" width="110">
+            <template #default="{ row }">
+              <el-tag :type="(CHANGE_STATUS[row.status]?.type) || 'info'" size="small">
+                {{ CHANGE_STATUS[row.status]?.label || row.status }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="创建时间" width="170">
+            <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="90">
+            <template #default="{ row }">
+              <el-button text type="primary" size="small" @click="router.push(`/devops/changes/${row.id}`)">详情</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-tab-pane>
+
+      <!-- 批次（档案室）：跨应用集成批次，点行进状态机详情页 -->
+      <el-tab-pane label="批次" name="batches">
+        <el-table :data="batches" size="small" empty-text="暂无批次">
+          <el-table-column label="应用" width="140">
+            <template #default="{ row }">
+              <span class="mono clickable" @click="goApp(row.appId)">{{ appName(row.appId) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="title" label="标题" min-width="160" show-overflow-tooltip />
+          <el-table-column label="集成分支" width="170">
+            <template #default="{ row }"><span class="mono">{{ row.branch }}</span></template>
+          </el-table-column>
+          <el-table-column label="变更数" width="80">
+            <template #default="{ row }">{{ row.changeIds?.length ?? 0 }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="130">
+            <template #default="{ row }">
+              <el-tag :type="(BATCH_STATUS[row.status]?.type) || 'info'" size="small">
+                {{ BATCH_STATUS[row.status]?.label || row.status }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="创建时间" width="170">
+            <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="90">
+            <template #default="{ row }">
+              <el-button text type="primary" size="small" @click="router.push(`/devops/batches/${row.id}`)">详情</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-tab-pane>
+
       <!-- 构建 -->
       <el-tab-pane label="构建" name="builds">
         <el-table :data="builds" size="small" v-loading="loading" empty-text="暂无构建">
@@ -252,8 +403,9 @@ onUnmounted(() => {
           <el-table-column label="开始时间" width="170">
             <template #default="{ row }">{{ new Date(row.startedAt).toLocaleString() }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="100">
+          <el-table-column label="操作" width="150">
             <template #default="{ row }">
+              <el-button text type="primary" size="small" @click="router.push(`/devops/builds/${row.id}`)">详情</el-button>
               <el-button
                 size="small" plain :disabled="busy || row.status === 'pending' || row.status === 'running'"
                 @click="rebuild(row)"
@@ -314,15 +466,14 @@ onUnmounted(() => {
           <el-table-column label="发布时间" width="170">
             <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="120">
+          <el-table-column label="操作" width="150">
             <template #default="{ row }">
+              <el-button text type="primary" size="small" @click="router.push(`/devops/releases/${row.id}`)">详情</el-button>
               <el-button
                 v-if="row.status === 'succeeded' && row.previousImageId"
                 text type="warning" size="small" :disabled="busy"
                 @click="rollback(row)"
               >回滚</el-button>
-              <span v-else-if="row.status !== 'succeeded'" class="text-faint">—</span>
-              <span v-else class="text-faint">最新</span>
             </template>
           </el-table-column>
         </el-table>
@@ -343,6 +494,20 @@ onUnmounted(() => {
 .tab-hint { font-size: 12.5px; color: var(--text-dim); margin: 0 0 10px; }
 .env-prod { color: var(--danger); font-weight: 600; }
 .empty-hint { padding: 32px; text-align: center; color: var(--text-faint); font-size: 13px; }
+
+/* 值班台三列 */
+.board { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.board-col { border: 1px solid var(--el-border-color-lighter); border-radius: 8px; padding: 10px; min-height: 120px; background: var(--el-bg-color); }
+.board-col.err { border-top: 3px solid var(--el-color-danger); }
+.board-col.warn { border-top: 3px solid var(--el-color-warning); }
+.board-col.info { border-top: 3px solid var(--el-color-primary); }
+.col-head { font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--el-text-color-secondary); }
+.board-item { padding: 8px 10px; border-radius: 6px; cursor: pointer; margin-bottom: 6px; background: var(--el-fill-color-lighter); }
+.board-item:hover { background: var(--el-fill-color); }
+.item-title { font-size: 13px; line-height: 1.4; }
+.item-meta { font-size: 12px; color: var(--el-text-color-placeholder); margin-top: 2px; }
+.board-empty { padding: 20px 0; }
+.board-badge { margin-left: 4px; transform: translateY(-6px); }
 
 .tag-list { padding: 4px 12px; display: flex; flex-direction: column; gap: 6px; }
 .tag-row { display: flex; align-items: center; gap: 12px; font-size: 12.5px; }
