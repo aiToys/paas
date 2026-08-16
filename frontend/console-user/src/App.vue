@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
+import NotificationBell from '@/components/NotificationBell.vue'
 import { useEnvStore } from '@/stores/env'
 import { useSessionStore } from '@/stores/session'
 import { useTheme } from '@/composables/useTheme'
@@ -285,6 +286,7 @@ function isActive(to: string) {
           <h1 class="page-title">{{ pageTitle }}</h1>
         </div>
         <div class="topbar-right">
+          <NotificationBell />
           <el-dropdown trigger="click" @command="onPickEnv">
             <div class="env-chip" :class="{ prod: envStore.isProd }">
               <Icon :name="envStore.isProd ? 'shield' : 'server'" :size="14" />
