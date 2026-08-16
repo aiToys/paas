@@ -106,10 +106,10 @@ func (b *runTriggerBridge) GetRunStatus(ctx context.Context, runID string) (stri
 	return run.Status, nil
 }
 
-// ListRunStatuses 全租户 failed/paused run 状态列表（change.Notifications 通知聚合用）。
+// ListRunStatuses 全租户 failed/paused/running run 状态列表（change.Notifications 通知聚合用）。
 func (b *runTriggerBridge) ListRunStatuses(ctx context.Context) ([]change.RunStatusItem, error) {
 	out := []change.RunStatusItem{}
-	for _, st := range []string{"failed", "paused"} {
+	for _, st := range []string{"failed", "paused", "running"} {
 		runs, err := b.runs.ListRuns(ctx, "", "", st)
 		if err != nil {
 			return nil, err

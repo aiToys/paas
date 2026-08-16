@@ -21,6 +21,8 @@ const (
 	NotifBatchReleasing = "batch_releasing"
 	NotifRunFailed      = "run_failed"
 	NotifRunPaused      = "run_paused"
+	NotifRunRunning     = "run_running"
+	NotifBatchApprove   = "batch_approve"
 )
 
 // Notification 单条通知（camelCase json，前端直取）。
@@ -78,7 +80,7 @@ func Notifications(ctx context.Context, repo Repository, runs RunLister) ([]Noti
 			})
 		case BatchTested:
 			out = append(out, Notification{
-				ID: "batch:" + b.ID + ":tested", Type: NotifRunPaused, Severity: "warning",
+				ID: "batch:" + b.ID + ":tested", Type: NotifBatchApprove, Severity: "warning",
 				Title: fmt.Sprintf("批次「%s」测试通过，待审批发布", b.Title), AppID: b.AppID,
 				TargetType: "batch", TargetID: b.ID, At: b.CreatedAt.Format("2006-01-02T15:04:05Z"),
 			})
@@ -103,6 +105,12 @@ func Notifications(ctx context.Context, repo Repository, runs RunLister) ([]Noti
 					out = append(out, Notification{
 						ID: "run:" + r.ID + ":paused", Type: NotifRunPaused, Severity: "warning",
 						Title: fmt.Sprintf("流水线等待审批（%s）", r.Current), AppID: r.AppID,
+						TargetType: "run", TargetID: r.ID, At: r.At,
+					})
+				case "running":
+					out = append(out, Notification{
+						ID: "run:" + r.ID + ":running", Type: NotifRunRunning, Severity: "info",
+						Title: fmt.Sprintf("流水线运行中（%s）", r.Current), AppID: r.AppID,
 						TargetType: "run", TargetID: r.ID, At: r.At,
 					})
 				}

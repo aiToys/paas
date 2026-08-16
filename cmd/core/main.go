@@ -762,9 +762,11 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	mux.Handle("/api/pipelineruns", auth(pipelineHandler))
 	mux.Handle("/api/pipelineruns/", auth(pipelineHandler))
 	// 变更/批次跨应用列表 + 通知聚合（DevOps 中心档案室/值班台，tenant 内，与 /api/buildruns 同款语义）。
-	mux.Handle("/api/changes", auth(changeHandler))
-	mux.Handle("/api/batches", auth(changeHandler))
-	mux.Handle("/api/notifications", auth(changeHandler))
+	// 注意：走 ServeGlobal（非 ServeHTTP——后者按 /api/applications/ 前缀解析，/api/changes 会被误解析为 appID="api"）。
+	globalChanges := http.HandlerFunc(changeHandler.ServeGlobal)
+	mux.Handle("/api/changes", auth(globalChanges))
+	mux.Handle("/api/batches", auth(globalChanges))
+	mux.Handle("/api/notifications", auth(globalChanges))
 	// admin 跨租户 PipelineRun 总览（super_admin，handler 内 platformAdmin 判定，与 admin 模板同款）。
 	mux.Handle("/api/admin/pipelineruns", auth(pipelineHandler))
 	// webhook 触发端点（无 auth 中间件，token 鉴权）：Gitea push event -> 触发 pipeline run。

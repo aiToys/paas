@@ -35,20 +35,27 @@ import { listNotifications, type Notification } from '@/api/change'
 import Icon from '@/components/Icon.vue'
 
 const READ_KEY = 'paas:notif-read'
+const READ_MAX = 500 // 已读集合上限（防 localStorage 无界增长，超出裁剪最旧）
 const router = useRouter()
 const items = ref<Notification[]>([])
 let timer: number | undefined
 
-function readSet(): Set<string> {
-  try { return new Set(JSON.parse(localStorage.getItem(READ_KEY) ?? '[]')) } catch { return new Set() }
+// 响应式已读集合（一次性读入，不再每渲染解析 localStorage）
+const readIds = ref<Set<string>>(new Set())
+try { readIds.value = new Set(JSON.parse(localStorage.getItem(READ_KEY) ?? '[]')) } catch { /* 损坏重置 */ }
+
+function persistRead() {
+  // 保留最近 READ_MAX 条（数组序即插入序，超出截尾）
+  const arr = [...readIds.value]
+  localStorage.setItem(READ_KEY, JSON.stringify(arr.slice(-READ_MAX)))
 }
-const isRead = (n: Notification) => readSet().has(n.id)
+
+const isRead = (n: Notification) => readIds.value.has(n.id)
 const unread = computed(() => items.value.filter((n) => !isRead(n)).length)
 
 function markAllRead() {
-  localStorage.setItem(READ_KEY, JSON.stringify([...readSet(), ...items.value.map((n) => n.id)]))
-  // 触发响应式刷新（readSet 非响应式，借用 items 引用更新）
-  items.value = [...items.value]
+  for (const n of items.value) readIds.value.add(n.id)
+  persistRead()
 }
 
 function go(n: Notification) {
@@ -58,10 +65,8 @@ function go(n: Notification) {
   else router.push(`/devops/changes/${n.targetId}`)
 }
 function markOneRead(n: Notification) {
-  const s = readSet()
-  s.add(n.id)
-  localStorage.setItem(READ_KEY, JSON.stringify([...s]))
-  items.value = [...items.value]
+  readIds.value.add(n.id)
+  persistRead()
 }
 
 async function load() {

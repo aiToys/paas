@@ -361,3 +361,37 @@ func doGlobal[T any](t *testing.T, h *Handler, target string) T {
 	}
 	return resp.Data
 }
+
+// TestServeGlobalRoutingWiring 路由层接线回归：/api/changes|batches|notifications 必须派发到
+// ServeGlobal。C1 教训——曾误接 Handler.ServeHTTP（按 /api/applications/ 前缀解析，/api/changes
+// 被当作 appID="api" 返空列表、/api/notifications 落 404），单测直调 ServeGlobal 绕过路由层测不出。
+// 本测试模拟 mux 装配（http.HandlerFunc(ServeGlobal) + 尾斜杠 404 语义），断言三路径行为。
+func TestServeGlobalRoutingWiring(t *testing.T) {
+	h, _, _, _ := newTestHandler(t, nil, nil)
+	// 模拟 cmd/core 装配：mux.Handle("/api/changes", http.HandlerFunc(h.ServeGlobal)) 等
+	mux := http.NewServeMux()
+	global := http.HandlerFunc(h.ServeGlobal)
+	mux.Handle("/api/changes", global)
+	mux.Handle("/api/batches", global)
+	mux.Handle("/api/notifications", global)
+
+	for _, path := range []string{"/api/changes", "/api/batches", "/api/notifications"} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, acmeReq(http.MethodGet, path, ""))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s 经 mux 应 200，got %d body %s", path, rec.Code, rec.Body.String())
+		}
+		// POST 应 405（ServeGlobal 方法守卫）
+		rec2 := httptest.NewRecorder()
+		mux.ServeHTTP(rec2, acmeReq(http.MethodPost, path, "{}"))
+		if rec2.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("POST %s 应 405，got %d", path, rec2.Code)
+		}
+	}
+	// 尾斜杠/子路径不匹配精确 pattern（落兜底，防误派发到 ServeHTTP 语义）
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, acmeReq(http.MethodGet, "/api/changes/", ""))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("尾斜杠应落兜底 404，got %d", rec.Code)
+	}
+}
