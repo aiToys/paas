@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 应用详情 - 变更 tab（火车发车模型）：变更列表（创建/放弃）+ 集成批次（发车：collecting→integrate→testing→tested→approve→released）。
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   type Change, type IntegrationBatch,
@@ -11,6 +12,7 @@ import {
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 
 const props = defineProps<{ appId: string }>()
+const router = useRouter()
 
 const changes = ref<Change[]>([])
 const batches = ref<IntegrationBatch[]>([])
@@ -266,11 +268,13 @@ const fmtTime = (t?: string) => (t ? new Date(t).toLocaleString() : '-')
       <el-button text @click="load">刷新</el-button>
     </div>
 
-    <!-- 变更列表 -->
+    <!-- 变更列表：标题可点进收件箱详情页（全生命周期一站式视图） -->
     <div class="section-title">变更</div>
     <el-table :data="changes" size="small" empty-text="暂无变更">
       <el-table-column label="标题" min-width="160" show-overflow-tooltip>
-        <template #default="{ row }">{{ row.title }}</template>
+        <template #default="{ row }">
+          <a class="link" @click="router.push(`/devops/changes/${row.id}`)">{{ row.title }}</a>
+        </template>
       </el-table-column>
       <el-table-column label="类型" width="80">
         <template #default="{ row }">
@@ -301,8 +305,20 @@ const fmtTime = (t?: string) => (t ? new Date(t).toLocaleString() : '-')
       <el-table-column label="创建时间" width="170">
         <template #default="{ row }">{{ fmtTime(row.createdAt) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="90">
+      <el-table-column label="下一步" width="200">
         <template #default="{ row }">
+          <el-button v-if="row.status === 'open' && !row.batchId" size="small" text type="primary" @click="openBatchCreate">入批集成</el-button>
+          <el-button v-else-if="row.conflictWith" size="small" text type="danger" @click="drawerBid = row.batchId">解决冲突</el-button>
+          <span v-else-if="row.status === 'open' && row.batchId" class="faint">批次收集中</span>
+          <span v-else-if="row.status === 'integrated'" class="faint">集成测试中</span>
+          <span v-else-if="row.status === 'tested'" class="faint">待审批</span>
+          <span v-else-if="row.status === 'released'" class="faint">✓ 已上线</span>
+          <span v-else class="faint">—</span>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="130">
+        <template #default="{ row }">
+          <el-button size="small" text type="primary" @click="router.push(`/devops/changes/${row.id}`)">详情</el-button>
           <el-button v-if="row.status === 'open'" size="small" text type="danger" @click="abandon(row)">放弃</el-button>
         </template>
       </el-table-column>
