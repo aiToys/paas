@@ -6,8 +6,12 @@
 package natspub
 
 import (
+	"context"
 	"log/slog"
 	"time"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/nats-io/nats.go"
 )
@@ -38,10 +42,18 @@ func Connect(url string) *Publisher {
 }
 
 // Publish 发布消息；降级 stub 静默丢弃返 nil。
+// 带 OTel span（messaging 语义属性）使瀑布图可见 MQ 发布耗时与目标 subject。
 func (p *Publisher) Publish(subject string, payload []byte) error {
 	if p.degraded || p.nc == nil {
 		return nil
 	}
+	_, span := otel.Tracer("paas-shop/nats").Start(context.Background(), "nats.publish "+subject)
+	span.SetAttributes(
+		attribute.String("messaging.system", "nats"),
+		attribute.String("messaging.destination", subject),
+		attribute.Int("messaging.message.payload_size_bytes", len(payload)),
+	)
+	defer span.End()
 	return p.nc.Publish(subject, payload)
 }
 

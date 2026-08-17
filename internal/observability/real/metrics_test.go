@@ -37,7 +37,7 @@ func TestMetricsStoreSuccess(t *testing.T) {
 		})
 	}))
 	defer srv.Close()
-	s := NewMetricsStore(srv.URL, &fakeLister{ids: []string{"wl-wl1", "wl-wl2"}})
+	s := NewMetricsStore(srv.URL, &fakeLister{ids: []string{"wl-wl1", "wl-wl2"}}, nil)
 	ctx := tenant.WithTenant(context.Background(), "t-acme")
 	out, err := s.ListMetrics(ctx, "app", "app-cs", "cpu")
 	if err != nil {
@@ -56,7 +56,7 @@ func TestMetricsStoreSuccess(t *testing.T) {
 
 func TestMetricsStoreBackendDown(t *testing.T) {
 	// 指向不存在的端口 → 降级返空切片，不报错。
-	s := NewMetricsStore("http://127.0.0.1:1", nil)
+	s := NewMetricsStore("http://127.0.0.1:1", nil, nil)
 	out, err := s.ListMetrics(context.Background(), "app", "", "cpu")
 	if err != nil {
 		t.Fatalf("后端不可达应降级返空非报错: %v", err)
@@ -85,7 +85,7 @@ func TestMetricsStoreDataservicePodQuery(t *testing.T) {
 		})
 	}))
 	defer srv.Close()
-	s := NewMetricsStore(srv.URL, nil)
+	s := NewMetricsStore(srv.URL, nil, nil)
 	out, err := s.ListMetrics(context.Background(), "dataservice", "ds-mysql", "cpu")
 	if err != nil {
 		t.Fatalf("意外错误: %v", err)
@@ -116,7 +116,7 @@ func TestMetricsStoreDataserviceMemoryScale(t *testing.T) {
 		})
 	}))
 	defer srv.Close()
-	s := NewMetricsStore(srv.URL, nil)
+	s := NewMetricsStore(srv.URL, nil, nil)
 	out, _ := s.ListMetrics(context.Background(), "dataservice", "ds-r", "mem")
 	if len(out) != 1 {
 		t.Fatalf("应 1 条 series，got %d", len(out))

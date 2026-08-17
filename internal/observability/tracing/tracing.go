@@ -10,9 +10,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -27,6 +29,14 @@ const ServiceName = "paas-core"
 //   - endpoint 形如 "localhost:4318"（OTLP/HTTP，默认 grpc→http 端口 4318）；
 //     空串则不初始化（noop），返回的 shutdown 为 no-op。
 //   - 返回的 shutdown 必须在进程退出前调用以 flush span。
+// clusterIDFromEnv 集群标识（env PAAS_CLUSTER_ID，缺省 default 单集群）。
+func clusterIDFromEnv() string {
+	if v := os.Getenv("PAAS_CLUSTER_ID"); v != "" {
+		return v
+	}
+	return "default"
+}
+
 func Init(ctx context.Context, endpoint string) (func(context.Context) error, error) {
 	if endpoint == "" {
 		// noop：otel 全局默认即 noop tracer，不接入任何后端。
@@ -45,6 +55,9 @@ func Init(ctx context.Context, endpoint string) (func(context.Context) error, er
 	res, err := resource.Merge(resource.Default(),
 		resource.NewWithAttributes(semconv.SchemaURL,
 			semconv.ServiceName(ServiceName),
+			// 排障上下文：控制面所在集群（与应用 Pod 的 paas.cluster 同约定，
+			// trace 可按集群过滤）。env PAAS_CLUSTER_ID，缺省 default（单集群）。
+			attribute.String("paas.cluster", clusterIDFromEnv()),
 		))
 	if err != nil {
 		return nil, fmt.Errorf("otel resource: %w", err)

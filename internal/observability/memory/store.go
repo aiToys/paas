@@ -199,8 +199,9 @@ func (s *Store) ListAlerts(ctx context.Context, targetType, targetId string) ([]
 }
 
 // ListLogs 应用日志查询（过滤，不补点）。降级模式返空。按时间倒序返回。
-// targetType=dataservice 走 TargetType/TargetID 维度；否则走原 appID 维度（向后兼容）。
-func (s *Store) ListLogs(ctx context.Context, appID, targetType, targetID, level, q string, limit int) ([]observability.LogEntry, error) {
+// targetType 非空走 TargetType/TargetID 维度（dataservice/env/workload 通用）；否则走 appID 维度（向后兼容）。
+func (s *Store) ListLogs(ctx context.Context, appID, targetType, targetID, level, q, lane string, limit int) ([]observability.LogEntry, error) {
+	_ = lane // mock 数据无 lane 维度（真实 Loki 路径消费）
 	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return nil, err
@@ -218,18 +219,16 @@ func (s *Store) ListLogs(ctx context.Context, appID, targetType, targetID, level
 	out := make([]observability.LogEntry, 0, len(all))
 	qlower := strings.ToLower(q)
 	for _, l := range all {
-		// targetType=dataservice 走 TargetType/TargetID 维度；否则走原 appID 维度（向后兼容）。
-		if targetType == observability.TargetDataservice {
-			if l.TargetType != observability.TargetDataservice {
+		// targetType 非空走 TargetType/TargetID 维度（dataservice/env/workload 通用匹配）；否则走 appID 维度（向后兼容）。
+		if targetType != "" {
+			if l.TargetType != targetType {
 				continue
 			}
 			if targetID != "" && l.TargetID != targetID {
 				continue
 			}
-		} else {
-			if appID != "" && l.AppID != appID {
-				continue
-			}
+		} else if appID != "" && l.AppID != appID {
+			continue
 		}
 		if level != "" && l.Level != level {
 			continue
@@ -279,13 +278,54 @@ func (s *Store) ListTraces(ctx context.Context, appID, status string, limit int)
 	return out, nil
 }
 
-// seed 仅灌告警规则（配置类演示）；metrics/logs/traces 不 seed（去假数据，接真实后端或返空）。
+// GetTrace 按 traceID 精确查单条（memory 路径：遍历租户 traces 按 ID 匹配）。
+func (s *Store) GetTrace(ctx context.Context, traceID string) (observability.Trace, error) {
+	tid, err := tenant.IDOrErr(ctx)
+	if err != nil {
+		return observability.Trace{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, t := range s.traces[tid] {
+		if t.ID == traceID {
+			return t, nil
+		}
+	}
+	return observability.Trace{}, observability.ErrTraceNotFound
+}
+
+// seed 灌平台预置告警规则（targetID 空=该维度全部实体，新应用自动纳入监控）；
+// metrics/logs/traces 不 seed（去假数据，接真实后端或返空）。
 func (s *Store) seed() {
 	now := time.Now()
 	s.rules["rule-acme-cpu"] = observability.AlertRule{
 		ID: "rule-acme-cpu", TenantID: "t-acme", Name: "应用 CPU 偏高",
 		MetricName: observability.MetricCPU, TargetType: observability.TargetApp,
 		Operator: observability.OpGT, Threshold: 50, Severity: observability.SeverityWarning,
+		Enabled: true, UpdatedAt: now,
+	}
+	s.rules["rule-acme-app-err"] = observability.AlertRule{
+		ID: "rule-acme-app-err", TenantID: "t-acme", Name: "应用错误率超标",
+		MetricName: observability.MetricErrorRate, TargetType: observability.TargetApp,
+		Operator: observability.OpGT, Threshold: 5, Severity: observability.SeverityCritical,
+		Enabled: true, UpdatedAt: now,
+	}
+	s.rules["rule-acme-app-latency"] = observability.AlertRule{
+		ID: "rule-acme-app-latency", TenantID: "t-acme", Name: "应用 P95 延迟过高",
+		MetricName: observability.MetricLatency, TargetType: observability.TargetApp,
+		Operator: observability.OpGT, Threshold: 1000, Severity: observability.SeverityWarning,
+		Enabled: true, UpdatedAt: now,
+	}
+	s.rules["rule-acme-ds-cpu"] = observability.AlertRule{
+		ID: "rule-acme-ds-cpu", TenantID: "t-acme", Name: "数据服务 CPU 打满",
+		MetricName: observability.MetricCPU, TargetType: observability.TargetDataservice,
+		Operator: observability.OpGT, Threshold: 0.8, Severity: observability.SeverityCritical,
+		Enabled: true, UpdatedAt: now,
+	}
+	s.rules["rule-acme-ds-mem"] = observability.AlertRule{
+		ID: "rule-acme-ds-mem", TenantID: "t-acme", Name: "数据服务内存过高",
+		MetricName: observability.MetricMem, TargetType: observability.TargetDataservice,
+		Operator: observability.OpGT, Threshold: 1024, Severity: observability.SeverityWarning,
 		Enabled: true, UpdatedAt: now,
 	}
 }

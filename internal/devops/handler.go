@@ -68,6 +68,9 @@ type Handler struct {
 	registryClient *registry.Client
 	// logStreamer 构建实时日志流（k8s Pod logs follow）；nil 时 /logs/stream 降级 503。
 	logStreamer builder.BuildLogStreamer
+	// svcLister 查 app 已部署的服务集合（多服务发布 service 必填校验用）；
+	// nil 时跳过校验（测试/未装配场景）。
+	svcLister WorkloadServiceLister
 	// Authorize 校验当前请求是否持有权限；nil 跳过（测试场景）。
 	Authorize func(r *http.Request, perm string) bool
 	// UserIDFrom 从身份 ctx 取用户 ID（填 Release.CreatedBy）；nil 则空。
@@ -114,6 +117,21 @@ func WithRegistryClient(c *registry.Client) HandlerOpt {
 // WithBuildLogStreamer 注入构建实时日志流（k8s Pod logs follow）；nil 时 /logs/stream 降级 503。
 func WithBuildLogStreamer(s builder.BuildLogStreamer) HandlerOpt {
 	return func(h *Handler) { h.logStreamer = s }
+}
+
+// WorkloadServiceLister 查 app 在某环境已部署的服务集合（依赖倒置，cmd/core 桥接
+// workload.Repository）。发布前校验：app 已是多服务形态时 service 必填——
+// service 空时 CreateRelease 的基线查找「不过滤返回全部服务」，会命中 ID 最小的
+// Workload 反复覆盖，多服务镜像互相踩（paas-shop 实测踩坑）。
+type WorkloadServiceLister interface {
+	// DeployedServices 返回该 app×env 已部署的服务名集合（Workload.Service 非空值去重）。
+	// 空 slice = 单服务/无部署（service 可空，向后兼容）。
+	DeployedServices(ctx context.Context, appID, envID string) ([]string, error)
+}
+
+// WithWorkloadServiceLister 注入已部署服务查询（多服务发布 service 必填校验）。
+func WithWorkloadServiceLister(l WorkloadServiceLister) HandlerOpt {
+	return func(h *Handler) { h.svcLister = l }
 }
 
 func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) bool {
@@ -707,6 +725,15 @@ func (h *Handler) serveReleases(w http.ResponseWriter, r *http.Request, appID st
 		// 生产环境发布需 prod:write（developer 被拦，生产只读）
 		if !h.allowProd(w, r, input.EnvID) {
 			return
+		}
+		// 多服务防护：app 已部署多个服务时 service 必填。service 空时基线查找
+		// 「不过滤返回全部」，会命中 ID 最小的 Workload 反复覆盖，多服务镜像互相踩。
+		if input.Service == "" && h.svcLister != nil {
+			if svcs, err := h.svcLister.DeployedServices(r.Context(), appID, input.EnvID); err == nil && len(svcs) > 0 {
+				httputil.WriteError(w, http.StatusBadRequest,
+					"该应用是多服务形态（已部署 "+strings.Join(svcs, "、")+"），请指定 service 字段")
+				return
+			}
 		}
 		rel, err := h.releases.CreateRelease(r.Context(), input)
 		if err != nil {

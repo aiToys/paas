@@ -15,7 +15,9 @@ package builder
 //     而非 ${var:+-f "$var"}——busybox ash 对 ${:+} 嵌套引号展开有 bug（会丢 -f）。
 //   - DOCKER_BUILDKIT=0 禁用 buildkit 用 classic builder：DooD 下 buildkit 经 sock 的
 //     context transfer 有 bug（dockerfile 收到 2B 损坏 → "failed to read dockerfile"），
-//     classic builder 直接传 context 不受影响。
+//     classic builder 直接传 context 不受影响。注意 classic builder 无 buildkit 预定义
+//     $BUILDPLATFORM 自动变量——用户 Dockerfile 若用 FROM --platform=<var>，需显式
+//     `ARG <var>=linux/amd64` 声明默认值（见 examples/paas-shop/Dockerfile.backend）。
 //
 // 最后一行 echo "PAAS_DIGEST=sha256:..." 是与 Go 侧约定的回传标记（parseDigest 正则解析）。
 const builderScript = `set -eu

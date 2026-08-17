@@ -1,4 +1,5 @@
 # Grafana values（统一面板，预配 Prometheus/Loki/Jaeger 三数据源 + sidecar 自动加载 dashboard）。
+# ⚠️ dev overlay：adminPassword 是本地 dev 集群演示凭证，开源部署请替换。
 ---
 adminPassword: "paas-admin"
 

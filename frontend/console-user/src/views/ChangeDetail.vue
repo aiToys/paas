@@ -19,7 +19,8 @@
         <div class="kv"><span>类型</span><el-tag size="small" :type="change.type === 'hotfix' ? 'danger' : 'primary'">{{ change.type }}</el-tag></div>
         <div class="kv"><span>分支</span><code class="mono">{{ change.branch }}</code><span class="dim">（基于 {{ change.baseBranch }}{{ change.branchCreated ? '，平台代建' : '' }}）</span></div>
         <div class="kv"><span>克隆</span><code class="mono clone">{{ cloneCmd }}</code>
-          <el-button size="small" text @click="copyClone">复制</el-button></div>
+          <el-button size="small" text @click="copyClone">复制</el-button>
+          <el-button size="small" text type="primary" @click="router.push(repoLink(change.appId, change.repoId))">浏览仓库 →</el-button></div>
         <div v-if="commits.length" class="commits">
           <div class="sub">最近提交</div>
           <div v-for="c in commits" :key="c.sha" class="commit">
@@ -84,14 +85,18 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getChange, abandonChange, getBatch, listAllBatches, listAllChanges, type Change, type IntegrationBatch } from '@/api/change'
 import { fetchAuth } from '@/api'
+import { repoLink } from '@/composables/useDevopsLinks'
 
 const route = useRoute()
 const router = useRouter()
 const change = ref<Change>()
 const batch = ref<IntegrationBatch>()
 const commits = ref<{ sha: string; message: string }[]>([])
+const repoGitUrl = ref('')
 
-const cloneCmd = computed(() => `git clone -b ${change.value?.branch ?? ''} <仓库地址>`)
+// 克隆命令：仓库地址来自仓库详情（GitURL，internal=内网 Gitea / external=用户填的公网地址）
+const cloneCmd = computed(() =>
+  repoGitUrl.value ? `git clone -b ${change.value?.branch ?? ''} ${repoGitUrl.value}` : '（仓库地址加载中…）')
 
 function goBack() {
   if (history.length > 1) history.back()
@@ -159,6 +164,15 @@ async function doLoad() {
     return
   }
   change.value = await getChange(c.appId, id)
+  // 仓库地址（真实 clone 命令用；拉不到降级提示）
+  try {
+    const resp = await fetchAuth(`/api/applications/${c.appId}/repositories`)
+    if (resp.ok) {
+      const repos = (await resp.json()).data ?? []
+      const r = repos.find((x: { id: string }) => x.id === change.value!.repoId)
+      if (r?.gitUrl) repoGitUrl.value = r.gitUrl
+    }
+  } catch { /* 非关键 */ }
   // 批次：经跨应用批次列表定位（change.batchId 已知）
   if (change.value.batchId) {
     const bs = await listAllBatches(change.value.appId)

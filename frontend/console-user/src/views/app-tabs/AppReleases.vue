@@ -3,10 +3,14 @@
 // 生产发布/回滚受 prod:write 保护（后端）；前端回滚走 confirmDangerous（生产输入名称确认）。
 // 环境列表自加载；默认环境取全局 env store（顶栏当前环境）。
 import { ref, computed, onMounted, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
+import { imageLink, releaseLink } from '@/composables/useDevopsLinks'
+
+const router = useRouter()
 
 const props = defineProps<{ appId: string; pickedImageId?: string }>()
 const envStore = useEnvStore()
@@ -189,14 +193,17 @@ watch(() => props.pickedImageId, (id) => {
         <template #default="{ row }">{{ envName(row.envId) }}</template>
       </el-table-column>
       <el-table-column label="镜像" width="150">
-        <template #default="{ row }"><span class="mono">{{ imgTag(row.imageId) }}</span></template>
+        <template #default="{ row }">
+          <a class="mono link" @click="router.push(imageLink(props.appId, row.imageId))">{{ imgTag(row.imageId) }}</a>
+        </template>
       </el-table-column>
       <el-table-column prop="strategy" label="策略" width="90" />
       <el-table-column label="发布时间" width="160">
         <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="80">
+      <el-table-column label="操作" width="140">
         <template #default="{ row }">
+          <el-button text type="primary" size="small" @click="router.push(releaseLink(row.id))">详情</el-button>
           <el-button v-if="row.status === 'succeeded' && row.previousImageId" text type="warning" size="small" @click="rollback(row)">回滚</el-button>
         </template>
       </el-table-column>
@@ -232,6 +239,8 @@ watch(() => props.pickedImageId, (id) => {
 </template>
 
 <style scoped>
+.link { color: var(--el-color-primary); cursor: pointer; }
+.link:hover { text-decoration: underline; }
 .prod-warn {
   margin-top: 6px;
   font-size: 12px;

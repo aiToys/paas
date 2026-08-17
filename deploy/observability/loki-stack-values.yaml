@@ -36,6 +36,26 @@ promtail:
   config:
     clients:
       - url: http://loki:3100/loki/api/v1/push
+    # 泳道排障：从 Pod label 提取 paas.aitoys/lane（reconciler 已打）为 Loki label
+    # `lane`——日志可按 {lane="feature-x"} 过滤（同服务多泳道并行时区分流量归属）。
+    # pod label 键含 / 和 .，需整体转义（promtail label 名只许 [a-zA-Z0-9_]）。
+    # 同时提取租户/应用 label，日志侧具备与 trace 一致的排障维度。
+    snippets:
+      extraScrapeConfigs: |
+        - job_name: kubernetes-pods-lane
+          kubernetes_sd_configs:
+            - role: pod
+          relabel_configs:
+            - source_labels: [__meta_kubernetes_pod_label_paas_aitoys_lane]
+              target_label: lane
+            - source_labels: [__meta_kubernetes_pod_label_paas_aitoys_tenant]
+              target_label: paas_tenant
+            - source_labels: [__meta_kubernetes_pod_label_paas_aitoys_app]
+              target_label: paas_app
+            - source_labels: [__meta_kubernetes_pod_name]
+              target_label: pod
+          pipeline_stages:
+            - cri: {}
   # 内存 64Mi → 256Mi：节点 pod 多时 promtail tail 大量文件，64Mi 易 OOMKilled
   # （exit 137 CrashLoopBackOff，实测 kb3 OOM 重启 270 次）。256Mi 稳定。
   resources:

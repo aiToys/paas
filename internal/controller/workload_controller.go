@@ -38,6 +38,9 @@ type WorkloadReconciler struct {
 	// 到平台可观测后端（paas-shop observ.Init 据此建 tracer，空则 noop）。与 DPToken 独立——
 	// 应用即使不接数据面也应有可观测。空则不注入（未配 OTEL 后端的场景）。
 	OtelEndpoint string
+	// ClusterID 排障上下文：注入 service 类型 Pod env PAAS_CLUSTER_ID（应用读入 OTel 资源属性
+	// paas.cluster，trace 可按集群过滤）。空则不注入（单集群场景，应用侧默认 "default"）。
+	ClusterID string
 	// IngressClass 是 applyIngress 建的 Ingress 的 ingressClassName（env PAAS_INGRESS_CLASS，
 	// 默认 hermes）。空则不设 ingressClassName（集群默认 IngressController 接管）。
 	IngressClass string
@@ -262,6 +265,8 @@ func (r *WorkloadReconciler) applyDeployment(ctx context.Context, w *v1alpha1.Wo
 		if w.Spec.Type == "service" && r.OtelEndpoint != "" {
 			c.Env = append(c.Env,
 				corev1.EnvVar{Name: "PAAS_OTEL_ENDPOINT", Value: r.OtelEndpoint},
+				corev1.EnvVar{Name: "PAAS_CLUSTER_ID", Value: r.ClusterID},
+				corev1.EnvVar{Name: "PAAS_LANE_ID", Value: sanitizeLane(w.Spec.LaneID)},
 			)
 		}
 		// OwnerReference：CR 删除时 K8s GC 自动清理 Deployment（SetupWithManager 的 Owns 生效前提，

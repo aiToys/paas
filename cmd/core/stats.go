@@ -41,3 +41,27 @@ func (s *appWorkloadStats) StatsByTenant(ctx context.Context) (map[string]applic
 	}
 	return stats, nil
 }
+
+// wlServiceLister 查 app×env 已部署的服务集合（devops.WorkloadServiceLister 桥接，
+// 多服务发布 service 必填校验用）。Workload.Service 非空值去重；基线+泳道合并。
+type wlServiceLister struct{ repo workload.Repository }
+
+func (l *wlServiceLister) DeployedServices(ctx context.Context, appID, envID string) ([]string, error) {
+	// laneID 空串=不过滤（含基线 + 全部泳道），服务形态以 app 维度判定
+	wls, err := l.repo.List(ctx, envID, appID, "", workload.TypeService, "")
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(wls))
+	out := make([]string, 0, len(wls))
+	for _, w := range wls {
+		if w.Service == "" {
+			continue // 单服务 Workload（Service 空）不算多服务形态
+		}
+		if _, ok := seen[w.Service]; !ok {
+			seen[w.Service] = struct{}{}
+			out = append(out, w.Service)
+		}
+	}
+	return out, nil
+}

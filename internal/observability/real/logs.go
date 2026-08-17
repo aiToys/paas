@@ -52,7 +52,7 @@ type lokiResponse struct {
 // （`|~ "(?i)\berror\b"` 等），非严格——仅缩小范围，不保证命中所有该级别日志。
 //
 // Loki 按时间倒序返回；截断 limit。后端不可达 / lister 未注入降级返空。
-func (s *LogsStore) ListLogs(ctx context.Context, appID, targetType, targetID, level, q string, limit int) ([]observability.LogEntry, error) {
+func (s *LogsStore) ListLogs(ctx context.Context, appID, targetType, targetID, level, q, lane string, limit int) ([]observability.LogEntry, error) {
 	if limit <= 0 || limit > observability.MaxLogs {
 		limit = 100
 	}
@@ -78,7 +78,13 @@ func (s *LogsStore) ListLogs(ctx context.Context, appID, targetType, targetID, l
 		podRegex = lokiPodSelector(ids)
 	}
 	// LogQL selector：限定本租户 ns + 应用 pod 名正则。
-	selector := fmt.Sprintf(`{namespace=%q,pod=~%q}`, ns, podRegex)
+	// lane 非空时追加 lane label 过滤（promtail 从 Pod label paas.aitoys/lane 提取；
+	// 泳道排障：同服务多泳道并行时区分流量归属，default 基线 lane=default）。
+	selector := fmt.Sprintf(`{namespace=%q,pod=~%q`, ns, podRegex)
+	if lane != "" {
+		selector += fmt.Sprintf(`,lane=%q`, lane)
+	}
+	selector += `}`
 	if level != "" {
 		// 内容正则 best-effort（非严格 level label）
 		selector += fmt.Sprintf(" |~ %q", "(?i)\\b"+regexp.QuoteMeta(level)+"\\b")

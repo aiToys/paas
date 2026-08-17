@@ -4,13 +4,16 @@
 // 点节点切换下方详情面板（错误/输出物/日志）；build 日志保留 SSE 实时流 + 终态全量。
 // 5s 轮询仅运行中/暂停持续，终态自动停止。断连静默重试下次。
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { imageLink, releaseLink, buildLink } from '@/composables/useDevopsLinks'
 import {
   getRun, approveStage, abortRun, retryRun, getBuildRun,
   type PipelineRun, type StageRun, laneOf, buildRunIdOf,
 } from '@/api/pipeline'
 
 const props = defineProps<{ runId: string }>()
+const router = useRouter()
 
 const run = ref<PipelineRun | null>(null)
 const loading = ref(false)
@@ -267,14 +270,26 @@ const selectedStage = computed<StageRun | null>(() => {
 const OUTPUT_LABELS: Record<string, string> = {
   imageId: '镜像',
   releaseId: '发布单',
+  buildRunId: '构建记录',
   workloadDomain: '访问地址',
   version: '版本',
   mergeSha: '合并 SHA',
 }
 
-function outputEntries(s: StageRun): Array<[key: string, string]> {
-  if (!s.output) return []
-  return Object.entries(s.output).map(([k, v]) => [OUTPUT_LABELS[k] || k, String(v ?? '')])
+// 输出条目：文本值 + 可选跳转路由（信息即入口——imageId/releaseId/buildRunId/domain 可点）
+interface OutEntry { label: string; value: string; to?: string; external?: boolean }
+
+function outputEntries(s: StageRun): OutEntry[] {
+  if (!s.output || !run.value) return []
+  return Object.entries(s.output).map(([k, v]) => {
+    const value = String(v ?? '')
+    const e: OutEntry = { label: OUTPUT_LABELS[k] || k, value }
+    if (k === 'imageId' && value) e.to = imageLink(run.value!.appId, value)
+    else if (k === 'releaseId' && value) e.to = releaseLink(value)
+    else if (k === 'buildRunId' && value) e.to = buildLink(value)
+    else if (k === 'workloadDomain' && value) { e.external = true; e.to = `http://${value}` }
+    return e
+  })
 }
 
 function stageDuration(s: StageRun): string {
@@ -360,8 +375,11 @@ watch(() => run.value?.id, autoSelect)
         </div>
         <div v-if="selectedStage.error" class="stage-error">⚠ {{ selectedStage.error }}</div>
         <div v-if="outputEntries(selectedStage).length" class="stage-output">
-          <div v-for="[k, v] in outputEntries(selectedStage)" :key="k" class="out-item">
-            <span class="out-key">{{ k }}：</span><span class="out-val">{{ v }}</span>
+          <div v-for="o in outputEntries(selectedStage)" :key="o.label" class="out-item">
+            <span class="out-key">{{ o.label }}：</span>
+            <a v-if="o.external && o.to" :href="o.to" target="_blank" rel="noopener" class="out-val out-link">{{ o.value }} ↗</a>
+            <a v-else-if="o.to" class="out-val out-link" @click="router.push(o.to!)">{{ o.value }}</a>
+            <span v-else class="out-val">{{ o.value }}</span>
           </div>
         </div>
         <div class="stage-log" v-loading="logLoading && selectedStage.type === 'build'">
@@ -437,6 +455,8 @@ watch(() => run.value?.id, autoSelect)
 .out-item { font-size: 12px; line-height: 1.8; }
 .out-key { color: var(--el-text-color-secondary); }
 .out-val { font-family: monospace; color: var(--el-text-color-primary); word-break: break-all; }
+.out-link { color: var(--el-color-primary); cursor: pointer; }
+.out-link:hover { text-decoration: underline; }
 .log-block {
   max-height: 320px; overflow-y: auto;
   padding: 8px 10px; font-family: monospace; font-size: 12px; line-height: 1.6;

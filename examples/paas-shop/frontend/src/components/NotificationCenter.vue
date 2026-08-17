@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { laneFetch } from '../lane'
 import { ref, onMounted, onUnmounted } from 'vue'
 
 // 事件结构（与后端 bff /api/events 返回的 shopEvent JSON 一致）
@@ -25,7 +26,7 @@ try {
 
 async function fetchEvents() {
   try {
-    const resp = await fetch('/api/events?limit=20')
+    const resp = await laneFetch('/api/events?limit=20')
     const data: Event[] = await resp.json()
     events.value = data
     unread.value = data.filter(e => new Date(e.receivedAt).getTime() > lastSeen).length

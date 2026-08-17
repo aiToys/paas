@@ -152,9 +152,14 @@ func (h *Handler) ServeGlobal(w http.ResponseWriter, r *http.Request) {
 	case "/api/changes":
 		list, err = h.repo.ListChanges(r.Context(), q.Get("appId"), q.Get("status"))
 	case "/api/batches":
-		list, err = h.repo.ListBatches(r.Context(), q.Get("appId"), q.Get("status"))
+		list, err = h.syncAndListBatches(r.Context(), q.Get("appId"), q.Get("status"))
 	case "/api/notifications":
-		list, err = Notifications(r.Context(), h.repo, h.runLister)
+		// 通知依赖批次最新状态（tested 待审批等），先惰性推进再聚合。
+		if _, serr := h.syncAndListBatches(r.Context(), "", ""); serr == nil {
+			list, err = Notifications(r.Context(), h.repo, h.runLister)
+		} else {
+			err = serr
+		}
 	default:
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 		return
@@ -164,6 +169,26 @@ func (h *Handler) ServeGlobal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputil.WriteData(w, list)
+}
+
+// syncAndListBatches 列表前惰性推进活跃批次（testing/releasing）终态。
+// 前端列表/通知轮询不触发详情端点，若仅详情推进，批次会一直显示 testing、
+// 「tested 待审批」通知永不出现。活跃批次通常 ≤2 个，开销可忽略；单批失败不影响其余。
+func (h *Handler) syncAndListBatches(ctx context.Context, appID, status string) ([]IntegrationBatch, error) {
+	list, err := h.repo.ListBatches(ctx, appID, status)
+	if err != nil {
+		return nil, err
+	}
+	for _, b := range list {
+		if b.Status != BatchTesting && b.Status != BatchReleasing {
+			continue
+		}
+		if _, err := h.svc.SyncBatchStatus(ctx, b.ID); err != nil {
+			continue // 单批推进失败保持现状（下次再推）
+		}
+	}
+	// 推进后状态可能变化，重读一次保证返回最新
+	return h.repo.ListBatches(ctx, appID, status)
 }
 
 // ServeHTTP 分发 /api/applications/{id}/changes[...] 与 /api/applications/{id}/batches[...]。
@@ -231,12 +256,8 @@ func (h *Handler) serveChanges(w http.ResponseWriter, r *http.Request, appID str
 			if !h.allow(w, r, PermPipelineRead) {
 				return
 			}
-			if _, ok := h.ownChange(w, r, appID, cid); !ok {
-				return
-			}
-			c, err := h.repo.GetChange(ctx, cid)
-			if err != nil {
-				httputil.WriteServiceError(w, toHTTPStatus(err), err)
+			c, ok := h.ownChange(w, r, appID, cid)
+			if !ok {
 				return
 			}
 			httputil.WriteData(w, c)
@@ -272,7 +293,7 @@ func (h *Handler) serveBatches(w http.ResponseWriter, r *http.Request, appID str
 			if !h.allow(w, r, PermPipelineRead) {
 				return
 			}
-			list, err := h.repo.ListBatches(ctx, appID, r.URL.Query().Get("status"))
+			list, err := h.syncAndListBatches(ctx, appID, r.URL.Query().Get("status"))
 			if err != nil {
 				httputil.WriteInternalError(w, err)
 				return
@@ -302,10 +323,7 @@ func (h *Handler) serveBatches(w http.ResponseWriter, r *http.Request, appID str
 	if len(parts) == 3 {
 		switch r.Method {
 		case http.MethodGet:
-			if !h.allow(w, r, PermPipelineRead) {
-				return
-			}
-			b, err := h.svc.SyncBatchStatus(ctx, bid) // 惰性推进（testing/releasing 终态回写）
+			b, err := h.svc.SyncBatchStatus(ctx, bid) // 惰性推进（testing/releasing 终态回写；权限已在上方统一校验）
 			if err != nil {
 				httputil.WriteServiceError(w, toHTTPStatus(err), err)
 				return

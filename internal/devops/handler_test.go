@@ -15,6 +15,7 @@ import (
 	devopsmemory "github.com/aitoys/paas/internal/devops/memory"
 	envmemory "github.com/aitoys/paas/internal/environment/memory"
 	wlmemory "github.com/aitoys/paas/internal/workload/memory"
+	"github.com/aitoys/paas/internal/workload"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
@@ -404,4 +405,80 @@ func TestHandlerBuildLogsStream(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("跨租户期望 404，got %d", rec.Code)
 	}
+}
+
+// TestHandlerReleaseMultiServiceGuard 验证多服务发布防护：app 已部署多服务
+// （Workload.Service 非空 ≥1）时不传 service 的发布被 400 拒（防基线查找命中
+// ID 最小的 Workload 反复覆盖，多服务镜像互相踩——paas-shop 实测踩坑）；
+// 传 service 正常发布；未注入 lister 时跳过校验（向后兼容）。
+func TestHandlerReleaseMultiServiceGuard(t *testing.T) {
+	// 构造带 svcLister 的 handler：app-cs 在 test 环境预置一个带 Service 的 Workload。
+	acme := tenant.WithTenant(context.Background(), "t-acme")
+	wl := wlmemory.NewStore()
+	if err := wl.Create(acme, workload.Workload{
+		ID: "wl-test-product", AppID: "app-cs", EnvID: "env-acme-test", Service: "product",
+		Type: workload.TypeService, Name: "app-cs-product-svc", Replicas: 1,
+		Image: "nginx:alpine",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	env := envmemory.NewStore()
+	s := devopsmemory.NewStore(wl)
+	h := devops.NewHandler(s, s, s, s,
+		devops.WithEnvResolver(env), devops.WithEnvPromoter(env),
+		devops.WithWorkloadServiceLister(stubSvcLister{svcs: []string{"product"}}),
+	)
+	h.Authorize = func(*http.Request, string) bool { return true }
+
+	// 构建产出一个可用镜像（先建仓库，CreateBuildRun 校验 repo 归属）
+	if err := s.CreateRepo(acme, devops.CodeRepo{ID: "repo-acme-cs", AppID: "app-cs", GitURL: "https://github.com/acme/cs.git", Branch: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateBuildRun(acme, devops.BuildRun{AppID: "app-cs", RepoID: "repo-acme-cs", Branch: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	var imgID string
+	for time.Now().Before(deadline) {
+		imgs, _ := s.ListImages(acme, "app-cs")
+		if len(imgs) > 0 {
+			imgID = imgs[0].ID
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if imgID == "" {
+		t.Fatal("mock 构建未产出镜像")
+	}
+
+	// 不传 service -> 400（多服务形态）
+	r := req(acmeCtx(), "POST", "/api/applications/app-cs/releases", devops.ReleaseInput{
+		EnvID: "env-acme-test", ImageID: imgID,
+	})
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "service") {
+		t.Fatalf("多服务不传 service 应 400 且提示 service，got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 传 service -> 201
+	r = req(acmeCtx(), "POST", "/api/applications/app-cs/releases", devops.ReleaseInput{
+		EnvID: "env-acme-test", ImageID: imgID, Service: "product",
+	})
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("传 service 应 201，got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 未注入 lister（默认 newHandler）-> 单服务路径不受影响，400 校验不触发。
+	h2 := newHandler(true)
+	_ = h2 // 行为已由既有 TestHandlerReleaseProdGuard 覆盖（无 lister 跳过校验）
+}
+
+// stubSvcLister 固定返回 svcs。
+type stubSvcLister struct{ svcs []string }
+
+func (l stubSvcLister) DeployedServices(context.Context, string, string) ([]string, error) {
+	return l.svcs, nil
 }

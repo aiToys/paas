@@ -61,6 +61,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveLogs(w, r)
 	case path == "/api/observability/traces":
 		h.serveTraces(w, r)
+	case strings.HasPrefix(path, "/api/observability/traces/"):
+		h.serveTraceItem(w, r)
 	default:
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
@@ -90,6 +92,29 @@ func (h *Handler) serveTraces(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteData(w, traces)
 }
 
+// serveTraceItem 处理 GET /api/observability/traces/{traceID}（traceId 精确直查）。
+// 排障入口：日志/告警/响应头拿到 traceId 后直接定位完整链路（含全部 span 树）。
+func (h *Handler) serveTraceItem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.allow(w, r, PermObservabilityRead) {
+		return
+	}
+	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/observability/traces/"), "/")
+	if id == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "traceId 不能为空")
+		return
+	}
+	tr, err := h.repo.GetTrace(r.Context(), id)
+	if err != nil {
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
+		return
+	}
+	httputil.WriteData(w, tr)
+}
+
 // serveLogs 处理 GET /api/observability/logs?appId=&level=&q=&limit=（惰性补点）。
 func (h *Handler) serveLogs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -106,7 +131,7 @@ func (h *Handler) serveLogs(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	logs, err := h.repo.ListLogs(r.Context(), q.Get("appId"), q.Get("targetType"), q.Get("targetId"), q.Get("level"), q.Get("q"), limit)
+	logs, err := h.repo.ListLogs(r.Context(), q.Get("appId"), q.Get("targetType"), q.Get("targetId"), q.Get("level"), q.Get("q"), q.Get("lane"), limit)
 	if err != nil {
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return

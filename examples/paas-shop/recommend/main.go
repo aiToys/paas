@@ -88,7 +88,7 @@ func main() {
 	})
 	mux.HandleFunc("/recommend", recommendHandler)
 
-	h := observ.Recover(observ.Handler("recommend", mux))
+	h := observ.Recover(observ.Handler("recommend", observ.LaneMiddleware(mux)))
 	srv := &http.Server{Addr: ":8082", Handler: h, ReadHeaderTimeout: 10 * time.Second}
 	if err := srv.ListenAndServe(); err != nil {
 		slog.Error("server 退出", "err", err)
@@ -111,8 +111,12 @@ func recommendHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	cacheKey := "recommend:" + userID
 
-	// 1. 查缓存
-	if cached, err := rdb.Get(r.Context(), cacheKey).Result(); err == nil {
+	// 1. 查缓存（redis span：瀑布图可见缓存命中耗时与 key）
+	endGet := observ.MiddlewareSpan(r.Context(), "redis.get "+cacheKey,
+		observ.AttrDBSystem.String("redis"), observ.AttrDBOperation.String("GET"))
+	cached, cacheErr := rdb.Get(r.Context(), cacheKey).Result()
+	endGet()
+	if cacheErr == nil {
 		var out []Product
 		if err := json.Unmarshal([]byte(cached), &out); err == nil {
 			w.Header().Set("X-Cache", "HIT")
@@ -140,9 +144,13 @@ func recommendHandler(w http.ResponseWriter, r *http.Request) {
 	// 3. 简单推荐：随机取 3 个（按 userID 确定性 seed）
 	recs := pickRandom(all, userID, recCount)
 
-	// 4. 写缓存
+	// 4. 写缓存（redis span）
 	if data, err := json.Marshal(recs); err == nil {
-		if err := rdb.Set(r.Context(), cacheKey, data, cacheTTL).Err(); err != nil {
+		endSet := observ.MiddlewareSpan(r.Context(), "redis.set "+cacheKey,
+			observ.AttrDBSystem.String("redis"), observ.AttrDBOperation.String("SET"))
+		err := rdb.Set(r.Context(), cacheKey, data, cacheTTL).Err()
+		endSet()
+		if err != nil {
 			slog.Warn("写缓存失败", "err", err)
 		}
 	}
@@ -168,6 +176,7 @@ func pickRandom(all []Product, seed string, n int) []Product {
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Paas-Service", observ.ServiceFingerprint()) // 泳道演示：实例指纹可见
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
 }

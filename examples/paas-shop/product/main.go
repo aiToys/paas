@@ -74,7 +74,7 @@ func main() {
 	mux.HandleFunc("/products", productsHandler)       // GET 列表 / POST 创建
 	mux.HandleFunc("/products/", productDetailHandler) // GET /products/{id}
 
-	h := observ.Recover(observ.Handler("product", mux))
+	h := observ.Recover(observ.Handler("product", observ.LaneMiddleware(mux)))
 	addr := ":8081"
 	slog.Info("监听", "addr", addr)
 	srv := &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second}
@@ -159,7 +159,10 @@ func productsHandler(w http.ResponseWriter, r *http.Request) {
 		category := r.URL.Query().Get("category")
 		limit := pageSizeFromEnv(r, 20)
 		query, args := buildSearchQuery(q, category, limit)
+		end := observ.MiddlewareSpan(r.Context(), "db.query products",
+			observ.AttrDBSystem.String("postgresql"), observ.AttrDBStatement.String(stmtDigest(query)))
 		rows, err := db.QueryContext(r.Context(), query, args...)
+		end()
 		if err != nil {
 			slog.Error("query products", "err", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -186,9 +189,12 @@ func productsHandler(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "name 和 price 必填", http.StatusBadRequest)
 			return
 		}
+		end := observ.MiddlewareSpan(r.Context(), "db.insert products",
+			observ.AttrDBSystem.String("postgresql"), observ.AttrDBOperation.String("INSERT"))
 		err := db.QueryRowContext(r.Context(),
 			`INSERT INTO products(name,price,category,stock,description) VALUES($1,$2,$3,$4,$5) RETURNING id`,
 			p.Name, p.Price, p.Category, p.Stock, p.Description).Scan(&p.ID)
+		end()
 		if err != nil {
 			slog.Error("insert", "err", err)
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -214,9 +220,12 @@ func productDetailHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var p Product
+	end := observ.MiddlewareSpan(r.Context(), "db.query product by id",
+		observ.AttrDBSystem.String("postgresql"), observ.AttrDBOperation.String("SELECT"))
 	err = db.QueryRowContext(r.Context(),
 		`SELECT id,name,price,category,stock,description,created_at FROM products WHERE id=$1`, id).
 		Scan(&p.ID, &p.Name, &p.Price, &p.Category, &p.Stock, &p.Description, &p.CreatedAt)
+	end()
 	if err == sql.ErrNoRows {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
@@ -246,6 +255,15 @@ func publishProductEvent(eventType string, p Product) {
 	} else {
 		slog.Info("发 NATS 事件", "type", eventType, "productId", p.ID)
 	}
+}
+
+// stmtDigest SQL 语句摘要（截 80 字符）作 span 属性 db.statement——足够辨认语句，
+// 又不把完整 SQL（含参数位）灌进 trace。
+func stmtDigest(q string) string {
+	if len(q) <= 80 {
+		return q
+	}
+	return q[:80] + "…"
 }
 
 // buildSearchQuery 拼商品搜索 SQL（参数化防注入）。q→name ILIKE，category→精确，limit→分页。
@@ -290,6 +308,7 @@ func pageSizeFromEnv(r *http.Request, fallback int) int {
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Paas-Service", observ.ServiceFingerprint()) // 泳道演示：实例指纹可见
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
 }

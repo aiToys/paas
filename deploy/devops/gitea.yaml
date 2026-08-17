@@ -1,5 +1,8 @@
 # 内置 Git 后端（Gitea 无头模式）。
 #
+# ⚠️ dev overlay：bot-password 是本地 dev 集群演示凭证。开源部署请复制本文件并替换
+# Secret 中的密码（与 core 的 PAAS_GITEA_PASSWORD 同源），勿直接使用示例值。
+#
 # 设计：PaaS 一站式——用户不跳出平台。Gitea 作为无头后端，仅 ClusterIP 暴露给 core/builder，
 # 不建 ingress（不暴露自己的 Web UI）。代码仓库的创建/浏览/提交管理 UI 全在 console-user。
 #

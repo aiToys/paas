@@ -91,6 +91,9 @@ func startManager() (k8sAppliers, context.CancelFunc) {
 		// OTel trace 推送地址（PAAS_OTEL_ENDPOINT，集群内 jaeger:4318）。注入 service 类型
 		// Pod env，应用 observ.Init 据此建 tracer 推 Jaeger。与 core 自身 tracing.Init 同源 env。
 		OtelEndpoint: os.Getenv("PAAS_OTEL_ENDPOINT"),
+		// 排障上下文：集群标识注入 Pod env（应用读入 OTel 资源属性 paas.cluster）。
+		// 默认 "default"（单集群）；多区部署时 helm set 区分。
+		ClusterID: clusterIDFromEnv(),
 		// 应用域名->自动 Ingress 的 ingressClassName（env PAAS_INGRESS_CLASS，默认 hermes）。
 		// workload spec.domain 非空时 reconciler 建 Ingress，host=domain -> Service:port。
 		IngressClass: ingressClassFromEnv(),
@@ -136,4 +139,13 @@ func ingressClassFromEnv() string {
 		return v
 	}
 	return "hermes"
+}
+
+// clusterIDFromEnv 集群标识（env PAAS_CLUSTER_ID，helm values core.clusterId）。
+// 默认 "default"（单集群）；多区部署时区分。注入 Pod env 供应用 OTel 资源属性 paas.cluster 用。
+func clusterIDFromEnv() string {
+	if v := os.Getenv("PAAS_CLUSTER_ID"); v != "" {
+		return v
+	}
+	return "default"
 }

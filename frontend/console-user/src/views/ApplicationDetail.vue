@@ -305,6 +305,14 @@ watch(
   },
 )
 
+// 深链定位：?repo=<id> 打开仓库浏览抽屉 / ?image=<id> 展开镜像行（从构建/发布/变更等详情页跳入精确定位）
+const focusRepoId = ref((route.query.repo as string) || '')
+const focusImageId = ref((route.query.image as string) || '')
+watch(() => route.query, (q) => {
+  focusRepoId.value = (q.repo as string) || ''
+  focusImageId.value = (q.image as string) || ''
+})
+
 // 镜像 tab 点「发布」-> 切到发布 tab 并预选镜像（pickedImageId 变化触发 AppReleases 打开创建弹窗）
 const pickedImageId = ref('')
 async function pickImage(img: { id: string }) {
@@ -594,7 +602,7 @@ async function deleteApp() {
 
       <!-- 代码仓库 -->
       <div v-else-if="activeTab === '代码仓库'">
-        <AppRepositories :app-id="app.id" />
+        <AppRepositories :app-id="app.id" :focus-repo-id="focusRepoId" @repo-focused="focusRepoId = ''" />
       </div>
 
       <!-- 流水线（DevOps 分组首位，主线） -->
@@ -611,7 +619,7 @@ async function deleteApp() {
       <!-- 镜像（构建产物） -->
       <div v-else-if="activeTab === '镜像'">
         <div class="cross-link"><a @click="goDevOps">查看跨应用镜像总览 →</a></div>
-        <AppImages :app-id="app.id" @pick="pickImage" />
+        <AppImages :app-id="app.id" :focus-image-id="focusImageId" @image-focused="focusImageId = ''" @pick="pickImage" />
       </div>
 
       <!-- 发布 -->

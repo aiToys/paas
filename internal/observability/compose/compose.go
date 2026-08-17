@@ -29,12 +29,16 @@ func (r *Repo) ListMetrics(ctx context.Context, targetType, targetID, name strin
 	return r.metrics.ListMetrics(ctx, targetType, targetID, name)
 }
 
-func (r *Repo) ListLogs(ctx context.Context, appID, targetType, targetID, level, q string, limit int) ([]observability.LogEntry, error) {
-	return r.logs.ListLogs(ctx, appID, targetType, targetID, level, q, limit)
+func (r *Repo) ListLogs(ctx context.Context, appID, targetType, targetID, level, q, lane string, limit int) ([]observability.LogEntry, error) {
+	return r.logs.ListLogs(ctx, appID, targetType, targetID, level, q, lane, limit)
 }
 
 func (r *Repo) ListTraces(ctx context.Context, appID, status string, limit int) ([]observability.Trace, error) {
 	return r.traces.ListTraces(ctx, appID, status, limit)
+}
+
+func (r *Repo) GetTrace(ctx context.Context, traceID string) (observability.Trace, error) {
+	return r.traces.GetTrace(ctx, traceID)
 }
 
 func (r *Repo) ListAlertRules(ctx context.Context) ([]observability.AlertRule, error) {

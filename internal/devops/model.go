@@ -191,8 +191,12 @@ type BuildRun struct {
 	ImageID    string            `json:"imageId,omitempty"`
 	Log        string            `json:"log,omitempty"`
 	BuildArgs  map[string]string `json:"buildArgs,omitempty"`
-	StartedAt  time.Time         `json:"startedAt"`
-	FinishedAt time.Time         `json:"finishedAt,omitempty"`
+	// Dockerfile / BuildContext 构建覆盖（可选，空则用 repo 级配置）：
+	// 同仓多形态产物（Go 后端 vs node 前端）按次构建指定不同 Dockerfile。
+	Dockerfile   string    `json:"dockerfile,omitempty"`
+	BuildContext string    `json:"buildContext,omitempty"`
+	StartedAt    time.Time `json:"startedAt"`
+	FinishedAt   time.Time `json:"finishedAt,omitempty"`
 }
 
 // Image 是构建产物。digest 是不可变真源（生产部署锁这个），tag 可变。

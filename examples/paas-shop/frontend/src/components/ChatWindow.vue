@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { laneFetch } from '../lane'
 import { ref } from 'vue'
 
 // 客服弹窗（自 App.vue 整体迁移：SSE 流式 + reasoning 折叠）
@@ -34,7 +35,7 @@ async function sendChat() {
   chatLoading.value = true
 
   try {
-    const resp = await fetch('/api/chat', {
+    const resp = await laneFetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
       body: JSON.stringify({ message: msg, userId: 'web-user' }),

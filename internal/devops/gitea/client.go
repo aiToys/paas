@@ -321,6 +321,14 @@ func (c *Client) Merge(ctx context.Context, owner, repo, head, base, mode string
 	} else if err != nil {
 		return "", err
 	}
+	// 无差异合并防护：head 与 base 指向同一 commit（平台代建分支未 push 新提交即入批集成）
+	// 时 Gitea merge API 返 405 "Please try again later"。跳过合并、关闭空 PR、返当前 sha。
+	if hb, err := c.GetBranch(ctx, owner, repo, head); err == nil {
+		if bb, err := c.GetBranch(ctx, owner, repo, base); err == nil && hb.CommitSHA == bb.CommitSHA {
+			_ = c.closePR(ctx, owner, repo, pr.Number)
+			return bb.CommitSHA, nil
+		}
+	}
 	// 2. merge PR（Do=merge/squash）
 	mergeBody := map[string]any{
 		"Do":                mergeDo(mode),
@@ -338,6 +346,14 @@ func (c *Client) Merge(ctx context.Context, owner, repo, head, base, mode string
 		return pr.Head.SHA, nil
 	}
 	return commits[0].SHA, nil
+}
+
+// closePR 关闭 PR（无差异 PR 不留残留；PATCH state=closed）。
+func (c *Client) closePR(ctx context.Context, owner, repo string, number int) error {
+	p := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d", pathEscape(owner), pathEscape(repo), number)
+	body := map[string]any{"state": "closed"}
+	var out any
+	return c.doJSON(ctx, http.MethodPatch, p, body, &out)
 }
 
 // mergeDo 把 mode 映射为 Gitea PR merge 的 Do 字段。

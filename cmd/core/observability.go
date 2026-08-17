@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 
+	"github.com/aitoys/paas/internal/core/application"
+	"github.com/aitoys/paas/internal/dataservice"
 	"github.com/aitoys/paas/internal/observability"
 	obcompose "github.com/aitoys/paas/internal/observability/compose"
 	obsmemory "github.com/aitoys/paas/internal/observability/memory"
@@ -22,11 +24,13 @@ import (
 //
 // lister 桥接 workload.Repository，供应用级 metrics/logs 按工作负载 pod 名正则查询
 // （cAdvisor/Loki 不带 paas 自定义 label，靠 app→工作负载 ID 解析 pod 集合）。nil 时应用级查询降级返空。
-func buildObservabilityStore(lister observability.AppWorkloadLister) observability.Repository {
+// entities 桥接 application/dataservice Repository，供全局（targetType 空）指标聚合
+// （可观测大屏「全部」视图健康矩阵）。nil 时全局查询降级返空。
+func buildObservabilityStore(lister observability.AppWorkloadLister, entities observability.TenantEntityLister) observability.Repository {
 	rules := obsmemory.NewStore()
 	metrics := observability.MetricsReader(rules)
 	if u := os.Getenv("PAAS_PROM_URL"); u != "" {
-		metrics = obreal.NewMetricsStore(u, lister)
+		metrics = obreal.NewMetricsStore(u, lister, entities)
 	}
 	logs := observability.LogsReader(rules)
 	if u := os.Getenv("PAAS_LOKI_URL"); u != "" {
@@ -78,4 +82,39 @@ func (l workloadLister) AppWorkloadNames(ctx context.Context, appID string) ([]s
 		names = append(names, w.Name)
 	}
 	return names, nil
+}
+
+// tenantEntityLister 桥接 application/dataservice Repository → observability.TenantEntityLister。
+// 全局指标聚合（可观测大屏「全部」视图）需列出租户全部实体 ID，逐实体查 Prometheus 拼装。
+type tenantEntityLister struct {
+	apps application.Repository
+	ds   dataservice.Repository
+}
+
+func (l tenantEntityLister) TenantAppIDs(ctx context.Context) ([]string, error) {
+	list, err := l.apps.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(list))
+	for _, a := range list {
+		if a.ID != "" {
+			ids = append(ids, a.ID)
+		}
+	}
+	return ids, nil
+}
+
+func (l tenantEntityLister) TenantDataServiceIDs(ctx context.Context) ([]string, error) {
+	list, err := l.ds.List(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(list))
+	for _, d := range list {
+		if d.ID != "" {
+			ids = append(ids, d.ID)
+		}
+	}
+	return ids, nil
 }

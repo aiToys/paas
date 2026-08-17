@@ -352,9 +352,18 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) (devops.B
 	if gitURL == "" {
 		gitURL = repo.GitURL
 	}
+	// Dockerfile/BuildContext 请求级覆盖优先（BuildRun 字段），空则回退 repo 级配置：
+	// 同仓多形态产物（Go 后端 vs node 前端）按次构建指定不同 Dockerfile。
+	df, bctx := b.Dockerfile, b.BuildContext
+	if df == "" {
+		df = repo.Dockerfile
+	}
+	if bctx == "" {
+		bctx = repo.BuildContext
+	}
 	go s.runBuild(s.baseCtxOrBg(), builder.Params{
 		TenantID: tid, AppID: b.AppID, BuildID: b.ID, Commit: b.Commit, Branch: b.Branch,
-		GitURL: gitURL, Dockerfile: repo.Dockerfile, BuildContext: repo.BuildContext, BuildArgs: b.BuildArgs,
+		GitURL: gitURL, Dockerfile: df, BuildContext: bctx, BuildArgs: b.BuildArgs,
 	}) //nolint:gosec // G118 误报：后台构建任务须脱离请求生命周期，不持 request ctx 是有意为之
 	return b, nil
 }

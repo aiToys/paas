@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import type { Product } from './types'
 import { fmtPrice } from './format'
+import { lane, setLane, laneFetch } from './lane'
 import SearchBar from './components/SearchBar.vue'
 import ProductCard from './components/ProductCard.vue'
 import DetailDrawer from './components/DetailDrawer.vue'
@@ -22,6 +23,19 @@ const allCategories = ref<string[]>([])
 const selected = ref<Product | null>(null)
 const chatRef = ref<InstanceType<typeof ChatWindow> | null>(null)
 
+// 泳道演示：header 输入 lane 名（如 feature-x），所有请求自动染色 x-paas-lane；
+// 留空 = 基线。切换后需重载列表才走新泳道（下次请求即生效）。
+const laneInput = ref(lane.value)
+const laneActive = computed(() => lane.value !== '')
+// 最近一次请求的实例指纹（bff/product 响应头）：泳道切换后可见「实际命中实例/版本」变化
+const servedBy = ref('')
+const servedLane = ref('')
+function applyLane() {
+  setLane(laneInput.value)
+  loadProducts(searchQ.value, searchCategory.value)
+  loadRecommend()
+}
+
 async function loadProducts(q?: string, category?: string) {
   loading.value = true
   error.value = ''
@@ -30,7 +44,9 @@ async function loadProducts(q?: string, category?: string) {
     if (q) params.set('q', q)
     if (category) params.set('category', category)
     params.set('limit', '50')
-    const resp = await fetch('/api/products?' + params.toString())
+    const resp = await laneFetch('/api/products?' + params.toString())
+    servedLane.value = resp.headers.get('x-paas-lane') || ''
+    servedBy.value = resp.headers.get('x-paas-service') || resp.headers.get('x-paas-bff') || ''
     const data: Product[] = await resp.json()
     // 首次全量加载（无过滤）时派生分类缓存
     if (!q && !category && allCategories.value.length === 0) {
@@ -46,7 +62,7 @@ async function loadProducts(q?: string, category?: string) {
 
 async function loadRecommend() {
   try {
-    const resp = await fetch('/api/recommend?userId=user-1')
+    const resp = await laneFetch('/api/recommend?userId=user-1')
     const data = await resp.json()
     recommends.value = data.products || []
   } catch {}
@@ -75,6 +91,16 @@ onMounted(() => {
     <header class="hdr">
       <div class="logo">🛍️ PaasShop</div>
       <div class="tag">智能商品服务 · 演示微服务 + AI 客服 + 全链路可观测</div>
+      <div class="lane-box" title="泳道演示：输入 lane 名（如 feature-x）使请求带 x-paas-lane 染色，走对应泳道实例；留空 = 基线">
+        <span class="lane-label">🚧 泳道</span>
+        <input v-model="laneInput" class="lane-input" placeholder="基线（default）" @keyup.enter="applyLane" />
+        <span v-if="laneActive" class="lane-badge">染色中：{{ lane }}</span>
+        <button class="lane-btn" @click="applyLane">切换</button>
+      </div>
+      <div v-if="servedBy" class="served" title="最近一次请求实际命中的实例（Pod 名），泳道切换后此值变化即验证流量走了不同实例">
+        <span class="served-lane">lane={{ servedLane || 'default' }}</span>
+        <span class="served-svc">{{ servedBy }}</span>
+      </div>
       <NotificationCenter />
       <button class="chat-btn" @click="chatRef?.open()">💬 智能客服</button>
     </header>
@@ -117,6 +143,17 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
 .tag { font-size: 13px; opacity: .9; flex: 1; }
 .chat-btn { background: rgba(255,255,255,.2); border: 1px solid rgba(255,255,255,.4); color: #fff; padding: 8px 16px; border-radius: 20px; cursor: pointer; font-size: 14px; }
 .chat-btn:hover { background: rgba(255,255,255,.3); }
+.lane-box { display: flex; align-items: center; gap: 8px; }
+.lane-label { font-size: 13px; opacity: .9; }
+.lane-input { width: 110px; padding: 5px 10px; border-radius: 14px; border: 1px solid rgba(255,255,255,.4); background: rgba(255,255,255,.15); color: #fff; font-size: 13px; }
+.lane-input::placeholder { color: rgba(255,255,255,.6); }
+.lane-input:focus { outline: 1px solid rgba(255,255,255,.7); }
+.lane-badge { font-size: 12px; background: #ff9800; color: #fff; padding: 3px 10px; border-radius: 12px; white-space: nowrap; }
+.lane-btn { background: rgba(255,255,255,.2); border: 1px solid rgba(255,255,255,.4); color: #fff; padding: 5px 12px; border-radius: 14px; cursor: pointer; font-size: 13px; }
+.lane-btn:hover { background: rgba(255,255,255,.3); }
+.served { display: flex; align-items: center; gap: 8px; font-size: 12px; background: rgba(0,0,0,.25); padding: 4px 12px; border-radius: 14px; }
+.served-lane { color: #ffd54f; font-family: ui-monospace, monospace; }
+.served-svc { color: #b3e5fc; font-family: ui-monospace, monospace; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .main { display: grid; grid-template-columns: 1fr 320px; gap: 24px; padding: 24px 32px; }
 .products h2, .rec h2 { font-size: 16px; margin-bottom: 16px; color: #5a6a7a; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }

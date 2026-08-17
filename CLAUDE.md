@@ -906,6 +906,8 @@ console-user 导航采用**三层信息架构**（避免「资源」概念被滥
 - **环境菜单（管理面）**：环境实体 CRUD + 跨环境总览（统计卡：工作负载数/健康度/物理落点），点环境进**环境详情页** `/environments/:id`（工作负载总览按类型 + 应用部署矩阵），**不跳工作负载列表**。「在此环境工作」按钮桥接到操作面（switchEnv + 跳工作负载）。
 - 一句话区分：顶栏 scope =「我在哪个环境干活」；环境菜单 =「我管理环境本身」。工作负载页无环境切换控件（去重，环境切换唯一走顶栏）。设计见 `docs/superpowers/specs/2026-07-28-environment-ia-redesign.md`。
 
+**主模块 vs 应用详情维度原则**（2026-08-17 确立，对标 Datadog/Grafana/Jaeger）：应用详情 = 应用维度聚合（各能力以 tab 收敛进应用）；主模块（平台能力入口）= 综合平台视角——**入口全局，维度是过滤器不是门槛**。三条铁律：① 主模块默认租户全局视图，环境/应用/数据服务等维度是可切换的过滤器；② 漏斗式排障：告警总览（置顶入口）→ 实体健康矩阵 → 单实体下钻；③ 告警天然全局，从告警点击下钻到对应实体。落地样板：`Observability.vue` 多维度重构（维度过滤器条 + 告警点击下钻 + 健康矩阵，spec `docs/superpowers/specs/2026-08-17-observability-multi-dimension-design.md`）。审计确认 DevOps 值班台/ConfigCenter/Security/ServiceRegistry 已符合，无需改。
+
 - API 契约：后端 OpenAPI 自动生成前端 TS 类型（Plan 4 起接入 Gateway）。
 - console-admin 的基座源码自带其 `CLAUDE.md` 与 `docs/standards/`（四层架构 lib/app/modules/shared），改它时遵循其自身规范。
 

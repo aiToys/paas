@@ -74,6 +74,27 @@ type jaegerTag struct {
 	Value json.RawMessage `json:"value"`
 }
 
+// GetTrace 按 traceID 精确查单条（Jaeger /api/traces/{traceID}）。
+// 排障直查入口：日志/告警/响应头拿到 traceId 后直接定位完整链路。不存在返 ErrTraceNotFound。
+func (s *TracesStore) GetTrace(ctx context.Context, traceID string) (observability.Trace, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.jaegerURL+"/api/traces/"+traceID, nil)
+	if err != nil {
+		return observability.Trace{}, err
+	}
+	resp, err := fetchJSON[jaegerTraceResponse](s.client, req)
+	if err != nil {
+		return observability.Trace{}, err
+	}
+	if len(resp.Data) == 0 {
+		return observability.Trace{}, observability.ErrTraceNotFound
+	}
+	tr, hasErr := parseJaegerTrace(resp.Data[0])
+	if hasErr {
+		tr.Status = observability.TraceError
+	}
+	return tr, nil
+}
+
 // ListTraces 调 Jaeger /api/traces 查最近 1h trace，list 接口已返完整 span 树，直接解析填充 Spans。
 //
 // 应用级（appID 非空）：该应用的 service 工作负载名 = OTel span 的 service.name（约定 Deployment/Service

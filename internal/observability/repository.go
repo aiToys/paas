@@ -24,8 +24,10 @@ type Repository interface {
 	// ListLogs 应用日志查询（惰性补点：查询时按时间间隔追加 mock 日志）。
 	// targetType=dataservice 时按 TargetType/TargetID 维度过滤；否则按 appID 维度（向后兼容）。
 	// level 为空表示不限；q 为消息关键字（大小写不敏感）；limit<=0 时用默认上限。按时间倒序返回。
-	ListLogs(ctx context.Context, appID, targetType, targetID, level, q string, limit int) ([]LogEntry, error)
+	ListLogs(ctx context.Context, appID, targetType, targetID, level, q, lane string, limit int) ([]LogEntry, error)
 	// ListTraces 链路追踪查询（惰性补点：查询时按时间间隔生成 mock trace）。
 	// appID/status 为空表示不限；limit<=0 时用默认上限。按 StartedAt 倒序返回。
 	ListTraces(ctx context.Context, appID, status string, limit int) ([]Trace, error)
+	// GetTrace 按 traceID 精确查单条（排障直查：日志/告警拿到 traceId 后定位完整链路）。
+	GetTrace(ctx context.Context, traceID string) (Trace, error)
 }

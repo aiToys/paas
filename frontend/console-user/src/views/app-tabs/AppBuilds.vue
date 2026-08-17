@@ -2,8 +2,12 @@
 // 应用详情 - 构建 tab：触发构建 + 列表 + 状态轮询 + 日志展开。
 // mock CI runner 异步流转 pending->running->success，前端轮询直到全部终态。
 import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
+import { buildLink, imageLink, repoLink } from '@/composables/useDevopsLinks'
+
+const router = useRouter()
 
 const props = defineProps<{ appId: string }>()
 // 构建成功 → 一键发布：复用镜像 tab 的 pick 机制，父组件切到发布 tab 并预选产出镜像。
@@ -132,14 +136,19 @@ watch(() => props.appId, async () => {
         </template>
       </el-table-column>
       <el-table-column label="commit" width="100">
-        <template #default="{ row }"><span class="mono">{{ (row.commit || '').slice(0, 8) }}</span></template>
+        <template #default="{ row }">
+          <a class="mono link" @click="router.push(repoLink(props.appId, row.repoId))">{{ (row.commit || '').slice(0, 8) }}</a>
+        </template>
       </el-table-column>
       <el-table-column prop="branch" label="分支" width="90" />
       <el-table-column prop="message" label="提交信息" min-width="180" />
       <el-table-column label="产出镜像" width="130">
-        <template #default="{ row }"><span class="mono">{{ (row.imageId || '').slice(0, 14) || '—' }}</span></template>
+        <template #default="{ row }">
+          <a v-if="row.imageId" class="mono link" @click="router.push(imageLink(props.appId, row.imageId))">{{ row.imageId.slice(0, 14) }}</a>
+          <span v-else class="text-faint">—</span>
+        </template>
       </el-table-column>
-      <el-table-column label="操作" width="90">
+      <el-table-column label="操作" width="140">
         <template #default="{ row }">
           <el-button
             v-if="row.status === 'success' && row.imageId"
@@ -147,7 +156,7 @@ watch(() => props.appId, async () => {
             type="primary"
             @click="emit('pick', { id: row.imageId })"
           >发布</el-button>
-          <span v-else class="text-faint">—</span>
+          <el-button size="small" text type="primary" @click="router.push(buildLink(row.id))">详情</el-button>
         </template>
       </el-table-column>
       <el-table-column label="开始时间" width="160">
@@ -171,3 +180,8 @@ watch(() => props.appId, async () => {
     </el-dialog>
   </div>
 </template>
+
+<style scoped>
+.link { color: var(--el-color-primary); cursor: pointer; }
+.link:hover { text-decoration: underline; }
+</style>

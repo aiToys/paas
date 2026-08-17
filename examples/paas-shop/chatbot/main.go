@@ -182,7 +182,7 @@ func main() {
 	})
 	mux.HandleFunc("/chat", chatHandler) // POST {message,userId} -> SSE 流式
 
-	h := observ.Recover(observ.Handler("chatbot", mux))
+	h := observ.Recover(observ.Handler("chatbot", observ.LaneMiddleware(mux)))
 	srv := &http.Server{Addr: ":8083", Handler: h, ReadHeaderTimeout: 30 * time.Second}
 	if err := srv.ListenAndServe(); err != nil {
 		slog.Error("server 退出", "err", err)

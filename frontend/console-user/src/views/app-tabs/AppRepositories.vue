@@ -7,7 +7,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchAuth } from '@/api'
 import RepoBrowser from './RepoBrowser.vue'
 
-const props = defineProps<{ appId: string }>()
+const props = defineProps<{ appId: string; focusRepoId?: string }>()
+const emit = defineEmits<{ (e: 'repoFocused'): void }>()
 
 interface Repo {
   id: string
@@ -142,6 +143,16 @@ async function unbind(r: Repo) {
 
 // 浏览抽屉
 const browseRepo = ref<Repo | null>(null)
+
+// 深链定位：?repo=<id> 且为内置仓库时自动打开浏览抽屉（从构建/变更详情页跳入）
+watch(() => [props.focusRepoId, repos.value.length] as const, ([rid]) => {
+  if (!rid) return
+  const r = repos.value.find((x) => x.id === rid)
+  if (r && r.source === 'internal') {
+    browseRepo.value = r
+    emit('repoFocused')
+  }
+})
 
 onMounted(load)
 watch(() => props.appId, load)

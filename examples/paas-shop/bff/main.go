@@ -46,7 +46,9 @@ func main() {
 	events := newEventRing(100)
 	subscribeShopEvents(events)
 
-	h := observ.Recover(observ.Handler("bff", buildMux(events)))
+	// LaneMiddleware 在 Handler 内层（span 建立后提取 header 写 paas.lane 属性）；
+	// 转发透传：proxy* 的 copyHeaders 已复制全部 header（x-paas-lane 天然到下游）。
+	h := observ.Recover(observ.Handler("bff", observ.LaneMiddleware(buildMux(events))))
 	srv := &http.Server{Addr: ":8080", Handler: h, ReadHeaderTimeout: 10 * time.Second}
 	if err := srv.ListenAndServe(); err != nil {
 		slog.Error("server 退出", "err", err)
@@ -176,6 +178,9 @@ func proxy(target string) http.HandlerFunc {
 		}
 		defer resp.Body.Close()
 		copyHeaders(w.Header(), resp.Header)
+		// 泳道演示可见性：响应带请求实际泳道 + bff 实例指纹（下游经 X-Paas-Service 透传）。
+		w.Header().Set("X-Paas-Lane", observ.LaneOrBase(r.Context()))
+		w.Header().Set("X-Paas-Bff", observ.ServiceFingerprint())
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(w, resp.Body)
 	}
@@ -199,6 +204,9 @@ func proxyPrefix(target string) http.HandlerFunc {
 		}
 		defer resp.Body.Close()
 		copyHeaders(w.Header(), resp.Header)
+		// 泳道演示可见性：响应带请求实际泳道 + bff 实例指纹（下游经 X-Paas-Service 透传）。
+		w.Header().Set("X-Paas-Lane", observ.LaneOrBase(r.Context()))
+		w.Header().Set("X-Paas-Bff", observ.ServiceFingerprint())
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(w, resp.Body)
 	}

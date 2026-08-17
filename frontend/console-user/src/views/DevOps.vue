@@ -13,6 +13,7 @@ import { confirmDangerous } from '@/composables/useDangerConfirm'
 import { usePolling } from '@/composables/usePolling'
 import { listRuns, type PipelineRun } from '@/api/pipeline'
 import { listAllChanges, listAllBatches, listNotifications, type Change, type IntegrationBatch, type Notification } from '@/api/change'
+import { imageLink, repoLink } from '@/composables/useDevopsLinks'
 
 type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
 
@@ -393,7 +394,9 @@ onMounted(load)
             <template #default="{ row }"><span class="mono">{{ row.branch }}</span></template>
           </el-table-column>
           <el-table-column label="Commit" width="110">
-            <template #default="{ row }"><span class="mono">{{ row.commit?.slice(0, 8) }}</span></template>
+            <template #default="{ row }">
+              <a class="mono clickable" @click="router.push(repoLink(row.appId))">{{ row.commit?.slice(0, 8) }}</a>
+            </template>
           </el-table-column>
           <el-table-column prop="message" label="说明" min-width="180" show-overflow-tooltip />
           <el-table-column label="开始时间" width="170">
@@ -445,7 +448,9 @@ onMounted(load)
             <template #default="{ row }">{{ envName(row.envId) }}</template>
           </el-table-column>
           <el-table-column label="镜像 Digest" min-width="180">
-            <template #default="{ row }"><span class="mono">{{ shortDigest(row.imageDigest) }}</span></template>
+            <template #default="{ row }">
+              <a class="mono clickable" :title="row.imageDigest" @click="router.push(imageLink(row.appId, row.imageId))">{{ shortDigest(row.imageDigest) }}</a>
+            </template>
           </el-table-column>
           <el-table-column label="策略" width="100">
             <template #default="{ row }">{{ row.strategy }}</template>

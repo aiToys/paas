@@ -14,8 +14,10 @@
       <section class="card">
         <div class="grid">
           <div class="kv"><span>应用</span><a class="link" @click="router.push(`/applications/${release.appId}`)">{{ release.appId }}</a></div>
-          <div class="kv"><span>环境</span><span>{{ release.envId }}</span></div>
-          <div class="kv"><span>镜像</span><code class="mono">{{ release.imageId }}</code></div>
+          <div class="kv"><span>环境</span><a class="link" @click="router.push(`/environments/${release.envId}`)">{{ release.envId }}</a></div>
+          <div class="kv"><span>镜像</span>
+            <a class="link mono" @click="router.push(imageLink(release.appId, release.imageId))">{{ release.imageId }}</a>
+          </div>
           <div class="kv"><span>策略</span><span>{{ release.strategy }}</span></div>
           <div class="kv"><span>时间</span><span>{{ release.createdAt }}</span></div>
           <div class="kv"><span>操作人</span><span>{{ release.createdBy || '—' }}</span></div>
@@ -34,7 +36,9 @@
         <h3>当前运行态</h3>
         <template v-if="workload">
           <div class="grid">
-            <div class="kv"><span>工作负载</span><span class="mono">{{ workload.id }}</span></div>
+            <div class="kv"><span>工作负载</span>
+              <a class="link mono" @click="router.push(deployLink(release.appId))">{{ workload.id }}</a>
+            </div>
             <div class="kv"><span>状态</span><el-tag size="small">{{ workload.status }}</el-tag></div>
             <div class="kv"><span>副本</span><span>{{ workload.ready ?? 0 }} / {{ workload.replicas }}</span></div>
             <div class="kv"><span>当前镜像</span><code class="mono">{{ workload.imageRef?.slice(0, 60) || '—' }}</code></div>
@@ -53,6 +57,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchAuth } from '@/api'
+import { imageLink, deployLink } from '@/composables/useDevopsLinks'
 
 interface ReleaseFull {
   id: string; appId: string; envId: string; imageId: string; imageDigest: string

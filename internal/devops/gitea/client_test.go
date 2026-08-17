@@ -96,6 +96,48 @@ func TestMergeUnavailable(t *testing.T) {
 	}
 }
 
+// TestMergeNoDiffSkipsMerge 无差异合并防护：head 与 base 指向同一 commit（代建分支
+// 未 push 新提交即入批集成）时跳过 merge、关闭空 PR、返当前 sha，不再触发 405。
+func TestMergeNoDiffSkipsMerge(t *testing.T) {
+	var mergeCalled, prClosed bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"number":7,"head":{"sha":"same-sha"}}`)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/merge"):
+			mergeCalled = true
+			w.WriteHeader(http.StatusMethodNotAllowed) // 真实 Gitea 对空 PR 的返回
+		case r.Method == http.MethodPatch && strings.Contains(r.URL.Path, "/pulls/"):
+			prClosed = true
+			_, _ = io.WriteString(w, `{}`)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/branches/"):
+			// head/base 同 sha（无差异）
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"name":"b","commit":{"id":"same-sha"}}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c := New(srv.URL, "bot", "pass")
+
+	sha, err := c.Merge(context.Background(), "paas-bot", "repo1", "feature", "main", "ff")
+	if err != nil {
+		t.Fatalf("无差异合并应成功跳过: %v", err)
+	}
+	if sha != "same-sha" {
+		t.Fatalf("期望返 base 当前 sha same-sha, got %q", sha)
+	}
+	if mergeCalled {
+		t.Fatal("无差异时不应调用 merge 端点")
+	}
+	if !prClosed {
+		t.Fatal("无差异 PR 应被关闭")
+	}
+}
+
 // fakeGitea 分支 API 模拟：记录调用 + 可注入状态码。
 // 既有测试若已有 fake server helper，复用其模式；否则新建。
 func TestBranchAPIs(t *testing.T) {

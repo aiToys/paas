@@ -501,6 +501,8 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		devops.WithGiteaClient(giteaClient),
 		devops.WithRegistryClient(registryClient),
 		devops.WithBuildLogStreamer(builder.NewK8sBuildLogStreamer(appliers.clientset)),
+		// 多服务发布 service 必填校验（app 已部署多服务时不传 service 会互相覆盖镜像）。
+		devops.WithWorkloadServiceLister(&wlServiceLister{repo: stores.Workload}),
 	)
 	devopsHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
@@ -589,7 +591,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 
 	// 可观测（指标监控 + 告警规则，平台能力横切）。
 	// 惰性时序模拟采集，即时评估告警；不接 prod:write，独立于物理环境。
-	obsRepo := buildObservabilityStore(workloadLister{repo: stores.Workload})
+	obsRepo := buildObservabilityStore(workloadLister{repo: stores.Workload}, tenantEntityLister{apps: stores.Application, ds: stores.DataService})
 	obsHandler := observability.NewHandler(obsRepo)
 	obsHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
@@ -798,6 +800,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	mux.Handle("/api/observability/alerts", auth(obsHandler))
 	mux.Handle("/api/observability/logs", auth(obsHandler))
 	mux.Handle("/api/observability/traces", auth(obsHandler))
+	mux.Handle("/api/observability/traces/", auth(obsHandler))
 	// 安全（密钥/证书 + 审计）
 	mux.Handle("/api/security/secrets", auth(secHandler))
 	mux.Handle("/api/security/secrets/", auth(secHandler))
@@ -1117,8 +1120,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("POST", "/api/observability/alert-rules", apiroute.Tags("可观测"), apiroute.Summary("创建告警规则"), apiroute.Perm("observability:write"), apiroute.WithReqBody(observability.AlertRule{}), apiroute.WithResp(observability.AlertRule{}))
 	reg.Operation("DELETE", "/api/observability/alert-rules/{id}", apiroute.Tags("可观测"), apiroute.Summary("删除告警规则"), apiroute.Perm("observability:write"))
 	reg.Operation("GET", "/api/observability/alerts", apiroute.Tags("可观测"), apiroute.Summary("当前告警（即时评估）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.Alert{}))
-	reg.Operation("GET", "/api/observability/logs", apiroute.Tags("可观测"), apiroute.Summary("日志聚合（惰性补点）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.LogEntry{}))
+	reg.Operation("GET", "/api/observability/logs", apiroute.Tags("可观测"), apiroute.Summary("日志聚合（?lane= 泳道过滤，真实 Loki 模式生效）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.LogEntry{}))
 	reg.Operation("GET", "/api/observability/traces", apiroute.Tags("可观测"), apiroute.Summary("链路追踪（惰性生成）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.Trace{}))
+	reg.Operation("GET", "/api/observability/traces/{traceID}", apiroute.Tags("可观测"), apiroute.Summary("按 traceId 直查单条链路（排障入口）"), apiroute.Perm("observability:read"), apiroute.WithResp(observability.Trace{}))
 	// 安全（密钥/证书 + 审计）
 	reg.Operation("GET", "/api/security/secrets", apiroute.Tags("安全"), apiroute.Summary("密钥/证书列表（掩码）"), apiroute.Perm("security:read"), apiroute.WithResp([]security.Secret{}))
 	reg.Operation("POST", "/api/security/secrets", apiroute.Tags("安全"), apiroute.Summary("创建密钥/证书"), apiroute.Perm("security:write"), apiroute.WithReqBody(security.Secret{}), apiroute.WithResp(security.Secret{}))

@@ -29,13 +29,15 @@ var metricNameToPromQL = map[string]string{
 type MetricsStore struct {
 	promURL string
 	client  *http.Client
-	lister  observability.AppWorkloadLister // 应用级查询：解析 app→工作负载 ID（pod 名正则）
+	lister  observability.AppWorkloadLister   // 应用级查询：解析 app→工作负载 ID（pod 名正则）
+	entities observability.TenantEntityLister // 全局查询：列出租户全部应用/数据服务（健康矩阵）
 }
 
 // NewMetricsStore 创建 Prometheus 适配。promURL 为 Prometheus 根地址（如 http://prom:9090）。
 // lister 可为 nil（应用级查询降级返空，不影响 dataservice/通用查询）。
-func NewMetricsStore(promURL string, lister observability.AppWorkloadLister) *MetricsStore {
-	return &MetricsStore{promURL: promURL, client: httputil.NewClient(10 * time.Second), lister: lister}
+// entities 可为 nil（全局查询降级返空，不影响 app/dataservice 维度）。
+func NewMetricsStore(promURL string, lister observability.AppWorkloadLister, entities observability.TenantEntityLister) *MetricsStore {
+	return &MetricsStore{promURL: promURL, client: httputil.NewClient(10 * time.Second), lister: lister, entities: entities}
 }
 
 // promResponse 是 Prometheus /api/v1/query_range 响应的最小子集。
@@ -57,10 +59,14 @@ func (s *MetricsStore) ListMetrics(ctx context.Context, targetType, targetID, na
 	if targetType == observability.TargetDataservice {
 		return s.listDataserviceMetrics(ctx, targetID, name)
 	}
-	// 应用级：聚合该 app 下所有 Pod 的 cAdvisor 指标（按 paas_aitoys_app label）。
-	// 仅 CPU/内存（应用级 RPS/latency 无数据源——PaaS 不代理应用流量）。
+	// 应用级：聚合该 app 下所有 Pod 的 cAdvisor + RED 指标（pod 名正则）。
 	if targetType == observability.TargetApp {
 		return s.listAppMetrics(ctx, targetID, name)
+	}
+	// 全局（targetType 空）：聚合租户内全部应用 + 全部数据服务（健康矩阵数据源）。
+	// 与 memory 路径「空参数=租户全部 series」契约对齐。
+	if targetType == "" {
+		return s.listTenantMetrics(ctx, name)
 	}
 	out := make([]observability.MetricSeries, 0)
 	// 无 name 时查全部约定 metric；否则查单个。
@@ -112,6 +118,37 @@ func (s *MetricsStore) ListMetrics(ctx context.Context, targetType, targetID, na
 		}
 		for _, r := range pr.Data.Result {
 			out = append(out, toMetricSeries(r.Metric, r.Values))
+		}
+	}
+	return out, nil
+}
+
+// listTenantMetrics 全局聚合：租户内全部应用 + 全部数据服务的 series 拼接
+// （可观测大屏「全部」视图健康矩阵数据源，与 memory「空参数=租户全部」契约对齐）。
+// 实体级查询失败不影响其它实体（逐实体降级）；entities 未注入返空。
+func (s *MetricsStore) listTenantMetrics(ctx context.Context, name string) ([]observability.MetricSeries, error) {
+	out := make([]observability.MetricSeries, 0)
+	if s.entities == nil {
+		return out, nil
+	}
+	appIDs, err := s.entities.TenantAppIDs(ctx)
+	if err != nil {
+		log.Printf("observability real tenant metrics: 列应用失败: %v", err)
+	}
+	for _, id := range appIDs {
+		series, err := s.listAppMetrics(ctx, id, name)
+		if err == nil {
+			out = append(out, series...)
+		}
+	}
+	dsIDs, err := s.entities.TenantDataServiceIDs(ctx)
+	if err != nil {
+		log.Printf("observability real tenant metrics: 列数据服务失败: %v", err)
+	}
+	for _, id := range dsIDs {
+		series, err := s.listDataserviceMetrics(ctx, id, name)
+		if err == nil {
+			out = append(out, series...)
 		}
 	}
 	return out, nil

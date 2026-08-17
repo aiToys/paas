@@ -133,6 +133,13 @@ function traceRowClass({ row }: { row: Trace }): string {
   return row.status === 'error' || errSpanCount(row) ? 'trace-err-row' : ''
 }
 
+// 降噪：默认只展示「真实业务链路」（≥2 span，即有下游调用/中间件访问），
+// 单 span 的轮询/探活类请求（通知轮询、healthz）折叠进「显示全部」。
+const showShallowTraces = ref(false)
+const visibleTraces = computed(() =>
+  showShallowTraces.value ? traces.value : traces.value.filter((t) => (t.spans?.length || 0) >= 2),
+)
+
 function sparkHeights(points: MetricPoint[]): number[] {
   if (points.length < 2) return []
   const vals = points.map((p) => p.value)
@@ -150,9 +157,19 @@ async function loadLogs() {
   const resp = await fetchAuth(`/api/observability/logs?appId=${props.appId}&limit=50`)
   if (resp.ok) logs.value = (await resp.json()).data ?? []
 }
+const traceIdQuery = ref('')
 async function loadTraces() {
   const resp = await fetchAuth(`/api/observability/traces?appId=${props.appId}&limit=20`)
   if (resp.ok) traces.value = (await resp.json()).data ?? []
+}
+
+// traceId 精确直查（排障：日志/告警拿到 traceId 后定位完整链路）
+async function searchTraceById() {
+  const id = traceIdQuery.value.trim()
+  if (!id) { loadTraces(); return }
+  const resp = await fetchAuth(`/api/observability/traces/${encodeURIComponent(id)}`)
+  if (resp.ok) traces.value = [await resp.json().then((j) => j.data)]
+  else traces.value = []
 }
 async function loadWorkloads() {
   const resp = await fetchAuth(`/api/applications/${props.appId}/workloads`)
@@ -273,8 +290,17 @@ watch(() => props.bindings, () => loadDeps(), { deep: true })
         </section>
 
         <section class="sub-block">
-          <div class="sub-title">最近链路</div>
-          <el-table :data="traces" size="small" row-key="id" empty-text="暂无链路"
+          <div class="sub-title">
+            最近链路
+            <el-checkbox v-model="showShallowTraces" size="small" class="shallow-toggle">
+              显示单 span 请求（轮询/探活）
+            </el-checkbox>
+            <el-input v-model="traceIdQuery" placeholder="按 TraceID 直查" size="small" style="width: 200px; margin-left: 12px"
+              clearable @keyup.enter="searchTraceById" @clear="loadTraces">
+              <template #append><el-button @click="searchTraceById">查</el-button></template>
+            </el-input>
+          </div>
+          <el-table :data="visibleTraces" size="small" row-key="id" empty-text="暂无链路"
             :row-class-name="traceRowClass">
             <el-table-column type="expand">
               <template #default="{ row }">
@@ -410,6 +436,7 @@ watch(() => props.bindings, () => loadDeps(), { deep: true })
 .spark-bar { flex: 1; background: var(--brand); opacity: 0.7; border-radius: 2px 2px 0 0; min-width: 2px; }
 .sub-block { margin-top: 18px; }
 .sub-title { font-size: 13px; font-weight: 600; color: var(--text-dim); margin-bottom: 8px; }
+.shallow-toggle { margin-left: 12px; font-weight: 400; }
 .mono { font-family: var(--font-mono); }
 :deep(.trace-err-row) { background: var(--danger-soft) !important; }
 .span-list { padding: 6px 20px; display: flex; flex-direction: column; gap: 6px; }
