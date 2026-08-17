@@ -27,9 +27,9 @@ var metricNameToPromQL = map[string]string{
 
 // MetricsStore 调 Prometheus HTTP API 实现 MetricsReader。
 type MetricsStore struct {
-	promURL string
-	client  *http.Client
-	lister  observability.AppWorkloadLister   // 应用级查询：解析 app→工作负载 ID（pod 名正则）
+	promURL  string
+	client   *http.Client
+	lister   observability.AppWorkloadLister  // 应用级查询：解析 app→工作负载 ID（pod 名正则）
 	entities observability.TenantEntityLister // 全局查询：列出租户全部应用/数据服务（健康矩阵）
 }
 

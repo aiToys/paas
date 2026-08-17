@@ -179,18 +179,18 @@ func validateBranch(b string) error {
 // BuildRun 是一次构建运行。mock CI runner 创建后异步流转 pending->running->success，
 // 成功产出 Image（回填 ImageID）；失败/进行中 ImageID 为空。
 type BuildRun struct {
-	ID         string            `json:"id"`
-	TenantID   string            `json:"tenantId,omitempty"`
-	AppID      string            `json:"appId"`
-	RepoID     string            `json:"repoId"`
-	Trigger    string            `json:"trigger"`
-	Commit     string            `json:"commit"`
-	Branch     string            `json:"branch"`
-	Message    string            `json:"message"`
-	Status     string            `json:"status"`
-	ImageID    string            `json:"imageId,omitempty"`
-	Log        string            `json:"log,omitempty"`
-	BuildArgs  map[string]string `json:"buildArgs,omitempty"`
+	ID        string            `json:"id"`
+	TenantID  string            `json:"tenantId,omitempty"`
+	AppID     string            `json:"appId"`
+	RepoID    string            `json:"repoId"`
+	Trigger   string            `json:"trigger"`
+	Commit    string            `json:"commit"`
+	Branch    string            `json:"branch"`
+	Message   string            `json:"message"`
+	Status    string            `json:"status"`
+	ImageID   string            `json:"imageId,omitempty"`
+	Log       string            `json:"log,omitempty"`
+	BuildArgs map[string]string `json:"buildArgs,omitempty"`
 	// Dockerfile / BuildContext 构建覆盖（可选，空则用 repo 级配置）：
 	// 同仓多形态产物（Go 后端 vs node 前端）按次构建指定不同 Dockerfile。
 	Dockerfile   string    `json:"dockerfile,omitempty"`
@@ -289,7 +289,7 @@ func dns1035(name string) string {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
 			b = append(b, byte(r))
 		case r >= 'A' && r <= 'Z':
-			b = append(b, byte(r-'A'+'a'))
+			b = append(b, byte(r-'A'+'a')) //nolint:gosec // case 已限定 A-Z 区间，算术结果必在 a-z
 		default:
 			b = append(b, '-')
 		}

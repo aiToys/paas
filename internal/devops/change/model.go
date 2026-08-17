@@ -38,39 +38,39 @@ const (
 
 // Change 单个变更（工作分支粒度）。json 标签 camelCase（与 workload/pipeline 一致）。
 type Change struct {
-	ID            string `json:"id"`
-	TenantID      string `json:"tenantId,omitempty"`
-	AppID         string `json:"appId"`
-	RepoID        string `json:"repoId"`
-	Title         string `json:"title"`
-	Type          string `json:"type"`
-	Branch        string `json:"branch"`
-	BranchCreated bool   `json:"branchCreated"`
-	BaseBranch    string `json:"baseBranch"`
-	Status        string `json:"status"` // open|integrated|tested|released|reverted|abandoned
-	BatchID       string `json:"batchId"`
-	ConflictWith  string `json:"conflictWith"` // integrate 冲突时记前一个变更 ID
-	CreatedBy     string `json:"createdBy,omitempty"`
+	ID            string    `json:"id"`
+	TenantID      string    `json:"tenantId,omitempty"`
+	AppID         string    `json:"appId"`
+	RepoID        string    `json:"repoId"`
+	Title         string    `json:"title"`
+	Type          string    `json:"type"`
+	Branch        string    `json:"branch"`
+	BranchCreated bool      `json:"branchCreated"`
+	BaseBranch    string    `json:"baseBranch"`
+	Status        string    `json:"status"` // open|integrated|tested|released|reverted|abandoned
+	BatchID       string    `json:"batchId"`
+	ConflictWith  string    `json:"conflictWith"` // integrate 冲突时记前一个变更 ID
+	CreatedBy     string    `json:"createdBy,omitempty"`
 	CreatedAt     time.Time `json:"createdAt"`
 	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
 // IntegrationBatch 一次集成批次（同 repo 多变更合并到一个集成分支统一构建发布）。
 type IntegrationBatch struct {
-	ID          string   `json:"id"`
-	TenantID    string   `json:"tenantId,omitempty"`
-	AppID       string   `json:"appId"`
-	RepoID      string   `json:"repoId"`
-	Title       string   `json:"title"`
-	Branch      string   `json:"branch"`
-	Status      string   `json:"status"`
-	ChangeIDs   []string `json:"changeIds"` // 有序
-	PipelineID  string   `json:"pipelineId"`
-	RunID       string   `json:"runId"`
-	ReleaseIDs  []string `json:"releaseIds"`
-	CreatedBy   string   `json:"createdBy,omitempty"`
-	CreatedAt   time.Time `json:"createdAt"`
-	FinishedAt  time.Time `json:"finishedAt"`
+	ID         string    `json:"id"`
+	TenantID   string    `json:"tenantId,omitempty"`
+	AppID      string    `json:"appId"`
+	RepoID     string    `json:"repoId"`
+	Title      string    `json:"title"`
+	Branch     string    `json:"branch"`
+	Status     string    `json:"status"`
+	ChangeIDs  []string  `json:"changeIds"` // 有序
+	PipelineID string    `json:"pipelineId"`
+	RunID      string    `json:"runId"`
+	ReleaseIDs []string  `json:"releaseIds"`
+	CreatedBy  string    `json:"createdBy,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
+	FinishedAt time.Time `json:"finishedAt"`
 }
 
 // Validate 校验变更必填字段：title/type/branch 非空、type ∈ {feat,hotfix}。

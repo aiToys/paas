@@ -393,12 +393,12 @@ func TestReconcileLabelsLane(t *testing.T) {
 // 非法 label 字符替换为 -；空清洗后空回 default。防 Deployment label 校验拒绝（e2e 实测）。
 func TestSanitizeLane(t *testing.T) {
 	cases := map[string]string{
-		"":                          "default",
-		"feature-x":                 "feature-x",
-		"integration/20260815-1":    "integration-20260815-1",
-		"integration/20260815-e2e":  "integration-20260815-e2e",
-		"///":                       "default",
-		"feat/user-export":          "feat-user-export",
+		"":                         "default",
+		"feature-x":                "feature-x",
+		"integration/20260815-1":   "integration-20260815-1",
+		"integration/20260815-e2e": "integration-20260815-e2e",
+		"///":                      "default",
+		"feat/user-export":         "feat-user-export",
 	}
 	for in, want := range cases {
 		if got := sanitizeLane(in); got != want {

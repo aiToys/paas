@@ -14,8 +14,8 @@ import (
 	"github.com/aitoys/paas/internal/devops"
 	devopsmemory "github.com/aitoys/paas/internal/devops/memory"
 	envmemory "github.com/aitoys/paas/internal/environment/memory"
-	wlmemory "github.com/aitoys/paas/internal/workload/memory"
 	"github.com/aitoys/paas/internal/workload"
+	wlmemory "github.com/aitoys/paas/internal/workload/memory"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 

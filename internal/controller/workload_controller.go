@@ -120,7 +120,7 @@ func sanitizeLane(lane string) string {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
 			r == '-', r == '_', r == '.':
-			b = append(b, byte(r))
+			b = append(b, byte(r)) //nolint:gosec // 上行 case 已限定 ASCII 区间，rune->byte 无溢出
 		default:
 			b = append(b, '-')
 		}

@@ -27,9 +27,9 @@ const (
 
 // Notification 单条通知（camelCase json，前端直取）。
 type Notification struct {
-	ID         string `json:"id"`         // 稳定 ID（targetType:targetID[:status]，前端记已读用）
+	ID         string `json:"id"` // 稳定 ID（targetType:targetID[:status]，前端记已读用）
 	Type       string `json:"type"`
-	Severity   string `json:"severity"`   // error|warning|info
+	Severity   string `json:"severity"` // error|warning|info
 	Title      string `json:"title"`
 	AppID      string `json:"appId"`
 	TargetType string `json:"targetType"` // batch|run|change（跳转目标类型）

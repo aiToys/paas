@@ -76,7 +76,7 @@ func doJSON[T any](t *testing.T, h *Handler, method, target, body string, wantCo
 		t.Fatalf("%s %s 期望 %d，got %d body %s", method, target, wantCode, rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		Data T      `json:"data"`
+		Data  T      `json:"data"`
 		Error string `json:"error"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {

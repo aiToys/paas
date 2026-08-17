@@ -8,8 +8,8 @@ package dataplane
 
 import (
 	"context"
-	"strings"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -170,7 +170,7 @@ func dns1035Name(name string) string {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
 			b = append(b, byte(r))
 		case r >= 'A' && r <= 'Z':
-			b = append(b, byte(r-'A'+'a'))
+			b = append(b, byte(r-'A'+'a')) //nolint:gosec // case 已限定 A-Z 区间，算术结果必在 a-z
 		default:
 			b = append(b, '-')
 		}

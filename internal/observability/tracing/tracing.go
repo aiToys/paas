@@ -29,6 +29,7 @@ const ServiceName = "paas-core"
 //   - endpoint 形如 "localhost:4318"（OTLP/HTTP，默认 grpc→http 端口 4318）；
 //     空串则不初始化（noop），返回的 shutdown 为 no-op。
 //   - 返回的 shutdown 必须在进程退出前调用以 flush span。
+//
 // clusterIDFromEnv 集群标识（env PAAS_CLUSTER_ID，缺省 default 单集群）。
 func clusterIDFromEnv() string {
 	if v := os.Getenv("PAAS_CLUSTER_ID"); v != "" {
