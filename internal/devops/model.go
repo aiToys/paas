@@ -287,7 +287,7 @@ func dns1035(name string) string {
 	for _, r := range name {
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
-			b = append(b, byte(r))
+			b = append(b, byte(r)) //nolint:gosec // case 已限定 ASCII 区间，rune->byte 无溢出
 		case r >= 'A' && r <= 'Z':
 			b = append(b, byte(r-'A'+'a')) //nolint:gosec // case 已限定 A-Z 区间，算术结果必在 a-z
 		default:
