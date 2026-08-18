@@ -7,9 +7,10 @@ import (
 	"net/http"
 	"strings"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/httputil"
-	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。

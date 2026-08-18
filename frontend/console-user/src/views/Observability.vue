@@ -10,6 +10,12 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import {
+  listMetrics, listAlertRules, createAlertRule, deleteAlertRule, listAlerts, listLogs,
+  listTraces, getTrace,
+  type MetricPoint, type MetricSeries, type AlertRule, type Alert, type LogEntry,
+} from '@/api/observability'
+import { listLanes } from '@/api/workload'
+import {
   type Span, type Trace,
   buildSpanTree, flattenSpanTree, spanWidth, spanLeft, spanChips, errSpanCount,
 } from '@/composables/useSpanTree'
@@ -23,22 +29,6 @@ type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
 
 interface App { id: string; name: string; envId?: string }
 interface DataService { id: string; kind: string; name: string; envId?: string; status?: string }
-interface MetricPoint { ts: string; value: number }
-interface MetricSeries {
-  targetType: string; targetId: string; name: string; unit: string
-  current: number; points: MetricPoint[]
-}
-interface AlertRule {
-  id: string; name: string; metricName: string; targetType: string; targetId?: string
-  operator: string; threshold: number; severity: string; enabled: boolean
-}
-interface Alert {
-  ruleId: string; ruleName: string; targetType?: string; targetId: string; metricName: string
-  value: number; threshold: number; operator: string; severity: string
-}
-interface LogEntry {
-  id: string; appId: string; targetId?: string; level: string; message: string; traceId?: string; timestamp: string
-}
 
 // ---- 维度状态：dim = all | env | app | dataservice；all 视图为租户全局聚合 ----
 type Dim = 'all' | 'env' | 'app' | 'dataservice'
@@ -64,8 +54,7 @@ const laneOptions = ref<{ laneId: string; workloadCount: number }[]>([])
 
 async function loadLanes() {
   try {
-    const resp = await fetchAuth('/api/workloads/lanes')
-    if (resp.ok) laneOptions.value = (await resp.json()).data ?? []
+    laneOptions.value = await listLanes()
   } catch {
     // 泳道候选加载失败不阻断主流程（下拉空仍可 allow-create 手输）
   }
@@ -179,33 +168,28 @@ async function loadApps() {
 }
 
 async function loadMetrics() {
-  const params = new URLSearchParams(metricsParams.value)
-  const resp = await fetchAuth(`/api/observability/metrics?${params.toString()}`)
-  if (resp.ok) metrics.value = (await resp.json()).data ?? []
+  metrics.value = await listMetrics(metricsParams.value)
 }
 
 async function loadRules() {
-  const resp = await fetchAuth('/api/observability/alert-rules')
-  if (resp.ok) rules.value = (await resp.json()).data ?? []
+  rules.value = await listAlertRules()
 }
 
 async function loadAlerts() {
-  const resp = await fetchAuth('/api/observability/alerts')
-  if (resp.ok) alerts.value = (await resp.json()).data ?? []
+  alerts.value = await listAlerts()
 }
 
 async function loadLogs() {
-  const params = new URLSearchParams()
-  if (logsAppId.value) params.set('appId', logsAppId.value)
+  const params: Record<string, string> = {}
+  if (logsAppId.value) params.appId = logsAppId.value
   if (dim.value === 'dataservice' && dimDS.value) {
-    params.set('targetType', 'dataservice')
-    params.set('targetId', dimDS.value)
+    params.targetType = 'dataservice'
+    params.targetId = dimDS.value
   }
-  if (logLevel.value) params.set('level', logLevel.value)
-  if (logLane.value.trim()) params.set('lane', logLane.value.trim())
-  if (logQ.value.trim()) params.set('q', logQ.value.trim())
-  const resp = await fetchAuth(`/api/observability/logs?${params.toString()}`)
-  if (resp.ok) logs.value = (await resp.json()).data ?? []
+  if (logLevel.value) params.level = logLevel.value
+  if (logLane.value.trim()) params.lane = logLane.value.trim()
+  if (logQ.value.trim()) params.q = logQ.value.trim()
+  logs.value = await listLogs(params)
 }
 
 const traceIdQuery = ref('')
@@ -215,11 +199,10 @@ async function loadTraces() {
     await searchTraceById()
     return
   }
-  const params = new URLSearchParams()
-  if (logsAppId.value) params.set('appId', logsAppId.value)
-  if (traceStatus.value) params.set('status', traceStatus.value)
-  const resp = await fetchAuth(`/api/observability/traces?${params.toString()}`)
-  if (resp.ok) traces.value = (await resp.json()).data ?? []
+  const params: Record<string, string> = {}
+  if (logsAppId.value) params.appId = logsAppId.value
+  if (traceStatus.value) params.status = traceStatus.value
+  traces.value = await listTraces<Trace>(params)
 }
 
 // traceId 精确直查：日志/告警拿到 traceId 后定位完整链路（命中即单条展示）。
@@ -229,10 +212,9 @@ async function searchTraceById(focusTraces = false) {
   if (focusTraces) tracesRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   const id = traceIdQuery.value.trim()
   if (!id) { loadTraces(); return }
-  const resp = await fetchAuth(`/api/observability/traces/${encodeURIComponent(id)}`)
-  if (resp.ok) {
-    traces.value = [await resp.json().then((j) => j.data)]
-  } else {
+  try {
+    traces.value = [await getTrace<Trace>(id)]
+  } catch {
     traces.value = []
     ElMessage.warning(`未找到 TraceID: ${id}`)
   }
@@ -357,28 +339,22 @@ async function saveRule() {
   }
   ruleSubmitting.value = true
   try {
-    const resp = await fetchAuth('/api/observability/alert-rules', {
-      method: 'POST',
-      body: JSON.stringify({
-        name: ruleForm.value.name,
-        metricName: ruleForm.value.metricName,
-        targetType: ruleForm.value.targetType,
-        targetId: ruleForm.value.targetId,
-        operator: ruleForm.value.operator,
-        threshold: ruleForm.value.threshold,
-        severity: ruleForm.value.severity,
-        enabled: ruleForm.value.enabled,
-      }),
+    await createAlertRule({
+      name: ruleForm.value.name,
+      metricName: ruleForm.value.metricName,
+      targetType: ruleForm.value.targetType,
+      targetId: ruleForm.value.targetId,
+      operator: ruleForm.value.operator,
+      threshold: ruleForm.value.threshold,
+      severity: ruleForm.value.severity,
+      enabled: ruleForm.value.enabled,
     })
-    if (resp.ok) {
-      ElMessage.success('规则已创建')
-      showRule.value = false
-      loadRules()
-      loadAlerts()
-    } else {
-      const err = await resp.json().catch(() => ({}))
-      ElMessage.error(err.error || '创建失败')
-    }
+    ElMessage.success('规则已创建')
+    showRule.value = false
+    loadRules()
+    loadAlerts()
+  } catch (e) {
+    ElMessage.error((e as Error).message || '创建失败')
   } finally {
     ruleSubmitting.value = false
   }
@@ -386,7 +362,7 @@ async function saveRule() {
 
 async function deleteRule(r: AlertRule) {
   try {
-    const resp = await fetchAuth(`/api/observability/alert-rules/${r.id}`, { method: 'DELETE' })
+    const resp = await deleteAlertRule(r.id)
     if (resp.ok) {
       ElMessage.success('已删除')
       loadRules()

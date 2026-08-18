@@ -7,22 +7,13 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import { fetchAuth } from '@/api'
+import {
+  listWorkloads, updateWorkload, updateSchedule, deleteWorkload,
+  getWorkload, getWorkloadLogs, createWorkload,
+  type Workload, type WorkloadDetail,
+} from '@/api/workload'
 import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
-
-interface Workload {
-  id: string
-  appId: string
-  envId: string
-  laneId: string
-  type: 'service' | 'job' | 'cronjob'
-  name: string
-  image: string
-  replicas: number
-  ready: number
-  status: 'running' | 'deploying' | 'failed' | 'succeeded' | 'pending'
-  schedule?: string
-}
 
 const props = defineProps<{ type?: string }>()
 
@@ -84,12 +75,9 @@ const envName = computed(() => (id: string) => envStore.envs.find((e) => e.id ==
 async function load() {
   loading.value = true
   try {
-    const params = new URLSearchParams({ type: activeType.value })
-    if (activeEnv.value) params.set('envId', activeEnv.value)
-    const resp = await fetchAuth(`/api/workloads?${params}`)
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    const json = await resp.json()
-    items.value = (json.data ?? []) as Workload[]
+    const params: Record<string, string> = { type: activeType.value }
+    if (activeEnv.value) params.envId = activeEnv.value
+    items.value = await listWorkloads(params)
   } catch (e) {
     ElMessage.error('加载工作负载失败：' + (e as Error).message)
   } finally {
@@ -117,11 +105,7 @@ async function scale(w: Workload) {
       return
     }
     scaling.value = w.id
-    const resp = await fetchAuth(`/api/workloads/${w.id}`, {
-      method: 'PUT',
-      body: JSON.stringify({ replicas }),
-    })
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    await updateWorkload(w.id, { replicas })
     ElMessage.success(`已调整为 ${replicas} 副本`)
     await load()
   } catch (e) {
@@ -163,14 +147,7 @@ async function editSchedule(w: Workload) {
       return
     }
     editingSchedule.value = w.id
-    const resp = await fetchAuth(`/api/workloads/${w.id}/schedule`, {
-      method: 'PUT',
-      body: JSON.stringify({ schedule }),
-    })
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}))
-      throw new Error(err.error || `HTTP ${resp.status}`)
-    }
+    await updateSchedule(w.id, schedule)
     ElMessage.success('调度已更新')
     await load()
   } catch (e) {
@@ -192,7 +169,7 @@ async function remove(w: Workload) {
   })
   if (!ok) return
   try {
-    const resp = await fetchAuth(`/api/workloads/${w.id}`, { method: 'DELETE' })
+    const resp = await deleteWorkload(w.id)
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     ElMessage.success('已删除')
     await load()
@@ -209,20 +186,6 @@ function switchType(key: string) {
 // —— 工作负载详情（运行实例 + 日志）——
 // GET /api/workloads/{id} 返回 {workload, instances}；Job/CronJob 的每次执行对应一个 Pod（实例），
 // 点「详情」查看实例列表（状态/重启/节点），每行可查运行日志（GET /api/workloads/{id}/logs?pod=）。
-interface Instance {
-  name: string
-  status: string
-  ready?: string
-  restarts: number
-  node?: string
-  ip?: string
-  startedAt?: string
-  message?: string
-}
-interface WorkloadDetail {
-  workload: Workload
-  instances: Instance[]
-}
 const showDetail = ref(false)
 const detailLoading = ref(false)
 const detail = ref<WorkloadDetail | null>(null)
@@ -255,10 +218,7 @@ async function openDetail(w: Workload) {
   detailLoading.value = true
   detail.value = null
   try {
-    const resp = await fetchAuth(`/api/workloads/${w.id}`)
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    const json = await resp.json()
-    detail.value = json.data as WorkloadDetail
+    detail.value = await getWorkload(w.id)
   } catch (e) {
     ElMessage.error('加载详情失败：' + (e as Error).message)
   } finally {
@@ -272,9 +232,9 @@ async function viewLogs(pod: string) {
   logsPod.value = pod
   logsText.value = ''
   try {
-    const params = new URLSearchParams({ pod, tail: '1000' })
-    if (logsPrevious.value) params.set('previous', 'true')
-    const resp = await fetchAuth(`/api/workloads/${detail.value?.workload.id ?? ''}/logs?${params}`)
+    const params: Record<string, string> = { pod, tail: '1000' }
+    if (logsPrevious.value) params.previous = 'true'
+    const resp = await getWorkloadLogs(detail.value?.workload.id ?? '', params)
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
     logsText.value = await resp.text()
     if (!logsText.value) logsText.value = '（暂无日志输出）'
@@ -340,14 +300,7 @@ async function submitCreate() {
   if (activeType.value === 'cronjob') body.schedule = f.schedule.trim()
   submitting.value = true
   try {
-    const resp = await fetchAuth(`/api/applications/${f.appId}/workloads`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    })
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({}))
-      throw new Error(err.error || `HTTP ${resp.status}`)
-    }
+    await createWorkload(f.appId, body as Partial<Workload>)
     ElMessage.success('已创建工作负载')
     showCreate.value = false
     await load()
