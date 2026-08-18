@@ -130,7 +130,9 @@ onMounted(load)
         </el-table>
       </el-collapse-item>
     </el-collapse>
-    <el-empty v-if="!loading && prompts.length === 0" description="暂无提示词" />
+    <el-empty v-if="!loading && prompts.length === 0" description="暂无提示词，沉淀可复用的 Prompt 模板" :image-size="64">
+      <el-button type="primary" @click="openCreate">新建提示词</el-button>
+    </el-empty>
 
     <el-dialog v-model="showForm" title="新建提示词" width="640px">
       <el-form label-width="90px">

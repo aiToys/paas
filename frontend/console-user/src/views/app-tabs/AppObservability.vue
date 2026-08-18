@@ -13,6 +13,7 @@
 // 故不设独立「业务监控」tab；推理 token/请求消耗已归「用量」tab，避免重复。
 // 流量健康（RPS/延迟/副本就绪）即业务相关的运行视图，归「应用实例」。
 import { computed, onMounted, ref, watch } from 'vue'
+import { ElMessage } from 'element-plus'
 import { usePolling } from '@/composables/usePolling'
 import { useRouter } from 'vue-router'
 import { fetchAuth } from '@/api'
@@ -179,7 +180,11 @@ async function loadWorkloads() {
 async function loadAll(silent = false) {
   if (!silent) loading.value = true
   try {
-    await Promise.all([loadMetrics(), loadLogs(), loadTraces(), loadWorkloads()])
+    const results = await Promise.allSettled([loadMetrics(), loadLogs(), loadTraces(), loadWorkloads()])
+    // 首次加载失败提示（轮询 silent 静默重试，不弹窗打扰）
+    if (!silent && results.some((r) => r.status === 'rejected')) {
+      ElMessage.error('加载可观测数据失败，请稍后重试')
+    }
   } finally {
     if (!silent) loading.value = false
   }

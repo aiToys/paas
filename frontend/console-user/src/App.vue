@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import NotificationBell from '@/components/NotificationBell.vue'
+import CommandPalette from '@/components/CommandPalette.vue'
 import { useEnvStore } from '@/stores/env'
 import { useSessionStore } from '@/stores/session'
 import { useTheme } from '@/composables/useTheme'
@@ -14,12 +15,9 @@ const router = useRouter()
 const collapsed = ref(false)
 const envStore = useEnvStore()
 const { theme, toggle } = useTheme()
-const searchQuery = ref('')
-
-function onSearch() {
-  const q = searchQuery.value.trim()
-  router.push({ path: '/applications', query: q ? { q } : {} })
-}
+// 命令面板（Cmd/Ctrl+K）：顶栏搜索框点击打开，替代旧的仅跳应用列表的回车搜索
+const paletteOpen = ref(false)
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
 
 // 生产会话超时检查定时器
 let prodTimer: number | undefined
@@ -310,15 +308,10 @@ function isActive(to: string) {
               </el-dropdown-menu>
             </template>
           </el-dropdown>
-          <div class="search">
+          <div class="search" @click="paletteOpen = true">
             <Icon name="search" :size="16" />
-            <input
-              v-model="searchQuery"
-              class="search-input"
-              placeholder="搜索应用…"
-              @keydown.enter="onSearch"
-            />
-            <kbd>⏎</kbd>
+            <span class="search-input search-placeholder">搜索应用、环境或命令…</span>
+            <kbd>{{ isMac ? '⌘K' : 'Ctrl K' }}</kbd>
           </div>
           <button
             class="theme-toggle"
@@ -375,6 +368,7 @@ function isActive(to: string) {
         </RouterView>
       </main>
     </div>
+    <CommandPalette v-model="paletteOpen" />
   </div>
 </template>
 
@@ -626,6 +620,12 @@ function isActive(to: string) {
 }
 .search:focus-within {
   border-color: var(--brand);
+}
+.search {
+  cursor: pointer;
+}
+.search-placeholder {
+  color: var(--text-faint);
 }
 .search-input {
   flex: 1;

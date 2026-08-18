@@ -106,6 +106,7 @@ onMounted(load)
         <div class="empty-icon">🔑</div>
         <div class="empty-title">暂无 API 密钥</div>
         <div class="empty-desc">创建一个密钥开始调用平台 API</div>
+        <button class="create-btn" :disabled="creating" @click="create">+ 创建密钥</button>
       </div>
       <div v-for="k in keys" :key="k.id" class="key-row">
         <div class="key-main">

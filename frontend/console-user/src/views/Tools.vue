@@ -109,7 +109,12 @@ onMounted(load)
       <h2>工具</h2>
       <el-button type="primary" @click="openCreate">新建工具</el-button>
     </div>
-    <el-table v-loading="loading" :data="tools" empty-text="暂无工具，点「新建工具」创建">
+    <el-table v-loading="loading" :data="tools">
+      <template #empty>
+        <el-empty description="暂无工具，注册 MCP/HTTP 工具供 Agent 调用" :image-size="64">
+          <el-button type="primary" @click="openCreate">新建工具</el-button>
+        </el-empty>
+      </template>
       <el-table-column prop="name" label="名称" min-width="140" />
       <el-table-column label="类型" width="100">
         <template #default="{ row }">{{ TYPE_LABEL[row.type] || row.type }}</template>

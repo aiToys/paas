@@ -5,6 +5,7 @@
 // PriceTable 是 mock 单价，成本为「预估」（真实计费引擎留后续）。
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 
 const props = defineProps<{ appId: string }>()
@@ -61,8 +62,11 @@ async function load() {
       const json = await usageResp.json()
       const usage = json?.data?.usage ?? json?.usage ?? {}
       appUsage.value = usage.byApp?.[props.appId] ?? {}
+    } else {
+      ElMessage.error(`加载用量失败：HTTP ${usageResp.status}`)
     }
     if (wlResp.ok) workloads.value = (await wlResp.json()).data ?? []
+    else ElMessage.error(`加载工作负载失败：HTTP ${wlResp.status}`)
     // 绑定资源计数：从 application detail 的 bindings（独立拉一次应用详情）。
     const appResp = await fetchAuth(`/api/applications/${props.appId}`)
     if (appResp.ok) {

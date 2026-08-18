@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 应用详情 - 变更 tab（火车发车模型）：变更列表（创建/放弃）+ 集成批次（发车：collecting→integrate→testing→tested→approve→released）。
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -10,6 +10,7 @@ import {
   addChangeToBatch, removeChangeFromBatch, integrateBatch, approveBatch, releaseBatch,
 } from '@/api/change'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
+import { usePolling } from '@/composables/usePolling'
 
 const props = defineProps<{ appId: string }>()
 const router = useRouter()
@@ -125,27 +126,20 @@ watch(drawerBid, async (bid) => {
   } catch { /* 列表数据兜底 */ }
 })
 
-// testing/releasing 轮询（10s，silent）
-let pollTimer: ReturnType<typeof setInterval> | null = null
-function startPollIfNeeded() {
-  const active = batches.value.some((b) => b.status === 'testing' || b.status === 'releasing')
-  if (active && !pollTimer) {
-    pollTimer = setInterval(async () => {
-      try {
-        await load()
-        if (drawerBid.value) {
-          const b = await getBatch(props.appId, drawerBid.value)
-          const i = batches.value.findIndex((x) => x.id === b.id)
-          if (i >= 0) batches.value[i] = b
-        }
-      } catch { /* silent */ }
-    }, 10_000)
-  } else if (!active && pollTimer) {
-    clearInterval(pollTimer); pollTimer = null
+// testing/releasing 轮询（10s，silent；不可见自动暂停）
+async function pollActive() {
+  await load()
+  if (drawerBid.value) {
+    try {
+      const b = await getBatch(props.appId, drawerBid.value)
+      const i = batches.value.findIndex((x) => x.id === b.id)
+      if (i >= 0) batches.value[i] = b
+    } catch { /* 列表数据兜底 */ }
   }
 }
-watch(() => batches.value.map((b) => b.status).join(','), startPollIfNeeded, { immediate: true })
-onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
+usePolling(pollActive, 10_000, {
+  active: () => batches.value.some((b) => b.status === 'testing' || b.status === 'releasing'),
+})
 
 // 步骤条：collecting→testing→tested→released；conflict/failed 显异常态
 const stepActive = computed(() => {

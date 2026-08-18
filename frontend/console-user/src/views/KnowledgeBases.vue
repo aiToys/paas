@@ -134,9 +134,9 @@ async function loadDocs() {
 function startPoll() {
   stopPoll()
   pollTimer = setInterval(async () => {
-    await loadDocs()
     // 全部终态（无 parsing）则停止轮询；页面不可见时跳过本次（后台 tab 不请求）
     if (document.hidden) return
+    await loadDocs()
     if (!docs.value.some((d) => d.status === 'parsing')) stopPoll()
   }, 3000)
 }
@@ -214,7 +214,12 @@ onUnmounted(stopPoll)
       <h2>知识库</h2>
       <el-button type="primary" @click="openCreate">新建知识库</el-button>
     </div>
-    <el-table v-loading="loading" :data="kbs" empty-text="暂无知识库，点击右上角创建">
+    <el-table v-loading="loading" :data="kbs">
+      <template #empty>
+        <el-empty description="暂无知识库，上传文档构建 RAG 检索" :image-size="64">
+          <el-button type="primary" @click="openCreate">新建知识库</el-button>
+        </el-empty>
+      </template>
       <el-table-column prop="name" label="名称" />
       <el-table-column prop="embeddingModel" label="向量模型" width="180" />
       <el-table-column prop="embeddingDim" label="维度" width="90" />

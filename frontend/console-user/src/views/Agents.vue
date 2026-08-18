@@ -255,7 +255,12 @@ onMounted(load)
       <h2>Agent</h2>
       <el-button type="primary" @click="openCreate">新建 Agent</el-button>
     </div>
-    <el-table v-loading="loading" :data="agents" empty-text="暂无 Agent">
+    <el-table v-loading="loading" :data="agents">
+      <template #empty>
+        <el-empty description="暂无 Agent，创建一个开始编排模型与工具" :image-size="64">
+          <el-button type="primary" @click="openCreate">新建 Agent</el-button>
+        </el-empty>
+      </template>
       <el-table-column prop="name" label="名称" min-width="140" />
       <el-table-column prop="model" label="模型" width="140" />
       <el-table-column label="工具" width="80">

@@ -4,6 +4,7 @@
 // 注册/注销/路由/熔断的写操作归 /platform/governance；本 tab 仅应用内可见性。
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
 
@@ -63,10 +64,13 @@ async function load() {
       fetchAuth('/api/breakers'),
     ])
     if (svcResp.ok) services.value = (await svcResp.json()).data ?? []
+    else ElMessage.error(`加载服务列表失败：HTTP ${svcResp.status}`)
     if (routeResp.ok) routes.value = (await routeResp.json()).data ?? []
     if (breakerResp.ok) breakers.value = (await breakerResp.json()).data ?? []
     instancesBySvc.value = {}
     expanded.value = {}
+  } catch (e) {
+    ElMessage.error('加载服务治理数据失败：' + (e as Error).message)
   } finally {
     loading.value = false
   }
@@ -84,9 +88,12 @@ async function onExpand(row: Service, expandedRows: Service[]) {
         const json = await resp.json()
         const payload = json && typeof json === 'object' && 'service' in json ? json : (json?.data ?? {})
         instancesBySvc.value[row.id] = payload.instances ?? []
+      } else {
+        instancesBySvc.value[row.id] = []
       }
     } catch {
       instancesBySvc.value[row.id] = []
+      ElMessage.error(`加载服务「${row.name}」实例失败`)
     }
   }
 }

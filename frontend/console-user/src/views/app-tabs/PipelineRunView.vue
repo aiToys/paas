@@ -19,8 +19,6 @@ const run = ref<PipelineRun | null>(null)
 const loading = ref(false)
 let timer: ReturnType<typeof setInterval> | null = null
 
-const POLL_INTERVAL = 5000
-
 const runStatusLabel = (s?: string): string => {
   const m: Record<string, string> = { running: '运行中', paused: '等待审批', succeeded: '成功', failed: '失败', aborted: '已中止' }
   return m[s || ''] || s || '-'
@@ -128,11 +126,13 @@ async function retry() {
 function startPolling() {
   stopPolling()
   timer = setInterval(async () => {
+    // 后台 tab 不请求（不可见跳过本次 tick，恢复可见立即拉一次补状态）
+    if (document.hidden) return
     if (isTerminal.value) { stopPolling(); return }
     try {
       run.value = await getRun(props.runId)
     } catch { /* 静默重试 */ }
-  }, POLL_INTERVAL)
+  }, 5000)
 }
 function stopPolling() {
   if (timer) { clearInterval(timer); timer = null }

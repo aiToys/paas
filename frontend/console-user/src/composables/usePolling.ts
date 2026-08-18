@@ -3,13 +3,24 @@
 // onUnmounted 自动清理，调用方无需手动 clearInterval。
 import { onMounted, onUnmounted } from 'vue'
 
-export function usePolling(fn: () => void | Promise<void>, intervalMs: number): void {
+// opts.active：条件轮询（如「有 pending 构建才拉」「run 未终态才拉」）。
+// 返回 false 时跳过本次 tick（不发请求），定时器保留——替代各页手写的
+// 「启动/停止 setInterval」条件轮询模式，语义等价且自带不可见暂停。
+export function usePolling(
+  fn: () => void | Promise<void>,
+  intervalMs: number,
+  opts?: { active?: () => boolean },
+): void {
   let timer: number | undefined
+  const tick = () => {
+    if (opts?.active && !opts.active()) return
+    fn()
+  }
 
   function start() {
     if (timer === undefined) {
-      fn() // 启动/恢复立即执行一次
-      timer = window.setInterval(fn, intervalMs)
+      tick() // 启动/恢复立即执行一次
+      timer = window.setInterval(tick, intervalMs)
     }
   }
   function stop() {

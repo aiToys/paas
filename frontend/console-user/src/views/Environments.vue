@@ -164,7 +164,8 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
     </div>
     <div v-else-if="!envs.length" class="empty">
       <Icon name="shield" :size="32" />
-      <p>暂无环境，点击右上角创建</p>
+      <p>暂无环境，环境是应用部署的物理隔离单元</p>
+      <button class="new-btn" @click="showCreate = true">+ 创建环境</button>
     </div>
     <div v-else class="grid">
       <article

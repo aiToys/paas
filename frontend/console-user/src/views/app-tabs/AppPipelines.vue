@@ -5,7 +5,7 @@
 // ③ 待发布变更（下）：open 未入批变更，逐个「添加」进集成区
 // 批次 = 集成区（首次添加自动创建）；integrate = 提交发车（merge → CI 构建部署测试环境）。
 // 其余流水线管理（CD/自定义）折叠在底部「全部流水线」。
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -19,6 +19,7 @@ import {
 } from '@/api/pipeline'
 import { fetchAuth } from '@/api'
 import PipelineDesigner from './PipelineDesigner.vue'
+import { usePolling } from '@/composables/usePolling'
 
 const props = defineProps<{ appId: string }>()
 const router = useRouter()
@@ -114,15 +115,10 @@ async function loadLatestRun() {
   } catch { /* 非关键 */ }
 }
 
-// testing/releasing 轮询（10s，终态自停）
-let pollTimer: ReturnType<typeof setInterval> | null = null
-function syncPoll() {
-  const active = batches.value.some((b) => ['building', 'testing', 'releasing'].includes(b.status))
-  if (active && !pollTimer) pollTimer = setInterval(load, 10_000)
-  else if (!active && pollTimer) { clearInterval(pollTimer); pollTimer = null }
-}
-watch(() => batches.value.map((b) => b.status).join(','), syncPoll, { immediate: true })
-onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
+// testing/releasing 轮询（10s，条件拉取；不可见自动暂停）
+usePolling(load, 10_000, {
+  active: () => batches.value.some((b) => ['building', 'testing', 'releasing'].includes(b.status)),
+})
 
 // ---- 添加进集成区（无活动批次时自动创建） ----
 async function addToStage(c: Change) {

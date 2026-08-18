@@ -1,11 +1,12 @@
 <script setup lang="ts">
 // 应用详情 - 构建 tab：触发构建 + 列表 + 状态轮询 + 日志展开。
 // mock CI runner 异步流转 pending->running->success，前端轮询直到全部终态。
-import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import { buildLink, imageLink, repoLink } from '@/composables/useDevopsLinks'
+import { usePolling } from '@/composables/usePolling'
 
 const router = useRouter()
 
@@ -37,7 +38,6 @@ const repos = ref<Repo[]>([])
 const loading = ref(false)
 const showTrigger = ref(false)
 const selectedRepo = ref('')
-let pollTimer: number | null = null
 
 async function loadRepos() {
   const resp = await fetchAuth(`/api/applications/${props.appId}/repositories`)
@@ -45,35 +45,13 @@ async function loadRepos() {
   if (repos.value.length && !selectedRepo.value) selectedRepo.value = repos.value[0].id
 }
 
-async function load() {
-  loading.value = true
+async function load(silent = false) {
+  if (!silent) loading.value = true
   try {
     const resp = await fetchAuth(`/api/applications/${props.appId}/buildruns`)
     if (resp.ok) builds.value = (await resp.json()).data ?? []
-    schedulePoll()
   } finally {
-    loading.value = false
-  }
-}
-
-function schedulePoll() {
-  const hasPending = builds.value.some((b) => b.status === 'pending' || b.status === 'running')
-  if (hasPending && pollTimer === null) {
-    pollTimer = window.setInterval(async () => {
-      try {
-        const resp = await fetchAuth(`/api/applications/${props.appId}/buildruns`)
-        if (resp.ok) {
-          builds.value = (await resp.json()).data ?? []
-          const still = builds.value.some((b) => b.status === 'pending' || b.status === 'running')
-          if (!still && pollTimer !== null) {
-            clearInterval(pollTimer)
-            pollTimer = null
-          }
-        }
-      } catch {
-        // 网络错误静默：轮询不阻塞用户，下次 tick 重试
-      }
-    }, 2000)
+    if (!silent) loading.value = false
   }
 }
 
@@ -107,12 +85,13 @@ onMounted(async () => {
   await loadRepos()
   await load()
 })
-onUnmounted(() => {
-  if (pollTimer !== null) clearInterval(pollTimer)
-})
 watch(() => props.appId, async () => {
   await loadRepos()
   await load()
+})
+// 条件轮询：有 pending/running 构建才拉（2s）；不可见自动暂停（usePolling）
+usePolling(() => load(true), 2000, {
+  active: () => builds.value.some((b) => b.status === 'pending' || b.status === 'running'),
 })
 </script>
 

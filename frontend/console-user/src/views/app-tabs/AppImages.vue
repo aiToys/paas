@@ -3,6 +3,7 @@
 // 「发布」按钮通知父组件切到发布 tab 并预选该镜像；支持 ?image= 深链自动展开定位行。
 import { ref, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import { buildLink, repoLink } from '@/composables/useDevopsLinks'
 
@@ -34,6 +35,9 @@ async function load() {
   try {
     const resp = await fetchAuth(`/api/applications/${props.appId}/images`)
     if (resp.ok) images.value = (await resp.json()).data ?? []
+    else ElMessage.error(`加载镜像列表失败：HTTP ${resp.status}`)
+  } catch (e) {
+    ElMessage.error('加载镜像列表失败：' + (e as Error).message)
   } finally {
     loading.value = false
   }
