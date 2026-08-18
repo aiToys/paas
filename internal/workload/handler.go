@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -239,6 +240,55 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 		}
 		h.fillStatus(r.Context(), list)
 		httputil.WriteData(w, list)
+		return
+	}
+
+	// GET /api/workloads/lanes 租户泳道枚举（distinct laneId + 工作负载数）。
+	// 回答「存在哪些泳道」：前端日志 lane 过滤候选 / 泳道总览的权威来源。
+	// 默认排除 default 基线；?includeDefault=1 包含。
+	if rest == "lanes" && r.Method == http.MethodGet {
+		if !h.allow(w, r, PermWorkloadRead) {
+			return
+		}
+		list, err := h.repo.List(r.Context(), "", "", "", "", "")
+		if err != nil {
+			httputil.WriteInternalError(w, err)
+			return
+		}
+		includeDefault := r.URL.Query().Get("includeDefault") == "1"
+		counts := map[string]int{}
+		for _, wl := range list {
+			if wl.LaneID == "" {
+				continue // 无 lane 的工作负载不参与枚举
+			}
+			if wl.LaneID == LaneDefault && !includeDefault {
+				continue
+			}
+			counts[wl.LaneID]++
+		}
+		type laneSummary struct {
+			LaneID           string `json:"laneId"`
+			WorkloadCount    int    `json:"workloadCount"`
+			ApplicationCount int    `json:"applicationCount"`
+		}
+		lanes := make([]laneSummary, 0, len(counts))
+		appSets := map[string]map[string]struct{}{}
+		for _, wl := range list {
+			if _, ok := counts[wl.LaneID]; !ok {
+				continue
+			}
+			if appSets[wl.LaneID] == nil {
+				appSets[wl.LaneID] = map[string]struct{}{}
+			}
+			if wl.AppID != "" {
+				appSets[wl.LaneID][wl.AppID] = struct{}{}
+			}
+		}
+		for lane, n := range counts {
+			lanes = append(lanes, laneSummary{LaneID: lane, WorkloadCount: n, ApplicationCount: len(appSets[lane])})
+		}
+		sort.Slice(lanes, func(i, j int) bool { return lanes[i].LaneID < lanes[j].LaneID })
+		httputil.WriteData(w, lanes)
 		return
 	}
 

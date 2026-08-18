@@ -4,6 +4,8 @@ package change
 
 import (
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -73,7 +75,29 @@ type IntegrationBatch struct {
 	FinishedAt time.Time `json:"finishedAt"`
 }
 
-// Validate 校验变更必填字段：title/type/branch 非空、type ∈ {feat,hotfix}。
+// branchPattern 分支名安全校验（与 devops.CodeRepo.Validate 同款）：
+// 仅安全字符（含 -）+ 拒 `-` 前缀（防 git argv flag 注入）。
+var branchPattern = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
+
+// reservedBranches 保留分支：批次集成分支不能撞主干名——Integrate 会「删重建集成分支」，
+// branch="main" 会删除仓库 main 分支（paas-bot 是 Gitea admin 无分支保护），必须拒。
+var reservedBranches = map[string]bool{"main": true, "master": true}
+
+// validateBranchName 分支名校验：非空 + 安全字符 + 非保留字（深度审计第 1 轮 I-1）。
+func validateBranchName(branch string) error {
+	if branch == "" {
+		return fmt.Errorf("branch 不能为空")
+	}
+	if !branchPattern.MatchString(branch) || strings.HasPrefix(branch, "-") {
+		return fmt.Errorf("branch 含非法字符（仅字母数字 ._ /）且不能以 - 开头")
+	}
+	if reservedBranches[strings.ToLower(branch)] {
+		return fmt.Errorf("branch 不能使用保留名 %s（主干分支）", branch)
+	}
+	return nil
+}
+
+// Validate 校验变更必填字段：title/type 非空、type ∈ {feat,hotfix}、branch 安全校验。
 // BranchCreated=false 时仍要求 branch 非空（引用已有分支）。
 func (c Change) Validate() error {
 	if c.Title == "" {
@@ -82,19 +106,13 @@ func (c Change) Validate() error {
 	if c.Type != ChangeFeat && c.Type != ChangeHotfix {
 		return fmt.Errorf("type 仅支持 feat|hotfix")
 	}
-	if c.Branch == "" {
-		return fmt.Errorf("branch 不能为空")
-	}
-	return nil
+	return validateBranchName(c.Branch)
 }
 
-// ValidateBatch 校验批次必填字段：title/branch 非空。
+// ValidateBatch 校验批次必填字段：title 非空 + branch 安全校验（拒主干名，防 Integrate 删主干）。
 func (b IntegrationBatch) ValidateBatch() error {
 	if b.Title == "" {
 		return fmt.Errorf("title 不能为空")
 	}
-	if b.Branch == "" {
-		return fmt.Errorf("branch 不能为空")
-	}
-	return nil
+	return validateBranchName(b.Branch)
 }

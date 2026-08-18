@@ -9,6 +9,7 @@ import (
 
 	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/httputil"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -282,6 +283,11 @@ func (h *Handler) serveItemCRUD(w http.ResponseWriter, r *http.Request, id strin
 			return
 		}
 		d.ID = id
+		// 格式校验：reconciler 用 MustParse 解析，非法值会 panic-requeue 死循环（审计第 6 轮 I4）
+		if !validQuantity(d.CPU) || !validQuantity(d.Memory) {
+			httputil.WriteError(w, http.StatusBadRequest, "cpu/memory 格式非法（如 500m / 1Gi）")
+			return
+		}
 		updated, err := h.repo.Update(r.Context(), d)
 		if err != nil {
 			httputil.WriteServiceError(w, http.StatusBadRequest, err)
@@ -373,6 +379,15 @@ func (h *Handler) serveRestart(w http.ResponseWriter, r *http.Request, id string
 	httputil.WriteData(w, map[string]string{"restarted": id})
 }
 
+// validQuantity 校验 K8s 资源量格式（空串合法=未设置）；reconciler 侧 MustParse 不容错。
+func validQuantity(s string) bool {
+	if s == "" {
+		return true
+	}
+	_, err := resource.ParseQuantity(s)
+	return err == nil
+}
+
 // scaleInput 扩缩容请求体（字段全可选，非空/非零覆盖）。
 type scaleInput struct {
 	Replicas  *int   `json:"replicas,omitempty"`
@@ -405,6 +420,14 @@ func (h *Handler) serveScale(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 	ex.Replicas = in.Replicas // nil 不覆盖（store 合并语义）
+	if in.CPU != "" && !validQuantity(in.CPU) {
+		httputil.WriteError(w, http.StatusBadRequest, "cpu 格式非法（如 500m / 0.5）")
+		return
+	}
+	if in.Memory != "" && !validQuantity(in.Memory) {
+		httputil.WriteError(w, http.StatusBadRequest, "memory 格式非法（如 1Gi / 512Mi）")
+		return
+	}
 	if in.CPU != "" {
 		ex.CPU = in.CPU
 	}

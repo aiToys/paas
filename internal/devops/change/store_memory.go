@@ -227,3 +227,20 @@ func (s *MemoryStore) UpdateBatch(ctx context.Context, in IntegrationBatch) (Int
 	s.batches[in.ID] = in
 	return cloneBatch(in), nil
 }
+
+// SetBatchStatus 仅更新 status 单字段（SyncBatchStatus 推进专用，避免全量覆盖并发竞态）。
+func (s *MemoryStore) SetBatchStatus(ctx context.Context, id, status string) error {
+	tid, err := tenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.batches[id]
+	if !ok || cur.TenantID != tid {
+		return ErrBatchNotFound
+	}
+	cur.Status = status
+	s.batches[id] = cur
+	return nil
+}

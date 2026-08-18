@@ -5,8 +5,8 @@
 # 前提：paas-shop 应用已建、shop-db/cache/mq 数据服务已建（running）、镜像已推 $REGISTRY/paas-shop/<svc>:tag。
 # 幂等：workload 按 name 查重，已存在跳过。
 set -uo pipefail
-H="Authorization: Bearer sk-acme-admin"
-B="http://paas.k8s.dd"
+H="Authorization: Bearer ${PAAS_TOKEN:?请设置 PAAS_TOKEN（API Key，dev 默认 sk-acme-admin）}"
+B="${PAAS_BASE:?请设置 PAAS_BASE（core 地址，dev 默认 http://paas.k8s.dd）}"
 APP="paas-shop"
 REGISTRY="${REGISTRY:?设置 REGISTRY 为集群 registry，如 <nodeIP>:30050}"
 TAG="${TAG:-latest}"

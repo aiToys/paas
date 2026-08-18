@@ -172,10 +172,21 @@ func TestSyncBatchStatusAdvances(t *testing.T) {
 		t.Fatalf("change 应 tested: %s", ch1.Status)
 	}
 
-	// approve → releasing
+	// approve → releasing（清 RunID：防 SyncBatchStatus 读旧 CI run 提前判 released，审计第 2 轮 I1）
 	got, err = s.Approve(ctx, b.ID)
 	if err != nil || got.Status != BatchReleasing {
 		t.Fatalf("approve: %+v err=%v", got, err)
+	}
+
+	// releasing 态无 RunID 不推进（守卫验证）
+	got, err = s.SyncBatchStatus(ctx, b.ID)
+	if err != nil || got.Status != BatchReleasing {
+		t.Fatalf("无 RunID 的 releasing 不应推进: %+v err=%v", got, err)
+	}
+
+	// Release 触发 CD run（merge 到 main）后才有 RunID
+	if _, err := s.Release(ctx, b.ID); err != nil {
+		t.Fatalf("release: %v", err)
 	}
 
 	// CD succeeded → released + change released + ReleaseIDs 回填

@@ -125,6 +125,13 @@ func (s *Store) Create(ctx context.Context, w workload.Workload) error {
 	if _, exists := s.workloads[w.ID]; exists {
 		return fmt.Errorf("工作负载已存在: %s", w.ID)
 	}
+	// 同租户 Name 唯一：Name 即 K8s Service 名，同名 Workload 会让 reconciler 抢建同一
+	// K8s Service（AlreadyOwned）触发无限 requeue（审计第 6 轮 I2）。
+	for _, ex := range s.workloads {
+		if ex.TenantID == tid && ex.Name == w.Name {
+			return fmt.Errorf("同名工作负载已存在: %s", w.Name)
+		}
+	}
 	w.TenantID = tid // 以 ctx 为准
 	if w.LaneID == "" {
 		w.LaneID = workload.LaneDefault // 默认基线

@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 )
 
 // 通知类型。
@@ -64,25 +65,25 @@ func Notifications(ctx context.Context, repo Repository, runs RunLister) ([]Noti
 			out = append(out, Notification{
 				ID: "batch:" + b.ID + ":conflict", Type: NotifBatchConflict, Severity: "error",
 				Title: fmt.Sprintf("批次「%s」集成冲突，需解决后重新集成", b.Title), AppID: b.AppID,
-				TargetType: "batch", TargetID: b.ID, At: b.CreatedAt.Format("2006-01-02T15:04:05Z"),
+				TargetType: "batch", TargetID: b.ID, At: b.CreatedAt.Format(time.RFC3339),
 			})
 		case BatchTesting:
 			out = append(out, Notification{
 				ID: "batch:" + b.ID + ":testing", Type: NotifBatchTesting, Severity: "info",
 				Title: fmt.Sprintf("批次「%s」集成测试进行中", b.Title), AppID: b.AppID,
-				TargetType: "batch", TargetID: b.ID, At: b.CreatedAt.Format("2006-01-02T15:04:05Z"),
+				TargetType: "batch", TargetID: b.ID, At: b.CreatedAt.Format(time.RFC3339),
 			})
 		case BatchReleasing:
 			out = append(out, Notification{
 				ID: "batch:" + b.ID + ":releasing", Type: NotifBatchReleasing, Severity: "info",
 				Title: fmt.Sprintf("批次「%s」正在发布", b.Title), AppID: b.AppID,
-				TargetType: "batch", TargetID: b.ID, At: b.CreatedAt.Format("2006-01-02T15:04:05Z"),
+				TargetType: "batch", TargetID: b.ID, At: b.CreatedAt.Format(time.RFC3339),
 			})
 		case BatchTested:
 			out = append(out, Notification{
 				ID: "batch:" + b.ID + ":tested", Type: NotifBatchApprove, Severity: "warning",
 				Title: fmt.Sprintf("批次「%s」测试通过，待审批发布", b.Title), AppID: b.AppID,
-				TargetType: "batch", TargetID: b.ID, At: b.CreatedAt.Format("2006-01-02T15:04:05Z"),
+				TargetType: "batch", TargetID: b.ID, At: b.CreatedAt.Format(time.RFC3339),
 			})
 		}
 	}

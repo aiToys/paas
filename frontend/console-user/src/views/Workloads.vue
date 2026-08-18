@@ -422,6 +422,7 @@ onUnmounted(() => {
             <th>名称</th>
             <th>归属应用</th>
             <th>环境</th>
+            <th>泳道</th>
             <th>镜像</th>
             <th v-if="activeType === 'cronjob'">调度</th>
             <th>副本</th>
@@ -439,6 +440,10 @@ onUnmounted(() => {
             </td>
             <td class="mono app-id"><a class="link" @click="goApp(w.appId)">{{ w.appId }}</a></td>
             <td class="env-cell">{{ envName(w.envId) }}</td>
+            <td>
+              <span v-if="w.laneId && w.laneId !== 'default'" class="lane-tag">{{ w.laneId }}</span>
+              <span v-else class="faint">基线</span>
+            </td>
             <td class="mono img">{{ w.image }}</td>
             <td v-if="activeType === 'cronjob'" class="mono sched">{{ w.schedule }}</td>
             <td>
@@ -665,6 +670,16 @@ onUnmounted(() => {
   color: var(--text-dim);
   white-space: nowrap;
 }
+/* 泳道列：feature 泳道 warning tag（基线不显，与 ApplicationDetail 部署 tab 一致） */
+.lane-tag {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 4px;
+  background: var(--warning-soft, rgba(230, 162, 60, 0.15));
+  color: var(--warning, #e6a23c);
+  white-space: nowrap;
+}
+.faint { color: var(--text-dim); font-size: 12px; }
 .tabs {
   display: flex;
   gap: 6px;

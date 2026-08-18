@@ -25,4 +25,7 @@ type Repository interface {
 	GetBatch(ctx context.Context, id string) (IntegrationBatch, error)
 	CreateBatch(ctx context.Context, b IntegrationBatch) (IntegrationBatch, error)
 	UpdateBatch(ctx context.Context, b IntegrationBatch) (IntegrationBatch, error)
+	// SetBatchStatus 仅更新 status（原子单列 UPDATE）。SyncBatchStatus 状态推进专用，
+	// 避免与用户操作（入批追加 change_ids）的全量 UpdateBatch 并发互相覆盖（深度审计 I-1）。
+	SetBatchStatus(ctx context.Context, id, status string) error
 }

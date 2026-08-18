@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -144,6 +145,11 @@ func (s *Store) Create(ctx context.Context, w workload.Workload) error {
 		w.Name, w.Image, w.ImageRef, w.Replicas, w.Ready,
 		w.Status, w.Schedule, w.Command, w.Port, w.ContainerPort, w.Domain, w.CreatedAt)
 	if pg.IsUniqueViolation(err) {
+		// 同租户 Name 唯一约束：Name 即 K8s Service 名，同名会让 reconciler 抢建同一
+		// K8s Service（AlreadyOwned）无限 requeue（审计第 6 轮 I2）。主键冲突同理。
+		if strings.Contains(err.Error(), "workloads_tenant_name") {
+			return fmt.Errorf("同名工作负载已存在: %s", w.Name)
+		}
 		return fmt.Errorf("工作负载已存在: %s", w.ID)
 	}
 	return err

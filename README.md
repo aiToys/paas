@@ -14,7 +14,7 @@
 
 - **Platform Core 底座**：插件契约 + Registry（拓扑排序 + 环检测）+ 依赖倒置注入；元数据 PG、事件 NATS（Core 自带，本期内存 mock）。
 - **多租户身份（RBAC + 租户隔离端到端）**：API Key = `(租户, 用户, 角色)` 凭证；ctx 传播租户；Repository 强制 tenant 过滤，跨租户 not found 不泄漏；三预设角色（tenant-admin / developer / viewer）。
-- **MaaS 端到端闭环 + 第三方供应商对接**：`Model → Channel → Provider` 三层抽象，聚合 OpenAI / DeepSeek / 通义千问（OpenAI 兼容协议，一个适配器覆盖三家），OpenAI 兼容流式推理（SSE）+ Token 计量 + **请求级 failover**（主通道限流/故障自动切备通道）。平台托管供应商凭证（平台级 Secret，仅管理员可写）。未配凭证时回退演示模型，开箱可用。
+- **MaaS 端到端闭环 + 第三方供应商对接**：`Model → Channel → Provider` 三层抽象，经统一推理网关聚合真实供应商模型（通义 / DeepSeek / 智谱 / 月之暗面等，OpenAI 兼容协议），OpenAI 兼容流式推理（SSE）+ Token 计量 + **请求级 failover**（主通道限流/故障自动切备通道）。平台托管供应商凭证（平台级 Secret，仅管理员可写）；未配凭证时推理返 503 + 配置引导。
 - **应用为主线**：应用是统一控制台主线抽象，资源以绑定形式归属；应用详情聚合工作负载 / DevOps / 配置 / 部署。
 - **工作负载 + 环境**：Service/Job/CronJob 三类工作负载；环境（prod/test 物理隔离）独立一等公民，应用 × 环境多对多。
 - **生产安全防护（横切）**：环境类型感知 RBAC（`prod:write`，developer 生产只读）+ 全局环境上下文 + 生产 gated 15min 超时 + 视觉强隔离 + 统一危险操作确认（`useDangerConfirm`）。后续切片自动继承。
@@ -52,7 +52,7 @@
 | 元数据存储 | PostgreSQL（全 10 模块已迁，可降级内存模式） |
 | 事件总线 | NATS（嵌入式） |
 | 推理引擎 | 第三方供应商聚合（OpenAI / DeepSeek / 通义千问，OpenAI 兼容协议；不自建 vLLM） |
-| 可观测 | OpenTelemetry + Prometheus + Loki + Tempo |
+| 可观测 | OpenTelemetry + Prometheus + Loki + Jaeger |
 | 交付 | Helm + OCI + `airsync` 离线工具 |
 | 前端 | Vue 3 + Element Plus + Vite + TypeScript（console-user / console-admin / landing 三套） |
 | 协议 | Apache 2.0 |
@@ -94,18 +94,20 @@ make build && ./bin/core          # 编译并运行，默认 API Key: sk-acme-ad
 cd frontend && pnpm install && pnpm dev:user
 ```
 
-打开 http://localhost:5174 即可看到：顶栏可切换 API Key（租户/角色视角）；模型市场（真实第三方供应商模型 GPT-4o / 通义千问 / DeepSeek + 演示模型）→ 点「试用」进 Playground 多轮流式推理；应用列表 → 应用详情（资源绑定/解绑）。换 Key 即换租户，应用数据按租户隔离。
+打开 http://localhost:5174 即可看到：登录后模型市场（通义 / DeepSeek / 智谱 / 月之暗面等真实模型，经统一推理网关聚合）→ 点「试用」进 Playground 多轮流式推理（推理模型带可折叠思考过程）；应用列表 → 应用详情（资源绑定/部署/可观测/DevOps 工作台）。换演示账号即换租户，应用数据按租户隔离。
 
-> 真实供应商模型需先配置凭证：管理员在「平台能力 → 安全」填写平台级 API Key（OpenAI / DeepSeek / 通义千问）。未配置时 Playground 会回退到 `echo-demo` 演示模型并给出引导提示。
+> 模型市场默认经统一推理网关（airouter）聚合真实供应商；网关凭证由管理员配置（平台级 Secret 或 `PAAS_AIROUTER_API_KEY` env）。未配置凭证时推理返回 503 并给出配置引导。
 
 **端到端验证（core 启动后）**。API Key 绑定 (租户, 角色)：
 
 ```bash
 # 模型市场富信息（含供应商 + 通道，平台级共享）
 curl -H "Authorization: Bearer sk-acme-admin" http://localhost:8080/api/models
-# 流式推理（echo-demo 演示模型，开箱可用，无需配置供应商凭证）
+# OpenAI 兼容模型列表
+curl -H "Authorization: Bearer sk-acme-admin" http://localhost:8080/v1/models
+# 流式推理（真实模型经统一推理网关；需管理员先配网关凭证，否则 503 + 配置引导）
 curl -N -H "Authorization: Bearer sk-acme-dev" -H "Content-Type: application/json" \
-  -d '{"model":"echo-demo","messages":[{"role":"user","content":"你好"}],"stream":true}' \
+  -d '{"model":"glm-5.2","messages":[{"role":"user","content":"你好"}],"stream":true}' \
   http://localhost:8080/v1/chat/completions
 # 多租户隔离：不同租户 Key 看到不同应用
 curl -H "Authorization: Bearer sk-acme-admin"   http://localhost:8080/api/applications   # Acme

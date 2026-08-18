@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 验证平台全资源可用状态（示例完整性检查）。
 set -uo pipefail
-H="Authorization: Bearer sk-acme-admin"; B="http://paas.k8s.dd"
+H="Authorization: Bearer ${PAAS_TOKEN:?请设置 PAAS_TOKEN（API Key，dev 默认 sk-acme-admin）}"; B="${PAAS_BASE:?请设置 PAAS_BASE（core 地址，dev 默认 http://paas.k8s.dd）}"
 ok=0; fail=0
 check() { # $1=name $2=condition
   if eval "$2"; then echo "  ✅ $1"; ok=$((ok+1)); else echo "  ❌ $1"; fail=$((fail+1)); fi

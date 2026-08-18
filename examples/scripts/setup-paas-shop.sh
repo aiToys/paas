@@ -12,8 +12,8 @@
 #   §7 知识库 + 文档上传                   [能力 3]
 #   §8 Prompt + Tool + Agent              [能力 4]
 set -uo pipefail
-H="Authorization: Bearer sk-acme-admin"
-B="http://paas.k8s.dd"
+H="Authorization: Bearer ${PAAS_TOKEN:?请设置 PAAS_TOKEN（API Key，dev 默认 sk-acme-admin）}"
+B="${PAAS_BASE:?请设置 PAAS_BASE（core 地址，dev 默认 http://paas.k8s.dd）}"
 APP="paas-shop"
 
 # 取 test 环境 envId（治理/告警等逻辑资源归属测试环境）。

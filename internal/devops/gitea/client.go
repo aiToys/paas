@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -263,8 +264,10 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return ErrUnauthorized
 	default:
+		// 响应体只进服务端日志，不回传客户端（防 Gitea 内部细节泄漏，审计 M-1）
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("gitea API %s %s 返回 %d: %s", method, path, resp.StatusCode, string(b))
+		log.Printf("gitea API %s %s 返回 %d: %s", method, path, resp.StatusCode, string(b))
+		return fmt.Errorf("gitea API %s %s 返回 %d", method, path, resp.StatusCode)
 	}
 }
 
@@ -531,6 +534,7 @@ func (c *Client) doMerge(ctx context.Context, path string, body any) error {
 		return ErrUnauthorized
 	default:
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("gitea merge %s 返回 %d: %s", path, resp.StatusCode, string(b))
+		log.Printf("gitea merge %s 返回 %d: %s", path, resp.StatusCode, string(b))
+		return fmt.Errorf("gitea merge %s 返回 %d", path, resp.StatusCode)
 	}
 }

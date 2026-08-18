@@ -66,7 +66,9 @@ func (r *Repo) ListAlerts(ctx context.Context, targetType, targetId string) ([]o
 	if err != nil {
 		return nil, err
 	}
-	series, err := r.metrics.ListMetrics(ctx, "", "", "")
+	// 维度下推：targetType/targetId 非空时让 reader 按维度过滤（real 模式少查 Prometheus，
+	// 避免全局聚合只为丢掉大部分 series）。读失败降级空继续（告警非关键路径不 5xx）。
+	series, err := r.metrics.ListMetrics(ctx, targetType, targetId, "")
 	if err != nil {
 		log.Printf("observability compose ListAlerts: 取 metrics 失败: %v", err)
 		series = nil

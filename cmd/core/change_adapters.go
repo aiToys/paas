@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/aitoys/paas/internal/devops"
 	"github.com/aitoys/paas/internal/devops/change"
@@ -121,7 +122,7 @@ func (b *runTriggerBridge) ListRunStatuses(ctx context.Context) ([]change.RunSta
 			}
 			out = append(out, change.RunStatusItem{
 				ID: r.ID, AppID: r.AppID, Status: r.Status, Current: cur,
-				At: r.CreatedAt.Format("2006-01-02T15:04:05Z"),
+				At: r.CreatedAt.Format(time.RFC3339),
 			})
 		}
 	}

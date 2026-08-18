@@ -2,8 +2,8 @@
 # 创建平台示例资源（覆盖 AI/治理/可观测/安全/计费全模块）。
 # 幂等：已存在的资源跳过（按 name 查重）。依赖：core 已部署（v0.1.4+，含 appconfig ListPlain 修复）。
 set -uo pipefail
-H="Authorization: Bearer sk-acme-admin"
-B="http://paas.k8s.dd"
+H="Authorization: Bearer ${PAAS_TOKEN:?请设置 PAAS_TOKEN（API Key，dev 默认 sk-acme-admin）}"
+B="${PAAS_BASE:?请设置 PAAS_BASE（core 地址，dev 默认 http://paas.k8s.dd）}"
 
 pp() { python3 -c "import sys,json; d=json.load(sys.stdin); print(json.dumps(d.get('data',d),ensure_ascii=False))" 2>/dev/null; }
 

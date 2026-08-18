@@ -1007,6 +1007,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/applications/{id}/workloads", apiroute.Tags("工作负载"), apiroute.Summary("应用下工作负载"), apiroute.Perm("workload:read"), apiroute.WithResp([]workload.Workload{}))
 	reg.Operation("POST", "/api/applications/{id}/workloads", apiroute.Tags("工作负载"), apiroute.Summary("创建工作负载"), apiroute.Perm("workload:write"), apiroute.WithReqBody(workload.Workload{}), apiroute.WithResp(workload.Workload{}))
 	reg.Operation("GET", "/api/workloads", apiroute.Tags("工作负载"), apiroute.Summary("跨应用工作负载列表"), apiroute.Perm("workload:read"), apiroute.WithResp([]workload.Workload{}))
+	reg.Operation("GET", "/api/workloads/lanes", apiroute.Tags("工作负载"), apiroute.Summary("泳道枚举（distinct laneId + 工作负载/应用数，默认排除基线）"), apiroute.Perm("workload:read"), apiroute.WithResp([]map[string]any{}))
 	reg.Operation("GET", "/api/workloads/{id}", apiroute.Tags("工作负载"), apiroute.Summary("工作负载详情（含运行实例）"), apiroute.Perm("workload:read"), apiroute.WithResp(workload.Detail{}))
 	reg.Operation("GET", "/api/workloads/{id}/logs", apiroute.Tags("工作负载"), apiroute.Summary("实例（Pod）运行日志"), apiroute.Perm("workload:read"))
 	reg.Operation("PUT", "/api/workloads/{id}", apiroute.Tags("工作负载"), apiroute.Summary("扩缩容/更新状态"), apiroute.Perm("workload:write"), apiroute.WithReqBody(struct {

@@ -135,7 +135,8 @@ function startPoll() {
   stopPoll()
   pollTimer = setInterval(async () => {
     await loadDocs()
-    // 全部终态（无 parsing）则停止轮询
+    // 全部终态（无 parsing）则停止轮询；页面不可见时跳过本次（后台 tab 不请求）
+    if (document.hidden) return
     if (!docs.value.some((d) => d.status === 'parsing')) stopPoll()
   }, 3000)
 }

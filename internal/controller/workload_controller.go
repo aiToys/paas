@@ -5,6 +5,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 
@@ -67,7 +68,12 @@ func (r *WorkloadReconciler) appEnvVars(ctx context.Context, w *v1alpha1.Workloa
 		return nil
 	}
 	items, err := r.Configs.Items(ctx, w.Spec.TenantID, w.Spec.AppID, w.Spec.EnvID)
-	if err != nil || len(items) == 0 {
+	if err != nil {
+		// 记日志可见（排障关键：静默失败会让「绑定资源不生效」无从排查，审计第 6 轮 M4）。
+		log.Printf("controller: 查应用配置失败 tenant=%s app=%s env=%s: %v", w.Spec.TenantID, w.Spec.AppID, w.Spec.EnvID, err)
+		return nil
+	}
+	if len(items) == 0 {
 		return nil
 	}
 	vars := make([]corev1.EnvVar, 0, len(items))
@@ -231,6 +237,7 @@ func (r *WorkloadReconciler) Reconcile(ctx context.Context, req ctrl.Request) (c
 // applyDeployment CreateOrUpdate Deployment + 回写 status.ready。
 func (r *WorkloadReconciler) applyDeployment(ctx context.Context, w *v1alpha1.Workload) error {
 	replicas := w.Spec.Replicas
+	orig := w.Status.DeepCopy() // 回写前快照：值未变跳过 Update，防自触发 reconcile 循环
 	dep := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: w.Name, Namespace: w.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, dep, func() error {
 		labels := labelsFor(w)
@@ -294,13 +301,16 @@ func (r *WorkloadReconciler) applyDeployment(ctx context.Context, w *v1alpha1.Wo
 		return fmt.Errorf("apply ingress: %w", ierr)
 	}
 	// 回写 status.ready（从 Deployment 实际 ready 副本）。
+	// 值未变时跳过 Update：无条件回写会自触发 reconcile 循环 + apiserver 写放大（审计第 6 轮 I3）。
 	w.Status.Ready = dep.Status.ReadyReplicas
 	w.Status.Status = "running"
 	if dep.Status.ReadyReplicas < replicas {
 		w.Status.Status = "deploying"
 	}
-	if err := r.Status().Update(ctx, w); err != nil {
-		return err
+	if w.Status.Ready != orig.Ready || w.Status.Status != orig.Status {
+		if err := r.Status().Update(ctx, w); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -379,6 +389,7 @@ func (r *WorkloadReconciler) applyIngress(ctx context.Context, w *v1alpha1.Workl
 
 // applyJob CreateOrUpdate Job（一次性）+ 回写 status。
 func (r *WorkloadReconciler) applyJob(ctx context.Context, w *v1alpha1.Workload) error {
+	origJob := w.Status.DeepCopy() // 回写前快照：值未变跳过 Update
 	job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: w.Name, Namespace: w.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, job, func() error {
 		labels := labelsFor(w)
@@ -416,6 +427,7 @@ func (r *WorkloadReconciler) applyJob(ctx context.Context, w *v1alpha1.Workload)
 		return fmt.Errorf("apply job: %w", err)
 	}
 	// 回写 status（Job 一次性：Succeeded→succeeded，Failed→failed，否则 running）。
+	// 值未变时跳过 Update：防自触发 reconcile 循环 + apiserver 写放大（审计第 6 轮 I3）。
 	w.Status.Ready = job.Status.Succeeded
 	w.Status.Status = "running"
 	if job.Status.Failed > 0 {
@@ -424,11 +436,15 @@ func (r *WorkloadReconciler) applyJob(ctx context.Context, w *v1alpha1.Workload)
 	if job.Status.Succeeded > 0 {
 		w.Status.Status = "succeeded"
 	}
-	return r.Status().Update(ctx, w)
+	if w.Status.Ready != origJob.Ready || w.Status.Status != origJob.Status {
+		return r.Status().Update(ctx, w)
+	}
+	return nil
 }
 
 // applyCronJob CreateOrUpdate CronJob（定时）+ 回写 status。
 func (r *WorkloadReconciler) applyCronJob(ctx context.Context, w *v1alpha1.Workload) error {
+	origCJ := w.Status.DeepCopy() // 回写前快照：值未变跳过 Update
 	cj := &batchv1.CronJob{ObjectMeta: metav1.ObjectMeta{Name: w.Name, Namespace: w.Namespace}}
 	_, err := controllerutil.CreateOrUpdate(ctx, r.Client, cj, func() error {
 		labels := labelsFor(w)
@@ -460,9 +476,13 @@ func (r *WorkloadReconciler) applyCronJob(ctx context.Context, w *v1alpha1.Workl
 		return fmt.Errorf("apply cronjob: %w", err)
 	}
 	// 回写 status（CronJob 持续调度：Active 数为运行中 Job 数）。
+	// 值未变时跳过 Update：防自触发 reconcile 循环 + apiserver 写放大（审计第 6 轮 I3）。
 	w.Status.Ready = int32(len(cj.Status.Active)) //nolint:gosec // G115: CronJob Active 数为运行中 Job 数，实际不会超 int32 范围
 	w.Status.Status = "running"
-	return r.Status().Update(ctx, w)
+	if w.Status.Ready != origCJ.Ready || w.Status.Status != origCJ.Status {
+		return r.Status().Update(ctx, w)
+	}
+	return nil
 }
 
 func ptrInt32(v int32) *int32 { return &v }

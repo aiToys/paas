@@ -2,8 +2,8 @@
 # 创建示例工作负载（mcp-server + traffic-gen Deployment + CronJob）+ 绑定资源。
 # 依赖：paas-examples:v1 镜像已推送 + 脚本1 已创建 appconfig（traffic-gen env 注入）。
 set -uo pipefail
-H="Authorization: Bearer sk-acme-admin"
-B="http://paas.k8s.dd"
+H="Authorization: Bearer ${PAAS_TOKEN:?请设置 PAAS_TOKEN（API Key，dev 默认 sk-acme-admin）}"
+B="${PAAS_BASE:?请设置 PAAS_BASE（core 地址，dev 默认 http://paas.k8s.dd）}"
 NODE_IP=$(kubectl get nodes -o wide | awk '!/master|ROLES/{print $6; exit}' | grep -E '^[0-9.]+$')
 IMAGE="$NODE_IP:30050/paas/paas-examples:v1"
 

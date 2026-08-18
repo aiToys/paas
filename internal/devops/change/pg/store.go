@@ -317,6 +317,24 @@ func (s *Store) UpdateBatch(ctx context.Context, in change.IntegrationBatch) (ch
 	return got, nil
 }
 
+// SetBatchStatus 仅更新 status 单列（原子，不覆盖 change_ids 等他人并发写的字段）。
+// SyncBatchStatus 状态推进专用（深度审计 I-1：全量 UpdateBatch 与入批操作并发互相覆盖）。
+func (s *Store) SetBatchStatus(ctx context.Context, id, status string) error {
+	tid, err := tenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	tag, err := s.db.Exec(ctx, `UPDATE integration_batches SET status=$3 WHERE id=$1 AND tenant_id=$2`,
+		id, tid, status)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return change.ErrBatchNotFound
+	}
+	return nil
+}
+
 // ChangesCount 返回 changes 总行数（平台级，seed 判空用）。
 func (s *Store) ChangesCount(ctx context.Context) (int64, error) {
 	var n int64

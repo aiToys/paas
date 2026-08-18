@@ -334,6 +334,7 @@ func (r *DataServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if err := r.Get(ctx, req.NamespacedName, &d); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	orig := d.Status.DeepCopy() // 回写前快照：值未变跳过 Update，防自触发 reconcile 循环
 	// 镜像：实例管理字段 Image（版本升级）优先于按 Kind+Engine 推断的默认镜像。
 	image := d.Spec.Image
 	if image == "" {
@@ -359,13 +360,16 @@ func (r *DataServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, fmt.Errorf("apply dataservice statefulset: %w", err)
 	}
 	// 回写 status（从 StatefulSet 实际 ready 副本）。
+	// 值未变时跳过 Update：无条件回写会自触发 reconcile 循环 + apiserver 写放大（审计第 6 轮 I3）。
 	d.Status.Image = image
 	d.Status.Phase = "creating"
 	if sts.Status.ReadyReplicas >= 1 {
 		d.Status.Phase = "running"
 	}
-	if err := r.Status().Update(ctx, &d); err != nil {
-		return ctrl.Result{}, fmt.Errorf("update dataservice status: %w", err)
+	if d.Status.Image != orig.Image || d.Status.Phase != orig.Phase {
+		if err := r.Status().Update(ctx, &d); err != nil {
+			return ctrl.Result{}, fmt.Errorf("update dataservice status: %w", err)
+		}
 	}
 	return ctrl.Result{}, nil
 }

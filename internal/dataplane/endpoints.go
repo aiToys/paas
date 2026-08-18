@@ -8,11 +8,14 @@ package dataplane
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/aitoys/paas/pkg/labels"
@@ -100,7 +103,14 @@ func (r *k8sEndpointsReader) Instances(ctx context.Context, namespace, serviceNa
 // 跨租户或不存在统一返空（不泄漏存在性），与平台 Repository 隔离语义一致。
 func (r *k8sEndpointsReader) fetchInstances(ctx context.Context, namespace, serviceName, tid, resolvedLane string) ([]Instance, error) {
 	svc, err := r.cs.CoreV1().Services(namespace).Get(ctx, serviceName, metav1.GetOptions{})
-	if err != nil || svc.Labels[labels.KeyTenant] != tid {
+	if err != nil {
+		// 服务不存在（含泳道降级候选）返空；其它错误（apiserver 故障）透传，不与 not found 混淆（审计第 6 轮 M3）。
+		if errors.Is(err, apierrors.NewNotFound(schema.GroupResource{}, "")) || strings.Contains(err.Error(), "not found") {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("get service: %w", err)
+	}
+	if svc.Labels[labels.KeyTenant] != tid {
 		return nil, nil
 	}
 	ep, err := r.cs.CoreV1().Endpoints(namespace).Get(ctx, serviceName, metav1.GetOptions{}) //nolint:staticcheck // Endpoints 在 K8s v0.36 仍主流；EndpointSlice 迁移留后续
@@ -163,6 +173,7 @@ func endpointsToInstances(ep *corev1.Endpoints, resolvedLane string) []Instance 
 
 // dns1035Name 清洗为 K8s Service 名合法字符（与 devops.BaselineWorkloadName 同款规则，
 // feature 泳道 Endpoints 查询与 Service 命名两侧对齐；独立实现避免 dataplane→devops import）。
+// 首字符数字前缀 n（DNS-1035 首字符须字母）——与 devops 侧 dns1035 语义严格一致（审计第 6 轮 I1）。
 func dns1035Name(name string) string {
 	var b []byte
 	for _, r := range name {
@@ -178,5 +189,9 @@ func dns1035Name(name string) string {
 	if len(b) > 63 {
 		b = b[:63]
 	}
-	return strings.Trim(string(b), "-")
+	out := strings.Trim(string(b), "-")
+	if out != "" && (out[0] < 'a' || out[0] > 'z') {
+		out = "n" + out
+	}
+	return out
 }

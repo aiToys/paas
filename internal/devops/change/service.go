@@ -201,6 +201,17 @@ func (s *Service) RemoveChangeFromBatch(ctx context.Context, batchID, changeID s
 	if !batchAllowed(b, BatchCollecting, BatchConflict, BatchFailed) {
 		return IntegrationBatch{}, fmt.Errorf("%w: 批次 %s 状态不可移出变更", ErrBatchState, b.Status)
 	}
+	// 断言变更确属本批次：否则「影子出批」破坏他批数据（审计第 7 轮 I1）
+	inBatch := false
+	for _, id := range b.ChangeIDs {
+		if id == changeID {
+			inBatch = true
+			break
+		}
+	}
+	if !inBatch {
+		return IntegrationBatch{}, fmt.Errorf("%w: 变更 %s 不在批次 %s 中", ErrBatchState, changeID, batchID)
+	}
 	ids := make([]string, 0, len(b.ChangeIDs))
 	for _, id := range b.ChangeIDs {
 		if id != changeID {
@@ -248,11 +259,18 @@ func (s *Service) Integrate(ctx context.Context, batchID string) (IntegrationBat
 		return IntegrationBatch{}, err
 	}
 
-	// 集成分支重建（先删后建，幂等重跑）
+	// 集成分支重建（先删后建，幂等重跑）。基线取批内第一个变更的 BaseBranch
+	// （默认 main；变更可指定其他基线，批次跟随首个变更，与平台代建分支语义一致——审计第 7 轮 M2）。
+	baseBranch := "main"
+	if len(b.ChangeIDs) > 0 {
+		if c, cerr := s.repo.GetChange(ctx, b.ChangeIDs[0]); cerr == nil && c.BaseBranch != "" {
+			baseBranch = c.BaseBranch
+		}
+	}
 	if err := s.gitea.DeleteBranch(ctx, owner, repoName, b.Branch); err != nil && !errors.Is(err, gitea.ErrBranchNotFound) {
 		return IntegrationBatch{}, fmt.Errorf("删除集成分支失败: %w", err)
 	}
-	if err := s.gitea.CreateBranch(ctx, owner, repoName, b.Branch, "main"); err != nil {
+	if err := s.gitea.CreateBranch(ctx, owner, repoName, b.Branch, baseBranch); err != nil {
 		return IntegrationBatch{}, fmt.Errorf("重建集成分支失败: %w", err)
 	}
 
@@ -322,7 +340,11 @@ func (s *Service) Approve(ctx context.Context, batchID string) (IntegrationBatch
 	if b.Status != BatchTested {
 		return IntegrationBatch{}, fmt.Errorf("%w: 仅 tested 批次可审批", ErrBatchState)
 	}
+	// 清 RunID：留旧 CI run 会让 SyncBatchStatus 在 releasing 态读到 succeeded 提前判
+	// released（审计第 2 轮 I1）；空 RunID 守卫使其不推进，等 Release 触发 CD run 后再判。
 	b.Status = BatchReleasing
+	b.RunID = ""
+	b.PipelineID = ""
 	if _, err := s.repo.UpdateBatch(ctx, b); err != nil {
 		return IntegrationBatch{}, err
 	}
@@ -345,6 +367,15 @@ func (s *Service) Release(ctx context.Context, batchID string) (IntegrationBatch
 	}
 	if b.Status != BatchReleasing {
 		return IntegrationBatch{}, fmt.Errorf("%w: 仅 releasing 批次可发布（先 approve）", ErrBatchState)
+	}
+	// fail-fast 预检 CD pipeline：在 merge 之前发现「无 CD 流水线」，避免 merge 全部成功后
+	// trigger 失败停留 releasing → 重试被 409 误判冲突的半程失败（审计 I-2）。
+	pid, err := s.runs.FindPipeline(ctx, b.AppID, "cd")
+	if err != nil {
+		return IntegrationBatch{}, err
+	}
+	if pid == "" {
+		return IntegrationBatch{}, fmt.Errorf("%w: app=%s kind=cd", ErrNoCIPipeline, b.AppID)
 	}
 	owner, repoName, _, err := s.lookupRepo(ctx, b.AppID)
 	if err != nil {
@@ -374,17 +405,16 @@ func (s *Service) Release(ctx context.Context, batchID string) (IntegrationBatch
 		prev = cid
 	}
 
-	// 全成功：触发 CD run（branch=main）
-	pid, err := s.runs.FindPipeline(ctx, b.AppID, "cd")
-	if err != nil {
-		return IntegrationBatch{}, err
-	}
-	if pid == "" {
-		return IntegrationBatch{}, fmt.Errorf("%w: app=%s kind=cd", ErrNoCIPipeline, b.AppID)
-	}
+	// 全成功：触发 CD run（branch=main）。
+	// trigger 失败显式回 tested：重试 Release 的 merge 已合并分支会 409 误判冲突，
+	// 回 tested 让用户走 SyncBatchStatus 同款重试语义（可重新 Release）。
 	runID, err := s.runs.TriggerAppRun(ctx, b.AppID, pid, "main")
 	if err != nil {
-		return IntegrationBatch{}, fmt.Errorf("触发 CD 失败: %w", err)
+		b.Status = BatchTested
+		if _, uerr := s.repo.UpdateBatch(ctx, b); uerr != nil {
+			return IntegrationBatch{}, fmt.Errorf("触发 CD 失败且回退状态失败: trigger=%v rollback=%w", err, uerr)
+		}
+		return IntegrationBatch{}, fmt.Errorf("触发 CD 失败（批次已回 tested 可重试）: %w", err)
 	}
 	b.PipelineID = pid
 	b.RunID = runID // 覆盖 CI run，批次只留当前活跃 run
@@ -418,8 +448,8 @@ func (s *Service) SyncBatchStatus(ctx context.Context, batchID string) (Integrat
 	case BatchTesting:
 		switch status {
 		case "succeeded":
-			b.Status = BatchTested
-			if _, err := s.repo.UpdateBatch(ctx, b); err != nil {
+			// 仅推进 status：用单列 SetBatchStatus，防与并发入批的全量 UpdateBatch 互相覆盖
+			if err := s.repo.SetBatchStatus(ctx, b.ID, BatchTested); err != nil {
 				return IntegrationBatch{}, err
 			}
 			for _, cid := range b.ChangeIDs {
@@ -445,6 +475,7 @@ func (s *Service) SyncBatchStatus(ctx context.Context, batchID string) (Integrat
 				}
 				c.Status = ChangeOpen
 				c.BatchID = ""
+				c.ConflictWith = "" // 上轮冲突标记不残留到下次入批（审计第 7 轮 M1）
 				if _, err := s.repo.UpdateChange(ctx, c); err != nil {
 					return IntegrationBatch{}, err
 				}
@@ -478,9 +509,8 @@ func (s *Service) SyncBatchStatus(ctx context.Context, batchID string) (Integrat
 				}
 			}
 		case "failed", "aborted":
-			// CD 失败停 releasing，回 tested 可重试
-			b.Status = BatchTested
-			if _, err := s.repo.UpdateBatch(ctx, b); err != nil {
+			// CD 失败停 releasing，回 tested 可重试（单列推进，不覆盖并发写字段）
+			if err := s.repo.SetBatchStatus(ctx, b.ID, BatchTested); err != nil {
 				return IntegrationBatch{}, err
 			}
 		}

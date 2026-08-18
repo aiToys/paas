@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -89,6 +90,30 @@ func (e *Engine) Start(ctx context.Context, runID string) {
 	e.mu.Unlock()
 	go func() {
 		defer e.releaseCancel(runID)
+		// panic recover：goroutine panic 会杀掉整个 core 进程（一个 run 的 bug 不应拖垮平台），
+		// 捕获后用脱离取消的 ctx 标 run failed，防卡 running 占串行槽位（审计第 2 轮 I2）。
+		defer func() {
+			if p := recover(); p != nil {
+				log.Printf("pipeline: advance run %s panic: %v\n%s", runID, p, debug.Stack()) //nolint:gosec // runID 平台生成
+				markCtx := tenant.WithTenant(context.WithoutCancel(runCtx), tid)
+				run, err := e.Runs.GetRun(markCtx, runID)
+				if err != nil {
+					return
+				}
+				if run.Status == RunRunning || run.Status == RunPaused {
+					run.Status = RunFailed
+					run.FinishedAt = time.Now()
+					for i := range run.StageRuns {
+						if run.StageRuns[i].Status == StageRunning {
+							run.StageRuns[i].Status = StageFailed
+							run.StageRuns[i].Error = fmt.Sprintf("内部错误: %v", p)
+							run.StageRuns[i].FinishedAt = time.Now()
+						}
+					}
+					_, _ = e.Runs.UpdateRun(markCtx, run)
+				}
+			}
+		}()
 		if err := e.Advance(runCtx, runID); err != nil {
 			log.Printf("pipeline: advance run %s 失败: %v", runID, err) //nolint:gosec // runID 平台生成
 		}

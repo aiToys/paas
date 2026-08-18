@@ -37,7 +37,7 @@ interface Alert {
   value: number; threshold: number; operator: string; severity: string
 }
 interface LogEntry {
-  id: string; appId: string; level: string; message: string; traceId?: string; timestamp: string
+  id: string; appId: string; targetId?: string; level: string; message: string; traceId?: string; timestamp: string
 }
 
 // ---- 维度状态：dim = all | env | app | dataservice；all 视图为租户全局聚合 ----
@@ -59,6 +59,17 @@ const logLane = ref('')
 const traces = ref<Trace[]>([])
 const traceStatus = ref('')
 const loading = ref(false)
+// 泳道候选（/api/workloads/lanes 聚合，权威来源；手输仍允许 allow-create）
+const laneOptions = ref<{ laneId: string; workloadCount: number }[]>([])
+
+async function loadLanes() {
+  try {
+    const resp = await fetchAuth('/api/workloads/lanes')
+    if (resp.ok) laneOptions.value = (await resp.json()).data ?? []
+  } catch {
+    // 泳道候选加载失败不阻断主流程（下拉空仍可 allow-create 手输）
+  }
+}
 
 const traceStatusLabel: Record<string, string> = { success: '成功', error: '错误' }
 const traceStatusType: Record<string, TagType> = { success: 'success', error: 'danger' }
@@ -198,8 +209,12 @@ async function loadLogs() {
 }
 
 const traceIdQuery = ref('')
-const traceIdSearched = ref(false)
 async function loadTraces() {
+  // 直查态：轮询/刷新保持直查结果（否则 10s 轮询全量列表会静默覆盖刚定位的 trace）
+  if (traceIdQuery.value.trim()) {
+    await searchTraceById()
+    return
+  }
   const params = new URLSearchParams()
   if (logsAppId.value) params.set('appId', logsAppId.value)
   if (traceStatus.value) params.set('status', traceStatus.value)
@@ -207,8 +222,11 @@ async function loadTraces() {
   if (resp.ok) traces.value = (await resp.json()).data ?? []
 }
 
-// traceId 精确直查：日志/告警拿到 traceId 后定位完整链路（命中即单条展示）
-async function searchTraceById() {
+// traceId 精确直查：日志/告警拿到 traceId 后定位完整链路（命中即单条展示）。
+// focusTraces=true（页头入口/日志联动触发）时滚动定位到链路区块。
+const tracesRef = ref<HTMLElement | null>(null)
+async function searchTraceById(focusTraces = false) {
+  if (focusTraces) tracesRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   const id = traceIdQuery.value.trim()
   if (!id) { loadTraces(); return }
   const resp = await fetchAuth(`/api/observability/traces/${encodeURIComponent(id)}`)
@@ -216,7 +234,15 @@ async function searchTraceById() {
     traces.value = [await resp.json().then((j) => j.data)]
   } else {
     traces.value = []
+    ElMessage.warning(`未找到 TraceID: ${id}`)
   }
+}
+
+// 日志行 TraceID 点击联动：填充直查框 + 触发查询 + 滚动到链路区块（最短排障路径）
+function clickTraceId(traceId?: string) {
+  if (!traceId) return
+  traceIdQuery.value = traceId
+  searchTraceById(true)
 }
 
 // 维度状态同步 URL（router.replace 不留历史）：刷新/分享保留「我正在看什么」上下文。
@@ -234,6 +260,7 @@ function switchDim() {
   dimEnv.value = ''
   dimApp.value = ''
   dimDS.value = ''
+  traceIdQuery.value = '' // 清直查态（防 chip 残留 + 列表被直查语义劫持）
   syncUrl()
   loadAll()
 }
@@ -245,12 +272,13 @@ function drillAlert(a: Alert) {
     dim.value = 'app'; dimApp.value = a.targetId
   } else if (tt === 'dataservice' && dataServices.value.some((x) => x.id === a.targetId)) {
     dim.value = 'dataservice'; dimDS.value = a.targetId
+  } else if (tt === 'env' && envStore.envs.some((e) => e.id === a.targetId)) {
+    dim.value = 'env'; dimEnv.value = a.targetId
   } else {
-    // 未知 target（env/workload 等）：留在全部视图，仅提示
+    // workload 等无对应过滤维度：留在全部视图，仅提示
     ElMessage.info(`告警目标 ${a.targetId}（${tt}）`)
     return
   }
-  dimEnv.value = ''
   syncUrl()
   loadAll()
 }
@@ -373,7 +401,8 @@ async function deleteRule(r: AlertRule) {
 }
 
 onMounted(async () => {
-  await Promise.all([loadApps(), envStore.loadEnvs()])
+  // 各加载独立 catch：单项网络失败不拖垮整页（Promise.all 一个 reject 会让其余结果丢失）
+  await Promise.allSettled([loadApps(), envStore.loadEnvs(), loadLanes()])
   await loadAll()
 })
 // 10s 轮询刷新指标/告警（silent 不闪烁；页面不可见自动暂停）
@@ -409,6 +438,13 @@ usePolling(() => loadAll(true), 10000)
       <el-select v-if="dim === 'dataservice'" v-model="dimDS" placeholder="选择数据服务" style="width: 200px" @change="syncUrl(); loadAll()">
         <el-option v-for="d in dataServices" :key="d.id" :label="d.name" :value="d.id" />
       </el-select>
+      <!-- TraceID 直查（页头显著位置，Jaeger 式；回车查询并滚动定位链路区块） -->
+      <el-input v-model="traceIdQuery" placeholder="🔍 TraceID 直查" style="width: 240px; margin-left: auto" clearable
+        @keyup.enter="searchTraceById(true)" @clear="loadTraces">
+        <template #append>
+          <el-button @click="searchTraceById(true)">查</el-button>
+        </template>
+      </el-input>
     </section>
 
     <!-- 当前告警（置顶入口：先看哪里红了，点击下钻到对应实体） -->
@@ -532,7 +568,10 @@ usePolling(() => loadAll(true), 10000)
             <el-option label="警告" value="warn" />
             <el-option label="错误" value="error" />
           </el-select>
-          <el-input v-model="logLane" placeholder="泳道（如 feature-x）" size="small" style="width: 150px" clearable @change="loadLogs" />
+          <el-select v-model="logLane" placeholder="泳道" size="small" style="width: 150px" clearable filterable allow-create
+            @change="loadLogs">
+            <el-option v-for="l in laneOptions" :key="l.laneId" :label="`${l.laneId}（${l.workloadCount}）`" :value="l.laneId" />
+          </el-select>
           <el-input v-model="logQ" placeholder="关键字…" size="small" style="width: 160px" clearable @change="loadLogs" />
           <el-button size="small" @click="loadLogs">刷新</el-button>
         </div>
@@ -555,27 +594,29 @@ usePolling(() => loadAll(true), 10000)
         </el-table-column>
         <el-table-column prop="message" label="消息" min-width="280" show-overflow-tooltip />
         <el-table-column label="TraceID" width="140">
-          <template #default="{ row }"><span class="mono faint">{{ row.traceId ? row.traceId.slice(0, 12) : '—' }}</span></template>
+          <template #default="{ row }">
+            <span v-if="row.traceId" class="mono trace-link" :title="row.traceId" @click="clickTraceId(row.traceId)">
+              {{ row.traceId.slice(0, 12) }} →
+            </span>
+            <span v-else class="mono faint">—</span>
+          </template>
         </el-table-column>
       </el-table>
     </section>
 
-    <!-- 链路追踪（可观测 Traces）：跟随维度过滤器 -->
-    <section class="block">
+    <!-- 链路追踪（可观测 Traces）：跟随维度过滤器。直查入口在页头（滚动定位到此） -->
+    <section ref="tracesRef" class="block traces-anchor">
       <div class="block-head">
-        <span class="block-title">链路追踪 · {{ dimTitle }}</span>
+        <span class="block-title">链路追踪 · {{ dimTitle }}
+          <span v-if="traceIdQuery.trim()" class="cnt">直查: {{ traceIdQuery.trim().slice(0, 16) }}…</span>
+        </span>
         <div class="log-filter">
           <el-select v-model="traceStatus" placeholder="全部状态" clearable size="small" style="width: 120px" @change="loadTraces">
             <el-option label="成功" value="success" />
             <el-option label="错误" value="error" />
           </el-select>
           <el-button size="small" @click="loadTraces">刷新</el-button>
-          <el-input v-model="traceIdQuery" placeholder="按 TraceID 直查" size="small" style="width: 220px; margin-left: 8px"
-            clearable @keyup.enter="searchTraceById" @clear="loadTraces">
-            <template #append>
-              <el-button @click="searchTraceById">查</el-button>
-            </template>
-          </el-input>
+          <el-button v-if="traceIdQuery.trim()" size="small" type="info" plain @click="traceIdQuery = ''; loadTraces()">清除直查</el-button>
         </div>
       </div>
       <el-table :data="traces" size="small" row-key="id" empty-text="暂无链路"
@@ -722,6 +763,9 @@ usePolling(() => loadAll(true), 10000)
 .faint { color: var(--text-faint); }
 /* 维度过滤器条 */
 .dim-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.trace-link { color: var(--brand); cursor: pointer; }
+.trace-link:hover { text-decoration: underline; }
+.traces-anchor { scroll-margin-top: 20px; }
 .clickable { cursor: pointer; transition: border-color 0.15s; }
 .clickable:hover { border-color: var(--brand); }
 .drill-hint { font-size: 11.5px; color: var(--brand); opacity: 0; transition: opacity 0.15s; }

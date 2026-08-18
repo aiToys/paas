@@ -14,6 +14,7 @@ import (
 	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/internal/observability"
 	"github.com/aitoys/paas/pkg/tenant"
+	"golang.org/x/sync/errgroup"
 )
 
 // metricNameToPromQL 把领域 metric 名映射为 Prometheus metric 约定名（写入端归埋点切片）。
@@ -125,7 +126,8 @@ func (s *MetricsStore) ListMetrics(ctx context.Context, targetType, targetID, na
 
 // listTenantMetrics 全局聚合：租户内全部应用 + 全部数据服务的 series 拼接
 // （可观测大屏「全部」视图健康矩阵数据源，与 memory「空参数=租户全部」契约对齐）。
-// 实体级查询失败不影响其它实体（逐实体降级）；entities 未注入返空。
+// 并发查询（bounded errgroup）：可观测页 10s 轮询，串行 N+1 在实体多时拖垮响应
+// （审计第 1/2/7 轮）。实体级查询失败不影响其它实体（逐实体降级）；entities 未注入返空。
 func (s *MetricsStore) listTenantMetrics(ctx context.Context, name string) ([]observability.MetricSeries, error) {
 	out := make([]observability.MetricSeries, 0)
 	if s.entities == nil {
@@ -135,21 +137,42 @@ func (s *MetricsStore) listTenantMetrics(ctx context.Context, name string) ([]ob
 	if err != nil {
 		log.Printf("observability real tenant metrics: 列应用失败: %v", err)
 	}
-	for _, id := range appIDs {
-		series, err := s.listAppMetrics(ctx, id, name)
-		if err == nil {
-			out = append(out, series...)
-		}
-	}
 	dsIDs, err := s.entities.TenantDataServiceIDs(ctx)
 	if err != nil {
 		log.Printf("observability real tenant metrics: 列数据服务失败: %v", err)
 	}
+	ids := make([]string, 0, len(appIDs)+len(dsIDs))
+	kinds := make([]bool, 0, len(appIDs)+len(dsIDs)) // true=app, false=dataservice
+	for _, id := range appIDs {
+		ids = append(ids, id)
+		kinds = append(kinds, true)
+	}
 	for _, id := range dsIDs {
-		series, err := s.listDataserviceMetrics(ctx, id, name)
-		if err == nil {
-			out = append(out, series...)
-		}
+		ids = append(ids, id)
+		kinds = append(kinds, false)
+	}
+	results := make([][]observability.MetricSeries, len(ids))
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(8) // 有界并发：防实体多时打爆 Prometheus
+	for i := range ids {
+		i := i
+		g.Go(func() error {
+			var series []observability.MetricSeries
+			var err error
+			if kinds[i] {
+				series, err = s.listAppMetrics(gctx, ids[i], name)
+			} else {
+				series, err = s.listDataserviceMetrics(gctx, ids[i], name)
+			}
+			if err == nil {
+				results[i] = series
+			}
+			return nil // 实体级失败降级（不取消其它实体）
+		})
+	}
+	_ = g.Wait()
+	for _, series := range results {
+		out = append(out, series...)
 	}
 	return out, nil
 }

@@ -63,16 +63,14 @@ func globexCtx() context.Context   { return tenant.WithTenant(context.Background
 func noTenantCtx() context.Context { return context.Background() }
 
 // samplePipeline 构造一个 Pipeline 样本（不带 ID/TenantID，由 Create 补）。
+// 模板+绑定模型：Pipeline 只存 TemplateID + ParamOverrides，Stages 运行时从模板解析。
 func samplePipeline(name string) Pipeline {
 	return Pipeline{
-		AppID: "app-cs",
-		Name:  name,
-		Kind:  KindCI,
-		Stages: []StageDef{
-			{Name: "构建", Type: StageBuild},
-			{Name: "部署", Type: StageDeploy},
-		},
-		Trigger: PipelineTrigger{Type: "manual"},
+		AppID:      "app-cs",
+		Name:       name,
+		Kind:       KindCI,
+		TemplateID: "tpl-test",
+		Trigger:    PipelineTrigger{Type: "manual"},
 	}
 }
 
@@ -105,7 +103,7 @@ func TestPGPipelineCRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPipeline 失败: %v", err)
 	}
-	if got.Name != "ci-main" || len(got.Stages) != 2 {
+	if got.Name != "ci-main" || got.TemplateID != "tpl-test" {
 		t.Fatalf("Get 回读不一致: %+v", got)
 	}
 
@@ -119,14 +117,14 @@ func TestPGPipelineCRUD(t *testing.T) {
 		t.Fatalf("ListPipelines other-app 期望 0 条，got %d", len(list2))
 	}
 
-	// Update（改名 + 加 stage）
+	// Update（改名 + 参数覆盖）
 	p.Name = "ci-main-v2"
-	p.Stages = append(p.Stages, StageDef{Name: "测试", Type: StageTest})
+	p.ParamOverrides = map[string]any{"0.branchOverride": "dev"}
 	upd, err := s.UpdatePipeline(acmeCtx(), p)
 	if err != nil {
 		t.Fatalf("UpdatePipeline 失败: %v", err)
 	}
-	if upd.Name != "ci-main-v2" || len(upd.Stages) != 3 {
+	if upd.Name != "ci-main-v2" || upd.ParamOverrides["0.branchOverride"] != "dev" {
 		t.Fatalf("Update 回读不一致: %+v", upd)
 	}
 
@@ -244,6 +242,29 @@ func TestPGTemplateBuiltinAndCustom(t *testing.T) {
 		Stages: []StageDef{{Name: "构建", Type: StageBuild}},
 	}); err != ErrTemplateExists {
 		t.Fatalf("重名模板期望 ErrTemplateExists，got %v", err)
+	}
+
+	// ReplaceBuiltinTemplate：覆盖 builtin 的 stages/name/description/version（seed 升级路径）
+	newStages := []StageDef{
+		{Name: "构建", Type: StageBuild},
+		{Name: "部署", Type: StageDeploy, Params: map[string]any{"envId": "{{app.env.test}}"}},
+	}
+	replaced := PipelineTemplate{
+		ID: builtinID, Name: "tpl-builtin-ci-v2", Kind: KindCI, Builtin: true, Version: 2,
+		Description: "升级版", Stages: newStages,
+	}
+	if err := s.ReplaceBuiltinTemplate(context.Background(), replaced); err != nil {
+		t.Fatalf("ReplaceBuiltinTemplate 失败: %v", err)
+	}
+	got, err := s.GetTemplate(globexCtx(), builtinID)
+	if err != nil {
+		t.Fatalf("覆盖后 Get 失败: %v", err)
+	}
+	if got.Version != 2 || got.Description != "升级版" || len(got.Stages) != 2 {
+		t.Fatalf("覆盖后字段不符: %+v", got)
+	}
+	if got.TenantID != "" || !got.Builtin {
+		t.Fatalf("覆盖不应改 kind/tenant/builtin: %+v", got)
 	}
 }
 
