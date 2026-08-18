@@ -72,7 +72,8 @@ async function quickLogin(d: DemoAccount) {
   loading.value = true
   try {
     await session.login(d.username, d.password)
-    router.push('/applications')
+    // 与 submit 同款：优先回跳 redirect（含 ?env= 等 query），保持登录前上下文
+    router.push((route.query.redirect as string) || '/applications')
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : '登录失败')
   } finally {

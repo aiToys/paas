@@ -23,18 +23,28 @@ const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
 let prodTimer: number | undefined
 onMounted(async () => {
   await envStore.loadEnvs()
-  // 从 URL ?env=<id> 恢复环境上下文（分享链接保留环境，一次）。
-  const q = route.query.env as string
-  if (q) {
-    const found = envStore.envs.find((e) => e.id === q)
-    if (found) await envStore.switchEnv(found)
-  }
+  // 从 URL ?env=<id> 恢复环境上下文（分享链接保留环境）。
+  // watch 而非只跑一次：登录 redirect 回跳（login→applications）不重新挂载 App.vue，
+  // 只跑一次会错过回跳后 query 里才出现的 env。
+  restoreEnvFromUrl()
   prodTimer = window.setInterval(() => {
     if (envStore.checkProdTimeout()) {
       ElMessageBox.alert('生产会话已超时，已自动切回。如需继续操作生产请重新进入。', '生产超时', { type: 'info' })
     }
   }, 5000)
 })
+
+// URL ?env= → store（单向恢复）：仅当 URL 显式带 env 且与当前不一致时生效。
+// 不处理「URL 无 env」的清空——那可能是 switchEnv watch 尚未写入，避免抖动。
+async function restoreEnvFromUrl() {
+  const q = (route.query.env as string) || ''
+  if (!q || q === envStore.currentEnvId) return
+  // 登录页阶段 loadEnvs 因 401 为空，登录回跳后再拉一次
+  if (!envStore.envs.length) await envStore.loadEnvs()
+  const found = envStore.envs.find((e) => e.id === q)
+  if (found) await envStore.switchEnv(found)
+}
+watch(() => route.query.env, () => restoreEnvFromUrl())
 onUnmounted(() => { if (prodTimer) window.clearInterval(prodTimer) })
 
 // envStore.currentEnvId → URL：环境切换写 ?env=<id>（分享链接带环境上下文）。
