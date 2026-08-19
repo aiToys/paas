@@ -82,6 +82,7 @@ Service {
 ### 4.2 部署关联
 
 - 流水线 deploy stage / Releaser.Deploy 的「找/建基线 Workload」改为优先按 `(app, env, lane, serviceID)` 匹配；新建时回填 ServiceID + 从 Service 带出 Port/Replicas/Env。
+  - **Phase 1 实现注记**：Env/BuildArgs 带出归 Phase 2（workload 模型无 Env 字段，需与 appconfig 合并注入，另 `Releaser.Deploy` 流水线链路尚未传 ServiceID——按名匹配自洽，Phase 2 接通）。
 
 ### 4.3 存量回填（幂等 seed）
 

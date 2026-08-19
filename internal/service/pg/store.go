@@ -151,6 +151,9 @@ func (s *Store) Create(ctx context.Context, in service.Service) error {
 	if in.ID == "" {
 		in.ID = randID("svc")
 	}
+	if in.CreatedAt.IsZero() {
+		in.CreatedAt = time.Now() // 落库零值时间防（与 memory 实现对齐）
+	}
 	in.TenantID = tid // 以 ctx 为准
 	_, err = s.db.Pool().Exec(ctx,
 		`INSERT INTO services (`+svcCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
