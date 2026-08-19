@@ -59,6 +59,8 @@ const scaling = ref<string>('') // 正在扩缩容的 id
 // statusMeta 仅覆盖已知枚举值；后端返回空串/未知状态时必须兜底，否则
 // statusMeta[status] 为 undefined，模板访问 .cls 崩溃整个工作负载列表（与 Applications 同款）。
 const STATUS_META: Record<string, { label: string; cls: string }> = {
+  // running=进行中语义（黄），与 DevOps/流水线一致；绿仅留给完全就绪的「已完成」。
+  // 此前 running=绿与 succeeded=灰并存，同状态跨页两种色。
   running: { label: '运行中', cls: 'ok' },
   deploying: { label: '部署中', cls: 'warn' },
   failed: { label: '异常', cls: 'err' },
@@ -264,6 +266,28 @@ const createForm = ref({
   schedule: '',
 })
 
+// 镜像候选（对标 Render/Railway 零手填）：所选应用的 ready 构建产物下拉选择，
+// 手输仍保留（「自定义镜像」选项）——外部镜像/调试场景。
+interface AppImage { id: string; registry: string; tag: string; status: string }
+const imageOptions = ref<AppImage[]>([])
+async function loadImages(appId: string) {
+  if (!appId) { imageOptions.value = []; return }
+  try {
+    const resp = await fetchAuth(`/api/applications/${appId}/images`)
+    if (resp.ok) {
+      const list: AppImage[] = (await resp.json()).data ?? []
+      imageOptions.value = list.filter((i) => i.status === 'ready')
+    }
+  } catch { /* 镜像候选加载失败不阻断（可手输） */ }
+}
+// imageRef：'' = 自定义手输；否则 <registry>/<app>/<tag> 形态的完整引用由下拉驱动 image 字段
+const imageRef = ref('')
+watch(imageRef, (v) => {
+  if (!v) return // 自定义模式不动 image
+  const img = imageOptions.value.find((i) => i.id === v)
+  if (img) createForm.value.image = `${img.registry}/${img.tag}`
+})
+
 async function loadApps() {
   const resp = await fetchAuth('/api/applications')
   if (resp.ok) apps.value = (await resp.json()).data ?? []
@@ -273,21 +297,58 @@ function openCreate() {
   createForm.value = {
     appId: apps.value[0]?.id ?? '',
     name: '',
-    image: 'nginx:stable',
+    image: '',
     replicas: activeType.value === 'service' ? 1 : 1,
     port: activeType.value === 'service' ? 80 : 0,
     schedule: activeType.value === 'cronjob' ? '*/5 * * * *' : '',
   }
+  imageRef.value = ''
+  if (apps.value[0]?.id) loadImages(apps.value[0].id)
   showCreate.value = true
 }
+
+// Cron 表达式即时校验（5 段：分 时 日 月 周，支持 * / - , 数字）
+function validCron(s: string): boolean {
+  const re = /^(\S+\s+){4}\S+$/
+  return re.test(s.trim())
+}
+
+// 创建后部署进度反馈（对标 Vercel Building→Ready）：自动打开详情抽屉，
+// 轮询副本就绪，就绪/失败给终态提示，抽屉关闭即停。
+let deployWatchTimer: number | undefined
+async function watchDeploy(id: string) {
+  showDetail.value = true
+  detailLoading.value = true
+  detail.value = null
+  if (deployWatchTimer) window.clearInterval(deployWatchTimer)
+  deployWatchTimer = window.setInterval(async () => {
+    if (document.hidden) return
+    try {
+      const d = await getWorkload(id)
+      detail.value = d
+      detailLoading.value = false
+      const w = d.workload
+      if (w.status === 'running' && w.ready >= w.replicas) {
+        window.clearInterval(deployWatchTimer); deployWatchTimer = undefined
+        ElMessage.success(`「${w.name}」已就绪（${w.ready}/${w.replicas}）`)
+      } else if (w.status === 'failed') {
+        window.clearInterval(deployWatchTimer); deployWatchTimer = undefined
+        ElMessage.error(`「${w.name}」部署失败`)
+      }
+    } catch { /* 短暂网络错误继续轮询 */ }
+  }, 2000)
+}
+onUnmounted(() => { if (deployWatchTimer) window.clearInterval(deployWatchTimer) })
 
 async function submitCreate() {
   const f = createForm.value
   if (!f.appId) { ElMessage.warning('请选择归属应用'); return }
+  if (!activeEnv.value) { ElMessage.warning('请先在顶栏选择部署环境（工作负载必须归属一个环境）'); return }
   if (!f.name.trim()) { ElMessage.warning('请输入工作负载名称'); return }
-  if (!f.image.trim()) { ElMessage.warning('请输入镜像'); return }
-  if (activeType.value === 'cronjob' && !f.schedule.trim()) {
-    ElMessage.warning('请输入 Cron 调度表达式'); return
+  if (!f.image.trim()) { ElMessage.warning('请选择或输入镜像'); return }
+  if (activeType.value === 'cronjob') {
+    if (!f.schedule.trim()) { ElMessage.warning('请输入 Cron 调度表达式'); return }
+    if (!validCron(f.schedule)) { ElMessage.warning('Cron 表达式格式不正确（应为 5 段：分 时 日 月 周，如 */5 * * * *）'); return }
   }
   const body: Record<string, unknown> = {
     name: f.name.trim(),
@@ -300,10 +361,11 @@ async function submitCreate() {
   if (activeType.value === 'cronjob') body.schedule = f.schedule.trim()
   submitting.value = true
   try {
-    await createWorkload(f.appId, body as Partial<Workload>)
-    ElMessage.success('已创建工作负载')
+    const created = await createWorkload(f.appId, body as Partial<Workload>)
+    ElMessage.success('已提交部署，等待副本就绪…')
     showCreate.value = false
     await load()
+    watchDeploy(created.id)
   } catch (e) {
     ElMessage.error('创建失败：' + (e as Error).message)
   } finally {
@@ -377,6 +439,7 @@ onUnmounted(() => {
             <th>环境</th>
             <th>泳道</th>
             <th>镜像</th>
+            <th v-if="activeType === 'service'">入口</th>
             <th v-if="activeType === 'cronjob'">调度</th>
             <th>副本</th>
             <th>状态</th>
@@ -398,6 +461,11 @@ onUnmounted(() => {
               <span v-else class="faint">基线</span>
             </td>
             <td class="mono img">{{ w.image }}</td>
+            <td v-if="activeType === 'service'">
+              <a v-if="w.domain" class="link domain-link" :href="`http://${w.domain}`" target="_blank" rel="noopener"
+                :title="w.domain">{{ w.domain.split('.')[0] }} ↗</a>
+              <span v-else class="faint">—</span>
+            </td>
             <td v-if="activeType === 'cronjob'" class="mono sched">{{ w.schedule }}</td>
             <td>
               <span class="reps mono" :class="{ notready: w.ready < w.replicas }">
@@ -429,7 +497,8 @@ onUnmounted(() => {
     <el-dialog v-model="showCreate" :title="`部署${tabs.find((t) => t.key === activeType)?.label}工作负载`" width="520px">
       <el-form label-width="92px">
         <el-form-item label="归属应用" required>
-          <el-select v-model="createForm.appId" placeholder="选择应用" style="width: 100%">
+          <el-select v-model="createForm.appId" placeholder="选择应用" style="width: 100%"
+            @change="imageRef = ''; createForm.image = ''; loadImages(createForm.appId)">
             <el-option v-for="a in apps" :key="a.id" :label="a.name" :value="a.id" />
           </el-select>
         </el-form-item>
@@ -437,7 +506,16 @@ onUnmounted(() => {
           <el-input v-model="createForm.name" placeholder="如 rec-svc" />
         </el-form-item>
         <el-form-item label="镜像" required>
-          <el-input v-model="createForm.image" placeholder="如 nginx:stable" />
+          <el-select v-if="imageOptions.length" v-model="imageRef" style="width: 100%"
+            placeholder="选择构建产物镜像">
+            <el-option v-for="i in imageOptions" :key="i.id" :value="i.id" :label="i.tag">
+              <span class="mono">{{ i.tag }}</span>
+              <span class="img-opt-hint">{{ i.status }}</span>
+            </el-option>
+            <el-option value="" label="自定义镜像…">自定义镜像…</el-option>
+          </el-select>
+          <el-input v-if="!imageOptions.length || !imageRef" v-model="createForm.image"
+            :placeholder="imageOptions.length ? '自定义镜像，如 nginx:stable' : '暂无构建产物，输入镜像，如 nginx:stable'" />
         </el-form-item>
         <el-form-item v-if="activeType === 'service'" label="副本数">
           <el-input-number v-model="createForm.replicas" :min="1" :max="20" />
@@ -633,6 +711,10 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 .faint { color: var(--text-dim); font-size: 12px; }
+/* 入口链接列（domain 可点开新窗，Railway 式列表直达入口） */
+.domain-link { color: var(--brand); text-decoration: none; white-space: nowrap; }
+.domain-link:hover { text-decoration: underline; }
+.img-opt-hint { float: right; font-size: 11px; color: var(--text-faint); }
 .tabs {
   display: flex;
   gap: 6px;
