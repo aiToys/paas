@@ -1,0 +1,1 @@
+DROP TABLE IF EXISTS services; ALTER TABLE workloads DROP COLUMN IF EXISTS service_id;

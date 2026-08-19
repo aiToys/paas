@@ -25,12 +25,12 @@ type Store struct {
 func NewStore(db *pg.DB) *Store { return &Store{db: db} }
 
 // wlCols 与 model.Workload 字段顺序对齐（scan 列顺序必须一致）。
-const wlCols = `id, tenant_id, app_id, env_id, lane_id, service, type, name, image, image_ref, replicas, ready, status, schedule, command, port, container_port, domain, created_at`
+const wlCols = `id, tenant_id, app_id, env_id, lane_id, service, service_id, type, name, image, image_ref, replicas, ready, status, schedule, command, port, container_port, domain, created_at`
 
 // scanWL 通过 pg.RowScanner 抽象 QueryRow 与 Row 两种 Scan 来源。
 func scanWL(r pg.RowScanner, w *workload.Workload) error {
 	return r.Scan(
-		&w.ID, &w.TenantID, &w.AppID, &w.EnvID, &w.LaneID, &w.Service, &w.Type,
+		&w.ID, &w.TenantID, &w.AppID, &w.EnvID, &w.LaneID, &w.Service, &w.ServiceID, &w.Type,
 		&w.Name, &w.Image, &w.ImageRef, &w.Replicas, &w.Ready,
 		&w.Status, &w.Schedule, &w.Command, &w.Port, &w.ContainerPort, &w.Domain, &w.CreatedAt,
 	)
@@ -140,8 +140,8 @@ func (s *Store) Create(ctx context.Context, w workload.Workload) error {
 		w.LaneID = workload.LaneDefault
 	}
 	_, err = s.db.Pool().Exec(ctx,
-		`INSERT INTO workloads (`+wlCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
-		w.ID, w.TenantID, w.AppID, w.EnvID, w.LaneID, w.Service, w.Type,
+		`INSERT INTO workloads (`+wlCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+		w.ID, w.TenantID, w.AppID, w.EnvID, w.LaneID, w.Service, w.ServiceID, w.Type,
 		w.Name, w.Image, w.ImageRef, w.Replicas, w.Ready,
 		w.Status, w.Schedule, w.Command, w.Port, w.ContainerPort, w.Domain, w.CreatedAt)
 	if pg.IsUniqueViolation(err) {

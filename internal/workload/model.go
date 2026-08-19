@@ -36,15 +36,17 @@ type Workload struct {
 	EnvID    string `json:"envId"`              // 归属环境
 	LaneID   string `json:"laneId"`             // "default"=基线（单例）；其他=泳道（预留，本期不创建非 default）
 	Service  string `json:"service,omitempty"`  // 服务名（同 app 多服务场景区分，如 product/recommend/chatbot/bff）；空=单服务（向后兼容）
-	Type     string `json:"type"`               // service / job / cronjob
-	Name     string `json:"name"`
-	Image    string `json:"image"`
-	ImageRef string `json:"imageRef,omitempty"` // 不可变 digest（生产部署锁定，Release 编排写入）
-	Replicas int    `json:"replicas"`           // 期望副本（service）；job 并行度；cronjob=0
-	Ready    int    `json:"ready"`              // 就绪副本
-	Status   string `json:"status"`
-	Schedule string `json:"schedule,omitempty"` // cronjob 专属 cron 表达式
-	Command  string `json:"command,omitempty"`  // 启动命令（可选）
+	// ServiceID 关联 service 实体（Phase 1 回填/新部署写入；空=未关联，向后兼容）。
+	ServiceID string `json:"serviceId,omitempty"`
+	Type      string `json:"type"` // service / job / cronjob
+	Name      string `json:"name"`
+	Image     string `json:"image"`
+	ImageRef  string `json:"imageRef,omitempty"` // 不可变 digest（生产部署锁定，Release 编排写入）
+	Replicas  int    `json:"replicas"`           // 期望副本（service）；job 并行度；cronjob=0
+	Ready     int    `json:"ready"`              // 就绪副本
+	Status    string `json:"status"`
+	Schedule  string `json:"schedule,omitempty"` // cronjob 专属 cron 表达式
+	Command   string `json:"command,omitempty"`  // 启动命令（可选）
 	// Port 是 Service 对外暴露端口（service 类型且 >0 时建 K8s Service，让其他 Pod 能 DNS 解析）。
 	Port          int `json:"port,omitempty"`
 	ContainerPort int `json:"containerPort,omitempty"` // Pod 监听端口；0 时取 Port
