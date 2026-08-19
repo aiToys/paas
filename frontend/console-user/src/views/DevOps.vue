@@ -14,8 +14,15 @@ import { usePolling } from '@/composables/usePolling'
 import { listRuns, type PipelineRun } from '@/api/pipeline'
 import { listAllChanges, listAllBatches, listNotifications, type Change, type IntegrationBatch, type Notification } from '@/api/change'
 import { imageLink, repoLink } from '@/composables/useDevopsLinks'
+import {
+  BUILD_STATUS, RELEASE_STATUS, RUN_STATUS, CHANGE_STATUS, BATCH_STATUS, statusOf,
+} from '@/composables/useStatus'
 
-type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
+const buildStatus = (s: string) => statusOf(BUILD_STATUS, s)
+const releaseStatus = (s: string) => statusOf(RELEASE_STATUS, s)
+const runStatus = (s: string) => statusOf(RUN_STATUS, s)
+const changeStatus = (s: string) => statusOf(CHANGE_STATUS, s)
+const batchStatus = (s: string) => statusOf(BATCH_STATUS, s)
 
 interface BuildRun {
   id: string; appId: string; repoId: string; commit: string; branch: string; message: string
@@ -48,43 +55,6 @@ const batches = ref<IntegrationBatch[]>([])
 const notifications = ref<Notification[]>([])
 const loading = ref(false)
 const busy = ref(false) // 重新构建/回滚 进行中（防重复点击）
-
-const BUILD_STATUS: Record<string, { label: string; type: TagType }> = {
-  pending: { label: '排队', type: 'info' },
-  running: { label: '构建中', type: 'warning' },
-  success: { label: '成功', type: 'success' },
-  failed: { label: '失败', type: 'danger' },
-}
-const RELEASE_STATUS: Record<string, { label: string; type: TagType }> = {
-  succeeded: { label: '已生效', type: 'success' },
-  'rolled-back': { label: '已回滚', type: 'info' },
-  deploying: { label: '部署中', type: 'warning' },
-}
-const RUN_STATUS: Record<string, { label: string; type: TagType }> = {
-  running: { label: '运行中', type: 'warning' },
-  paused: { label: '等待审批', type: 'warning' },
-  succeeded: { label: '成功', type: 'success' },
-  failed: { label: '失败', type: 'danger' },
-  aborted: { label: '已中止', type: 'info' },
-}
-const CHANGE_STATUS: Record<string, { label: string; type: TagType }> = {
-  open: { label: '进行中', type: 'primary' },
-  integrated: { label: '已集成', type: 'success' },
-  tested: { label: '测试通过', type: 'success' },
-  released: { label: '已发布', type: 'success' },
-  reverted: { label: '已回退', type: 'warning' },
-  abandoned: { label: '已放弃', type: 'info' },
-}
-const BATCH_STATUS: Record<string, { label: string; type: TagType }> = {
-  collecting: { label: '收集中', type: 'info' },
-  conflict: { label: '集成冲突', type: 'danger' },
-  testing: { label: '测试中', type: 'warning' },
-  tested: { label: '待审批', type: 'warning' },
-  releasing: { label: '发布中', type: 'warning' },
-  released: { label: '已发布', type: 'success' },
-  failed: { label: '失败', type: 'danger' },
-  abandoned: { label: '已放弃', type: 'info' },
-}
 
 // 应用名映射：onMounted 时一次拉取应用列表建 Map。
 const appNames = ref<Record<string, string>>({})
@@ -281,8 +251,8 @@ onMounted(async () => { await envStore.loadEnvs(); load() })
           </el-table-column>
           <el-table-column label="状态" width="100">
             <template #default="{ row }">
-              <el-tag :type="(RUN_STATUS[row.status]?.type) || 'info'" size="small">
-                {{ RUN_STATUS[row.status]?.label || row.status }}
+              <el-tag :type="(runStatus(row.status).type)" size="small">
+                {{ runStatus(row.status).label }}
               </el-tag>
             </template>
           </el-table-column>
@@ -331,8 +301,8 @@ onMounted(async () => { await envStore.loadEnvs(); load() })
           </el-table-column>
           <el-table-column label="状态" width="110">
             <template #default="{ row }">
-              <el-tag :type="(CHANGE_STATUS[row.status]?.type) || 'info'" size="small">
-                {{ CHANGE_STATUS[row.status]?.label || row.status }}
+              <el-tag :type="(changeStatus(row.status).type)" size="small">
+                {{ changeStatus(row.status).label }}
               </el-tag>
             </template>
           </el-table-column>
@@ -364,8 +334,8 @@ onMounted(async () => { await envStore.loadEnvs(); load() })
           </el-table-column>
           <el-table-column label="状态" width="130">
             <template #default="{ row }">
-              <el-tag :type="(BATCH_STATUS[row.status]?.type) || 'info'" size="small">
-                {{ BATCH_STATUS[row.status]?.label || row.status }}
+              <el-tag :type="(batchStatus(row.status).type)" size="small">
+                {{ batchStatus(row.status).label }}
               </el-tag>
             </template>
           </el-table-column>
@@ -390,8 +360,8 @@ onMounted(async () => { await envStore.loadEnvs(); load() })
           </el-table-column>
           <el-table-column label="状态" width="100">
             <template #default="{ row }">
-              <el-tag :type="(BUILD_STATUS[row.status]?.type) || 'info'" size="small">
-                {{ BUILD_STATUS[row.status]?.label || row.status }}
+              <el-tag :type="(buildStatus(row.status).type)" size="small">
+                {{ buildStatus(row.status).label }}
               </el-tag>
             </template>
           </el-table-column>
@@ -462,8 +432,8 @@ onMounted(async () => { await envStore.loadEnvs(); load() })
           </el-table-column>
           <el-table-column label="状态" width="110">
             <template #default="{ row }">
-              <el-tag :type="(RELEASE_STATUS[row.status]?.type) || 'info'" size="small">
-                {{ RELEASE_STATUS[row.status]?.label || row.status }}
+              <el-tag :type="(releaseStatus(row.status).type)" size="small">
+                {{ releaseStatus(row.status).label }}
               </el-tag>
               <el-tag v-if="row.isRollback" type="warning" size="small" style="margin-left:4px">回滚</el-tag>
               <el-tag v-if="row.promotedFrom" type="primary" size="small" style="margin-left:4px">提升</el-tag>

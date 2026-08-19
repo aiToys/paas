@@ -9,6 +9,7 @@ import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import { imageLink, releaseLink } from '@/composables/useDevopsLinks'
+import { RELEASE_STATUS, statusOf } from '@/composables/useStatus'
 
 const router = useRouter()
 
@@ -161,8 +162,8 @@ async function rollback(r: Release) {
 
 const envName = (id: string) => envs.value.find((e) => e.id === id)?.name ?? id
 const imgTag = (id: string) => images.value.find((i) => i.id === id)?.tag ?? (id || '').slice(0, 12)
-const statusType = (s: string) =>
-  (({ succeeded: 'success', failed: 'danger', 'rolled-back': 'info', deploying: 'warning', pending: 'info' } as Record<string, string>)[s] || 'info')
+const statusType = (s: string) => statusOf(RELEASE_STATUS, s).type
+const statusLabel = (s: string) => statusOf(RELEASE_STATUS, s).label
 
 onMounted(async () => {
   await Promise.all([loadImages(), loadEnvs(), load()])
@@ -185,7 +186,7 @@ watch(() => props.pickedImageId, (id) => {
     <el-table :data="releases" v-loading="loading" size="small" empty-text="尚无发布记录">
       <el-table-column label="状态" width="130">
         <template #default="{ row }">
-          <el-tag :type="statusType(row.status)" size="small">{{ row.status }}</el-tag>
+          <el-tag :type="statusType(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag>
           <el-tag v-if="row.isRollback" type="warning" size="small" style="margin-left: 4px">回滚</el-tag>
         </template>
       </el-table-column>

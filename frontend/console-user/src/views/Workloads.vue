@@ -46,7 +46,7 @@ watch(
   },
 )
 // 环境来自全局 store（顶栏环境选择器，唯一环境切换入口）；页面不再有环境切换控件
-const activeEnv = computed(() => envStore.currentEnvId)
+const activeEnv = computed(() => envStore.currentEnv)
 const items = ref<Workload[]>([])
 const loading = ref(true)
 // 应用上下文过滤（从应用详情「部署 tab」跳来带 ?app=）：只显示该应用工作负载，保留上下文。
@@ -78,7 +78,7 @@ async function load() {
   loading.value = true
   try {
     const params: Record<string, string> = { type: activeType.value }
-    if (activeEnv.value) params.envId = activeEnv.value
+    if (activeEnv.value) params.envId = activeEnv.value.id
     items.value = await listWorkloads(params)
   } catch (e) {
     ElMessage.error('加载工作负载失败：' + (e as Error).message)
@@ -356,7 +356,7 @@ async function submitCreate() {
     image: f.image.trim(),
     replicas: Number(f.replicas) || 1,
     port: Number(f.port) || 0,
-    envId: activeEnv.value || '',
+    envId: activeEnv.value?.id || '',
   }
   if (activeType.value === 'cronjob') body.schedule = f.schedule.trim()
   submitting.value = true
@@ -443,6 +443,7 @@ onUnmounted(() => {
             <th v-if="activeType === 'cronjob'">调度</th>
             <th>副本</th>
             <th>状态</th>
+            <th>部署时间</th>
             <th class="col-act"></th>
           </tr>
         </thead>
@@ -478,6 +479,9 @@ onUnmounted(() => {
                 {{ statusOf(w.status).label }}
               </span>
             </td>
+            <td>
+              <span class="deploy-time">{{ w.createdAt ? new Date(w.createdAt).toLocaleString() : '—' }}</span>
+            </td>
             <td class="col-act">
               <button class="act" @click="openDetail(w)">详情</button>
               <button class="act" :disabled="scaling === w.id || activeType === 'cronjob'" @click="scale(w)">
@@ -495,6 +499,11 @@ onUnmounted(() => {
 
     <!-- 创建工作负载对话框 -->
     <el-dialog v-model="showCreate" :title="`部署${tabs.find((t) => t.key === activeType)?.label}工作负载`" width="520px">
+      <!-- 显式展示部署目标环境（此前隐式取顶栏 scope，用户提交前无感知） -->
+      <div v-if="activeEnv" class="deploy-target" :class="{ prod: activeEnv.type === 'prod' }">
+        部署目标环境：<strong>{{ activeEnv.name }}</strong>
+        <span v-if="activeEnv.type === 'prod'" class="prod-flag">生产</span>
+      </div>
       <el-form label-width="92px">
         <el-form-item label="归属应用" required>
           <el-select v-model="createForm.appId" placeholder="选择应用" style="width: 100%"
@@ -711,6 +720,33 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 .faint { color: var(--text-dim); font-size: 12px; }
+/* 创建弹窗部署目标环境提示条（显式化顶栏 scope，生产红显） */
+.deploy-target {
+  margin-bottom: 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface, rgba(128, 128, 128, 0.06));
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.deploy-target.prod {
+  border-color: var(--el-color-danger, #f56c6c);
+}
+.deploy-target .prod-flag {
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: #fff;
+  background: var(--el-color-danger, #f56c6c);
+}
+.deploy-time {
+  font-size: 12px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
 /* 入口链接列（domain 可点开新窗，Railway 式列表直达入口） */
 .domain-link { color: var(--brand); text-decoration: none; white-space: nowrap; }
 .domain-link:hover { text-decoration: underline; }

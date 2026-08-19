@@ -20,6 +20,8 @@ import {
 import { fetchAuth } from '@/api'
 import PipelineDesigner from './PipelineDesigner.vue'
 import { usePolling } from '@/composables/usePolling'
+import { CHANGE_STATUS, BATCH_STATUS, RUN_STATUS, statusOf } from '@/composables/useStatus'
+import { confirmAbandon } from '@/composables/useAbandonConfirm'
 
 const props = defineProps<{ appId: string }>()
 const router = useRouter()
@@ -32,33 +34,6 @@ const latestRun = ref<PipelineRun | null>(null)
 const loading = ref(false)
 const busy = ref(false)
 
-// ---- 状态映射 ----
-const CHANGE_STATUS: Record<string, { type: string; label: string }> = {
-  open: { type: 'info', label: '开发中' },
-  integrated: { type: 'warning', label: '已集成' },
-  tested: { type: 'warning', label: '已测试' },
-  released: { type: 'success', label: '已上线' },
-  reverted: { type: 'danger', label: '已回退' },
-  abandoned: { type: 'info', label: '已放弃' },
-}
-const BATCH_STATUS: Record<string, { type: string; label: string }> = {
-  collecting: { type: 'info', label: '收集中' },
-  building: { type: 'warning', label: '合并中' },
-  conflict: { type: 'danger', label: '合并冲突' },
-  testing: { type: 'warning', label: '集成测试中' },
-  tested: { type: 'warning', label: '测试通过' },
-  releasing: { type: 'warning', label: '上线中' },
-  released: { type: 'success', label: '已上线' },
-  failed: { type: 'danger', label: '测试失败' },
-  abandoned: { type: 'info', label: '已放弃' },
-}
-const RUN_STATUS: Record<string, { type: string; label: string }> = {
-  running: { type: 'warning', label: '运行中' },
-  paused: { type: 'warning', label: '等审批' },
-  succeeded: { type: 'success', label: '成功' },
-  failed: { type: 'danger', label: '失败' },
-  aborted: { type: 'info', label: '已中止' },
-}
 
 // ---- 默认测试环境发布流水线（应用第一条 CI） ----
 const ciPipeline = computed(() => pipelines.value.find((p) => p.kind === 'ci') ?? null)
@@ -220,7 +195,7 @@ async function doCreate() {
 
 async function abandonC(c: Change) {
   try {
-    await ElMessageBox.confirm(`放弃变更「${c.title}」？`, '放弃确认', { type: 'warning' })
+    if (!(await confirmAbandon('change', c.title))) return
     await abandonChange(props.appId, c.id)
     ElMessage.success('已放弃')
     await load()
@@ -233,7 +208,7 @@ async function abandonStage() {
   const b = activeBatch.value
   if (!b) return
   try {
-    await ElMessageBox.confirm(`放弃批次「${b.title}」？集成区清空，变更回到待发布列表。`, '放弃确认', { type: 'warning' })
+    if (!(await confirmAbandon('batch', b.title))) return
     await abandonBatch(props.appId, b.id)
     ElMessage.success('已放弃')
     await load()
@@ -290,10 +265,10 @@ const fmtTime = (t?: string) => (t ? new Date(t).toLocaleString() : '-')
       <div class="release-head">
         <div>
           <span class="release-title">测试环境发布流水线</span>
-          <el-tag v-if="latestRun && RUN_STATUS[latestRun.status]" size="small"
-                  :type="RUN_STATUS[latestRun.status].type" class="run-tag"
+          <el-tag v-if="latestRun" size="small"
+                  :type="statusOf(RUN_STATUS, latestRun.status).type" class="run-tag"
                   @click="latestRun && router.push(`/devops/runs/${latestRun.id}`)">
-            {{ RUN_STATUS[latestRun.status].label }}
+            {{ statusOf(RUN_STATUS, latestRun.status).label }}
           </el-tag>
         </div>
         <div class="release-actions">
@@ -318,8 +293,8 @@ const fmtTime = (t?: string) => (t ? new Date(t).toLocaleString() : '-')
       <div class="zone-head">
         <span class="zone-title">集成区</span>
         <template v-if="activeBatch">
-          <el-tag size="small" :type="BATCH_STATUS[activeBatch.status]?.type || 'info'">
-            {{ BATCH_STATUS[activeBatch.status]?.label || activeBatch.status }}
+          <el-tag size="small" :type="statusOf(BATCH_STATUS, activeBatch.status).type">
+            {{ statusOf(BATCH_STATUS, activeBatch.status).label ?? activeBatch.status }}
           </el-tag>
           <span class="mono zone-branch">{{ activeBatch.branch }}</span>
           <el-button size="small" text type="danger" @click="abandonStage">放弃批次</el-button>
@@ -364,8 +339,8 @@ const fmtTime = (t?: string) => (t ? new Date(t).toLocaleString() : '-')
     <div v-if="runningBatch" class="zone zone-running">
       <div class="zone-head">
         <span class="zone-title">进行中批次</span>
-        <el-tag size="small" :type="BATCH_STATUS[runningBatch.status]?.type || 'info'">
-          {{ BATCH_STATUS[runningBatch.status]?.label || runningBatch.status }}
+        <el-tag size="small" :type="statusOf(BATCH_STATUS, runningBatch.status).type">
+          {{ statusOf(BATCH_STATUS, runningBatch.status).label ?? runningBatch.status }}
         </el-tag>
         <span class="mono zone-branch">{{ runningBatch.branch }}</span>
         <a v-if="runningBatch.runId" class="link" @click="router.push(`/devops/runs/${runningBatch.runId}`)">查看运行 →</a>
@@ -394,8 +369,8 @@ const fmtTime = (t?: string) => (t ? new Date(t).toLocaleString() : '-')
         </el-table-column>
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
-            <el-tag size="small" :type="CHANGE_STATUS[row.status]?.type || 'info'">
-              {{ CHANGE_STATUS[row.status]?.label || row.status }}
+            <el-tag size="small" :type="statusOf(CHANGE_STATUS, row.status).type">
+              {{ statusOf(CHANGE_STATUS, row.status).label ?? row.status }}
             </el-tag>
           </template>
         </el-table-column>

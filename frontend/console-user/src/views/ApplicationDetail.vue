@@ -15,6 +15,7 @@ import AppConfigs from './app-tabs/AppConfigs.vue'
 import AppGovernance from './app-tabs/AppGovernance.vue'
 import AppObservability from './app-tabs/AppObservability.vue'
 import AppUsage from './app-tabs/AppUsage.vue'
+import { BUILD_STATUS, RELEASE_STATUS, statusOf } from '@/composables/useStatus'
 
 const route = useRoute()
 const router = useRouter()
@@ -533,7 +534,7 @@ async function deleteApp() {
             <div class="side-card">
               <div class="side-label">最新发布</div>
               <div v-if="latestRelease" class="side-body">
-                <el-tag size="small" :type="latestRelease.status === 'succeeded' ? 'success' : 'info'">{{ latestRelease.status }}</el-tag>
+                <el-tag size="small" :type="statusOf(RELEASE_STATUS, latestRelease.status).type">{{ statusOf(RELEASE_STATUS, latestRelease.status).label }}</el-tag>
                 <span class="side-time">{{ new Date(latestRelease.createdAt).toLocaleString() }}</span>
               </div>
               <div v-else class="side-empty">暂无发布</div>
@@ -541,7 +542,7 @@ async function deleteApp() {
             <div class="side-card">
               <div class="side-label">最新构建</div>
               <div v-if="latestBuild" class="side-body">
-                <el-tag size="small" :type="latestBuild.status === 'success' ? 'success' : 'info'">{{ latestBuild.status }}</el-tag>
+                <el-tag size="small" :type="statusOf(BUILD_STATUS, latestBuild.status).type">{{ statusOf(BUILD_STATUS, latestBuild.status).label }}</el-tag>
                 <span class="side-time">{{ new Date(latestBuild.startedAt).toLocaleString() }}</span>
               </div>
               <div v-else class="side-empty">暂无构建</div>

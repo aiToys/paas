@@ -11,6 +11,8 @@ import {
 } from '@/api/change'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import { usePolling } from '@/composables/usePolling'
+import { CHANGE_STATUS, BATCH_STATUS, statusOf } from '@/composables/useStatus'
+import { confirmAbandon } from '@/composables/useAbandonConfirm'
 
 const props = defineProps<{ appId: string }>()
 const router = useRouter()
@@ -18,27 +20,6 @@ const router = useRouter()
 const changes = ref<Change[]>([])
 const batches = ref<IntegrationBatch[]>([])
 const loading = ref(false)
-
-// ---- 变更状态/类型映射 ----
-const CHANGE_STATUS: Record<string, { type: string; label: string }> = {
-  open: { type: 'info', label: '开发中' },
-  integrated: { type: 'warning', label: '已集成' },
-  tested: { type: 'warning', label: '已测试' },
-  released: { type: 'success', label: '已上线' },
-  reverted: { type: 'danger', label: '已回退' },
-  abandoned: { type: 'info', label: '已放弃' },
-}
-const BATCH_STATUS: Record<string, { type: string; label: string }> = {
-  collecting: { type: 'info', label: '收集中' },
-  building: { type: 'warning', label: '合并中' },
-  conflict: { type: 'danger', label: '合并冲突' },
-  testing: { type: 'warning', label: '集成测试中' },
-  tested: { type: 'warning', label: '测试通过' },
-  releasing: { type: 'warning', label: '上线中' },
-  released: { type: 'success', label: '已上线' },
-  failed: { type: 'danger', label: '测试失败' },
-  abandoned: { type: 'info', label: '已放弃' },
-}
 
 async function load() {
   loading.value = true
@@ -96,7 +77,7 @@ async function doCreate() {
 
 async function abandon(c: Change) {
   try {
-    await ElMessageBox.confirm(`放弃变更「${c.title}」？`, '放弃确认', { type: 'warning' })
+    if (!(await confirmAbandon('change', c.title))) return
     await abandonChange(props.appId, c.id)
     ElMessage.success('已放弃')
     await load()
@@ -205,7 +186,7 @@ async function doReleaseRetry() {
 async function abandonB() {
   if (!batch.value) return
   try {
-    await ElMessageBox.confirm(`放弃批次「${batch.value.title}」？`, '放弃确认', { type: 'warning' })
+    if (!(await confirmAbandon('batch', batch.value.title))) return
     await abandonBatch(props.appId, batch.value.id)
     ElMessage.success('已放弃')
     drawerBid.value = null
@@ -283,8 +264,8 @@ const fmtTime = (t?: string) => (t ? new Date(t).toLocaleString() : '-')
       </el-table-column>
       <el-table-column label="状态" width="100">
         <template #default="{ row }">
-          <el-tag size="small" :type="(CHANGE_STATUS[row.status]?.type) || 'info'">
-            {{ CHANGE_STATUS[row.status]?.label || row.status }}
+          <el-tag size="small" :type="statusOf(CHANGE_STATUS, row.status).type">
+            {{ statusOf(CHANGE_STATUS, row.status).label ?? row.status }}
           </el-tag>
         </template>
       </el-table-column>
@@ -328,8 +309,8 @@ const fmtTime = (t?: string) => (t ? new Date(t).toLocaleString() : '-')
       </el-table-column>
       <el-table-column label="状态" width="120">
         <template #default="{ row }">
-          <el-tag size="small" :type="(BATCH_STATUS[row.status]?.type) || 'info'">
-            {{ BATCH_STATUS[row.status]?.label || row.status }}
+          <el-tag size="small" :type="statusOf(BATCH_STATUS, row.status).type">
+            {{ statusOf(BATCH_STATUS, row.status).label ?? row.status }}
           </el-tag>
         </template>
       </el-table-column>
@@ -426,8 +407,8 @@ const fmtTime = (t?: string) => (t ? new Date(t).toLocaleString() : '-')
         </div>
         <div class="detail-row">
           <span class="label">状态：</span>
-          <el-tag size="small" :type="(BATCH_STATUS[batch.status]?.type) || 'info'">
-            {{ BATCH_STATUS[batch.status]?.label || batch.status }}
+          <el-tag size="small" :type="statusOf(BATCH_STATUS, batch.status).type">
+            {{ statusOf(BATCH_STATUS, batch.status).label ?? batch.status }}
           </el-tag>
         </div>
         <div class="detail-row" v-if="batch.runId">

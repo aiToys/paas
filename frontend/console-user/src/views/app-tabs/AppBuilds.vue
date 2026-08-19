@@ -7,6 +7,7 @@ import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import { buildLink, imageLink, repoLink } from '@/composables/useDevopsLinks'
 import { usePolling } from '@/composables/usePolling'
+import { BUILD_STATUS, statusOf } from '@/composables/useStatus'
 
 const router = useRouter()
 
@@ -87,8 +88,8 @@ async function trigger() {
   }
 }
 
-const statusType = (s: string) =>
-  (({ success: 'success', failed: 'danger', running: 'warning', pending: 'info' } as Record<string, string>)[s] || 'info')
+const statusType = (s: string) => statusOf(BUILD_STATUS, s).type
+const statusLabel = (s: string) => statusOf(BUILD_STATUS, s).label
 
 onMounted(async () => {
   await loadRepos()
@@ -120,7 +121,7 @@ usePolling(() => load(true), 2000, {
       </el-table-column>
       <el-table-column label="状态" width="100">
         <template #default="{ row }">
-          <el-tag :type="statusType(row.status)" size="small">{{ row.status }}</el-tag>
+          <el-tag :type="statusType(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag>
         </template>
       </el-table-column>
       <el-table-column label="commit" width="100">

@@ -86,6 +86,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { getChange, abandonChange, getBatch, listAllBatches, listAllChanges, type Change, type IntegrationBatch } from '@/api/change'
 import { fetchAuth } from '@/api'
 import { repoLink } from '@/composables/useDevopsLinks'
+import { CHANGE_STATUS, BATCH_STATUS, statusOf } from '@/composables/useStatus'
+import { confirmAbandon } from '@/composables/useAbandonConfirm'
 
 const route = useRoute()
 const router = useRouter()
@@ -103,20 +105,11 @@ function goBack() {
   else router.push('/devops')
 }
 
-const statusMap: Record<string, [string, string]> = {
-  open: ['进行中', 'primary'], integrated: ['已集成', 'success'], tested: ['测试通过', 'success'],
-  released: ['已发布', 'success'], reverted: ['已回退', 'warning'], abandoned: ['已放弃', 'info'],
-}
-const statusType = (s: string) => (statusMap[s] ?? [s, 'info'])[1]
-const statusLabel = (s: string) => (statusMap[s] ?? [s, 'info'])[0]
+const statusType = (s: string) => statusOf(CHANGE_STATUS, s).type
+const statusLabel = (s: string) => statusOf(CHANGE_STATUS, s).label
 
-const batchMap: Record<string, [string, string]> = {
-  collecting: ['收集中', 'info'], conflict: ['集成冲突', 'danger'], testing: ['测试中', 'warning'],
-  tested: ['测试通过·待审批', 'warning'], releasing: ['发布中', 'warning'], released: ['已发布', 'success'],
-  failed: ['失败', 'danger'], abandoned: ['已放弃', 'info'],
-}
-const batchStatusType = (s: string) => (batchMap[s] ?? [s, 'info'])[1]
-const batchStatusLabel = (s: string) => (batchMap[s] ?? [s, 'info'])[0]
+const batchStatusType = (s: string) => statusOf(BATCH_STATUS, s).type
+const batchStatusLabel = (s: string) => statusOf(BATCH_STATUS, s).label
 
 // steps 活跃序：collecting/conflict=0，testing=1，tested=2，releasing/released=4
 const stepActive = computed(() => {
@@ -137,7 +130,7 @@ function copyClone() {
 async function abandon() {
   if (!change.value) return
   try {
-    await ElMessageBox.confirm(`放弃变更「${change.value.title}」？分支保留，可重新引用。`, '放弃确认', { type: 'warning' })
+    if (!(await confirmAbandon('change', change.value.title))) return
     await abandonChange(change.value.appId, change.value.id)
     ElMessage.success('已放弃')
     router.push(`/applications/${change.value.appId}`)
