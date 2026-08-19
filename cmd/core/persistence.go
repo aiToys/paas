@@ -151,7 +151,8 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		if appliers.workload != nil {
 			wlRepo = workload.NewApplyRepo(wlRepo, appliers.workload) // K8s 启用：workload 写操作投影 CRD 期望状态
 		}
-		devopsRepo := devopspg.NewStore(db, wlRepo) // Release 编排经 workload.Repository 接口透明
+		svcRepo := svcpg.NewStore(db)
+		devopsRepo := devopspg.NewStore(db, wlRepo, devopspg.WithServiceLookup(serviceLookupBridge{repos: svcRepo})) // Release 编排经 workload.Repository 接口透明
 		devopsRepo.SetPipeline(devopsPipeline)      // PAAS_DEVOPS_REAL=true 接真实 git/docker
 		govRepo := govpg.NewStore(db)
 		// K8s 启用：governance Route 写投影聚合 Ingress（按 host 多 path，hermes/nginx 标准）。
@@ -174,7 +175,6 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		bkRepo := backup.Repository(bkmemory.NewStore())
 		pipelineStore := pipeline.NewPGStore(db.Pool())
 		changeRepo := changepg.NewStore(db)
-		svcRepo := svcpg.NewStore(db)
 
 		seedPGAllIfEmpty(ctx, idb, appRepo, envRepo, appcfgRepo, rawDs, rawWl,
 			devopsRepo, govRepo, ccRepo, billingRepo, secRepo)
@@ -242,7 +242,8 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 	if appliers.workload != nil {
 		wlRepo = workload.NewApplyRepo(wlRepo, appliers.workload) // K8s 启用：workload 写操作投影 CRD 期望状态
 	}
-	devopsRepo := devopsmemory.NewStore(wlRepo)
+	svcRepo0 := svcmemory.NewStore()
+	devopsRepo := devopsmemory.NewStore(wlRepo, devopsmemory.WithServiceLookup(serviceLookupBridge{repos: svcRepo0}))
 	devopsRepo.SetPipeline(devopsPipeline) // PAAS_DEVOPS_REAL=true 接真实 git/docker
 	govRepo := govmemory.NewStore()
 	// K8s 启用：governance Route 写投影聚合 Ingress（内存路径同款，applier 持裸 govRepo）。
@@ -264,7 +265,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 	bkRepo := backup.Repository(bkmemory.NewStore())
 	pipelineStore := pipeline.NewMemoryStore()
 	changeRepo := change.NewMemoryStore()
-	svcRepo := svcmemory.NewStore()
+	svcRepo := svcRepo0
 	// 存量回填：为无 ServiceID 的既有工作负载幂等建 Service 实体（两路径同源，失败不阻断启动）。
 	backfillTenantIDs(ctx, idb, svcRepo, wlRepo)
 	// 平台预置流水线模板（全租户共享，不门控 demo seed，生产也需预置）

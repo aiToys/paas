@@ -11,6 +11,7 @@
 package devops
 
 import (
+	"context"
 	"net/url"
 	"strings"
 	"time"
@@ -241,12 +242,13 @@ type Release struct {
 // ReleaseInput 是创建发布的输入。编排（找/建 Workload + 更新镜像 + 记录回滚指针）由
 // ReleaseRepository.CreateRelease 内部完成，调用方只提供意图。
 type ReleaseInput struct {
-	AppID    string `json:"appId"`
-	EnvID    string `json:"envId"`
-	LaneID   string `json:"laneId,omitempty"`  // 部署到的泳道（空=default 基线，向后兼容）
-	Service  string `json:"service,omitempty"` // 部署到的服务（同 app 多服务场景，如 paas-shop product/recommend/...）；空=单服务（向后兼容）
-	ImageID  string `json:"imageId"`
-	Strategy string `json:"strategy"`
+	AppID     string `json:"appId"`
+	EnvID     string `json:"envId"`
+	LaneID    string `json:"laneId,omitempty"`    // 部署到的泳道（空=default 基线，向后兼容）
+	Service   string `json:"service,omitempty"`   // 部署到的服务（同 app 多服务场景，如 paas-shop product/recommend/...）；空=单服务（向后兼容）
+	ServiceID string `json:"serviceId,omitempty"` // 关联服务实体 ID（Phase 1）；优先按 (app,env,lane,serviceID) 匹配基线 Workload，空退化按 Service 名
+	ImageID   string `json:"imageId"`
+	Strategy  string `json:"strategy"`
 	// Port/ContainerPort 仅在「新建基线 Workload」时设定（驱动 reconciler 建 Service，供 smoke 探活/服务发现）。
 	// 复用既有 Workload 时忽略（端口属 Workload 既有配置）。0 = 不建 Service（向后兼容）。
 	Port          int    `json:"port,omitempty"`
@@ -255,6 +257,21 @@ type ReleaseInput struct {
 }
 
 type fieldErr struct{ field string }
+
+// ServiceDef 是 ServiceLookup 返回的服务定义快照（依赖倒置本地结构体，
+// 避免 devops -> internal/service 跨模块耦合；cmd/core 桥接转换）。
+type ServiceDef struct {
+	ID       string
+	Name     string
+	Port     int
+	Replicas int
+}
+
+// ServiceLookup 供 CreateRelease 新建基线 Workload 时取服务定义（Port/Replicas 来源）。
+// 依赖倒置：cmd/core 桥接 internal/service Repository；未注入（nil/返回错误）时行为不变。
+type ServiceLookup interface {
+	GetService(ctx context.Context, appID, serviceID string) (ServiceDef, error)
+}
 
 func (e fieldErr) Error() string { return "字段非法或缺失: " + e.field }
 

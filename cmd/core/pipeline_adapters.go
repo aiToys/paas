@@ -20,6 +20,7 @@ import (
 	"github.com/aitoys/paas/internal/devops/gitea"
 	"github.com/aitoys/paas/internal/devops/pipeline"
 	"github.com/aitoys/paas/internal/environment"
+	"github.com/aitoys/paas/internal/service"
 	"github.com/aitoys/paas/internal/workload"
 	"github.com/aitoys/paas/pkg/tenant"
 )
@@ -361,4 +362,16 @@ func defaultPipelineBinder(pipes pipeline.Repository, templates pipeline.Templat
 		}
 		return nil
 	}
+}
+
+// serviceLookupBridge 桥接 service.Repository -> devops.ServiceLookup（依赖倒置，
+// devops 不 import internal/service；Release 编排新建基线 Workload 时取 Port/Replicas）。
+type serviceLookupBridge struct{ repos service.Repository }
+
+func (b serviceLookupBridge) GetService(ctx context.Context, appID, serviceID string) (devops.ServiceDef, error) {
+	s, err := b.repos.Get(ctx, appID, serviceID)
+	if err != nil {
+		return devops.ServiceDef{}, err
+	}
+	return devops.ServiceDef{ID: s.ID, Name: s.Name, Port: s.Port, Replicas: s.Replicas}, nil
 }

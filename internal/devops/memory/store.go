@@ -27,14 +27,15 @@ type Store struct {
 	buildruns map[string]devops.BuildRun
 	images    map[string]devops.Image
 	releases  map[string]devops.Release
-	workload  workload.Repository // 注入；Release 编排找/建/更新基线 Workload
-	pipeline  builder.Pipeline    // 构建流水线（nil=Mock）；cmd/core 按 PAAS_DEVOPS_REAL 注入 Real
-	baseCtx   context.Context     // 进程级 ctx（cmd/core 注入）；构建 goroutine 派生之，nil=Background 兼容
+	workload  workload.Repository  // 注入；Release 编排找/建/更新基线 Workload
+	svcLookup devops.ServiceLookup // 注入（可选）；新建基线 Workload 时取服务定义（Port/Replicas 来源）
+	pipeline  builder.Pipeline     // 构建流水线（nil=Mock）；cmd/core 按 PAAS_DEVOPS_REAL 注入 Real
+	baseCtx   context.Context      // 进程级 ctx（cmd/core 注入）；构建 goroutine 派生之，nil=Background 兼容
 }
 
 // NewStore 创建仓储（空，不 seed mock 演示数据）。wlRepo 为 Release 编排提供 Workload 能力。
 // 去假数据：用户绑定真实 git 仓库 + 触发构建产生仓库/构建/镜像/发布记录。
-func NewStore(wlRepo workload.Repository) *Store {
+func NewStore(wlRepo workload.Repository, opts ...StoreOpt) *Store {
 	s := &Store{
 		repos:     map[string]devops.CodeRepo{},
 		buildruns: map[string]devops.BuildRun{},
@@ -42,8 +43,17 @@ func NewStore(wlRepo workload.Repository) *Store {
 		releases:  map[string]devops.Release{},
 		workload:  wlRepo,
 	}
+	for _, o := range opts {
+		o(s)
+	}
 	return s
 }
+
+// StoreOpt 配置 Store。
+type StoreOpt func(*Store)
+
+// WithServiceLookup 注入服务定义查询（可选，未注入时 Release 编排行为不变）。
+func WithServiceLookup(l devops.ServiceLookup) StoreOpt { return func(s *Store) { s.svcLookup = l } }
 
 // ---------- CodeRepoRepository ----------
 
@@ -524,10 +534,45 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 2. 找目标环境某泳道某服务的基线 Workload（同 app×env×lane×service 唯一）
-	wls, err := s.workload.List(ctx, input.EnvID, input.AppID, lane, workload.TypeService, input.Service)
-	if err != nil {
-		return devops.Release{}, err
+	// 2. 找目标环境某泳道某服务的基线 Workload（同 app×env×lane×service 唯一）。
+	// ServiceID 非空时优先按 (app,env,lane,serviceID) 匹配（服务实体维度），否则按 Service 名（存量兼容）。
+	var wls []workload.Workload
+	if input.ServiceID != "" {
+		all, err := s.workload.List(ctx, input.EnvID, input.AppID, lane, workload.TypeService, "")
+		if err != nil {
+			return devops.Release{}, err
+		}
+		for _, w := range all {
+			if w.ServiceID == input.ServiceID {
+				wls = append(wls, w)
+				break
+			}
+		}
+	}
+	if len(wls) == 0 {
+		var err error
+		wls, err = s.workload.List(ctx, input.EnvID, input.AppID, lane, workload.TypeService, input.Service)
+		if err != nil {
+			return devops.Release{}, err
+		}
+		// ServiceID 路径未命中但按名命中时，排除已归属其他 ServiceID 的负载（防误复用他人基线）
+		if input.ServiceID != "" {
+			filtered := wls[:0]
+			for _, w := range wls {
+				if w.ServiceID == "" || w.ServiceID == input.ServiceID {
+					filtered = append(filtered, w)
+				}
+			}
+			wls = filtered
+		}
+	}
+
+	// 服务定义（可选）：新建基线 Workload 时带出 Port/Replicas；查不到用 input 值（行为不变）。
+	var svcDef *devops.ServiceDef
+	if input.ServiceID != "" && s.svcLookup != nil {
+		if d, err := s.svcLookup.GetService(ctx, input.AppID, input.ServiceID); err == nil {
+			svcDef = &d
+		}
 	}
 
 	var wl workload.Workload
@@ -541,31 +586,43 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 			return devops.Release{}, err
 		}
 	} else {
-		// 无基线 Workload -> 创建（基线 service，Replicas=1）
+		// 无基线 Workload -> 创建（基线 service）
 		// Name 规则：多服务（service 非空）用 `<app>-<service>-svc[-<lane>]`，单服务（service 空）用 `<app>-svc[-<lane>]`。
-		name := devops.BaselineWorkloadName(input.AppID, input.Service, lane)
+		svcName := input.Service
+		if svcName == "" && svcDef != nil {
+			svcName = svcDef.Name
+		}
+		name := devops.BaselineWorkloadName(input.AppID, svcName, lane)
 		// 端口来源（优先级）：① input.Port（deploy stage 显式 port 参数）> ② 同 app×env×service baseline 继承
 		// （泳道克隆基线端口）> ③ 0（不建 Service，向后兼容）。端口驱动 reconciler 建 Service，
 		// 否则 smoke 探活/跨泳道服务发现 DNS 不可达。
 		port, cport := input.Port, input.ContainerPort
+		if port == 0 && svcDef != nil {
+			port = svcDef.Port
+		}
 		if port == 0 && lane != workload.LaneDefault {
 			if bases, err := s.workload.List(ctx, input.EnvID, input.AppID, workload.LaneDefault, workload.TypeService, input.Service); err == nil && len(bases) > 0 {
 				port, cport = bases[0].Port, bases[0].ContainerPort
 			}
+		}
+		replicas := 1
+		if svcDef != nil && svcDef.Replicas > 0 {
+			replicas = svcDef.Replicas
 		}
 		wl = workload.Workload{
 			ID:            newID("wl"),
 			AppID:         input.AppID,
 			EnvID:         input.EnvID,
 			LaneID:        lane,
-			Service:       input.Service,
+			Service:       svcName,
+			ServiceID:     input.ServiceID,
 			Type:          workload.TypeService,
 			Name:          name,
 			Image:         display,
 			ImageRef:      img.Digest,
 			Port:          port,
 			ContainerPort: cport,
-			Replicas:      1,
+			Replicas:      replicas,
 			Status:        workload.StatusDeploying,
 			CreatedAt:     time.Now(),
 		}
