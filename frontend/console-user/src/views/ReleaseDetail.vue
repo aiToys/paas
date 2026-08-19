@@ -53,7 +53,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchAuth } from '@/api'
@@ -122,6 +122,8 @@ async function load() {
 }
 
 onMounted(load)
+// 同路由不同 id 复用组件（详情互链点另一单据）时重载
+watch(() => route.params.id, () => load())
 </script>
 
 <style scoped>

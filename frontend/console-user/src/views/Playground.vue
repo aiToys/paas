@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
@@ -57,6 +57,12 @@ onMounted(async () => {
   const q = route.query.model as string
   const ids = modelOptions.value.map((m) => m.id)
   model.value = q && ids.includes(q) ? q : modelOptions.value[0]?.id ?? ''
+})
+
+// 已停留本页时从模型市场带 ?model= 跳入（组件复用不重挂载）也要重选
+watch(() => route.query.model, (q) => {
+  const id = (q as string) || ''
+  if (id && modelOptions.value.some((m) => m.id === id)) model.value = id
 })
 
 async function send() {

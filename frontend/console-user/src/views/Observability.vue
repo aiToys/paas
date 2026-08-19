@@ -165,6 +165,7 @@ async function loadApps() {
   } else if (env && envStore.envs.some((e) => e.id === env)) {
     dim.value = 'env'; dimEnv.value = env
   }
+  restoreFiltersFromUrl()
 }
 
 async function loadMetrics() {
@@ -229,12 +230,25 @@ function clickTraceId(traceId?: string) {
 
 // 维度状态同步 URL（router.replace 不留历史）：刷新/分享保留「我正在看什么」上下文。
 // 全部视图不带参数；app 维度兼容既有 ?app= 深链格式。
+// 排障过滤器（级别/traceId/状态）一并入 URL——排障现场可分享。
 function syncUrl() {
   const q: Record<string, string> = {}
   if (dim.value === 'env' && dimEnv.value) q.env = dimEnv.value
   if (dim.value === 'app' && dimApp.value) q.app = dimApp.value
   if (dim.value === 'dataservice' && dimDS.value) q.ds = dimDS.value
+  if (logLevel.value) q.level = logLevel.value
+  if (traceStatus.value) q.traceStatus = traceStatus.value
+  if (traceIdQuery.value.trim()) q.traceId = traceIdQuery.value.trim()
   router.replace({ query: q })
+}
+
+// URL 恢复排障过滤器（深链/share 场景）：与 syncUrl 对偶。
+function restoreFiltersFromUrl() {
+  const qs = (k: string) => (typeof route.query[k] === 'string' ? (route.query[k] as string) : '')
+  const level = qs('level'), ts = qs('traceStatus'), tid = qs('traceId')
+  if (['info', 'warn', 'error'].includes(level)) logLevel.value = level
+  if (['success', 'error'].includes(ts)) traceStatus.value = ts
+  if (tid) traceIdQuery.value = tid
 }
 
 // 维度切换：重置下级选择并整页重载（env 维度级联过滤应用下拉）

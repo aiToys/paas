@@ -49,7 +49,16 @@ async function load(silent = false) {
   if (!silent) loading.value = true
   try {
     const resp = await fetchAuth(`/api/applications/${props.appId}/buildruns`)
-    if (resp.ok) builds.value = (await resp.json()).data ?? []
+    if (resp.ok) {
+      const fresh: BuildRun[] = (await resp.json()).data ?? []
+      // key-diff 原地更新：保留既有行对象引用，防 el-table expand 展开行（看日志）
+      // 被 2s 轮询整组替换后按引用失配强制折叠（构建中看日志「闪没」）。
+      const byId = new Map(builds.value.map((b) => [b.id, b]))
+      builds.value = fresh.map((b) => {
+        const old = byId.get(b.id)
+        return old ? Object.assign(old, b) : b
+      })
+    }
   } finally {
     if (!silent) loading.value = false
   }

@@ -74,7 +74,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getBatch, listAllBatches, listAllChanges, integrateBatch, approveBatch, releaseBatch, abandonBatch, type IntegrationBatch, type Change } from '@/api/change'
@@ -159,6 +159,8 @@ async function doAbandon() {
 }
 
 onMounted(load)
+// 同路由不同 id 复用组件（详情互链点另一单据）时重载
+watch(() => route.params.id, () => load())
 // testing/releasing 进行中 10s 轮询（GET 详情触发后端惰性推进；页面不可见自动暂停）
 usePolling(() => {
   if (['testing', 'releasing'].includes(batch.value?.status ?? '')) load(true)

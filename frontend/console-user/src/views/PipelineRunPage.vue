@@ -14,7 +14,10 @@ import { fetchAuth } from '@/api'
 
 const route = useRoute()
 const router = useRouter()
-const runId = ref(route.params.runId as string)
+// runId 跟随路由参数（单一真源）：行点击/通知跳转走 router.replace，
+// 同路由复用组件时 watch params 切换——本地 ref 方案两个方向都有 bug
+// （点行不更新 URL 刷新即错位；push 新 runId 页面不响应）。
+const runId = computed(() => (route.params.runId as string) || '')
 const appId = ref('')
 const appName = ref('')
 
@@ -57,16 +60,16 @@ async function loadRuns() {
   }
 }
 
-// 切流水线 tab：默认选该流水线最新一次运行
+// 切流水线 tab：默认选该流水线最新一次运行（经路由，保持 URL 可分享）
 async function switchPipeline(pid: string) {
   activePid.value = pid
   await loadRuns()
   const latest = runs.value[0]
-  if (latest && latest.id !== runId.value) runId.value = latest.id
-  else if (!latest) runId.value = ''
+  if (latest && latest.id !== runId.value) router.replace(`/devops/runs/${latest.id}`)
+  else if (!latest) router.replace('/devops')
 }
 
-onMounted(async () => {
+async function bootstrap() {
   try {
     const r = await getRun(runId.value)
     appId.value = r.appId || ''
@@ -85,16 +88,20 @@ onMounted(async () => {
   } catch {
     /* run 不存在时 PipelineRunView 自显 empty，无需处理 */
   }
-})
+}
 
-// runId 变化（点运行列表行）时同步 tab 归属（跨 tab 深链场景）
-watch(runId, async (id) => {
-  if (!id) return
+onMounted(bootstrap)
+
+// runId 变化（路由参数：点运行列表行/通知跳转/深链）时同步 tab 归属（跨 tab 场景）
+watch(runId, async (id, old) => {
+  if (!id || id === old) return
   const r = runs.value.find((x) => x.id === id)
   if (r && r.pipelineId !== activePid.value) {
     activePid.value = r.pipelineId
     await loadRuns()
   }
+  // 新 run 可能属另一应用（深链直入）：appId 未初始化时补 bootstrap
+  if (!appId.value) await bootstrap()
 })
 
 function goBack() {
@@ -126,7 +133,7 @@ function goBack() {
     <!-- ② 运行列表（横向 chips，选中高亮）+ ③ 运行轨道 -->
     <div v-if="activePid" class="run-chips" v-loading="runsLoading">
       <button v-for="r in runs" :key="r.id" class="run-chip" :class="{ active: r.id === runId }"
-        @click="runId = r.id">
+        @click="router.replace(`/devops/runs/${r.id}`)">
         <span class="chip-dot" :class="r.status" />
         <span class="chip-text">{{ r.branch }}@{{ shortCommit(r.commit) }}</span>
         <span v-if="r.version" class="chip-ver">{{ r.version }}</span>

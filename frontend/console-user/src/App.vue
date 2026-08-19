@@ -45,7 +45,11 @@ async function restoreEnvFromUrl() {
   if (found) await envStore.switchEnv(found)
 }
 watch(() => route.query.env, () => restoreEnvFromUrl())
-onUnmounted(() => { if (prodTimer) window.clearInterval(prodTimer) })
+onUnmounted(() => {
+  if (prodTimer) window.clearInterval(prodTimer)
+  window.removeEventListener('paas:session-expired', onSessionExpired)
+})
+window.addEventListener('paas:session-expired', onSessionExpired)
 
 // envStore.currentEnvId → URL：环境切换写 ?env=<id>（分享链接带环境上下文）。
 // 用 router.replace 避免历史栈膨胀；切回全部环境时省略 query（URL 干净）。
@@ -63,6 +67,24 @@ const session = useSessionStore()
 // 当前身份视角（来自会话 profile）：用户名 + 首字母。
 const identityLabel = computed(() => session.profile?.username ?? '未登录')
 const identityInitial = computed(() => (session.profile?.username ?? 'U').charAt(0).toUpperCase())
+
+// 会话过期兜底（api.ts 401→refresh 失败派发 paas:session-expired）：此前无监听者，
+// 用户停留当前页所有请求持续 401 却毫无感知。清会话 + 提示 + 带 redirect 跳登录。
+function onSessionExpired() {
+  if (route.path === '/login') return // 登录页自身请求失败不重复跳
+  session.profile = null
+  session.loaded = false
+  resetEnvContext()
+  ElMessage.warning('登录已过期，请重新登录')
+  router.push({ path: '/login', query: { redirect: route.fullPath } })
+}
+
+// 会话切换（退出/过期/换账号）时重置环境上下文：环境是租户资产，
+// 不清会残留上一租户的环境列表与选中态（越权观感 + 数据错位）。
+function resetEnvContext() {
+  envStore.envs = []
+  envStore.currentEnv = null
+}
 
 // 环境选择器
 const envLabel = computed(() => envStore.currentEnv?.name ?? '全部环境')
@@ -89,12 +111,15 @@ async function onPickAccount(cmd: string | number | object) {
   const c = String(cmd)
   if (c === '__logout') {
     await session.logout()
+    resetEnvContext()
     router.push('/login')
     return
   }
   const d = session.DEMO_ACCOUNTS.find((a) => a.username === c)
   if (!d) return
   try {
+    // 换账号前先清环境上下文（可能是跨租户切换），登录成功后由各页 loadEnvs 重拉
+    resetEnvContext()
     await session.login(d.username, d.password)
     ElMessage.success(`已切换到 ${d.label}`)
   } catch (e) {

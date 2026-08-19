@@ -22,7 +22,10 @@ export async function fetchAuth(path: string, opts: RequestInit = {}): Promise<R
     headers.set('Content-Type', 'application/json')
   }
   const resp = await fetch(path, { ...opts, headers, credentials: 'include' })
-  if (resp.status === 401 && !path.includes('/api/auth/')) {
+  // 仅排除 refresh 自身（防递归）；登录/users/me 等会话端点仍走 refresh——
+  // 此前 `!path.includes('/api/auth/')` 误伤 users/me：access cookie 过期（refresh 仍有效）
+  // 时 loadProfile 401 不 refresh → 被误判未登录踢回登录页。
+  if (resp.status === 401 && !path.includes('/api/auth/tokens/refresh')) {
     const ok = await refreshSession()
     if (ok) return fetch(path, { ...opts, headers, credentials: 'include' })
     window.dispatchEvent(new CustomEvent('paas:session-expired'))

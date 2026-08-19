@@ -35,7 +35,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
@@ -57,7 +57,7 @@ function goBack() {
 
 const stType = (s?: string) => ({ success: 'success', failed: 'danger', running: 'warning' } as Record<string, string>)[s ?? ''] ?? 'info'
 
-onMounted(async () => {
+async function load() {
   const resp = await fetchAuth(`/api/buildruns/${route.params.id}`)
   if (!resp.ok) {
     ElMessage.error('构建不存在')
@@ -65,7 +65,10 @@ onMounted(async () => {
   }
   const j = await resp.json()
   build.value = j?.data ?? j
-})
+}
+onMounted(load)
+// 同路由不同 id 复用组件（详情互链点另一构建）时重载
+watch(() => route.params.id, () => load())
 </script>
 
 <style scoped>

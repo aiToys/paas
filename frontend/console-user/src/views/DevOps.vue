@@ -4,7 +4,7 @@
 // 打开就知道该干什么。其余六 tab 是档案室（排障视角的全量单据）：运行/变更/批次/构建/镜像/发布，
 // 每行可进独立详情页（/devops/{runs|changes|batches|builds|releases}/:id），详情间有链路串联。
 // 发布回滚走 useDangerConfirm（生产按目标 env.type 显式 isProd，覆盖顶栏 scope）。
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
@@ -30,8 +30,13 @@ interface Release {
 const router = useRouter()
 const route = useRoute()
 const envStore = useEnvStore()
-// ?tab= 深链支持（详情页跳转定位，如构建详情→镜像库）
+// ?tab= 深链支持（详情页跳转定位，如构建详情→镜像库）+ 切换写回 URL（刷新/分享保持 tab）
 const tab = ref((route.query.tab as string) || 'board')
+watch(tab, (t) => {
+  if ((route.query.tab as string || 'board') !== t) {
+    router.replace({ query: { ...route.query, tab: t === 'board' ? undefined : t } })
+  }
+})
 const builds = ref<BuildRun[]>([])
 // 镜像库实时视图：registry v2 catalog（PAAS_REGISTRY 配置的镜像仓库），展开行按需加载 tag + digest
 const registryRepos = ref<{ name: string }[]>([])
@@ -149,7 +154,6 @@ function currentStageName(r: PipelineRun): string {
 async function load() {
   loading.value = true
   try {
-    if (!envStore.envs.length) await envStore.loadEnvs()
     await Promise.all([
       loadBuilds(), loadRegistry(), loadReleases(), loadAppNames(), loadRuns(),
       loadChanges(), loadBatches(), loadNotifications(),
@@ -216,7 +220,8 @@ function shortDigest(d: string) {
   return d && d.length > 19 ? d.slice(0, 19) + '…' : (d || '—')
 }
 
-onMounted(load)
+// 环境列表一次性加载（此前嵌在轮询的 load() 里，环境为空/失败时每 10s 重发）
+onMounted(async () => { await envStore.loadEnvs(); load() })
 </script>
 
 <template>

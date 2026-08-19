@@ -25,16 +25,25 @@ export const useSessionStore = defineStore('session', () => {
   const profile = ref<UserProfile | null>(null)
   const loaded = ref(false)
 
+  let inflight: Promise<boolean> | null = null
   async function loadProfile(): Promise<boolean> {
-    try {
-      profile.value = await fetchJSON<UserProfile>('/api/auth/users/me')
-      loaded.value = true
-      return true
-    } catch {
-      profile.value = null
-      loaded.value = true
-      return false
-    }
+    // 并发去重：路由守卫对每次导航都可能在 loaded 未置前调用（如刷新后连续跳转），
+    // 不去重会同时发多个 /users/me。
+    if (inflight) return inflight
+    inflight = (async () => {
+      try {
+        profile.value = await fetchJSON<UserProfile>('/api/auth/users/me')
+        loaded.value = true
+        return true
+      } catch {
+        profile.value = null
+        loaded.value = true
+        return false
+      } finally {
+        inflight = null
+      }
+    })()
+    return inflight
   }
 
   async function login(username: string, password: string): Promise<void> {

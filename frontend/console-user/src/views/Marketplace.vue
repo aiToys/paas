@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import { fetchAuth } from '@/api'
@@ -82,13 +82,20 @@ const categories = [
   { key: 'embed', label: 'Embedding' },
 ] as const
 
-const activeCat = ref<string>('all')
+const route = useRoute()
+const router = useRouter()
+
+// 分类进 URL（?cat=）：刷新/分享保持筛选；点击分类时写回
+const activeCat = ref<string>((route.query.cat as string) || 'all')
+watch(activeCat, (c) => {
+  if ((route.query.cat as string || 'all') !== c) {
+    router.replace({ query: { ...route.query, cat: c === 'all' ? undefined : c } })
+  }
+})
 const filtered = computed(() => {
   const all = models.value.map((m) => ({ m, cat: categoryOf(m.capabilities) }))
   return activeCat.value === 'all' ? all : all.filter((x) => x.cat === activeCat.value)
 })
-
-const router = useRouter()
 function tryout(id: string) {
   router.push({ path: '/playground', query: { model: id } })
 }

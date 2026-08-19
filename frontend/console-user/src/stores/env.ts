@@ -25,12 +25,19 @@ export const useEnvStore = defineStore('env', () => {
   const isProd = computed(() => currentEnv.value?.type === 'prod')
   const currentEnvId = computed(() => currentEnv.value?.id ?? '')
 
-  async function loadEnvs() {
-    const resp = await fetchAuth('/api/environments')
-    if (resp.ok) {
-      const json = await resp.json()
-      envs.value = (json.data ?? []) as Env[]
-    }
+  let inflight: Promise<void> | null = null
+  async function loadEnvs(): Promise<void> {
+    // 并发去重：多视图 onMounted 同时调（Applications/Workloads/DevOps/Observability），
+    // 不去重登录后首屏最多 3-4 路重复 /api/environments。
+    if (inflight) return inflight
+    inflight = (async () => {
+      const resp = await fetchAuth('/api/environments')
+      if (resp.ok) {
+        const json = await resp.json()
+        envs.value = (json.data ?? []) as Env[]
+      }
+    })().finally(() => { inflight = null })
+    return inflight
   }
 
   // switchEnv 切换当前环境。生产需二次确认 + 启动超时计时。
