@@ -35,6 +35,7 @@ func (f *fakeRepo) UpdateImage(ctx context.Context, id, image, imageRef string) 
 func (f *fakeRepo) UpdateSchedule(ctx context.Context, id, schedule string) (Workload, error) {
 	return Workload{ID: id, Schedule: schedule}, nil
 }
+func (f *fakeRepo) SetServiceID(ctx context.Context, id, serviceID string) error { return nil }
 func (f *fakeRepo) Delete(ctx context.Context, id string) error {
 	f.deleted = append(f.deleted, id)
 	return nil

@@ -48,6 +48,15 @@ func (s *stubRepo) Update(_ context.Context, id string, r int, st string) (Workl
 	return Workload{}, errNotFound
 }
 func (s *stubRepo) Delete(_ context.Context, id string) error { s.deleted = id; return nil }
+func (s *stubRepo) SetServiceID(_ context.Context, id, serviceID string) error {
+	for i, w := range s.list {
+		if w.ID == id {
+			s.list[i].ServiceID = serviceID
+			return nil
+		}
+	}
+	return errNotFound
+}
 func (s *stubRepo) UpdateImage(_ context.Context, id, image, imageRef string) (Workload, error) {
 	for _, w := range s.list {
 		if w.ID == id {

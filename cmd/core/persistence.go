@@ -191,6 +191,8 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		} else if n == 0 {
 			seedWorkloads(ctx, wlRepo)
 		}
+		// 存量回填：为无 ServiceID 的既有工作负载幂等建 Service 实体（两路径同源，失败不阻断启动）。
+		backfillTenantIDs(ctx, idb, svcRepo, wlRepo)
 		log.Println("持久化后端: PostgreSQL（全 11 模块已迁移）")
 
 		stores := &Stores{
@@ -263,6 +265,8 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 	pipelineStore := pipeline.NewMemoryStore()
 	changeRepo := change.NewMemoryStore()
 	svcRepo := svcmemory.NewStore()
+	// 存量回填：为无 ServiceID 的既有工作负载幂等建 Service 实体（两路径同源，失败不阻断启动）。
+	backfillTenantIDs(ctx, idb, svcRepo, wlRepo)
 	// 平台预置流水线模板（全租户共享，不门控 demo seed，生产也需预置）
 	if err := pipeline.SeedTemplates(ctx, pipelineStore); err != nil {
 		log.Printf("[seed] pipeline 模板失败: %v", err)

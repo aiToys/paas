@@ -209,6 +209,24 @@ func (s *Store) UpdateSchedule(ctx context.Context, id, schedule string) (worklo
 	return w, nil
 }
 
+// SetServiceID 回填服务实体关联（存量回填/新部署写入）。
+// 跨租户访问返回 not found（不泄漏）。
+func (s *Store) SetServiceID(ctx context.Context, id, serviceID string) error {
+	tid, err := tenant.IDOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w, hit := s.workloads[id]
+	if !hit || w.TenantID != tid {
+		return fmt.Errorf("工作负载不存在: %s", id)
+	}
+	w.ServiceID = serviceID
+	s.workloads[id] = w
+	return nil
+}
+
 func (s *Store) Delete(ctx context.Context, id string) error {
 	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {

@@ -234,6 +234,24 @@ func (s *Store) UpdateSchedule(ctx context.Context, id, schedule string) (worklo
 }
 
 // Delete 删除指定工作负载。跨租户访问返回 not found（不泄漏）。
+// SetServiceID 回填服务实体关联（存量回填/新部署写入）。
+// 跨租户访问返回 not found（不泄漏）。
+func (s *Store) SetServiceID(ctx context.Context, id, serviceID string) error {
+	tid, err := pg.TenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	tag, err := s.db.Pool().Exec(ctx,
+		`UPDATE workloads SET service_id=$3 WHERE id=$1 AND tenant_id=$2`, id, tid, serviceID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("工作负载不存在: %s", id)
+	}
+	return nil
+}
+
 func (s *Store) Delete(ctx context.Context, id string) error {
 	tid, err := pg.TenantOrErr(ctx)
 	if err != nil {
