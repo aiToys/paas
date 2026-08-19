@@ -70,6 +70,7 @@ func BuiltinRoles() map[string]Role {
 		"tenant-admin": {Name: "tenant-admin", Permissions: []Permission{"tenant:admin", "prod:write"}},
 		"developer": {Name: "developer", Permissions: []Permission{
 			"application:read", "application:write", "binding:write",
+			"service:read", "service:write",
 			"workload:read", "workload:write",
 			"environment:read", "environment:write",
 			"repository:read", "repository:write",
@@ -91,7 +92,7 @@ func BuiltinRoles() map[string]Role {
 			// 无 prod:write：developer 在生产环境只读，防误操作
 		}},
 		"viewer": {Name: "viewer", Permissions: []Permission{
-			"application:read", "workload:read", "environment:read", "model:read",
+			"application:read", "service:read", "workload:read", "environment:read", "model:read",
 			"repository:read", "build:read", "image:read", "release:read", "pipeline:read", "config:read", "governance:read", "observability:read", "security:read", "billing:read", "dataservice:read", "kb:read", "tool:read", "prompt:read", "agent:read",
 		}},
 		// app-llm 是应用级 API Key 的最小角色（绑模型时自动生成 Key 用）：

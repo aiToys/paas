@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -275,5 +274,3 @@ func (s *Store) ServicesCount(ctx context.Context) (int, error) {
 	err := s.db.Pool().QueryRow(ctx, `SELECT COUNT(*) FROM services`).Scan(&n)
 	return n, err
 }
-
-var _ = fmt.Sprintf // 保留 fmt 引用占位（错误消息构造如需可扩展）

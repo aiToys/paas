@@ -52,6 +52,7 @@ import (
 	"github.com/aitoys/paas/internal/observability"
 	"github.com/aitoys/paas/internal/observability/tracing"
 	"github.com/aitoys/paas/internal/security"
+	"github.com/aitoys/paas/internal/service"
 	"github.com/aitoys/paas/internal/web"
 	"github.com/aitoys/paas/internal/workload"
 	"github.com/aitoys/paas/pkg/plugin"
@@ -567,6 +568,13 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	appconfigHandler := appconfig.NewHandler(stores.AppConfig, appconfig.WithEnvResolver(stores.Environment))
 	appconfigHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
+	// 服务实体（用户声明的服务定义，应用 → 服务 → 环境模型）：写操作记审计。
+	svcHandler := service.NewHandler(stores.Service,
+		service.WithAudit(&identityAuditAdapter{store: stores.Security}),
+		service.WithActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
+	)
+	svcHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+
 	// 服务治理（注册中心 = 平台能力横切）：注入 environment store（prod 写校验）+
 	// 数据面实例发现器（服务详情按 Service.Name 返真实 K8s Endpoint ready 实例）。
 	govHandler := governance.NewHandler(stores.Governance,
@@ -740,6 +748,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 					return
 				case "configs":
 					appconfigHandler.ServeHTTP(w, r)
+					return
+				case "services":
+					svcHandler.ServeHTTP(w, r)
 					return
 				}
 			}
@@ -965,6 +976,21 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("DELETE", "/api/applications/{id}/bindings/{type}/{name}",
 		apiroute.Tags("应用"), apiroute.Summary("解绑应用资源"), apiroute.Perm("binding:write"),
 		apiroute.WithResp(application.Application{}))
+	// 服务实体（composite 内部派发，mux 粗粒度已注册，spec 补逻辑操作）
+	reg.Operation("GET", "/api/applications/{id}/services",
+		apiroute.Tags("服务"), apiroute.Summary("应用下服务列表"), apiroute.Perm("service:read"),
+		apiroute.WithResp([]service.Service{}))
+	reg.Operation("POST", "/api/applications/{id}/services",
+		apiroute.Tags("服务"), apiroute.Summary("创建服务"), apiroute.Perm("service:write"),
+		apiroute.WithReqBody(service.Service{}), apiroute.WithResp(service.Service{}))
+	reg.Operation("GET", "/api/applications/{id}/services/{sid}",
+		apiroute.Tags("服务"), apiroute.Summary("服务详情"), apiroute.Perm("service:read"),
+		apiroute.WithResp(service.Service{}))
+	reg.Operation("PUT", "/api/applications/{id}/services/{sid}",
+		apiroute.Tags("服务"), apiroute.Summary("更新服务"), apiroute.Perm("service:write"),
+		apiroute.WithReqBody(service.Service{}), apiroute.WithResp(service.Service{}))
+	reg.Operation("DELETE", "/api/applications/{id}/services/{sid}",
+		apiroute.Tags("服务"), apiroute.Summary("删除服务"), apiroute.Perm("service:write"))
 	// 环境（同上：mux 粗粒度注册，spec 补逻辑操作）
 	reg.Operation("GET", "/api/environments",
 		apiroute.Tags("环境"), apiroute.Summary("列出环境"), apiroute.Perm("environment:read"),

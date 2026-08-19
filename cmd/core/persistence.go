@@ -70,6 +70,9 @@ import (
 	"github.com/aitoys/paas/internal/security"
 	secmemory "github.com/aitoys/paas/internal/security/memory"
 	secpg "github.com/aitoys/paas/internal/security/pg"
+	"github.com/aitoys/paas/internal/service"
+	svcmemory "github.com/aitoys/paas/internal/service/memory"
+	svcpg "github.com/aitoys/paas/internal/service/pg"
 	storagepg "github.com/aitoys/paas/internal/storage/pg"
 	"github.com/aitoys/paas/internal/workload"
 	wlmemory "github.com/aitoys/paas/internal/workload/memory"
@@ -112,6 +115,7 @@ type Stores struct {
 	Eval           eval.Repository
 	Pipeline       pipeline.Store
 	Change         change.Repository
+	Service        service.Repository
 }
 
 // buildAllStores 选择持久化后端、构造全模块 store 并完成 seed。
@@ -170,6 +174,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		bkRepo := backup.Repository(bkmemory.NewStore())
 		pipelineStore := pipeline.NewPGStore(db.Pool())
 		changeRepo := changepg.NewStore(db)
+		svcRepo := svcpg.NewStore(db)
 
 		seedPGAllIfEmpty(ctx, idb, appRepo, envRepo, appcfgRepo, rawDs, rawWl,
 			devopsRepo, govRepo, ccRepo, billingRepo, secRepo)
@@ -214,6 +219,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 			Eval:           evalRepo,
 			Pipeline:       pipelineStore,
 			Change:         changeRepo,
+			Service:        svcRepo,
 		}
 		return stores, db.Close, nil
 	}
@@ -256,6 +262,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 	bkRepo := backup.Repository(bkmemory.NewStore())
 	pipelineStore := pipeline.NewMemoryStore()
 	changeRepo := change.NewMemoryStore()
+	svcRepo := svcmemory.NewStore()
 	// 平台预置流水线模板（全租户共享，不门控 demo seed，生产也需预置）
 	if err := pipeline.SeedTemplates(ctx, pipelineStore); err != nil {
 		log.Printf("[seed] pipeline 模板失败: %v", err)
@@ -288,6 +295,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		Eval:           evalmemory.NewStore(),
 		Pipeline:       pipelineStore,
 		Change:         changeRepo,
+		Service:        svcRepo,
 	}
 	return stores, nil, nil
 }
