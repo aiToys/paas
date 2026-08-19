@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import { fetchAuth, fetchJSON } from '@/api'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
+import AppServices from './app-tabs/AppServices.vue'
 import AppRepositories from './app-tabs/AppRepositories.vue'
 import AppPipelines from './app-tabs/AppPipelines.vue'
 import AppChanges from './app-tabs/AppChanges.vue'
@@ -262,14 +263,15 @@ async function unbind(b: Binding) {
 
 // tab 视觉分组（运行态/资源/DevOps）：防 10 tab 平铺膨胀。
 const tabGroups = [
-  { label: '运行态', tabs: ['概览', '部署', '服务治理', '可观测'] as const },
+  { label: '运行态', tabs: ['服务', '概览', '部署', '服务治理', '可观测'] as const },
   { label: '资源', tabs: ['资源绑定', '配置', '用量'] as const },
   { label: 'DevOps', tabs: ['流水线', '变更', '代码仓库', '构建', '镜像', '发布'] as const },
 ]
-type TabName = '概览' | '部署' | '服务治理' | '可观测' | '资源绑定' | '配置' | '用量' | '流水线' | '变更' | '代码仓库' | '构建' | '镜像' | '发布'
+type TabName = '服务' | '概览' | '部署' | '服务治理' | '可观测' | '资源绑定' | '配置' | '用量' | '流水线' | '变更' | '代码仓库' | '构建' | '镜像' | '发布'
 
 // tab 名 ↔ URL query 值的双向映射（query 用英文短名，避免中文 URL 编码臃肿 + 利于分享）。
 const TAB_TO_Q: Record<TabName, string> = {
+  服务: 'services',
   概览: 'overview',
   部署: 'deploy',
   服务治理: 'governance',
@@ -289,7 +291,7 @@ const Q_TO_TAB: Record<string, TabName> = Object.fromEntries(
 ) as Record<string, TabName>
 
 // activeTab 与 URL ?tab= 双向同步：初始化从 query 读（分享/刷新直达指定 tab），切换时写回 query。
-const activeTab = ref<TabName>(Q_TO_TAB[(route.query.tab as string) ?? ''] ?? '概览')
+const activeTab = ref<TabName>(Q_TO_TAB[(route.query.tab as string) ?? ''] ?? '服务')
 watch(activeTab, (t) => {
   const q = TAB_TO_Q[t]
   // 仅在 query 缺失或不一致时 replace（避免每帧推历史致后退栈膨胀）。
@@ -301,7 +303,7 @@ watch(activeTab, (t) => {
 watch(
   () => route.query.tab,
   (q) => {
-    const t = Q_TO_TAB[(q as string) ?? ''] ?? '概览'
+    const t = Q_TO_TAB[(q as string) ?? ''] ?? '服务'
     if (t !== activeTab.value) activeTab.value = t
   },
 )
@@ -468,6 +470,11 @@ async function deleteApp() {
             </div>
           </div>
         </section>
+      </div>
+
+      <!-- 服务（应用组成单元，Phase 1 置顶默认） -->
+      <div v-if="activeTab === '服务'">
+        <AppServices :app-id="app.id" />
       </div>
 
       <!-- 概览 = 真实工作台 -->

@@ -3,7 +3,7 @@
 import { fetchAuth } from '@/api'
 
 export interface Workload {
-  id: string; appId: string; envId: string; laneId: string; service?: string
+  id: string; appId: string; envId: string; laneId: string; service?: string; serviceId?: string
   type: 'service' | 'job' | 'cronjob'; name: string
   image: string; imageRef?: string; replicas: number; ready: number; status: string; createdAt?: string
   schedule?: string; command?: string; port?: number; containerPort?: number; domain?: string
