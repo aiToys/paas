@@ -228,3 +228,68 @@ func writeSSE(w http.ResponseWriter, v interface{}) {
 	b, _ := json.Marshal(map[string]interface{}{"choices": []interface{}{v}})
 	_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
 }
+
+// embedReq 是 OpenAI 兼容 /v1/embeddings 请求体。
+type embedReq struct {
+	Model string   `json:"model"`
+	Input []string `json:"input"`
+}
+
+// Embeddings 实现 OpenAI 兼容 /v1/embeddings（供应用向量化：RAG 语义搜索等）。
+// 与 ChatCompletions 同款 failover：通道错误按 offline/degraded 切换；全部失败 503 脱敏。
+// 仅支持 Embedder 能力的通道（OpenAICompatibleProvider），无 Embed 实现的通道跳过。
+func Embeddings(gw *Gateway) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		var req embedReq
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+		if req.Model == "" || len(req.Input) == 0 {
+			httputil.WriteError(w, http.StatusBadRequest, "model 与 input 必填")
+			return
+		}
+		if len(req.Input) > 64 {
+			httputil.WriteError(w, http.StatusBadRequest, "input 单次上限 64 条")
+			return
+		}
+		channels, err := gw.ResolveChannels(req.Model)
+		if err != nil {
+			httputil.WriteServiceError(w, http.StatusNotFound, err)
+			return
+		}
+		var lastErr error
+		for _, ch := range channels {
+			impl := ch.Impl()
+			embedder, ok := impl.(provider.Embedder)
+			if impl == nil || !ok {
+				continue // 该通道不支持向量化，切下一通道
+			}
+			vecs, embedErr := embedder.Embed(r.Context(), req.Input)
+			if embedErr != nil {
+				if isOfflineErr(embedErr) {
+					gw.MarkChannelStatus(req.Model, ch.ID, provider.StatusOffline)
+				} else {
+					gw.MarkChannelStatus(req.Model, ch.ID, provider.StatusDegraded)
+				}
+				lastErr = embedErr
+				continue
+			}
+			// OpenAI 兼容协议固定形态（data 按 index 排序，object=list），不走平台 {data:T} 契约。
+			data := make([]map[string]any, len(vecs))
+			for i, v := range vecs {
+				data[i] = map[string]any{"object": "embedding", "index": i, "embedding": v}
+			}
+			httputil.WriteJSON(w, http.StatusOK, map[string]any{
+				"object": "list", "model": req.Model, "data": data,
+			})
+			return
+		}
+		if lastErr == nil {
+			lastErr = fmt.Errorf("model %q 无支持向量化的通道", req.Model)
+		}
+		log.Printf("[gateway] %s %s 全部通道不可用: %v", r.Method, r.URL.Path, lastErr) //nolint:gosec // 请求 method/path 入日志是标准实践
+		httputil.WriteError(w, http.StatusServiceUnavailable, "embedding unavailable")
+	}
+}

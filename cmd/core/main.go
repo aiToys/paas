@@ -427,6 +427,10 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Register("GET", "/v1/models", auth(gateway.Require("model:read")(gateway.ListModels(gw))),
 		apiroute.Tags("MaaS"), apiroute.Summary("OpenAI 兼容模型列表"),
 		apiroute.Perm("model:read"), apiroute.WithResp(nil))
+	// /v1/embeddings（OpenAI 兼容向量化，供应用 RAG 语义搜索；model:infer 与 chat 同权）。
+	reg.Register("POST", "/v1/embeddings", auth(gateway.Require("model:infer")(gateway.Embeddings(gw))),
+		apiroute.Tags("MaaS"), apiroute.Summary("向量化（OpenAI 兼容，RAG/语义搜索用）"),
+		apiroute.Perm("model:infer"))
 	reg.Register("GET", "/api/models", auth(gateway.Require("model:read")(gateway.CatalogModels(gw))),
 		apiroute.Tags("MaaS"), apiroute.Summary("模型市场富信息（含通道）"),
 		apiroute.Perm("model:read"), apiroute.WithResp(nil))
