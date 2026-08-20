@@ -291,11 +291,25 @@ func parseJaegerTrace(jt jaegerTrace) (observability.Trace, bool) {
 			startMs = (sp.StartTime - minStart) / 1000 // us → ms（相对 trace 起点偏移）
 		}
 		durMs = sp.Duration / 1000
+		// span.kind（server=入口/client=出站）+ client span 的真实对端。
+		// 区分「谁发起调用、谁被调用」：client span 的 service.name 是调用方，
+		// 真实下游取 peer.service > db.system > server.address（redis/db 等中间件无 peer.service）。
+		kind := tagStr(sp.Tags, "span.kind")
+		peer := tagStr(sp.Tags, "peer.service")
+		if peer == "" {
+			if db := tagStr(sp.Tags, "db.system"); db != "" {
+				peer = db
+			} else {
+				peer = tagStr(sp.Tags, "server.address")
+			}
+		}
 		spans = append(spans, observability.Span{
 			ID:           sp.SpanID,
 			ParentID:     parent,
 			Operation:    sp.OperationName,
 			Service:      svc,
+			Kind:         kind,
+			Peer:         peer,
 			StartMs:      startMs,
 			DurationMs:   durMs,
 			IsError:      isErr,

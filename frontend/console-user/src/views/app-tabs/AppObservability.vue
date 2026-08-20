@@ -21,6 +21,7 @@ import { useUrlState } from '@/composables/useUrlState'
 import {
   type Span, type Trace,
   buildSpanTree, flattenSpanTree, spanWidth, spanLeft, spanChips, errSpanCount,
+  spanKindBadge, spanServiceLabel,
 } from '@/composables/useSpanTree'
 
 type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
@@ -322,7 +323,8 @@ watch(() => props.bindings, () => loadDeps(), { deep: true })
                     <div class="span-row">
                       <span class="span-bar" :style="{ width: spanWidth(node.span, row) + '%', left: spanLeft(node.span, row) + '%' }" />
                       <span v-if="node.depth > 0" class="span-tree-line" />
-                      <span class="mono span-svc">{{ node.span.service }}</span>
+                      <span v-if="spanKindBadge(node.span.kind)" class="span-kind" :title="spanKindBadge(node.span.kind)!.title">{{ spanKindBadge(node.span.kind)!.text }}</span>
+                      <span class="mono span-svc">{{ spanServiceLabel(node.span) }}</span>
                       <span class="span-op">{{ node.span.operation }}</span>
                       <span class="mono span-dur">{{ node.span.durationMs }}ms</span>
                       <el-tag v-if="node.span.isError" type="danger" size="small" effect="dark">
@@ -456,6 +458,7 @@ watch(() => props.bindings, () => loadDeps(), { deep: true })
 /* 瀑布条：绝对定位甘特条贴行底，left=startMs%，width=durationMs%（时间轴对齐，一眼看串行/并行/等待） */
 .span-bar { position: absolute; left: 0; bottom: 0; height: 4px; width: 0; background: rgba(99, 102, 241, 0.5); border-radius: 3px; z-index: 0; }
 .span-err .span-bar { background: rgba(239, 68, 68, 0.55); }
+.span-kind { flex-shrink: 0; font-size: 11px; padding: 0 5px; border-radius: 3px; background: rgba(99, 102, 241, 0.12); color: var(--brand); position: relative; z-index: 1; cursor: help; }
 .span-svc { color: var(--brand); min-width: 100px; position: relative; z-index: 1; }
 .span-op { flex: 1; color: var(--text-dim); position: relative; z-index: 1; }
 .span-dur { color: var(--text-faint); position: relative; z-index: 1; }

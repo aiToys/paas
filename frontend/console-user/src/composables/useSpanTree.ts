@@ -10,6 +10,8 @@ export interface Span {
   parentId?: string
   operation: string
   service: string
+  kind?: string // OTel span.kind：server（入口）/ client（出站调用）/ producer / consumer / internal
+  peer?: string // client span 的真实对端（peer.service > db.system > server.address）
   startMs: number
   durationMs: number
   tags?: Record<string, string>
@@ -139,4 +141,27 @@ export function spanChips(sp: Span): { label: string; v: string; err?: boolean }
 /** errSpanCount：错误 span 计数（trace 列表「状态」列旁显「异常 2/3」便于定位）。 */
 export function errSpanCount(row: Trace): number {
   return (row.spans || []).filter((s) => s.isError).length
+}
+
+/**
+ * spanKindBadge：span.kind 徽标（区分入口/出站调用，Jaeger UI 同款语义）。
+ * server ⇅ 入口 / client → 出站 / producer ◀ 生产 / consumer ▶ 消费 / internal 省略。
+ */
+export function spanKindBadge(kind?: string): { text: string; title: string } | null {
+  switch (kind) {
+    case 'server': return { text: '⇅ 入口', title: 'server：本服务接收的入口请求' }
+    case 'client': return { text: '→ 出站', title: 'client：本服务发起的出站调用' }
+    case 'producer': return { text: '◀ 生产', title: 'producer：消息生产' }
+    case 'consumer': return { text: '▶ 消费', title: 'consumer：消息消费' }
+    default: return null
+  }
+}
+
+/**
+ * spanServiceLabel：span 服务列文案——client span 显示「调用方 → 真实对端」。
+ * 如 bff 的 redis client span 显示「bff → redis」，而非只显示调用方 bff（对端语义丢失）。
+ */
+export function spanServiceLabel(sp: Span): string {
+  if (sp.kind === 'client' && sp.peer) return `${sp.service} → ${sp.peer}`
+  return sp.service
 }

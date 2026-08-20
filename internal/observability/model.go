@@ -217,8 +217,10 @@ type Span struct {
 	ParentID     string            `json:"parentId,omitempty"`
 	Operation    string            `json:"operation"`
 	Service      string            `json:"service"`
-	StartMs      int64             `json:"startMs"`    // 相对 trace 起点的偏移（ms）
-	DurationMs   int64             `json:"durationMs"` // 本 span 时长（ms）
+	Kind         string            `json:"kind,omitempty"` // OTel span.kind：server（入口）/ client（出站调用）/ producer / consumer / internal
+	Peer         string            `json:"peer,omitempty"` // client span 的真实对端（peer.service > db.system > server.address），如 bff client span 显示「bff → redis」
+	StartMs      int64             `json:"startMs"`        // 相对 trace 起点的偏移（ms）
+	DurationMs   int64             `json:"durationMs"`     // 本 span 时长（ms）
 	IsError      bool              `json:"isError,omitempty"`
 	ErrorType    string            `json:"errorType,omitempty"`
 	ErrorMessage string            `json:"errorMessage,omitempty"`

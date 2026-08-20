@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/aitoys/paas/internal/observability"
 )
 
 // TestTracesStoreAppLevelByServiceName：应用级查询经 lister 解析 app→工作负载名，按 service 查 Jaeger。
@@ -228,5 +230,50 @@ func TestTracesStoreFiltersProbeNoise(t *testing.T) {
 		if tr.ID == "probe-1" {
 			t.Fatalf("probe-1 应被排除: %+v", out)
 		}
+	}
+}
+
+// TestParseJaegerTraceSpanKindAndPeer：span.kind（server/client）与 client span 对端
+// （peer.service > db.system > server.address）提取——区分「谁发起调用、谁被调用」，
+// redis client 调用显示「bff → redis」而非只显示调用方 bff。
+func TestParseJaegerTraceSpanKindAndPeer(t *testing.T) {
+	tr, _ := parseJaegerTrace(jaegerTrace{
+		TraceID: "t-kind",
+		Processes: map[string]jaegerProc{
+			"p-bff": {ServiceName: "bff"},
+		},
+		Spans: []jaegerSpan{
+			{SpanID: "s-srv", OperationName: "GET /api/products", StartTime: 1719500000000000, Duration: 5000, ProcessID: "p-bff",
+				Tags: []jaegerTag{{Key: "span.kind", Type: "string", Value: json.RawMessage(`"server"`)}}},
+			{SpanID: "s-redis", OperationName: "redis.get", StartTime: 1719500000000001, Duration: 2000, ProcessID: "p-bff",
+				References: []jaegerRef{{RefType: "CHILD_OF", SpanID: "s-srv"}},
+				Tags: []jaegerTag{
+					{Key: "span.kind", Type: "string", Value: json.RawMessage(`"client"`)},
+					{Key: "db.system", Type: "string", Value: json.RawMessage(`"redis"`)},
+				}},
+			{SpanID: "s-http", OperationName: "GET", StartTime: 1719500000000002, Duration: 1000, ProcessID: "p-bff",
+				References: []jaegerRef{{RefType: "CHILD_OF", SpanID: "s-srv"}},
+				Tags: []jaegerTag{
+					{Key: "span.kind", Type: "string", Value: json.RawMessage(`"client"`)},
+					{Key: "peer.service", Type: "string", Value: json.RawMessage(`"product"`)},
+					{Key: "server.address", Type: "string", Value: json.RawMessage(`"product.paas.svc"`)},
+				}},
+		},
+	})
+
+	byID := map[string]observability.Span{}
+	for _, sp := range tr.Spans {
+		byID[sp.ID] = sp
+	}
+	if s := byID["s-srv"]; s.Kind != "server" || s.Peer != "" {
+		t.Fatalf("server span kind/peer 解析错误: %+v", s)
+	}
+	// db.system 兜底：redis client span 无 peer.service，取 db.system=redis
+	if s := byID["s-redis"]; s.Kind != "client" || s.Peer != "redis" {
+		t.Fatalf("redis client span 应 kind=client peer=redis: %+v", s)
+	}
+	// peer.service 优先于 server.address
+	if s := byID["s-http"]; s.Kind != "client" || s.Peer != "product" {
+		t.Fatalf("http client span 应 kind=client peer=product（peer.service 优先）: %+v", s)
 	}
 }
