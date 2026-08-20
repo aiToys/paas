@@ -50,6 +50,9 @@ func (a *identityAuditAdapter) Record(ctx context.Context, tenantID, actor, acti
 	}
 	ctx = tenant.WithTenant(ctx, tenantID)
 	return a.store.RecordAudit(ctx, security.AuditLog{
+		// ID 必须显式生成（audit_logs 主键无默认值，空串第二条起全部主键冲突静默丢——
+		// identity/service/pipeline/change/billing 五处审计共用本 adapter，全受影响）。
+		ID:           "al-" + randHex(10),
 		Actor:        actor,
 		Action:       action,
 		ResourceType: resourceType,
