@@ -242,7 +242,7 @@ func TestReconcileNATS(t *testing.T) {
 func TestEngineImageLightEngines(t *testing.T) {
 	cases := map[string]string{
 		"vector|qdrant":        "qdrant/qdrant:v1.12.4",
-		"search|meilisearch":   "meilisearch/meilisearch:v1.10",
+		"search|meilisearch":   "getmeili/meilisearch:v1.22.1",
 		"vector|milvus":        "", // 已弃用重型引擎返空 -> reconciler 走 failed
 		"search|elasticsearch": "",
 	}
@@ -340,7 +340,7 @@ func TestReconcileMeilisearch(t *testing.T) {
 	var sts appsv1.StatefulSet
 	_ = cl.Get(context.Background(), types.NamespacedName{Name: "ds-meili", Namespace: "default"}, &sts)
 	c := sts.Spec.Template.Spec.Containers[0]
-	if c.Image != "meilisearch/meilisearch:v1.10" {
+	if c.Image != "getmeili/meilisearch:v1.22.1" {
 		t.Fatalf("meilisearch 镜像错误: %s", c.Image)
 	}
 	if c.Ports[0].ContainerPort != 7700 {

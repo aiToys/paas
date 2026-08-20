@@ -58,7 +58,7 @@ func engineImage(kind, engine, registry string) string {
 		}
 	case "search":
 		if engine == "meilisearch" {
-			img = "meilisearch/meilisearch:v1.10"
+			img = "getmeili/meilisearch:v1.22.1"
 		}
 	}
 	if img == "" {
