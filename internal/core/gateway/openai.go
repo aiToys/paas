@@ -230,9 +230,27 @@ func writeSSE(w http.ResponseWriter, v interface{}) {
 }
 
 // embedReq 是 OpenAI 兼容 /v1/embeddings 请求体。
+// Input 兼容 OpenAI 协议两种形态：字符串（"text"）或数组（["a","b"]）——
+// RawMessage 收后 parseInput 归一化为 []string（客户端两种形态都常见）。
 type embedReq struct {
-	Model string   `json:"model"`
-	Input []string `json:"input"`
+	Model string          `json:"model"`
+	Input json.RawMessage `json:"input"`
+}
+
+// parseInput 把 OpenAI input 的字符串/数组两种形态归一化为 []string。
+func parseInput(raw json.RawMessage) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("input 必填")
+	}
+	var one string
+	if err := json.Unmarshal(raw, &one); err == nil {
+		return []string{one}, nil
+	}
+	var many []string
+	if err := json.Unmarshal(raw, &many); err == nil {
+		return many, nil
+	}
+	return nil, fmt.Errorf("input 需为字符串或字符串数组")
 }
 
 // Embeddings 实现 OpenAI 兼容 /v1/embeddings（供应用向量化：RAG 语义搜索等）。
@@ -246,11 +264,16 @@ func Embeddings(gw *Gateway) http.HandlerFunc {
 			httputil.WriteError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}
-		if req.Model == "" || len(req.Input) == 0 {
+		if req.Model == "" {
 			httputil.WriteError(w, http.StatusBadRequest, "model 与 input 必填")
 			return
 		}
-		if len(req.Input) > 64 {
+		inputs, err := parseInput(req.Input)
+		if err != nil || len(inputs) == 0 {
+			httputil.WriteError(w, http.StatusBadRequest, "model 与 input 必填")
+			return
+		}
+		if len(inputs) > 64 {
 			httputil.WriteError(w, http.StatusBadRequest, "input 单次上限 64 条")
 			return
 		}
@@ -266,7 +289,7 @@ func Embeddings(gw *Gateway) http.HandlerFunc {
 			if impl == nil || !ok {
 				continue // 该通道不支持向量化，切下一通道
 			}
-			vecs, embedErr := embedder.Embed(r.Context(), req.Input)
+			vecs, embedErr := embedder.Embed(r.Context(), inputs)
 			if embedErr != nil {
 				if isOfflineErr(embedErr) {
 					gw.MarkChannelStatus(req.Model, ch.ID, provider.StatusOffline)
