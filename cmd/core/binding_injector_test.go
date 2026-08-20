@@ -89,3 +89,20 @@ func TestDSBindingInjectorOnBindUnbind(t *testing.T) {
 		}
 	}
 }
+
+// TestInjectKeysVectorSearch：vector(qdrant)/search(meilisearch) 绑定注入 QDRANT_*/MEILI_* env
+// （此前 injectKeys 只覆盖 db/cache/mq/storage 四类，vector/search 绑定后应用侧拿不到连接信息）。
+func TestInjectKeysVectorSearch(t *testing.T) {
+	vec := injectKeys(dataservice.DataService{Kind: dataservice.KindVector, Connection: map[string]string{
+		"uri": "http://shop-vector.paas-t-acme.svc.cluster.local:6333", "api_key": "qk-1",
+	}})
+	if len(vec) != 2 || vec[0].Key != "QDRANT_URL" || vec[1].Key != "QDRANT_API_KEY" {
+		t.Fatalf("vector 注入错误: %+v", vec)
+	}
+	sch := injectKeys(dataservice.DataService{Kind: dataservice.KindSearch, Connection: map[string]string{
+		"uri": "http://shop-search.paas-t-acme.svc.cluster.local:7700", "master_key": "mk-1",
+	}})
+	if len(sch) != 2 || sch[0].Key != "MEILI_URL" || sch[1].Key != "MEILI_MASTER_KEY" {
+		t.Fatalf("search 注入错误: %+v", sch)
+	}
+}

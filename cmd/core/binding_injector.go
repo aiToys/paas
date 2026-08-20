@@ -84,6 +84,18 @@ func injectKeys(ds dataservice.DataService) []struct{ Key, Value string } {
 			{"MINIO_ACCESS_KEY", ds.Connection["accessKey"]},
 			{"MINIO_SECRET_KEY", ds.Connection["secretKey"]},
 		}
+	case dataservice.KindVector:
+		// Qdrant：HTTP REST 6333 + x-api-key 鉴权。
+		return []struct{ Key, Value string }{
+			{"QDRANT_URL", ds.Connection["uri"]},
+			{"QDRANT_API_KEY", ds.Connection["api_key"]},
+		}
+	case dataservice.KindSearch:
+		// Meilisearch：HTTP 7700 + master key 鉴权。
+		return []struct{ Key, Value string }{
+			{"MEILI_URL", ds.Connection["uri"]},
+			{"MEILI_MASTER_KEY", ds.Connection["master_key"]},
+		}
 	}
 	return nil
 }
