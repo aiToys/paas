@@ -86,7 +86,9 @@ func buildMux(events *eventRing) *http.ServeMux {
 	mux.HandleFunc("/api/products", proxyTo("product", "/products"))        // GET 列表
 	mux.HandleFunc("/api/products/", proxyPrefixTo("product", "/products")) // GET /{id}
 	mux.HandleFunc("/api/recommend", proxyTo("recommend", "/recommend"))    // GET 推荐
-	mux.HandleFunc("/api/chat", chatProxy)                                  // POST SSE 透传
+	// 图片直读代理：minio 集群内 URL 浏览器不可达，经 bff 反代（公开读 bucket，无凭证）。
+	mux.HandleFunc("/images/", imageProxy)
+	mux.HandleFunc("/api/chat", chatProxy) // POST SSE 透传
 	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
 		limit := 20
 		if v := r.URL.Query().Get("limit"); v != "" {
@@ -229,6 +231,35 @@ func proxyPrefixTo(service, base string) http.HandlerFunc {
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(w, resp.Body)
 	}
+}
+
+// imageProxy 把 /images/<bucket>/<key> 反代到 minio 公开读（浏览器可达集群内对象）。
+// MINIO_ENDPOINT 未配（未绑 storage）返 503。
+func imageProxy(w http.ResponseWriter, r *http.Request) {
+	ep := os.Getenv("MINIO_ENDPOINT")
+	if ep == "" {
+		http.Error(w, "storage 未绑定", http.StatusServiceUnavailable)
+		return
+	}
+	key := strings.TrimPrefix(r.URL.Path, "/images/")
+	if key == "" || strings.Contains(key, "..") {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, ep+"/"+key, nil)
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		http.Error(w, "upstream unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer resp.Body.Close()
+	copyHeaders(w.Header(), resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
 }
 
 // chatProxy SSE 流式透传：按 data: 行透传 chatbot 的 SSE（含 reasoning_content）。

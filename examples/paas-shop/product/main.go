@@ -41,7 +41,7 @@ type Product struct {
 
 var db *sql.DB
 var pub *natspub.Publisher
-var cc *ccpull.Puller    // 配置中心动态拉取（PAAS_CONFIGCENTER_NS 未配则 nil）
+var cc *ccpull.Puller   // 配置中心动态拉取（PAAS_CONFIGCENTER_NS 未配则 nil）
 var vec *vector.Client  // 语义搜索（qdrant，降级可空）
 var mei *search.Client  // 全文搜索（meilisearch，降级可空）
 var sto *storage.Client // 图片上传（minio，降级可空）
@@ -80,6 +80,11 @@ func main() {
 	}
 	if err := sto.EnsureBucket(ctx(10)); err != nil {
 		slog.Warn("minio bucket 初始化失败（图片上传降级）", "err", err)
+	}
+	// qdrant collection 启动即建（幂等）：存量库也要（syncSeedToSearch 仅新库 seed 跑，
+	// 存量商品向量靠写路径逐步补，collection 必须先存在）。
+	if err := vec.EnsureCollection(ctx(15)); err != nil {
+		slog.Warn("qdrant collection 初始化失败（语义搜索降级）", "err", err)
 	}
 	if err := migrateAndSeed(ctx(10)); err != nil {
 		slog.Error("建表/seed 失败", "err", err)
@@ -276,12 +281,8 @@ func productsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func productDetailHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	idStr := r.URL.Path[len("/products/"):]
-	// POST /products/{id}/image -> 图片上传（minio 演示）
+	// POST /products/{id}/image -> 图片上传（minio 演示）。先于 GET-only 检查（POST 非法路径仍 405）。
 	if strings.HasSuffix(idStr, "/image") && r.Method == http.MethodPost {
 		idNum, err := strconv.Atoi(strings.TrimSuffix(idStr, "/image"))
 		if err != nil {
@@ -327,9 +328,6 @@ func syncSearchIndexes(ctx context.Context, p Product) {
 
 // syncSeedToSearch seed 后把存量商品同步进索引（best-effort；qdrant collection 需维度探测成功）。
 func syncSeedToSearch(ctx context.Context, seeds []Product) {
-	if err := vec.EnsureCollection(ctx); err != nil {
-		slog.Warn("qdrant collection 初始化失败（语义搜索降级）", "err", err)
-	}
 	for _, p := range seeds {
 		syncSearchIndexes(ctx, p)
 	}
@@ -462,13 +460,24 @@ func imageUploadHandler(w http.ResponseWriter, r *http.Request, id int) {
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	// 图片 URL 回写商品（前端详情抽屉展示）
+	// 图片 URL 回写商品（前端详情抽屉展示）。存 bff 代理相对路径 /images/<bucket>/<key>：
+	// minio 集群内 FQDN 浏览器不可达，bff imageProxy 反代（前端同域可达）。
 	_, _ = db.ExecContext(r.Context(), `ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url TEXT NOT NULL DEFAULT ''`)
 	_, err = db.ExecContext(r.Context(), `UPDATE products SET image_url=$1 WHERE id=$2`, url, id)
 	if err != nil {
 		slog.Warn("image_url 回写失败", "err", err)
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"url": url})
+	webURL := ""
+	if url != "" {
+		if u, err := urlParse(url); err == nil {
+			webURL = "/images/" + strings.Join(u[3:], "/") // http://host/bucket/key -> /images/bucket/key
+		}
+	}
+	// 回写用浏览器可达路径；响应返两个 URL（集群内 + web）。
+	if webURL != "" {
+		_, _ = db.ExecContext(r.Context(), `UPDATE products SET image_url=$1 WHERE id=$2`, webURL, id)
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"url": webURL, "internalUrl": url})
 }
 
 // publishProductEvent 发商品事件到 shop-events topic（NATS 降级时静默丢弃）。
@@ -488,6 +497,19 @@ func publishProductEvent(eventType string, p Product) {
 	} else {
 		slog.Info("发 NATS 事件", "type", eventType, "productId", p.ID)
 	}
+}
+
+// urlParse 极简 URL 拆段：[scheme,host,path...]，path 首段起拼（url.Parse 的轻量替身，示例够用）。
+func urlParse(u string) ([]string, error) {
+	if !strings.Contains(u, "://") {
+		return nil, fmt.Errorf("invalid url")
+	}
+	parts := strings.SplitN(u, "://", 2)
+	segs := append([]string{parts[0]}, strings.Split(parts[1], "/")...)
+	if len(segs) < 4 {
+		return nil, fmt.Errorf("url 缺 bucket/key")
+	}
+	return segs, nil
 }
 
 // stmtDigest SQL 语句摘要（截 80 字符）作 span 属性 db.statement——足够辨认语句，

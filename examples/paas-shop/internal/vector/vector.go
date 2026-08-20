@@ -42,7 +42,7 @@ func New() *Client {
 	c := &Client{
 		qdrantURL:  os.Getenv("QDRANT_URL"),
 		apiKey:     os.Getenv("QDRANT_API_KEY"),
-		embedModel: envOr("PAAS_EMBED_MODEL", "text-embedding-v3"),
+		embedModel: envOr("PAAS_EMBED_MODEL", "text-embedding-v4"),
 		http:       &http.Client{Timeout: 10 * time.Second},
 	}
 	base := os.Getenv("PAAS_LLM_BASE_URL")
