@@ -147,6 +147,20 @@ func (s *TracesStore) ListTraces(ctx context.Context, appID, status string, limi
 		merged = s.queryAllServices(ctx, start, end, limit)
 	}
 
+	// 噪音降权：单 span 且 0ms 的探活类 trace（如 mcp /mcp 健康检查）一次一批占满列表，
+	// 掩盖真实业务链路（dogfooding 实测 8 条探活刷屏）。不丢弃（直查 TraceID 仍可见），
+	// 仅在默认列表中排除——保留 >=2 span 或耗时 >0 的真实链路。
+	if len(merged) > 0 {
+		signal := merged[:0]
+		for _, t := range merged {
+			if len(t.Spans) <= 1 && t.DurationMs <= 0 {
+				continue
+			}
+			signal = append(signal, t)
+		}
+		merged = signal
+	}
+
 	sort.Slice(merged, func(i, j int) bool { return merged[i].StartedAt.After(merged[j].StartedAt) })
 	if len(merged) > limit {
 		merged = merged[:limit]

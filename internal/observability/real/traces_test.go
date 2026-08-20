@@ -191,3 +191,42 @@ func TestParseJaegerTraceEmptySpans(t *testing.T) {
 		t.Fatalf("空 span trace 解析错误: %+v hasErr=%v", tr, hasErr)
 	}
 }
+
+// TestTracesStoreFiltersProbeNoise：单 span 且 0ms 的探活 trace（如 mcp /mcp 健康检查）
+// 从默认列表排除（>=2 span 或耗时 >0 的保留），防刷屏掩盖业务链路。
+func TestTracesStoreFiltersProbeNoise(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{
+				// 探活噪音：单 span + 0 duration → 应被排除
+				{"traceID": "probe-1", "spans": []map[string]any{
+					{"spanID": "s-p1", "operationName": "POST /mcp", "startTime": 1719500000000000, "duration": 0, "processID": "p1", "tags": []map[string]any{}},
+				}, "processes": map[string]any{"p1": map[string]any{"serviceName": "s1"}}},
+				// 真实链路：多 span → 保留
+				{"traceID": "real-1", "spans": []map[string]any{
+					{"spanID": "s-r1", "operationName": "GET /api/products", "startTime": 1719500000000001, "duration": 4000, "processID": "p1", "tags": []map[string]any{}},
+					{"spanID": "s-r2", "operationName": "SELECT products", "startTime": 1719500000000002, "duration": 2000, "processID": "p1", "tags": []map[string]any{}},
+				}, "processes": map[string]any{"p1": map[string]any{"serviceName": "s1"}}},
+				// 单 span 但耗时 >0 → 保留
+				{"traceID": "slow-1", "spans": []map[string]any{
+					{"spanID": "s-s1", "operationName": "POST /api/chat", "startTime": 1719500000000003, "duration": 3130000, "processID": "p1", "tags": []map[string]any{}},
+				}, "processes": map[string]any{"p1": map[string]any{"serviceName": "s1"}}},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	s := NewTracesStore(srv.URL, &fakeLister{names: []string{"s1"}})
+	out, err := s.ListTraces(context.Background(), "app-x", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 2 {
+		t.Fatalf("探活噪音应被排除（3 条中留 2），got %d: %+v", len(out), out)
+	}
+	for _, tr := range out {
+		if tr.ID == "probe-1" {
+			t.Fatalf("probe-1 应被排除: %+v", out)
+		}
+	}
+}

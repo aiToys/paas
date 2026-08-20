@@ -266,10 +266,11 @@ func (r *WorkloadReconciler) applyDeployment(ctx context.Context, w *v1alpha1.Wo
 				corev1.EnvVar{Name: "PAAS_TENANT_ID", Value: w.Spec.TenantID},
 			)
 		}
-		// OTel trace 推送 endpoint（service 类型 Pod 自动建 tracer 推 Jaeger）。
+		// OTel trace 推送 endpoint（service/cronjob Pod 自动建 tracer 推 Jaeger）。
 		// 空则跳过（未配 OTEL 后端时应用 observ.Init noop，功能不受影响）。
 		// 与 DPToken 独立注入：可观测是横切能力，应用不接数据面也应有 trace。
-		if w.Spec.Type == "service" && r.OtelEndpoint != "" {
+		// cronjob 也注入：statsworker 等定时任务的执行链路同样需要可观测（dogfooding 实测 noop 缺口）。
+		if (w.Spec.Type == "service" || w.Spec.Type == "cronjob") && r.OtelEndpoint != "" {
 			c.Env = append(c.Env,
 				corev1.EnvVar{Name: "PAAS_OTEL_ENDPOINT", Value: r.OtelEndpoint},
 				corev1.EnvVar{Name: "PAAS_CLUSTER_ID", Value: r.ClusterID},
