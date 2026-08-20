@@ -8,7 +8,7 @@ import (
 func TestBuildSearchQueryAll(t *testing.T) {
 	// 无过滤：全量，limit 生效
 	q, args := buildSearchQuery("", "", 20)
-	want := "SELECT id,name,price,category,stock,description,created_at FROM products ORDER BY created_at DESC LIMIT $1"
+	want := "SELECT id,name,price,category,stock,description,image_url,created_at FROM products ORDER BY created_at DESC LIMIT $1"
 	if q != want {
 		t.Fatalf("SQL:\n got: %s\nwant: %s", q, want)
 	}

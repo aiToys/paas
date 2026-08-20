@@ -18,30 +18,48 @@ import (
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/aitoys/paas-examples/paas-shop/internal/dpdisc"
 	"github.com/aitoys/paas-examples/paas-shop/internal/observ"
 )
 
 var (
 	httpClient   = observ.NewClient()
 	streamClient = observ.NewStreamingClient() // SSE 透传用（chatbot 客服链路含长 reasoning，无整体超时）
-	productURL   = "http://paas-shop-product:8081"
-	recommendURL = "http://paas-shop-recommend:8082"
-	chatbotURL   = "http://paas-shop-chatbot:8083"
+	dp           *dpdisc.Discoverer            // 数据面发现（PAAS_DP_URL 未配则 nil，静态 URL 兜底）
+	fallback     = map[string]string{          // 静态兜底：K8s Service DNS（发现不可用时与原行为一致）
+		"product":   "http://paas-shop-product:8081",
+		"recommend": "http://paas-shop-recommend:8082",
+		"chatbot":   "http://paas-shop-chatbot:8083",
+	}
 )
+
+// svcURL 解析下游地址：数据面发现优先（/dp/instances，含泳道感知），静态 URL 兜底。
+// 平台 K8s Service 名与工作负载名一致（paas-shop-product 等），dpdisc 按此查询。
+func svcURL(r *http.Request, service string) string {
+	if dp.Enabled() {
+		lane := r.Header.Get("x-paas-lane")
+		if u := dp.Addr(r.Context(), "paas-shop-"+service, lane); u != "" {
+			return u
+		}
+	}
+	return fallback[service]
+}
 
 func main() {
 	shutdown := observ.Init("paas-shop-bff")
 	defer shutdown()
 	if v := os.Getenv("PRODUCT_SERVICE_URL"); v != "" {
-		productURL = v
+		fallback["product"] = v
 	}
 	if v := os.Getenv("RECOMMEND_SERVICE_URL"); v != "" {
-		recommendURL = v
+		fallback["recommend"] = v
 	}
 	if v := os.Getenv("CHATBOT_SERVICE_URL"); v != "" {
-		chatbotURL = v
+		fallback["chatbot"] = v
 	}
-	slog.Info("bff 就绪", "product", productURL, "recommend", recommendURL, "chatbot", chatbotURL)
+	// 数据面服务发现（平台 /dp/instances；未配 PAAS_DP_URL 时纯静态兜底，行为与原版一致）。
+	dp = dpdisc.New()
+	slog.Info("bff 就绪", "fallback", fallback, "dpDiscovery", dp.Enabled())
 
 	events := newEventRing(100)
 	subscribeShopEvents(events)
@@ -65,10 +83,10 @@ func buildMux(events *eventRing) *http.ServeMux {
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		observ.MetricsHandler().ServeHTTP(w, r)
 	})
-	mux.HandleFunc("/api/products", proxy(productURL+"/products"))        // GET 列表
-	mux.HandleFunc("/api/products/", proxyPrefix(productURL+"/products")) // GET /{id}
-	mux.HandleFunc("/api/recommend", proxy(recommendURL+"/recommend"))    // GET 推荐
-	mux.HandleFunc("/api/chat", chatProxy)                                // POST SSE 透传
+	mux.HandleFunc("/api/products", proxyTo("product", "/products"))        // GET 列表
+	mux.HandleFunc("/api/products/", proxyPrefixTo("product", "/products")) // GET /{id}
+	mux.HandleFunc("/api/recommend", proxyTo("recommend", "/recommend"))    // GET 推荐
+	mux.HandleFunc("/api/chat", chatProxy)                                  // POST SSE 透传
 	mux.HandleFunc("/api/events", func(w http.ResponseWriter, r *http.Request) {
 		limit := 20
 		if v := r.URL.Query().Get("limit"); v != "" {
@@ -160,9 +178,10 @@ func (r *eventRing) latest(n int) []shopEvent {
 	return out
 }
 
-// proxy 透传到目标 URL（透传 body + headers + traceparent）。
-func proxy(target string) http.HandlerFunc {
+// proxyTo 透传到下游服务（svcURL 请求时解析：dp 发现优先 + 泳道感知，静态兜底）。
+func proxyTo(service, path string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		target := svcURL(r, service) + path
 		req, err := http.NewRequestWithContext(r.Context(), r.Method, target, r.Body)
 		if err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
@@ -186,11 +205,11 @@ func proxy(target string) http.HandlerFunc {
 	}
 }
 
-// proxyPrefix 透传路径后缀（/api/products/{id} -> product/products/{id}）。
-func proxyPrefix(target string) http.HandlerFunc {
+// proxyPrefixTo 透传路径后缀（/api/products/{id} -> product/products/{id}），地址请求时解析。
+func proxyPrefixTo(service, base string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		suffix := strings.TrimPrefix(r.URL.Path, "/api/products")
-		req, err := http.NewRequestWithContext(r.Context(), r.Method, target+suffix, r.Body)
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, svcURL(r, service)+base+suffix, r.Body)
 		if err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
@@ -214,7 +233,7 @@ func proxyPrefix(target string) http.HandlerFunc {
 
 // chatProxy SSE 流式透传：按 data: 行透传 chatbot 的 SSE（含 reasoning_content）。
 func chatProxy(w http.ResponseWriter, r *http.Request) {
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, chatbotURL+"/chat", r.Body)
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, svcURL(r, "chatbot")+"/chat", r.Body)
 	if err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
