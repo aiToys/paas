@@ -270,7 +270,12 @@ func (s *Store) ListInstances(ctx context.Context, serviceID string) ([]governan
 	if err != nil {
 		return nil, err
 	}
-	q := `SELECT ` + instCols + ` FROM gov_instances WHERE tenant_id=$1`
+	// 心跳过期惰性剔除（与 memory 版同语义）：原本 healthy 但超 90s 未心跳的手动实例
+	// 标 unhealthy（不删，心跳可复活）。SQL CASE 内判定，不读后改写。
+	q := `SELECT id, tenant_id, service_id, addr,
+		CASE WHEN status='healthy' AND updated_at < NOW() - INTERVAL '90 seconds' THEN 'unhealthy' ELSE status END,
+		lane_id, meta, updated_at
+		FROM gov_instances WHERE tenant_id=$1`
 	args := []any{tid}
 	if serviceID != "" {
 		args = append(args, serviceID)

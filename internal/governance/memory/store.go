@@ -176,6 +176,11 @@ func (s *Store) DeleteService(ctx context.Context, id string) error {
 
 // —— Instance ——
 
+// instanceTTL 手动注册实例的心跳有效期（对标 Nacos 临时实例 TTL 剔除）。
+// 超时未心跳标 unhealthy（惰性：查询时判定，不删——心跳可复活；与平台惰性评估风格一致，
+// 零后台 goroutine）。数据面 Endpoints 真源实例不经过本表，不受影响。
+const instanceTTL = 90 * time.Second
+
 func (s *Store) ListInstances(ctx context.Context, serviceID string) ([]governance.Instance, error) {
 	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
@@ -183,6 +188,7 @@ func (s *Store) ListInstances(ctx context.Context, serviceID string) ([]governan
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	now := time.Now()
 	out := make([]governance.Instance, 0)
 	for _, in := range s.instances {
 		if in.TenantID != tid {
@@ -191,7 +197,13 @@ func (s *Store) ListInstances(ctx context.Context, serviceID string) ([]governan
 		if serviceID != "" && in.ServiceID != serviceID {
 			continue
 		}
-		out = append(out, cloneInstance(in))
+		in = cloneInstance(in)
+		// 心跳过期剔除（惰性标 unhealthy）：原本 healthy 但超 TTL 未心跳的实例，
+		// 发现方据此跳过（消费方判活语义落地，CLAUDE.md「本期不过期剔除」自此补齐）。
+		if in.Status == governance.StatusHealthy && now.Sub(in.UpdatedAt) > instanceTTL {
+			in.Status = governance.StatusUnhealthy
+		}
+		out = append(out, in)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Addr < out[j].Addr })
 	return out, nil

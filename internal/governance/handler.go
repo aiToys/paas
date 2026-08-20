@@ -199,6 +199,16 @@ func (h *Handler) serveRouteCollection(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteError(w, http.StatusBadRequest, "目标服务不存在或不属于本租户")
 			return
 		}
+		// 同 host+path 重复拒绝（R8 对标）：K8s Ingress 同 host 下重复 path 行为未定义，
+		// 提前拒绝防用户配出歧义路由（host 空=不限 Host，与任何显式 host 都可能冲突，一并查）。
+		if existing, err := h.repo.ListRoutes(r.Context(), ""); err == nil {
+			for _, ex := range existing {
+				if ex.Host == rt.Host && ex.Path == rt.Path {
+					httputil.WriteError(w, http.StatusConflict, "同域名下已存在相同路径的路由: "+ex.Name)
+					return
+				}
+			}
+		}
 		saved, err := h.repo.CreateRoute(r.Context(), rt)
 		if err != nil {
 			httputil.WriteServiceError(w, http.StatusBadRequest, err)
