@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	envmemory "github.com/aitoys/paas/internal/environment/memory"
@@ -331,4 +332,83 @@ func TestHandlerServiceDetailDiscovererEmptyFallback(t *testing.T) {
 	if len(detail.Instances) != 1 || detail.Instances[0].Addr != "10.0.0.1:8080" {
 		t.Fatalf("discoverer 空应回退手动表，got %+v", detail.Instances)
 	}
+}
+
+// TestCreateRouteRejectsDanglingServiceID：Route/Breaker 创建校验 ServiceID 归属
+// （防悬挂引用——指向跨租户/不存在服务的脏数据，applier 解析失败静默跳过 path 用户不知）。
+func TestCreateRouteRejectsDanglingServiceID(t *testing.T) {
+	h := governance.NewHandler(govmemory.NewStore())
+	h.Authorize = func(*http.Request, string) bool { return true }
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+
+	// 不存在的 serviceID
+	body, _ := json.Marshal(governance.Route{Name: "r1", Path: "/x", ServiceID: "svc-nope", Methods: []string{governance.MethodGet}})
+	r := httptest.NewRequest(http.MethodPost, "/api/routes", bytes.NewReader(body))
+	r = r.WithContext(ctx)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("悬挂 serviceID 应 400，got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Breaker 同款
+	bbody, _ := json.Marshal(governance.CircuitBreaker{Name: "b1", ServiceID: "svc-nope", Strategy: governance.StrategyErrorRate, Threshold: 50, MinRequests: 5, WindowSecs: 60})
+	r2 := httptest.NewRequest(http.MethodPost, "/api/breakers", bytes.NewReader(bbody))
+	r2 = r2.WithContext(ctx)
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, r2)
+	if w2.Code != http.StatusBadRequest {
+		t.Fatalf("breaker 悬挂 serviceID 应 400，got %d", w2.Code)
+	}
+}
+
+// TestRouteValidatePath：Path 必须 / 开头且不含 ..，Host 逗号分段非空（下发 Ingress 前拦截）。
+func TestRouteValidatePath(t *testing.T) {
+	if err := (governance.Route{Name: "r", Path: "api/x", ServiceID: "s", Methods: []string{governance.MethodGet}}).Validate(); err == nil {
+		t.Fatal("非 / 开头 path 应拒绝")
+	}
+	if err := (governance.Route{Name: "r", Path: "/a/../b", ServiceID: "s", Methods: []string{governance.MethodGet}}).Validate(); err == nil {
+		t.Fatal("含 .. path 应拒绝")
+	}
+	if err := (governance.Route{Name: "r", Path: "/a", Host: "a.com,,b.com", ServiceID: "s", Methods: []string{governance.MethodGet}}).Validate(); err == nil {
+		t.Fatal("Host 空段应拒绝")
+	}
+	if err := (governance.Route{Name: "r", Path: "/a", Host: "a.com,b.com", ServiceID: "s", Methods: []string{governance.MethodGet}}).Validate(); err != nil {
+		t.Fatalf("合法多 Host 应通过: %v", err)
+	}
+}
+
+// TestAuditOnGovernanceWrites：治理写操作记审计（服务拓扑变更高敏感，action 前缀校验）。
+func TestAuditOnGovernanceWrites(t *testing.T) {
+	var mu sync.Mutex
+	var actions []string
+	h := governance.NewHandler(govmemory.NewStore(), governance.WithAudit(auditFunc(
+		func(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error {
+			mu.Lock()
+			defer mu.Unlock()
+			actions = append(actions, action)
+			return nil
+		})))
+	h.Authorize = func(*http.Request, string) bool { return true }
+	h.CallerUserID = func(context.Context) string { return "u-1" }
+
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	// 建服务（审计 service_create）
+	sbody, _ := json.Marshal(governance.Service{Name: "svc-a", EnvID: "env-1", Protocol: governance.ProtocolHTTP, Port: 8080})
+	r := httptest.NewRequest(http.MethodPost, "/api/services", bytes.NewReader(sbody))
+	r = r.WithContext(ctx)
+	h.ServeHTTP(httptest.NewRecorder(), r)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(actions) != 1 || actions[0] != "service_create" {
+		t.Fatalf("service_create 应记审计，got %v", actions)
+	}
+}
+
+// auditFunc 适配 AuditRecorder 接口的测试闭包（返 error 版）。
+type auditFunc func(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error
+
+func (f auditFunc) Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error {
+	return f(ctx, tenantID, actor, action, resourceType, resourceID, detail)
 }

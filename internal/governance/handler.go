@@ -57,6 +57,9 @@ type Handler struct {
 	envResolver EnvTypeResolver
 	discoverer  InstanceDiscoverer
 	Authorize   func(r *http.Request, perm string) bool
+	auditLog    AuditRecorder
+	// CallerUserID 取调用者用户 ID（main.go 注入 gateway.UserIDFrom，依赖倒置避免 governance -> gateway import）。
+	CallerUserID func(ctx context.Context) string
 }
 
 // NewHandler 创建服务治理 handler。
@@ -70,6 +73,31 @@ func NewHandler(repo Repository, opts ...HandlerOpt) *Handler {
 
 // HandlerOpt 配置 Handler。
 type HandlerOpt func(*Handler)
+
+// AuditRecorder 记审计（依赖倒置，cmd/core 桥接 security.AuditStore；与 identity/auth 同源模式）。
+type AuditRecorder interface {
+	Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error
+}
+
+// WithAudit 注入审计记录器（服务拓扑变更是高敏感操作，写操作全记：service_/route_/breaker_/instance_ 前缀）。
+func WithAudit(a AuditRecorder) HandlerOpt {
+	return func(h *Handler) { h.auditLog = a }
+}
+
+// audit best-effort 记审计（失败仅日志，不阻断主流程；与 admin_handler.recordAudit 同款）。
+func (h *Handler) audit(r *http.Request, action, resourceID, detail string) {
+	if h.auditLog == nil {
+		return
+	}
+	tid, _ := tenant.TenantFrom(r.Context())
+	actor := "user"
+	if h.CallerUserID != nil {
+		if uid := h.CallerUserID(r.Context()); uid != "" {
+			actor = uid
+		}
+	}
+	h.auditLog.Record(r.Context(), tid, actor, action, "governance", resourceID, detail)
+}
 
 // WithEnvResolver 注入环境类型解析器，启用生产写权限校验。
 func WithEnvResolver(r EnvTypeResolver) HandlerOpt {
@@ -165,11 +193,18 @@ func (h *Handler) serveRouteCollection(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
+		// ServiceID 归属校验（防悬挂引用：指向不存在/跨租户服务的脏 Route，
+		// applier 解析失败会静默跳过 path，用户不知路由为何不生效）。
+		if _, err := h.repo.GetService(r.Context(), rt.ServiceID); err != nil {
+			httputil.WriteError(w, http.StatusBadRequest, "目标服务不存在或不属于本租户")
+			return
+		}
 		saved, err := h.repo.CreateRoute(r.Context(), rt)
 		if err != nil {
 			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
+		h.audit(r, "route_create", saved.ID, saved.Name+" "+saved.Host+saved.Path)
 		httputil.WriteDataCreated(w, saved)
 		return
 	}
@@ -195,11 +230,18 @@ func (h *Handler) serveRouteItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		rt.ID = id
+		if rt.ServiceID != "" {
+			if _, err := h.repo.GetService(r.Context(), rt.ServiceID); err != nil {
+				httputil.WriteError(w, http.StatusBadRequest, "目标服务不存在或不属于本租户")
+				return
+			}
+		}
 		updated, err := h.repo.UpdateRoute(r.Context(), rt)
 		if err != nil {
 			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
+		h.audit(r, "route_update", updated.ID, updated.Name)
 		httputil.WriteData(w, updated)
 	case http.MethodDelete:
 		if !h.allow(w, r, PermGovernanceWrite) {
@@ -209,6 +251,7 @@ func (h *Handler) serveRouteItem(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
+		h.audit(r, "route_delete", id, "")
 		httputil.WriteData(w, map[string]string{"deleted": id})
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -251,11 +294,17 @@ func (h *Handler) serveBreakerCollection(w http.ResponseWriter, r *http.Request)
 			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
+		// ServiceID 归属校验（与 Route 同款，防悬挂引用）。
+		if _, err := h.repo.GetService(r.Context(), b.ServiceID); err != nil {
+			httputil.WriteError(w, http.StatusBadRequest, "目标服务不存在或不属于本租户")
+			return
+		}
 		saved, err := h.repo.CreateBreaker(r.Context(), b)
 		if err != nil {
 			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
+		h.audit(r, "breaker_create", saved.ID, saved.Name)
 		saved = h.fillBreakerState(saved)
 		httputil.WriteDataCreated(w, saved)
 		return
@@ -287,6 +336,7 @@ func (h *Handler) serveBreakerItem(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
+		h.audit(r, "breaker_update", updated.ID, updated.Name)
 		httputil.WriteData(w, h.fillBreakerState(updated))
 	case http.MethodDelete:
 		if !h.allow(w, r, PermGovernanceWrite) {
@@ -296,6 +346,7 @@ func (h *Handler) serveBreakerItem(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
+		h.audit(r, "breaker_delete", id, "")
 		httputil.WriteData(w, map[string]string{"deleted": id})
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -336,6 +387,7 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
+		h.audit(r, "service_create", saved.ID, saved.Name)
 		httputil.WriteDataCreated(w, saved)
 		return
 	}
@@ -432,6 +484,7 @@ func (h *Handler) serveServiceItem(w http.ResponseWriter, r *http.Request, id st
 			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
+		h.audit(r, "service_delete", id, s.Name)
 		httputil.WriteData(w, map[string]string{"deleted": id})
 		return
 	}
@@ -467,6 +520,7 @@ func (h *Handler) serveInstanceCreate(w http.ResponseWriter, r *http.Request, se
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}
+	h.audit(r, "instance_register", saved.ID, saved.Addr)
 	httputil.WriteDataCreated(w, saved)
 }
 
@@ -501,6 +555,7 @@ func (h *Handler) serveInstanceDelete(w http.ResponseWriter, r *http.Request, se
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
+	h.audit(r, "instance_deregister", instID, "")
 	httputil.WriteData(w, map[string]string{"deleted": instID})
 }
 

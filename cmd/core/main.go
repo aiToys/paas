@@ -583,8 +583,10 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// 数据面实例发现器（服务详情按 Service.Name 返真实 K8s Endpoint ready 实例）。
 	govHandler := governance.NewHandler(stores.Governance,
 		governance.WithEnvResolver(stores.Environment),
-		governance.WithInstanceDiscoverer(govInstanceDiscoverer{r: dataplane.NewEndpointsReader(appliers.clientset)}))
+		governance.WithInstanceDiscoverer(govInstanceDiscoverer{r: dataplane.NewEndpointsReader(appliers.clientset)}),
+		governance.WithAudit(&identityAuditAdapter{store: stores.Security}))
 	govHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+	govHandler.CallerUserID = gateway.UserIDFrom // ctx 版签名与 identity.CallerUserID 同源
 	// 数据面 SDK 接入 API（/dp/）：把 K8s Endpoints 暴露为 zeus 兼容服务发现真源。
 	// 鉴权复用 auth（dp token = API Key，绑 tenant）；reader 从 appliers.clientset 读 Endpoints
 	// （非集群部署 clientset=nil，/dp/instances 降级返空，与现状一致不破坏）。

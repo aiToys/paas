@@ -15,7 +15,10 @@
 // 真实数据面 SDK / Sidecar / K8s endpoints 接入（参考 zeus）留后续。
 package governance
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // 服务协议。
 const (
@@ -159,13 +162,24 @@ type Route struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
-// Validate 校验路由：Name/Path/ServiceID 非空、Methods 合法且非空。
+// Validate 校验路由：Name/Path/ServiceID 非空、Path 以 / 开头且不含 ..（防异常 path 下发 Ingress）、
+// Host 形态（逗号分隔多域名，每段非空）、Methods 合法且非空。
 func (r Route) Validate() error {
 	if r.Name == "" {
 		return errInvalid("name")
 	}
 	if r.Path == "" {
 		return errInvalid("path")
+	}
+	if !strings.HasPrefix(r.Path, "/") || strings.Contains(r.Path, "..") {
+		return errInvalid("path")
+	}
+	if r.Host != "" {
+		for _, h := range strings.Split(r.Host, ",") {
+			if strings.TrimSpace(h) == "" {
+				return errInvalid("host")
+			}
+		}
 	}
 	if r.ServiceID == "" {
 		return errInvalid("serviceId")

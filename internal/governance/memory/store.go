@@ -154,10 +154,21 @@ func (s *Store) DeleteService(ctx context.Context, id string) error {
 		return fmt.Errorf("服务不存在: %s", id)
 	}
 	delete(s.services, id)
-	// 级联删除该服务下所有实例
+	// 级联删除该服务下所有实例 + 路由 + 熔断器（与 PG 版单事务级联三表同语义，
+	// 防悬挂 Route/Breaker 指向已删服务）。
 	for iid, in := range s.instances {
 		if in.ServiceID == id {
 			delete(s.instances, iid)
+		}
+	}
+	for rid, rt := range s.routes {
+		if rt.ServiceID == id {
+			delete(s.routes, rid)
+		}
+	}
+	for bid, b := range s.breakers {
+		if b.ServiceID == id {
+			delete(s.breakers, bid)
 		}
 	}
 	return nil
