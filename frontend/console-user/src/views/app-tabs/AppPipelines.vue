@@ -220,6 +220,8 @@ async function abandonStage() {
 
 // ---- 底部「全部流水线」管理（CD + 自定义） ----
 const showAll = ref(false)
+// R8：变更火车（集成发车模型）默认折叠——高频路径是「直接运行」，火车是多变更协同的高级流程。
+const showTrain = ref(false)
 const designerPid = ref<string | null>(null)
 async function remove(p: Pipeline) {
   try {
@@ -271,11 +273,11 @@ const fmtTime = (t?: string) => (t ? new Date(t).toLocaleString() : '-')
 
 <template>
   <div class="app-pipelines" v-loading="loading">
-    <!-- ① 默认测试环境发布流水线 -->
+    <!-- ① 快速运行卡（高频路径：构建→部署→冒烟，一键直达） -->
     <div class="release-card" v-if="ciPipeline">
       <div class="release-head">
         <div>
-          <span class="release-title">测试环境发布流水线</span>
+          <span class="release-title">构建部署</span>
           <el-tag v-if="latestRun" size="small"
                   :type="statusOf(RUN_STATUS, latestRun.status).type" class="run-tag"
                   @click="latestRun && router.push(`/devops/runs/${latestRun.id}`)">
@@ -283,11 +285,7 @@ const fmtTime = (t?: string) => (t ? new Date(t).toLocaleString() : '-')
           </el-tag>
         </div>
         <div class="release-actions">
-          <span v-if="!canRun && !stagedChanges.length" class="hint-warning">需添加变更至集成区</span>
-          <span v-else-if="batchRunning" class="hint-warning">批次进行中</span>
-          <el-button type="primary" :disabled="!canRun || batchRunning" :loading="busy" @click="runPipeline">
-            {{ latestRun?.status === 'failed' ? '重新发车' : '集成发车' }}
-          </el-button>
+          <el-button type="primary" :loading="busy" @click="runCI(ciPipeline)">立即构建部署</el-button>
         </div>
       </div>
       <div class="release-stages">
@@ -299,6 +297,15 @@ const fmtTime = (t?: string) => (t ? new Date(t).toLocaleString() : '-')
     </div>
     <el-alert v-else type="info" :closable="false" title="应用尚无 CI 流水线（新建应用会自动绑定 tpl-ci，如缺失请联系管理员）" style="margin-bottom: 14px;" />
 
+    <!-- ② 高级发布流程（变更火车：多变更集成→批次测试→整批上线）。默认折叠——
+         概念成本高（变更/批次/集成分支/发车），仅在多变更协同时展开使用。 -->
+    <div class="all-pipes train-fold">
+      <div class="all-head" @click="showTrain = !showTrain">
+        <span>高级发布流程 · 变更集成（{{ pendingChanges.length }} 个待发布变更{{ activeBatch ? '，集成区收集中' : '' }}）</span>
+        <span class="fold">{{ showTrain ? '收起 ▴' : '展开 ▾' }}</span>
+      </div>
+    </div>
+    <template v-if="showTrain">
     <!-- ② 集成区（上） -->
     <div class="zone zone-stage">
       <div class="zone-head">
@@ -397,6 +404,8 @@ const fmtTime = (t?: string) => (t ? new Date(t).toLocaleString() : '-')
       </el-table>
       <div v-if="batchRunning" class="faint zone-note">*当前批次进行中，不能添加变更</div>
     </div>
+
+    </template><!-- /变更火车折叠 -->
 
     <!-- 底部：全部流水线（CD + 自定义管理） -->
     <div class="all-pipes">

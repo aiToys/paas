@@ -551,6 +551,23 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		engine:   pipeEngine,
 		rels:     stores.DevOpsReleases,
 	}
+	// 「从模板新建应用」一键端点（旅程审计 R7）：建应用+仓库+seed 模板文件+服务+首轮 CI。
+	// 复用 changeRunBridge 的 TriggerAppRun（resolve+单实例+engine.Start 全链路）。
+	tplHandler := &templateBootstrapHandler{
+		apps: appHandler, repos: stores.DevOpsRepos, svcRepo: stores.Service,
+		pipes: stores.Pipeline, gitea: giteaClient,
+		imageReg: os.Getenv("PAAS_IMAGE_REGISTRY"),
+		trigger: func(r *http.Request, appID, pid, branch string) (pipeline.PipelineRun, error) {
+			runID, err := changeRunBridge.TriggerAppRun(r.Context(), appID, pid, branch)
+			if err != nil {
+				return pipeline.PipelineRun{}, err
+			}
+			return pipeline.PipelineRun{ID: runID}, nil
+		},
+		allow: func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) },
+	}
+	mux.Handle("/api/applications/from-template", auth(tplHandler))
+
 	changeLookup := changeRepoLookup(stores.DevOpsRepos)
 	changeSvc := change.NewService(stores.Change,
 		change.WithGitea(&giteaBrancherBridge{client: giteaClient}),
@@ -968,6 +985,16 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("POST", "/api/applications",
 		apiroute.Tags("应用"), apiroute.Summary("创建应用"), apiroute.Perm("application:write"),
 		apiroute.WithReqBody(application.Application{}), apiroute.WithResp(application.Application{}))
+	reg.Operation("POST", "/api/applications/from-template",
+		apiroute.Tags("应用"), apiroute.Summary("从模板新建应用（一键：建应用+仓库+服务+首轮CI）"),
+		apiroute.Perm("application:write"),
+		apiroute.WithReqBody(struct {
+			TemplateSlug string `json:"templateSlug"`
+			Name         string `json:"name"`
+			Desc         string `json:"desc,omitempty"`
+			RepoName     string `json:"repoName,omitempty"`
+		}{}),
+		apiroute.WithResp(map[string]any{}))
 	reg.Operation("GET", "/api/applications/{id}",
 		apiroute.Tags("应用"), apiroute.Summary("应用详情"), apiroute.Perm("application:read"),
 		apiroute.WithResp(application.Application{}))

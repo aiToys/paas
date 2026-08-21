@@ -11,14 +11,54 @@ import { useEnvStore } from '@/stores/env'
 import { useUrlState } from '@/composables/useUrlState'
 
 // 新建应用弹窗：POST /api/applications（name+env+desc，ID 后端生成 + ApplyDefaults 补展示）。
+// 模板模式（旅程审计 R7）：POST /api/applications/from-template 一键建应用+仓库+服务+首轮 CI，
+// 冷启动从 14 步降到 1 步；「空白应用」保持原路径（自定义仓库/多服务场景）。
 const createVisible = ref(false)
 const creating = ref(false)
 const createForm = reactive({ name: '', desc: '' })
+type TplOpt = { slug: ''; label: '空白应用'; hint: '仅创建应用，代码仓库和服务稍后配置' } | { slug: 'hello-web'; label: 'Hello Web'; hint: '静态页模板——建仓+seed 代码+首轮构建部署全自动' }
+const TEMPLATES: TplOpt[] = [
+  { slug: 'hello-web', label: 'Hello Web', hint: '静态页模板——建仓+seed 代码+首轮构建部署全自动' },
+  { slug: '', label: '空白应用', hint: '仅创建应用，代码仓库和服务稍后配置' },
+]
+const createTpl = ref<string>('hello-web')
 
 function openCreate() {
   createForm.name = ''
   createForm.desc = ''
+  createTpl.value = 'hello-web'
   createVisible.value = true
+}
+
+async function createFromTemplate() {
+  try {
+    const resp = await fetchAuth('/api/applications/from-template', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        templateSlug: createTpl.value,
+        name: createForm.name.trim(),
+        desc: createForm.desc.trim(),
+      }),
+    })
+    const body = await resp.json().catch(() => ({}))
+    if (!resp.ok) {
+      ElMessage.error('创建失败：' + (body.error || resp.statusText))
+      return
+    }
+    createVisible.value = false
+    const d = body.data || {}
+    ElMessage.success('应用已创建，首轮构建部署已触发')
+    if (d.runId) {
+      router.push(`/devops/runs/${d.runId}`) // 直达运行页看构建部署进度
+    } else {
+      load()
+    }
+  } catch (e) {
+    ElMessage.error('创建失败：' + (e as Error).message)
+  } finally {
+    creating.value = false
+  }
 }
 
 async function createApp() {
@@ -28,6 +68,11 @@ async function createApp() {
   }
   creating.value = true
   try {
+    // 模板模式：一键端点聚合建应用+仓库+seed+服务+首轮 CI，直达运行页看进度。
+    if (createTpl.value) {
+      await createFromTemplate()
+      return
+    }
     // 应用是跨环境的逻辑实体（应用×环境多对多），创建时不绑定单一环境；
     // 环境归属由工作负载/绑定的 envId 决定（见环境模型）。
     const resp = await fetchAuth('/api/applications', {
@@ -229,6 +274,16 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
     <!-- 新建应用弹窗 -->
     <el-dialog v-model="createVisible" title="新建应用" width="460px">
       <el-form label-position="top">
+        <el-form-item label="从模板开始">
+          <el-radio-group v-model="createTpl">
+            <el-radio v-for="t in TEMPLATES" :key="t.slug" :value="t.slug">
+              <div class="tpl-line">
+                <span class="tpl-label">{{ t.label }}</span>
+                <span class="tpl-hint">{{ t.hint }}</span>
+              </div>
+            </el-radio>
+          </el-radio-group>
+        </el-form-item>
         <el-form-item label="应用名称" required>
           <el-input v-model="createForm.name" placeholder="如 智能客服" maxlength="32" show-word-limit />
         </el-form-item>
@@ -245,6 +300,18 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
 </template>
 
 <style scoped>
+.tpl-line {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.tpl-label {
+  font-size: 13px;
+}
+.tpl-hint {
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
 .page {
   max-width: 1200px;
   margin: 0 auto;

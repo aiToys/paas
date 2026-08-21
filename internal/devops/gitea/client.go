@@ -415,6 +415,14 @@ type Branch struct {
 
 // CreateBranch 从 from 分支/commit 创建新分支（POST /repos/{o}/{r}/branches）。
 // 422（分支已存在）-> ErrBranchExists。
+// CreateFile 向仓库提交单个文件（Gitea contents API；新建/更新均可，按 content base64）。
+// 模板 seed 用（一键建应用预置 Dockerfile/index.html 等）。
+func (c *Client) CreateFile(ctx context.Context, owner, repo, path, message, contentB64 string) error {
+	return c.doJSON(ctx, http.MethodPost,
+		fmt.Sprintf("/api/v1/repos/%s/%s/contents/%s", pathEscape(owner), pathEscape(repo), pathEscape(path)),
+		map[string]any{"content": contentB64, "message": message}, nil)
+}
+
 func (c *Client) CreateBranch(ctx context.Context, owner, repo, branch, from string) error {
 	body := map[string]any{"new_branch_name": branch, "old_branch_name": from, "old_ref_name": from}
 	p := fmt.Sprintf("/api/v1/repos/%s/%s/branches", pathEscape(owner), pathEscape(repo))

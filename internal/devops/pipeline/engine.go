@@ -415,15 +415,21 @@ func (e *Engine) execTest(ctx context.Context, run *PipelineRun, stage StageDef,
 	path := strOr(stage.Params, "path", "/livez")
 	url := fmt.Sprintf("http://%s%s", domain, path)
 	logf(sr, "探活 %s", url)
-	err = pollHTTP(ctx, url, 2*time.Minute)
+	// 两段探活：主路径先短探（15s，快速失败给降级让路），未过且非显式 / 时降级试根路径
+	//（静态页应用无 /healthz，白等 2 分钟才降级的体验优化），降级也未过再回到主路径长探
+	//（覆盖「应用启动慢」场景——短探失败可能是还没起完，不是路径不存在）。
+	err = pollHTTP(ctx, url, 15*time.Second)
 	if err != nil && path != "/" {
-		// F2 降级：配置路径探活失败时再试根路径（静态页类应用无 /healthz）；显式配 / 的不重复试。
 		fallback := fmt.Sprintf("http://%s/", domain)
-		logf(sr, "%s 探活未过，降级尝试 %s", path, fallback)
+		logf(sr, "%s 短探未过，降级尝试 %s", path, fallback)
 		if err2 := pollHTTP(ctx, fallback, 30*time.Second); err2 == nil {
 			err = nil
 			url = fallback
 		}
+	}
+	if err != nil {
+		logf(sr, "回到主路径长探（最多 2 分钟，等待应用完全启动）")
+		err = pollHTTP(ctx, url, 2*time.Minute)
 	}
 	if err != nil {
 		// F6：失败信息带行动指引（检查服务端口/健康路径），不只是裸报错。
