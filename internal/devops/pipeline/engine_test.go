@@ -36,8 +36,9 @@ type fakeReleaser struct {
 	pollErr   error  // PollWorkloadReady 错误（可选，模拟 deploy 后探活失败）
 	domain    string // Deploy/WorkloadDomain 返回（空则默认 wl-{id}.svc.cluster.local)
 
-	deployLane string // Deploy 收到的 lane（断言用）
-	deployPort int    // Deploy 收到的 port（断言用）
+	deployLane  string // Deploy 收到的 lane（断言用）
+	deployPort  int    // Deploy 收到的 port（断言用）
+	deploySvcID string // Deploy 收到的 serviceID（断言用，服务模型 Phase 1 透传）
 
 	promoteRel devops.Release // Promote 返回（空则默认 Release{ID:"rel-promoted"}）
 	promoteErr error
@@ -79,9 +80,10 @@ func (f *fakeReleaser) SetVersion(ctx context.Context, releaseIDs []string, vers
 }
 
 // Deploy stub：返有效部署记录（rel-fake/wl-fake）+ 尊重 domain 字段，供 execDeploy 链路测试可控。
-func (f *fakeReleaser) Deploy(ctx context.Context, appID, envID, lane, service, imageID string, port, containerPort int, sourceRunID string) (devops.Release, string, error) {
+func (f *fakeReleaser) Deploy(ctx context.Context, appID, envID, lane, service, serviceID, imageID string, port, containerPort int, sourceRunID string) (devops.Release, string, error) {
 	f.deployLane = lane
 	f.deployPort = port
+	f.deploySvcID = serviceID
 	if f.deployErr != nil {
 		return devops.Release{}, "", f.deployErr
 	}
@@ -214,6 +216,27 @@ func TestExecDeployUsesLaneAndLogs(t *testing.T) {
 	// deploy Output 链（Task 6 release stage 依赖）
 	if sr.Output[OutReleaseID] != "rel-fake" {
 		t.Errorf("deploy Output.releaseId 期望 rel-fake，got %v", sr.Output[OutReleaseID])
+	}
+}
+
+// TestExecDeployPassesServiceID：deploy stage 的 serviceId param 透传到 Releaser.Deploy
+// （服务模型 Phase 1 断链回归——修复前接口无 serviceID 参数，服务实体 Port 永不生效）。
+func TestExecDeployPassesServiceID(t *testing.T) {
+	s := NewMemoryStore()
+	r := seedPipeline(t, s, "p-svcid", "app-svcid", KindCI, []StageDef{
+		{Name: "部署", Type: StageDeploy, Params: map[string]any{
+			"envId": "env-test", "serviceId": "svc-abc", "service": "journey-web",
+			"imageSource": ImageSelected, "imageId": "img-1",
+		}},
+	})
+
+	rel := &fakeReleaser{}
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: rel}
+	if err := eng.Advance(acmeCtxEngine(), r.ID); err != nil {
+		t.Fatalf("Advance 失败: %v", err)
+	}
+	if rel.deploySvcID != "svc-abc" {
+		t.Errorf("Deploy 收到 serviceID=%q, want svc-abc（服务实体断链回归）", rel.deploySvcID)
 	}
 }
 

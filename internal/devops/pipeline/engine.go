@@ -44,10 +44,11 @@ type Releaser interface {
 	// SetVersion 给本次 run 涉及的 Release 批量回填版本号（baseline stage 打版本）。
 	SetVersion(ctx context.Context, releaseIDs []string, version string) error
 	// Deploy 部署镜像到 env×lane×service（找/建基线 Workload + UpdateImage），产生部署记录，不打版本。
-	// service 标识同 app 多服务（空=单服务）；port/containerPort 非零时在新建 Workload 时设定
+	// service 标识同 app 多服务（空=单服务）；serviceID 关联服务实体（服务模型 Phase 1，驱动 Port/Replicas 回填，
+	// adapter 在 service+serviceID 均空时自动解析 app 唯一服务）；port/containerPort 非零时在新建 Workload 时设定
 	// （驱动 reconciler 建 Service，供 smoke 探活/服务发现）；复用既有 Workload 时忽略（端口属 Workload 既有配置）。
 	// sourceRunID 非空时回填到部署记录。
-	Deploy(ctx context.Context, appID, envID, lane, service, imageID string, port, containerPort int, sourceRunID string) (deployment devops.Release, domain string, err error)
+	Deploy(ctx context.Context, appID, envID, lane, service, serviceID, imageID string, port, containerPort int, sourceRunID string) (deployment devops.Release, domain string, err error)
 	// Publish 打版本号里程碑：Image.Version 回填 + git tag（commit 非空且仓库为 internal 时）。
 	// 不部署（部署是 deploy stage 的事）。返回 tagSha（未打 tag 时为空串）。
 	Publish(ctx context.Context, appID, imageID, version, commit string) (tagSha string, err error)
@@ -318,13 +319,16 @@ func (e *Engine) execDeploy(ctx context.Context, run *PipelineRun, stage StageDe
 	// 模板不填（app-specific），应用经 Pipeline.paramOverrides 覆盖（如 paas-shop product 各一条 pipeline）。
 	// 空=单服务（向后兼容，CreateRelease 查找按 app×env×lane×service，service 空匹配单服务 Workload）。
 	service := strOr(stage.Params, "service", "")
+	// serviceId 关联服务实体（服务模型 Phase 1）：驱动 CreateRelease 回填 Port/Replicas + Workload.ServiceID。
+	// 模板不填；应用经 paramOverrides 覆盖。service+serviceId 均空时 adapter 自动采用 app 唯一服务（单服务应用零操作）。
+	serviceID := strOr(stage.Params, "serviceId", "")
 	// port/containerPort 透传给新建 Workload（驱动 reconciler 建 Service）。复用既有 Workload 忽略。
 	// 模板不填（app-specific），应用经 Pipeline.paramOverrides 覆盖（如 paas-shop product=8081）。
 	port := intOr(stage.Params, "port", 0)
 	cport := intOr(stage.Params, "containerPort", port)
-	logf(sr, "部署镜像 %s 到 env=%s lane=%s service=%s", imageID, envID, lane, service)
+	logf(sr, "部署镜像 %s 到 env=%s lane=%s service=%s serviceId=%s", imageID, envID, lane, service, serviceID)
 	// prod 环境写受 prod:write 保护（adapter 内 CreateRelease 走 EnvTypeResolver）
-	deployment, domain, err := e.Releases.Deploy(ctx, run.AppID, envID, lane, service, imageID, port, cport, run.ID)
+	deployment, domain, err := e.Releases.Deploy(ctx, run.AppID, envID, lane, service, serviceID, imageID, port, cport, run.ID)
 	if err != nil {
 		sr.Error = err.Error()
 		return true, err
@@ -411,8 +415,19 @@ func (e *Engine) execTest(ctx context.Context, run *PipelineRun, stage StageDef,
 	path := strOr(stage.Params, "path", "/livez")
 	url := fmt.Sprintf("http://%s%s", domain, path)
 	logf(sr, "探活 %s", url)
-	if err := pollHTTP(ctx, url, 2*time.Minute); err != nil {
-		sr.Error = fmt.Sprintf("探活失败 %s: %v", url, err)
+	err = pollHTTP(ctx, url, 2*time.Minute)
+	if err != nil && path != "/" {
+		// F2 降级：配置路径探活失败时再试根路径（静态页类应用无 /healthz）；显式配 / 的不重复试。
+		fallback := fmt.Sprintf("http://%s/", domain)
+		logf(sr, "%s 探活未过，降级尝试 %s", path, fallback)
+		if err2 := pollHTTP(ctx, fallback, 30*time.Second); err2 == nil {
+			err = nil
+			url = fallback
+		}
+	}
+	if err != nil {
+		// F6：失败信息带行动指引（检查服务端口/健康路径），不只是裸报错。
+		sr.Error = fmt.Sprintf("探活失败 %s: %v（排查：确认服务监听端口与流水线一致、健康路径存在；可在「服务」tab 修改端口后在「流水线」paramOverrides 覆盖探活 path）", url, err)
 		return true, err
 	}
 	logf(sr, "探活通过")

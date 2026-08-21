@@ -177,6 +177,8 @@ async function doCreate() {
       baseBranch: f.baseBranch.trim() || 'main', createBranch: f.branchMode === 'create',
     })
     createDlg.value = false
+    // 先刷新列表再弹复制命令（F5：alert 阻塞期间列表停滞，用户回看时「变更消失」造成困惑）。
+    await load()
     const cmd = `git fetch origin && git checkout ${created.branch}`
     try {
       await ElMessageBox.alert(cmd, '分支已就绪，本地开始开发：', {
@@ -185,7 +187,6 @@ async function doCreate() {
       await navigator.clipboard.writeText(cmd)
       ElMessage.success('已复制')
     } catch { /* 用户直接关闭 */ }
-    await load()
   } catch (e: any) {
     ElMessage.error(e.message || '创建失败')
   } finally {
@@ -234,6 +235,16 @@ async function remove(p: Pipeline) {
 // CD 等手动流水线：收集 version + branch 触发（变更驱动发车只覆盖默认 CI）
 const cdRunDlg = ref(false)
 const cdRunForm = ref<{ pipeline: Pipeline | null; branch: string; version: string }>({ pipeline: null, branch: 'main', version: '' })
+// CI 直接触发（默认分支）：不经变更火车，服务首次部署/快速验证的主路径。
+async function runCI(p: Pipeline) {
+  try {
+    const r = await triggerRun(props.appId, p.id, { branch: p.trigger?.branch || 'main' })
+    ElMessage.success('已触发构建部署')
+    router.push(`/devops/runs/${r.id}`)
+  } catch (e: any) {
+    ElMessage.error(e.message || '触发失败')
+  }
+}
 function runManual(p: Pipeline) {
   cdRunForm.value = { pipeline: p, branch: p.trigger?.branch || 'main', version: '' }
   cdRunDlg.value = true
@@ -400,7 +411,9 @@ const fmtTime = (t?: string) => (t ? new Date(t).toLocaleString() : '-')
           <span class="pipe-stages-hint">{{ templateStages(p.templateId).map((s) => s.name).join(' → ') }}</span>
           <span class="grow"></span>
           <el-button size="small" @click="designerPid = p.id">编辑</el-button>
-          <el-button v-if="p.kind !== 'ci'" size="small" type="primary" @click="runManual(p)">运行</el-button>
+          <!-- CI 直接以默认分支触发（无需收集表单）；CD 走弹窗收集 version -->
+          <el-button v-if="p.kind === 'ci'" size="small" type="primary" @click="runCI(p)">运行</el-button>
+          <el-button v-else size="small" type="primary" @click="runManual(p)">运行</el-button>
           <el-button size="small" text type="danger" @click="remove(p)">删除</el-button>
         </div>
         <div v-if="!pipelines.length" class="faint">暂无流水线</div>

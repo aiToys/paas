@@ -4,12 +4,16 @@
 // 该服务工作负载，复用 Workloads 详情抽屉模式（实例表 + Pod 日志）。
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useRouter } from 'vue-router'
 import { fetchJSON } from '@/api'
+import { listPipelines, triggerRun, type Pipeline } from '@/api/pipeline'
 import { createService, deleteService, listServices, type ServiceEntity, type ServiceType } from '@/api/service'
 import { getWorkload, getWorkloadLogs, listWorkloads, type Workload, type WorkloadDetail } from '@/api/workload'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 
 const props = defineProps<{ appId: string }>()
+const emit = defineEmits<{ (e: 'switch-tab', tab: string): void }>()
+const router = useRouter()
 
 // 类型元信息：标签 + tag 色（web 蓝/backend 绿/agent 紫/static 橙/cron 灰）。
 const TYPE_META: Record<ServiceType, { label: string; tag: 'primary' | 'success' | 'warning' | 'danger' | 'info' }> = {
@@ -89,6 +93,25 @@ async function submitCreate() {
     submitting.value = false
   }
 }
+
+// —— 部署：触发 app 的 CI 流水线（构建->部署->冒烟），直达运行页看进度 ——
+// 服务实体（含 Port）经 R1 后由 deploy stage 自动采用（单服务零操作）。
+async function onDeploy(s: ServiceEntity) {
+  deployingId.value = s.id
+  try {
+    const pipes = await listPipelines(props.appId)
+    const ci = pipes.find((p: Pipeline) => p.kind === 'ci')
+    if (!ci) { ElMessage.warning('未找到 CI 流水线（应用创建时自动绑定，可去「流水线」tab 查看）'); return }
+    const r = await triggerRun(props.appId, ci.id, { branch: ci.trigger?.branch || 'main' })
+    ElMessage.success(`已触发「${s.name}」部署`)
+    router.push(`/devops/runs/${r.id}`)
+  } catch (e) {
+    ElMessage.error('触发部署失败：' + (e as Error).message)
+  } finally {
+    deployingId.value = ''
+  }
+}
+const deployingId = ref('')
 
 async function onDelete(s: ServiceEntity) {
   const ok = await confirmDangerous({ action: '删除服务', target: s.name, requireNameConfirm: true })
@@ -219,6 +242,7 @@ async function togglePrevious() {
           <span class="meta-item sched mono">{{ s.schedule }}</span>
         </div>
         <div class="svc-actions">
+          <button class="act primary" :disabled="deployingId === s.id" @click="onDeploy(s)">{{ deployingId === s.id ? '触发中…' : '部署' }}</button>
           <button class="act" @click="openInstances(s)">实例</button>
           <button class="act danger" @click="onDelete(s)">删除</button>
         </div>
@@ -329,6 +353,10 @@ async function togglePrevious() {
           <el-select v-model="form.repoId" placeholder="选择应用绑定的仓库" clearable>
             <el-option v-for="r in repos" :key="r.id" :value="r.id" :label="r.giteaRepo || r.gitUrl" />
           </el-select>
+          <!-- F4：仓库为空时给出行动出口（下拉 No data 死路的引导）——跳代码仓库 tab 绑定后回来。 -->
+          <div v-if="!repos.length" class="field-hint">
+            应用尚未绑定代码仓库——<a class="link" @click="emit('switch-tab', 'repositories')">去绑定仓库</a>后回来创建服务
+          </div>
         </el-form-item>
         <el-form-item v-if="form.type !== 'static'" label="仓库内路径">
           <el-input v-model="form.repoPath" placeholder="monorepo 子目录，如 services/api（可空）" />
@@ -455,6 +483,30 @@ async function togglePrevious() {
 .act:hover {
   border-color: var(--brand);
   color: var(--brand);
+}
+.field-hint {
+  width: 100%;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+.field-hint .link {
+  color: var(--brand);
+  cursor: pointer;
+}
+/* 部署主操作：品牌色实底，与卡片其余轻量动作区分（旅程审计 R2） */
+.act.primary {
+  border-color: var(--brand);
+  background: var(--brand);
+  color: #fff;
+}
+.act.primary:hover {
+  filter: brightness(1.1);
+  color: #fff;
+}
+.act.primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 .act.danger:hover {
   border-color: var(--danger);

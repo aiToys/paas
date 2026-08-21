@@ -524,7 +524,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		Releases: &releaseBridge{
 			releases: stores.DevOpsReleases, images: stores.DevOpsImages,
 			workloads: stores.Workload, envs: stores.Environment,
-			gitea: giteaBridgeInst, status: statusReader,
+			gitea: giteaBridgeInst, status: statusReader, services: stores.Service,
 		},
 		Gitea: giteaBridgeInst,
 	}

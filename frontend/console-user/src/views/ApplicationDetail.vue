@@ -474,7 +474,7 @@ async function deleteApp() {
 
       <!-- 服务（应用组成单元，Phase 1 置顶默认） -->
       <div v-if="activeTab === '服务'">
-        <AppServices :app-id="app.id" />
+        <AppServices :app-id="app.id" @switch-tab="t => activeTab = t as TabName" />
       </div>
 
       <!-- 概览 = 真实工作台 -->

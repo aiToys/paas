@@ -80,6 +80,7 @@ type releaseBridge struct {
 	envs      environment.Repository
 	gitea     giteaTagger           // 可选，nil 时 Publish 跳过 git tag（仅回填 Image.Version）
 	status    workload.StatusReader // 可选，nil 时 PollWorkloadReady 透传 store 原 Ready（集群外降级）
+	services  service.Repository    // 可选，nil 时单服务自动解析降级（service/serviceID 均空保持向后兼容）
 }
 
 // CreateRelease 编排发布（取镜像 + 找/建基线 Workload + 更新镜像 + 回滚指针）。
@@ -181,9 +182,17 @@ func (r *releaseBridge) SetVersion(ctx context.Context, releaseIDs []string, ver
 
 // Deploy 部署镜像到 env×lane×service（找/建基线 Workload + UpdateImage），产生部署记录，不打版本。
 // port/containerPort 仅新建 Workload 时设定（驱动 reconciler 建 Service）。sourceRunID 非空回填追溯。
-func (r *releaseBridge) Deploy(ctx context.Context, appID, envID, lane, service, imageID string, port, containerPort int, sourceRunID string) (devops.Release, string, error) {
+// serviceID 关联服务实体（服务模型 Phase 1）；service+serviceID 均空时自动采用 app 唯一服务
+// （单服务应用零操作——默认绑定 pipeline 不写 overrides 也能带出 Port/Replicas/ServiceID）。
+func (r *releaseBridge) Deploy(ctx context.Context, appID, envID, lane, service, serviceID, imageID string, port, containerPort int, sourceRunID string) (devops.Release, string, error) {
+	if service == "" && serviceID == "" && r.services != nil {
+		// 单服务自动采用：恰 1 个服务实体时零操作打通 Port/ServiceID；多服务/无服务保持空（向后兼容）。
+		if svcs, err := r.services.List(ctx, appID); err == nil && len(svcs) == 1 {
+			service, serviceID = svcs[0].Name, svcs[0].ID
+		}
+	}
 	rel, err := r.releases.CreateRelease(ctx, devops.ReleaseInput{
-		AppID: appID, EnvID: envID, LaneID: lane, Service: service, ImageID: imageID,
+		AppID: appID, EnvID: envID, LaneID: lane, Service: service, ServiceID: serviceID, ImageID: imageID,
 		Port: port, ContainerPort: containerPort,
 	})
 	if err != nil {
