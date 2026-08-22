@@ -129,6 +129,27 @@ func (s *Store) ListRepos(ctx context.Context, appID string) ([]devops.CodeRepo,
 	return out, rows.Err()
 }
 
+// ListAllRepos 跨租户列出全部仓库（不过滤 tenant；按 tenant_id, id 排序）。启动收敛用。
+func (s *Store) ListAllRepos(ctx context.Context) ([]devops.CodeRepo, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+repoCols+` FROM code_repos ORDER BY tenant_id, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]devops.CodeRepo, 0)
+	for rows.Next() {
+		var r devops.CodeRepo
+		if err = rows.Scan(&r.ID, &r.TenantID, &r.AppID, &r.GitURL, &r.Branch,
+			&r.Dockerfile, &r.BuildContext, &r.Status, &r.CreatedAt,
+			&r.Source, &r.GiteaOwner, &r.GiteaRepo, &r.CloneURL); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // GetRepo 取单个仓库；跨租户访问返回 not found（不泄漏）。
 func (s *Store) GetRepo(ctx context.Context, id string) (devops.CodeRepo, error) {
 	tid, err := pg.TenantOrErr(ctx)

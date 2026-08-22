@@ -78,6 +78,23 @@ func (s *Store) ListRepos(ctx context.Context, appID string) ([]devops.CodeRepo,
 	return out, nil
 }
 
+// ListAllRepos 跨租户列出全部仓库（不过滤 tenant；按 TenantID 升序再 ID 升序）。
+func (s *Store) ListAllRepos(ctx context.Context) ([]devops.CodeRepo, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]devops.CodeRepo, 0, len(s.repos))
+	for _, r := range s.repos {
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TenantID != out[j].TenantID {
+			return out[i].TenantID < out[j].TenantID
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
+
 func (s *Store) GetRepo(ctx context.Context, id string) (devops.CodeRepo, error) {
 	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {

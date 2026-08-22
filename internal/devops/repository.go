@@ -12,6 +12,9 @@ type CodeRepoRepository interface {
 	GetRepo(ctx context.Context, id string) (CodeRepo, error)
 	CreateRepo(ctx context.Context, r CodeRepo) error
 	DeleteRepo(ctx context.Context, id string) error
+	// ListAllRepos 跨租户列出全部仓库（不过滤 tenant，返回对象带 TenantID）。
+	// 启动收敛用（存量 internal 仓库应用的 CI webhook 升级），非 HTTP 暴露。
+	ListAllRepos(ctx context.Context) ([]CodeRepo, error)
 }
 
 // BuildRunRepository 是构建运行持久化抽象。

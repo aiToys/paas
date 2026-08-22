@@ -14,6 +14,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -29,6 +30,7 @@ import (
 	"github.com/aitoys/paas/internal/devops/pipeline"
 	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/internal/service"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // templateApp 定义一个应用模板（KISS：先一个 Hello Web；后续扩列表）。
@@ -187,38 +189,15 @@ func (h *templateBootstrapHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	// 5. CI pipeline 升级 webhook 触发 + Gitea 注册 webhook（push 即自动构建部署——
-	//    日常迭代旅程核心：改代码 push 后零操作上线）。best-effort，失败保持 manual（可手动运行）。
-	pipes, err := h.pipes.ListPipelines(r.Context(), app.ID)
-	if err == nil {
-		for i, p := range pipes {
+	// 5. CI webhook 化（push 即自动构建部署）+ 首轮手动触发（webhook 只管后续 push）。
+	if pipes, err := h.pipes.ListPipelines(r.Context(), app.ID); err == nil {
+		for _, p := range pipes {
 			if p.Kind != pipeline.KindCI {
 				continue
 			}
-			if p.Trigger.Type != pipeline.TriggerWebhook {
-				p.Trigger = pipeline.PipelineTrigger{Type: pipeline.TriggerWebhook, Branch: "main"}
-				if p.Trigger.Token == "" {
-					// 与 pipeline handler normalizeTrigger 同款生成（私有函数不可复用，此处最小重复）
-					buf := make([]byte, 32)
-					if _, e := rand.Read(buf); e == nil {
-						p.Trigger.Token = hex.EncodeToString(buf)
-					}
-				}
-				if _, uErr := h.pipes.UpdatePipeline(r.Context(), p); uErr != nil {
-					log.Printf("CI 升级 webhook 触发失败（保持 manual）: app=%s: %v", app.ID, uErr)
-				} else {
-					pipes[i] = p
-				}
+			if _, ok := ensureCIWebhook(r.Context(), h.pipes, h.gitea, h.coreBaseURL, app.ID, owner, repoName, p); !ok {
+				partial["hint"] = "push 自动触发未配置成功（可去「流水线」tab 手动运行）"
 			}
-			// 注册 Gitea webhook（core 集群内地址回调；422 同 URL 已存在幂等跳过）
-			if h.coreBaseURL != "" && p.Trigger.Token != "" {
-				hookURL := fmt.Sprintf("%s/api/webhooks/pipeline/%s?token=%s", h.coreBaseURL, p.ID, p.Trigger.Token)
-				if wErr := h.gitea.CreateWebhook(r.Context(), owner, repoName, hookURL); wErr != nil {
-					log.Printf("Gitea webhook 注册失败（不阻断，push 自动触发暂不可用）: app=%s: %v", app.ID, wErr)
-					partial["hint"] = "push 自动触发未配置成功（可去「流水线」tab 手动运行）"
-				}
-			}
-			// 首轮手动触发（webhook 只管后续 push）
 			run, trErr := h.trigger(r, app.ID, p.ID, "main")
 			if trErr != nil {
 				log.Printf("模板首轮 CI 触发失败（不阻断）: app=%s: %v", app.ID, trErr)
@@ -231,6 +210,41 @@ func (h *templateBootstrapHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 	}
 
 	httputil.WriteDataCreated(w, partial)
+}
+
+// ensureCIWebhook 幂等升级 CI pipeline 为 webhook 触发 + 注册 Gitea webhook
+// （push 即自动构建部署）。from-template（新应用）与启动收敛（存量应用）共用。
+// 返回升级后的 pipeline + 是否完全成功（注册失败返 false 但 trigger 升级可能已生效）。
+func ensureCIWebhook(ctx context.Context, pipes pipeline.Repository, giteaCl *gitea.Client,
+	coreBaseURL, appID, owner, repoName string, p pipeline.Pipeline) (pipeline.Pipeline, bool) {
+	ok := true
+	if p.Trigger.Type != pipeline.TriggerWebhook {
+		p.Trigger = pipeline.PipelineTrigger{Type: pipeline.TriggerWebhook, Branch: "main"}
+		if p.Trigger.Token == "" {
+			// 与 pipeline handler normalizeTrigger 同款生成（私有函数不可复用，此处最小重复）
+			buf := make([]byte, 32)
+			if _, e := rand.Read(buf); e == nil {
+				p.Trigger.Token = hex.EncodeToString(buf)
+			}
+		}
+		if upd, uErr := pipes.UpdatePipeline(ctx, p); uErr != nil {
+			log.Printf("CI 升级 webhook 触发失败（保持 manual）: app=%s: %v", appID, uErr)
+			ok = false
+		} else {
+			p = upd
+		}
+	}
+	// 注册 Gitea webhook（core 集群内地址回调；422 同 URL 已存在幂等跳过）
+	if coreBaseURL != "" && p.Trigger.Token != "" && giteaCl != nil {
+		hookURL := fmt.Sprintf("%s/api/webhooks/pipeline/%s?token=%s", coreBaseURL, p.ID, p.Trigger.Token)
+		if wErr := giteaCl.CreateWebhook(ctx, owner, repoName, hookURL); wErr != nil {
+			log.Printf("Gitea webhook 注册失败（push 自动触发暂不可用）: app=%s: %v", appID, wErr)
+			ok = false
+		}
+	} else if coreBaseURL == "" || giteaCl == nil {
+		ok = false // 未配 core 地址/gitea——无法注册（不阻断 manual 运行）
+	}
+	return p, ok
 }
 
 // internalRecorder 捕获内部调 application handler 的响应（status/body），
@@ -262,4 +276,43 @@ func pickTemplate(slug string) *templateApp {
 		}
 	}
 	return nil
+}
+
+// convergeCIWebhooks 启动收敛：跨租户枚举 internal 仓库（ListAllRepos），其所属应用的
+// manual CI pipeline 升级 webhook 触发 + 注册 Gitea webhook（与新应用同体验——push 即自动构建部署）。
+// 幂等（已是 webhook 跳过；hook 同 URL 422 幂等）。best-effort：单 app 失败仅日志，不阻断其余。
+func convergeCIWebhooks(ctx context.Context, t *templateBootstrapHandler, stores *Stores) {
+	if t.gitea == nil || t.coreBaseURL == "" || t.pipes == nil || stores == nil || stores.DevOpsRepos == nil {
+		return
+	}
+	repos, err := stores.DevOpsRepos.ListAllRepos(ctx)
+	if err != nil {
+		log.Printf("CI webhook 收敛：仓库枚举失败: %v", err)
+		return
+	}
+	upgraded := 0
+	for _, r := range repos {
+		if r.Source != devops.RepoSourceInternal || r.GiteaOwner == "" || r.GiteaRepo == "" {
+			continue
+		}
+		// pipeline Repository 按 ctx tenant 过滤，切到仓库所属租户。
+		pctx := tenant.WithTenant(ctx, r.TenantID)
+		pipes, perr := t.pipes.ListPipelines(pctx, r.AppID)
+		if perr != nil {
+			log.Printf("CI webhook 收敛：pipeline 列表失败 app=%s: %v", r.AppID, perr)
+			continue
+		}
+		for _, p := range pipes {
+			if p.Kind != pipeline.KindCI || p.Trigger.Type == pipeline.TriggerWebhook {
+				continue
+			}
+			if _, ok := ensureCIWebhook(pctx, t.pipes, t.gitea, t.coreBaseURL, r.AppID, r.GiteaOwner, r.GiteaRepo, p); ok {
+				upgraded++
+				log.Printf("CI webhook 收敛：app=%s CI 已升级 webhook 触发（push 自动构建部署）", r.AppID)
+			}
+		}
+	}
+	if upgraded > 0 {
+		log.Printf("CI webhook 收敛完成：共升级 %d 条 CI pipeline", upgraded)
+	}
 }

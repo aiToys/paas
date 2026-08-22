@@ -570,6 +570,16 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	}
 	mux.Handle("/api/applications/from-template", auth(tplHandler))
 
+	// 存量收敛（异步，启动 3s 后）：internal 仓库应用的 CI pipeline 若仍 manual，升级 webhook +
+	// 注册 Gitea webhook（与新应用同体验——push 即自动构建部署）。幂等，失败仅日志下次启动重试。
+	go func() {
+		time.Sleep(3 * time.Second)
+		// 独立 ctx：serveHTTP 无进程生命周期 ctx 可取，收敛短平快（超时 2min 兜底防挂起）。
+		cctx, ccancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer ccancel()
+		convergeCIWebhooks(cctx, tplHandler, stores)
+	}()
+
 	changeLookup := changeRepoLookup(stores.DevOpsRepos)
 	changeSvc := change.NewService(stores.Change,
 		change.WithGitea(&giteaBrancherBridge{client: giteaClient}),
