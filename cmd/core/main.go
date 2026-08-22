@@ -504,6 +504,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		devops.WithEnvPromoter(stores.Environment),
 		devops.WithUserIDFrom(gateway.UserIDFrom),
 		devops.WithGiteaClient(giteaClient),
+		devops.WithGiteaExternalURL(os.Getenv("PAAS_GITEA_EXTERNAL_URL")),
 		devops.WithRegistryClient(registryClient),
 		devops.WithBuildLogStreamer(builder.NewK8sBuildLogStreamer(appliers.clientset)),
 		// 多服务发布 service 必填校验（app 已部署多服务时不传 service 会互相覆盖镜像）。
@@ -520,7 +521,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	giteaBridgeInst := &giteaBridge{repos: stores.DevOpsRepos, gitea: giteaClient}
 	pipeEngine := &pipeline.Engine{
 		Pipelines: stores.Pipeline, Runs: stores.Pipeline,
-		Builds: &buildBridge{builds: stores.DevOpsBuilds},
+		Builds: &buildBridge{builds: stores.DevOpsBuilds, repos: stores.DevOpsRepos, gitea: giteaClient},
 		Releases: &releaseBridge{
 			releases: stores.DevOpsReleases, images: stores.DevOpsImages,
 			workloads: stores.Workload, envs: stores.Environment,
@@ -557,6 +558,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		apps: appHandler, repos: stores.DevOpsRepos, svcRepo: stores.Service,
 		pipes: stores.Pipeline, gitea: giteaClient,
 		imageReg: os.Getenv("PAAS_IMAGE_REGISTRY"),
+		coreBaseURL: os.Getenv("PAAS_CORE_BASE_URL"),
 		trigger: func(r *http.Request, appID, pid, branch string) (pipeline.PipelineRun, error) {
 			runID, err := changeRunBridge.TriggerAppRun(r.Context(), appID, pid, branch)
 			if err != nil {

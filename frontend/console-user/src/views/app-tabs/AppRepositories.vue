@@ -66,6 +66,18 @@ function relTime(date: string): string {
   return new Date(date).toLocaleDateString()
 }
 
+// 展示 clone 命令（后端从 PAAS_GITEA_EXTERNAL_URL 运行时填充；凭证占位由用户替换）。
+async function showClone(row: any) {
+  try {
+    await ElMessageBox.alert(row.cloneCommand, '本机克隆命令（替换 <用户名>:<密码> 为 Git 凭证）：', {
+      confirmButtonText: '复制命令',
+      distinguishCancelAndClose: true,
+    })
+    await navigator.clipboard.writeText(row.cloneCommand)
+    ElMessage.success('已复制')
+  } catch { /* 直接关闭 */ }
+}
+
 // 拉单个 internal 仓库最近 1 条提交（best-effort，失败静默——浏览抽屉仍可看全部）。
 async function loadLatestCommit(repoId: string) {
   try {
@@ -192,9 +204,11 @@ watch(() => props.appId, load)
           <el-tag :type="row.status === 'active' ? 'success' : 'info'" size="small">{{ row.status }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="130">
+      <el-table-column label="操作" width="180">
         <template #default="{ row }">
           <el-button v-if="row.source === 'internal'" text size="small" @click="browseRepo = row">浏览</el-button>
+          <!-- 迭代旅程审计：开发者需要本机可用的 clone 命令（集群内 FQDN 本机不可达） -->
+          <el-button v-if="row.cloneCommand" text size="small" type="primary" @click="showClone(row)">克隆</el-button>
           <el-button text type="danger" size="small" @click="unbind(row)">解绑</el-button>
         </template>
       </el-table-column>

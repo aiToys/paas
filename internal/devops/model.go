@@ -90,7 +90,10 @@ type CodeRepo struct {
 	GiteaRepo  string `json:"giteaRepo,omitempty"`
 	// CloneURL 含凭证的 git clone URL（internal：含 paas-bot basic auth；external 空）。
 	// json:"-" 永不序列化到响应（防凭证泄漏前端）；builder 内部 Go 调用直接读此字段。
-	CloneURL  string    `json:"-"`
+	CloneURL string `json:"-"`
+	// CloneCommand 开发者本机 clone 命令（handler 运行时从 giteaExternalURL 填充，不落库；
+	// 凭证用占位符——真实凭证不回传前端，用户向管理员索取或用个人凭证）。external 仓库空。
+	CloneCommand string    `json:"cloneCommand,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 

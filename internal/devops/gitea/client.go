@@ -415,6 +415,23 @@ type Branch struct {
 
 // CreateBranch 从 from 分支/commit 创建新分支（POST /repos/{o}/{r}/branches）。
 // 422（分支已存在）-> ErrBranchExists。
+// CreateWebhook 注册仓库 webhook（push 事件 -> pipeline 自动触发）。
+// URL 需集群内可达（core Service FQDN）；已存在同 URL webhook 时幂等跳过（Gitea 返 422）。
+func (c *Client) CreateWebhook(ctx context.Context, owner, repo, url string) error {
+	err := c.doJSON(ctx, http.MethodPost,
+		fmt.Sprintf("/api/v1/repos/%s/%s/hooks", pathEscape(owner), pathEscape(repo)),
+		map[string]any{
+			"type": "gitea", "active": true,
+			"branch_filter": "*",
+			"events":        []string{"push"},
+			"config":        map[string]any{"url": url, "content_type": "json", "secret": ""},
+		}, nil)
+	if err != nil && strings.Contains(err.Error(), "422") {
+		return nil // 同 URL 已存在（幂等）
+	}
+	return err
+}
+
 // CreateFile 向仓库提交单个文件（Gitea contents API；新建/更新均可，按 content base64）。
 // 模板 seed 用（一键建应用预置 Dockerfile/index.html 等）。
 func (c *Client) CreateFile(ctx context.Context, owner, repo, path, message, contentB64 string) error {

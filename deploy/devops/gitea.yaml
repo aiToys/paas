@@ -125,6 +125,8 @@ spec:
             - { name: GITEA__server__DOMAIN, value: gitea.paas.svc.cluster.local }
             - { name: GITEA__server__ROOT_URL, value: http://gitea.paas.svc.cluster.local:3000/ }
             - { name: GITEA__security__INSTALL_LOCK, value: "true" }
+            # webhook 允许调用集群内地址（默认仅外网——push 自动触发流水线被拒）
+            - { name: GITEA__webhook__ALLOWED_HOST_LIST, value: "external,127.0.0.1,::1,*.svc.cluster.local" }
             - { name: GITEA__service__DISABLE_REGISTRATION, value: "true" }
           volumeMounts:
             - { name: data, mountPath: /data }
@@ -140,6 +142,8 @@ spec:
             - { name: GITEA__server__ROOT_URL, value: http://gitea.paas.svc.cluster.local:3000/ }
             # 安装锁：跳过首次安装向导（paas-bot 已由 initContainer 创建）
             - { name: GITEA__security__INSTALL_LOCK, value: "true" }
+            # webhook 允许调用集群内地址（默认仅外网——push 自动触发流水线被拒）
+            - { name: GITEA__webhook__ALLOWED_HOST_LIST, value: "external,127.0.0.1,::1,*.svc.cluster.local" }
             # 关闭自助注册（用户只能由 PaaS 通过 paas-bot API 创建，统一鉴权）
             - { name: GITEA__service__DISABLE_REGISTRATION, value: "true" }
             - { name: GITEA__service__REQUIRE_SIGNIN_VIEW, value: "false" }

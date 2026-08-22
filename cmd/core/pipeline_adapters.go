@@ -35,12 +35,35 @@ const (
 )
 
 // buildBridge 桥接 pipeline.BuildRunner -> devops BuildRunRepository。
-type buildBridge struct{ builds devops.BuildRunRepository }
+type buildBridge struct {
+	builds devops.BuildRunRepository
+	repos  devops.CodeRepoRepository // 可选：commit 真实化（internal 仓库取 Gitea 最新 commit）
+	gitea  *gitea.Client             // 可选：nil 时跳过真实化（保持 mock，与历史行为一致）
+}
 
 // CreateBuildRun 触发构建，返回写入后的 BuildRun（含 ID，供轮询）。
+// commit 为空且 internal 仓库时从 Gitea 取最新 commit sha/message（与 devops handler 路径同源，
+// 消除流水线构建记录 mock commit——迭代旅程审计卡点：用户无法回答「这个版本包含我的改动吗」）。
 func (b *buildBridge) CreateBuildRun(ctx context.Context, appID, repoID, branch, commit string, buildArgs map[string]string) (devops.BuildRun, error) {
+	message := ""
+	if b.gitea != nil && b.repos != nil {
+		if repo, err := b.repos.GetRepo(ctx, repoID); err == nil && repo.Source == devops.RepoSourceInternal {
+			owner := repo.GiteaOwner
+			if owner == "" {
+				owner = b.gitea.Username()
+			}
+			if cs, gerr := b.gitea.ListCommits(ctx, owner, repo.GiteaRepo, 1); gerr == nil && len(cs) > 0 {
+				// commit 已带（webhook push.after）时只补 message（构建记录可读性）；否则都取最新。
+				if commit == "" {
+					commit = cs[0].SHA
+				}
+				message = cs[0].Message
+			}
+		}
+	}
 	return b.builds.CreateBuildRun(ctx, devops.BuildRun{
-		AppID: appID, RepoID: repoID, Branch: branch, Commit: commit, Trigger: devops.TriggerManual, BuildArgs: buildArgs,
+		AppID: appID, RepoID: repoID, Branch: branch, Commit: commit, Message: message,
+		Trigger: devops.TriggerManual, BuildArgs: buildArgs,
 	})
 }
 

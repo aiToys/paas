@@ -64,6 +64,9 @@ type Handler struct {
 	envPromoter EnvPromoter
 	// giteaClient 内置 Git 后端客户端；nil 时 internal 来源建仓/浏览不可用（降级 503）。
 	giteaClient *gitea.Client
+	// giteaExternalURL Gitea 外部可达地址（开发者本机 clone 用；集群内 FQDN 本机不可达——
+	// 迭代旅程审计卡点）。空则 cloneCommand 不填充（前端降级提示联系管理员）。
+	giteaExternalURL string
 	// registryClient 镜像库 v2 客户端；nil 时 registry 实时视图不可用（降级 503）。
 	registryClient *registry.Client
 	// logStreamer 构建实时日志流（k8s Pod logs follow）；nil 时 /logs/stream 降级 503。
@@ -105,6 +108,11 @@ func WithUserIDFrom(f func(context.Context) string) HandlerOpt {
 }
 
 // WithGiteaClient 注入内置 Git 后端客户端，启用 internal 来源建仓 + 仓库浏览。
+// WithGiteaExternalURL 注入 Gitea 外部可达地址（列表响应运行时填充 cloneCommand，不落库）。
+func WithGiteaExternalURL(u string) HandlerOpt {
+	return func(h *Handler) { h.giteaExternalURL = u }
+}
+
 func WithGiteaClient(c *gitea.Client) HandlerOpt {
 	return func(h *Handler) { h.giteaClient = c }
 }
@@ -250,6 +258,16 @@ func (h *Handler) serveRepos(w http.ResponseWriter, r *http.Request, appID strin
 		if err != nil {
 			httputil.WriteInternalError(w, err)
 			return
+		}
+		// 运行时填充外部 clone 命令（地址来自 env 不落库；仅 internal 仓库）。
+		if h.giteaExternalURL != "" {
+			for i := range list {
+				if list[i].Source == RepoSourceInternal && list[i].GiteaRepo != "" {
+					list[i].CloneCommand = fmt.Sprintf(
+						"git clone http://<用户名>:<密码>@%s/%s/%s.git",
+						strings.TrimPrefix(h.giteaExternalURL, "http://"), list[i].GiteaOwner, list[i].GiteaRepo)
+				}
+			}
 		}
 		httputil.WriteData(w, list)
 		return

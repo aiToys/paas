@@ -55,6 +55,7 @@ devops:
     url: "http://gitea.paas.svc.cluster.local:3000"
     username: "paas-bot"
     password: "paas-gitea-bot-2026"  # 与 deploy/devops/gitea.yaml Secret bot-password 一致
+    externalURL: "http://gitea.k8s.dd"  # 外部可达（本机 clone）；需先给 gitea 配 ingress
 
 # MaaS 真实推理（airouter 网关）；key 不入库，部署时 --set maas.airouterApiKey=<key> 注入
 # 本 overlay 是 dev 集群配置（含 dev 网关地址）；开源用户参考 values.yaml 用 neutral 默认 + 自配

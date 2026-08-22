@@ -53,6 +53,7 @@ devops:
     url: ""                       # Gitea API 根地址（如 http://gitea.paas.svc.cluster.local:3000）
     username: ""                  # 平台账号（paas-bot，initContainer 创建）
     password: ""                  # 平台账号密码（与 deploy/devops/gitea.yaml Secret 一致）
+    externalURL: ""               # 外部可达地址（开发者本机 clone 用；空则 UI 不展示克隆命令）
 
 # MaaS 推理（airouter 示例 OpenAI 兼容网关；可替换为任意 OpenAI 兼容供应商）
 maas:

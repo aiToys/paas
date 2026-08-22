@@ -14,7 +14,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -62,8 +64,9 @@ type templateBootstrapHandler struct {
 	repos    devops.CodeRepoRepository
 	svcRepo  service.Repository
 	pipes    pipeline.Repository
-	gitea    *gitea.Client
-	imageReg string // 模板 Dockerfile 基础镜像 {REGISTRY} 替换值（集群内 registry，builder 可拉）
+	gitea       *gitea.Client
+	imageReg    string // 模板 Dockerfile 基础镜像 {REGISTRY} 替换值（集群内 registry，builder 可拉）
+	coreBaseURL string // core 集群内地址（如 http://paas-core.paas.svc:8080，webhook 回调）
 	trigger  func(r *http.Request, appID, pid, branch string) (pipeline.PipelineRun, error)
 	allow    func(r *http.Request, perm string) bool
 }
@@ -152,10 +155,13 @@ func (h *templateBootstrapHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 
 	// 3. seed 模板文件（best-effort——失败不阻断后续，用户可手动推文件）。
 	owner := h.gitea.Username()
+	i := 0
 	for path, content := range tpl.Files {
+		i++
 		content = strings.ReplaceAll(content, "{REGISTRY}", h.imageReg)
 		if err := h.gitea.CreateFile(r.Context(), owner, repoName, path,
-			"seed from template "+tpl.Slug, base64.StdEncoding.EncodeToString([]byte(content))); err != nil {
+			fmt.Sprintf("seed from template %s (%d/%d: %s)", tpl.Slug, i, len(tpl.Files), path),
+			base64.StdEncoding.EncodeToString([]byte(content))); err != nil {
 			log.Printf("模板 seed 文件失败（不阻断）: app=%s file=%s: %v", app.ID, path, err)
 			partial["seeded"] = false
 		}
@@ -181,13 +187,38 @@ func (h *templateBootstrapHandler) ServeHTTP(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	// 5. 触发首轮 CI（best-effort——失败引导手动触发）。
+	// 5. CI pipeline 升级 webhook 触发 + Gitea 注册 webhook（push 即自动构建部署——
+	//    日常迭代旅程核心：改代码 push 后零操作上线）。best-effort，失败保持 manual（可手动运行）。
 	pipes, err := h.pipes.ListPipelines(r.Context(), app.ID)
 	if err == nil {
-		for _, p := range pipes {
+		for i, p := range pipes {
 			if p.Kind != pipeline.KindCI {
 				continue
 			}
+			if p.Trigger.Type != pipeline.TriggerWebhook {
+				p.Trigger = pipeline.PipelineTrigger{Type: pipeline.TriggerWebhook, Branch: "main"}
+				if p.Trigger.Token == "" {
+					// 与 pipeline handler normalizeTrigger 同款生成（私有函数不可复用，此处最小重复）
+					buf := make([]byte, 32)
+					if _, e := rand.Read(buf); e == nil {
+						p.Trigger.Token = hex.EncodeToString(buf)
+					}
+				}
+				if _, uErr := h.pipes.UpdatePipeline(r.Context(), p); uErr != nil {
+					log.Printf("CI 升级 webhook 触发失败（保持 manual）: app=%s: %v", app.ID, uErr)
+				} else {
+					pipes[i] = p
+				}
+			}
+			// 注册 Gitea webhook（core 集群内地址回调；422 同 URL 已存在幂等跳过）
+			if h.coreBaseURL != "" && p.Trigger.Token != "" {
+				hookURL := fmt.Sprintf("%s/api/webhooks/pipeline/%s?token=%s", h.coreBaseURL, p.ID, p.Trigger.Token)
+				if wErr := h.gitea.CreateWebhook(r.Context(), owner, repoName, hookURL); wErr != nil {
+					log.Printf("Gitea webhook 注册失败（不阻断，push 自动触发暂不可用）: app=%s: %v", app.ID, wErr)
+					partial["hint"] = "push 自动触发未配置成功（可去「流水线」tab 手动运行）"
+				}
+			}
+			// 首轮手动触发（webhook 只管后续 push）
 			run, trErr := h.trigger(r, app.ID, p.ID, "main")
 			if trErr != nil {
 				log.Printf("模板首轮 CI 触发失败（不阻断）: app=%s: %v", app.ID, trErr)
