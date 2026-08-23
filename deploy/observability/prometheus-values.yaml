@@ -83,7 +83,7 @@ extraScrapeConfigs: |
   # 应用 Pod 自暴露指标（prometheus.io/scrape 注解发现——controller 给 service Pod 已注）。
   # 应用 RED 指标（http_requests_total 等，real/metrics listAppMetrics 的 rps/latency/errorRate）
   # 依赖此 job；透传 lane/tenant/app label 供泳道与租户维度过滤。未注解的 Pod 不抓（keep 过滤）。
-  - job_name: 'kubernetes-pods'
+  - job_name: 'paas-app-pods'
     kubernetes_sd_configs:
       - role: pod
     relabel_configs:
