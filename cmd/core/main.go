@@ -356,8 +356,12 @@ func resolveJWTSecret() string {
 //   - EnvTypeResolver：注入 environment store（实现 EnvType 方法），prod:write 校验跨模块复用。
 //
 // 模型目录平台共享（不按租户过滤）；应用/治理/配置等业务模块按租户隔离。
-// obsAlertEngine 由 serveHTTP 构造、run 层启动（serveHTTP 无进程生命周期 ctx 可传）。
-var obsAlertEngine *alertengine.Engine
+// obsRepo/obsAlertEngine 由 serveHTTP 构造（单实例，handler 与通知桥接共用源）、
+// 引擎在 run 层启动（serveHTTP 无进程生命周期 ctx 可传）。
+var (
+	obsRepo        observability.Repository
+	obsAlertEngine *alertengine.Engine
+)
 
 func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, appliers k8sAppliers, metricsReg *metrics.Registry) *http.Server {
 	apiKey := resolveAPIKey()
@@ -371,6 +375,10 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		}
 	}
 	jwtSecret := resolveJWTSecret()
+	// 可观测 Repository + 告警评估引擎先行构造（单实例）：changeHandler 通知桥接（下方）与
+	// obsHandler（下方可观测段）共用；必须在第一个消费者之前，否则 bridge 捕获 nil。
+	// 引擎启动在 run 层（有进程生命周期 ctx）。
+	obsRepo, obsAlertEngine = buildObservabilityStore(workloadLister{repo: stores.Workload}, tenantEntityLister{apps: stores.Application, ds: stores.DataService, wls: stores.Workload}, stores.AlertRules)
 	mux := http.NewServeMux()
 	// BearerAuth 双通道：JWT（admin 浏览器登录）/ API Key（程序化调用）共存，下游零改动。
 	auth := gateway.BearerAuth(stores.Identity, jwtSecret)
@@ -644,10 +652,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 
 	// 可观测（指标监控 + 告警规则，平台能力横切）。
 	// 惰性时序模拟采集，即时评估告警；不接 prod:write，独立于物理环境。
-	obsRepo, alertEngine := buildObservabilityStore(workloadLister{repo: stores.Workload}, tenantEntityLister{apps: stores.Application, ds: stores.DataService, wls: stores.Workload}, stores.AlertRules)
+	// obsRepo/engine 已在 serveHTTP 开头构造（单实例，通知桥接同源）。
 	obsHandler := observability.NewHandler(obsRepo)
 	obsHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
-	obsAlertEngine = alertEngine // 供 run 层 Start（serveHTTP 无进程生命周期 ctx）
 
 	// 安全（密钥/证书 + 审计日志，平台能力横切）。
 	// 注入 UserIDFrom 填审计 actor；Secret 明文存储/掩码返回，写操作自动记审计。
