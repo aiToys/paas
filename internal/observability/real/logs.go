@@ -21,12 +21,13 @@ type LogsStore struct {
 	lokiURL string
 	client  *http.Client
 	lister  observability.AppWorkloadLister // 应用级查询：解析 app→工作负载 ID（pod 名正则）
+	cache   *queryCache[[]observability.LogEntry] // singleflight + 短 TTL（R8-I1 轮询 QPS 削峰）
 }
 
 // NewLogsStore 创建 Loki 适配。lokiURL 为 Loki 根地址（如 http://loki:3100）。
 // lister 可为 nil（应用级查询降级返空）。
 func NewLogsStore(lokiURL string, lister observability.AppWorkloadLister) *LogsStore {
-	return &LogsStore{lokiURL: lokiURL, client: httputil.NewClient(10 * time.Second), lister: lister}
+	return &LogsStore{lokiURL: lokiURL, client: httputil.NewClient(10 * time.Second), lister: lister, cache: newQueryCache[[]observability.LogEntry](5 * time.Second)}
 }
 
 // lokiResponse 是 Loki /loki/api/v1/query_range 响应的最小子集。
@@ -53,6 +54,18 @@ type lokiResponse struct {
 //
 // Loki 按时间倒序返回；截断 limit。后端不可达 / lister 未注入降级返空。
 func (s *LogsStore) ListLogs(ctx context.Context, appID, targetType, targetID, level, q, lane string, limit int) ([]observability.LogEntry, error) {
+	// 无租户 ctx（测试/内部调用）跳过缓存直查，保持原降级语义。
+	tid, tidErr := tenant.IDOrErr(ctx)
+	if tidErr != nil {
+		return s.listLogs(ctx, appID, targetType, targetID, level, q, lane, limit)
+	}
+	key := "l:" + tid + ":" + appID + ":" + targetType + ":" + targetID + ":" + level + ":" + q + ":" + lane + ":" + observability.RangeFrom(ctx).String()
+	return s.cache.do(ctx, key, func(c context.Context) ([]observability.LogEntry, error) {
+		return s.listLogs(c, appID, targetType, targetID, level, q, lane, limit)
+	})
+}
+
+func (s *LogsStore) listLogs(ctx context.Context, appID, targetType, targetID, level, q, lane string, limit int) ([]observability.LogEntry, error) {
 	if limit <= 0 || limit > observability.MaxLogs {
 		limit = 100
 	}
@@ -100,9 +113,10 @@ func (s *LogsStore) ListLogs(ctx context.Context, appID, targetType, targetID, l
 		selector += fmt.Sprintf(" |= %q", q)
 	}
 	now := time.Now()
+	window := observability.RangeFrom(ctx) // 时间范围选择器（默认 1h）
 	v := url.Values{}
 	v.Set("query", selector)
-	v.Set("start", strconv.FormatInt(now.Add(-time.Hour).UnixNano(), 10))
+	v.Set("start", strconv.FormatInt(now.Add(-window).UnixNano(), 10))
 	v.Set("end", strconv.FormatInt(now.UnixNano(), 10))
 	v.Set("limit", strconv.Itoa(limit))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.lokiURL+"/loki/api/v1/query_range?"+v.Encode(), nil)

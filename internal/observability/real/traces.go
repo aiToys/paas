@@ -13,6 +13,7 @@ import (
 
 	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/internal/observability"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // TracesStore 调 Jaeger HTTP API（v1）实现 TracesReader。
@@ -25,13 +26,14 @@ type TracesStore struct {
 	client    *http.Client
 	lister    observability.AppWorkloadLister    // 应用级查询：app→工作负载名（service 过滤）
 	entities  observability.TenantEntityLister   // 租户服务白名单：平台级查询 + GetTrace 归属校验
+	cache     *queryCache[[]observability.Trace] // singleflight + 短 TTL（R8-I1 轮询 QPS 削峰）
 }
 
 // NewTracesStore 创建 Jaeger 适配。jaegerURL 为 Jaeger Query 根地址（如 http://jaeger:16686）。
 // lister 可为 nil（应用级查询降级返空）。entities 为 nil 时平台级查询与 GetTrace 归属校验
 // 降级返空（fail-closed，与租户隔离语义一致——宁可无数据不可跨租户泄漏）。
 func NewTracesStore(jaegerURL string, lister observability.AppWorkloadLister, entities observability.TenantEntityLister) *TracesStore {
-	return &TracesStore{jaegerURL: jaegerURL, client: httputil.NewClient(10 * time.Second), lister: lister, entities: entities}
+	return &TracesStore{jaegerURL: jaegerURL, client: httputil.NewClient(10 * time.Second), lister: lister, entities: entities, cache: newQueryCache[[]observability.Trace](5 * time.Second)}
 }
 
 // Jaeger v1 /api/traces 响应结构（最小子集）。
@@ -135,12 +137,25 @@ func (s *TracesStore) GetTrace(ctx context.Context, traceID string) (observabili
 // 按 pod 正则聚合的同款取舍）；彻底隔离需应用 Pod 注入 tenant 资源属性（留后续）。
 // 后端不可达降级返空（不报错）。
 func (s *TracesStore) ListTraces(ctx context.Context, appID, status string, limit int) ([]observability.Trace, error) {
+	// 无租户 ctx（测试/内部调用）跳过缓存直查，保持原降级语义。
+	tid, tidErr := tenant.IDOrErr(ctx)
+	if tidErr != nil {
+		return s.listTraces(ctx, appID, status, limit)
+	}
+	key := "t:" + tid + ":" + appID + ":" + status + ":" + observability.RangeFrom(ctx).String()
+	return s.cache.do(ctx, key, func(c context.Context) ([]observability.Trace, error) {
+		return s.listTraces(c, appID, status, limit)
+	})
+}
+
+func (s *TracesStore) listTraces(ctx context.Context, appID, status string, limit int) ([]observability.Trace, error) {
 	if limit <= 0 || limit > observability.MaxTraces {
 		limit = 50
 	}
-	// Jaeger start/end 用微秒（Unix microseconds）。
+	// Jaeger start/end 用微秒（Unix microseconds）。时间范围选择器（默认 1h）。
 	now := time.Now()
-	start := strconv.FormatInt(now.Add(-time.Hour).UnixMicro(), 10)
+	window := observability.RangeFrom(ctx)
+	start := strconv.FormatInt(now.Add(-window).UnixMicro(), 10)
 	end := strconv.FormatInt(now.UnixMicro(), 10)
 
 	var merged []observability.Trace

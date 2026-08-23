@@ -170,6 +170,10 @@ func (p *OpenAICompatibleProvider) Chat(ctx context.Context, req provider.ChatRe
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
 	httpReq.Header.Set("Accept", "text/event-stream")
+	// W3C traceparent 注入：上游（或中间网关）支持 OTel 时可延续同一条 trace（R6-I2）。
+	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+		httpReq.Header.Set("traceparent", "00-"+sc.TraceID().String()+"-"+sc.SpanID().String()+"-"+sc.TraceFlags().String())
+	}
 	// 显式禁 gzip：Go Transport 默认自动加 Accept-Encoding: gzip 并透明解压，部分网关在
 	// HTTP/2 下返回 gzip body 解压异常，会导致 SSE 行被跳过。identity 要求上游返明文 SSE 流。
 	httpReq.Header.Set("Accept-Encoding", "identity")
@@ -357,6 +361,10 @@ func (p *OpenAICompatibleProvider) embedBatch(ctx context.Context, apiKey string
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+apiKey)
+	// W3C traceparent 注入（与 chat 同款，embeddings 出站亦延续 trace）。
+	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+		httpReq.Header.Set("traceparent", "00-"+sc.TraceID().String()+"-"+sc.SpanID().String()+"-"+sc.TraceFlags().String())
+	}
 
 	resp, err := p.httpClient.Do(httpReq)
 	if err != nil {

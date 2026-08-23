@@ -33,13 +33,14 @@ type MetricsStore struct {
 	client   *http.Client
 	lister   observability.AppWorkloadLister  // 应用级查询：解析 app→工作负载 ID（pod 名正则）
 	entities observability.TenantEntityLister // 全局查询：列出租户全部应用/数据服务（健康矩阵）
+	cache    *queryCache[[]observability.MetricSeries] // singleflight + 短 TTL（R8-I1 轮询 QPS 削峰）
 }
 
 // NewMetricsStore 创建 Prometheus 适配。promURL 为 Prometheus 根地址（如 http://prom:9090）。
 // lister 可为 nil（应用级查询降级返空，不影响 dataservice/通用查询）。
 // entities 可为 nil（全局查询降级返空，不影响 app/dataservice 维度）。
 func NewMetricsStore(promURL string, lister observability.AppWorkloadLister, entities observability.TenantEntityLister) *MetricsStore {
-	return &MetricsStore{promURL: promURL, client: httputil.NewClient(10 * time.Second), lister: lister, entities: entities}
+	return &MetricsStore{promURL: promURL, client: httputil.NewClient(10 * time.Second), lister: lister, entities: entities, cache: newQueryCache[[]observability.MetricSeries](5 * time.Second)}
 }
 
 // promResponse 是 Prometheus /api/v1/query_range 响应的最小子集。
@@ -56,7 +57,20 @@ type promResponse struct {
 }
 
 // ListMetrics 调 Prometheus 查最近 1h 时序，按领域维度映射为 []MetricSeries。
+// singleflight + 5s TTL 缓存（key 含租户）：多用户 10s 轮询同维度查询只打一次上游。
 func (s *MetricsStore) ListMetrics(ctx context.Context, targetType, targetID, name string) ([]observability.MetricSeries, error) {
+	// 无租户 ctx（测试/内部调用）跳过缓存直查，保持原降级语义。
+	tid, tidErr := tenant.IDOrErr(ctx)
+	if tidErr != nil {
+		return s.listMetrics(ctx, targetType, targetID, name)
+	}
+	key := "m:" + tid + ":" + targetType + ":" + targetID + ":" + name + ":" + observability.RangeFrom(ctx).String()
+	return s.cache.do(ctx, key, func(c context.Context) ([]observability.MetricSeries, error) {
+		return s.listMetrics(c, targetType, targetID, name)
+	})
+}
+
+func (s *MetricsStore) listMetrics(ctx context.Context, targetType, targetID, name string) ([]observability.MetricSeries, error) {
 	// 数据服务：Pod 级真实指标走 cAdvisor（container_*），不依赖 paas_* 埋点。
 	if targetType == observability.TargetDataservice {
 		return s.listDataserviceMetrics(ctx, targetID, name)
@@ -81,9 +95,10 @@ func (s *MetricsStore) ListMetrics(ctx context.Context, targetType, targetID, na
 		}
 	}
 	now := time.Now()
+	window := observability.RangeFrom(ctx) // 时间范围选择器（默认 1h）
 	end := now.Unix()
-	start := now.Add(-time.Hour).Unix()
-	step := int64(time.Hour.Seconds() / float64(observability.MaxPoints)) // ~60s，对齐 MaxPoints
+	start := now.Add(-window).Unix()
+	step := int64(window.Seconds() / float64(observability.MaxPoints)) // 点距随范围自适应，对齐 MaxPoints
 	for _, mn := range names {
 		promMetric, ok := metricNameToPromQL[mn]
 		if !ok {
@@ -287,9 +302,10 @@ func (s *MetricsStore) listDataserviceMetrics(ctx context.Context, targetID, nam
 		}
 	}
 	now := time.Now()
+	window := observability.RangeFrom(ctx) // 时间范围选择器（默认 1h）
 	end := now.Unix()
-	start := now.Add(-time.Hour).Unix()
-	step := int64(time.Hour.Seconds() / float64(observability.MaxPoints))
+	start := now.Add(-window).Unix()
+	step := int64(window.Seconds() / float64(observability.MaxPoints))
 	for _, mn := range names {
 		def, ok := defs[mn]
 		if !ok {
@@ -391,9 +407,10 @@ func (s *MetricsStore) listAppMetrics(ctx context.Context, appID, name string) (
 		names = []string{observability.MetricCPU, observability.MetricMem, observability.MetricRPS, observability.MetricLatency, observability.MetricErrorRate}
 	}
 	now := time.Now()
+	window := observability.RangeFrom(ctx) // 时间范围选择器（默认 1h）
 	end := now.Unix()
-	start := now.Add(-time.Hour).Unix()
-	step := int64(time.Hour.Seconds() / float64(observability.MaxPoints))
+	start := now.Add(-window).Unix()
+	step := int64(window.Seconds() / float64(observability.MaxPoints))
 	for _, mn := range names {
 		def, ok := defs[mn]
 		if !ok {

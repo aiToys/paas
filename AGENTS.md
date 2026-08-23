@@ -54,7 +54,7 @@ examples/                       # 平台示例（**独立 module** github.com/ai
 CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md LICENSE
 ```
 
-> **示例与平台隔离**：`examples/` 是独立 Go module（`github.com/aitoys/paas-examples`），与主仓 Go 依赖完全解耦。示例（mcp-server/traffic-gen）是**平台的用户/消费者**，演示如何被平台纳管，不属于 Platform Core——业务领域逻辑绝不进平台 `cmd/`（判断标准同下「开发约定」）。示例只用标准库，不引用任何 paas 内部包。
+> **示例与平台隔离**：`examples/` 是独立 Go module（`github.com/aitoys/paas-examples`），与主仓 Go 依赖完全解耦。示例（paas-shop/mcp-server/traffic-gen）是**平台的用户/消费者**，演示如何被平台纳管，不属于 Platform Core——业务领域逻辑绝不进平台 `cmd/`（判断标准同下「开发约定」）。示例不引用任何 paas 内部包（第三方依赖如 pgx/nats/otel 仅用于示例自身演示真实业务形态）。
 
 ### 离线交付（airsync）
 
@@ -855,6 +855,32 @@ internal/dataservice/  领域(DataService + 6 Kind 常量 + KindMeta 表单元�
 - **测试**：governance pg `TestRouteHostRoundTrip`（Create/Update/清空 往返）+ configcenter pg `TestNamespaceServiceIDRoundTrip`（ServiceID 持久化 + ListNamespaces 过滤）。OpenAPI `WithReqBody(结构体)` 自动含新字段（reflector 自动生成 schema）。
 - **留后续**：Route Host 通配符匹配（`*.example.com`）、Host 数组化、实际 ingress/hermes 配置下发（数据面消费）、configcenter 配置变更通知 governance Service。
 
+### 变更管理（Change/IntegrationBatch，火车发车模型，2026-08-15）
+
+解决「多个变更合在一起测试、测试成功后同时上线」诉求。设计见 `docs/superpowers/specs/2026-08-15-change-management-design.md`。三实体：`Change`（feat/hotfix 分支粒度，open→integrated→tested→released/abandoned）+ `IntegrationBatch`（临时集成分支 `integration/YYYYMMDD-seq`，collecting→conflict/testing→tested→releasing→released/failed）+ 既有 `Release`（整批上线记录）。**流水线引擎零改动**：批次触发 CI 时 branch=集成分支名，deploy 泳道经 `{{run.branch}}` 占位符天然隔离（集成分支名即 lane）。
+
+- `internal/devops/change/`：model + Repository（memory/pg，migration 0027，JSONB change_ids 有序，唯一索引 tenant+repo+branch / tenant+branch）+ `Service` 编排（依赖倒置 `GiteaBrancher`/`RunTrigger`/`RunReader`/`RepoLookup`，cmd/core `change_adapters.go` 桥接 gitea.Client + pipeline 三仓储）。
+- **编排动作**：`CreateChangeWithBranch`（平台代建分支 main 派生 / 校验已有分支）；`Integrate`（删重建集成分支→按 ChangeIDs 顺序 merge→FindPipeline(ci)→TriggerAppRun(branch=集成分支)→testing；冲突→批次 conflict+`BatchConflictError`）；`Approve`（tested→releasing，handler 校验 prod:write）；`Release`（releasing 态逐个 merge 到 main→CD run branch=main）；`SyncBatchStatus` **惰性终态推进**（GET 批次详情时轮询 run 终态：testing succeeded→tested / failed→批内变更回 open 出批；releasing succeeded→released+ReleaseIDs 回填，无后台 goroutine）。
+- REST（`/api/applications/{id}/changes|batches[...]`，pipeline:read/write 权限 + approve 额外 prod:write）：变更 CRUD/放弃 + 批次 CRUD/放弃 + 入批/出批 + integrate/approve/release，OpenAPI 13 操作。审计 change_/batch_ 前缀全动作覆盖。
+- Gitea client 扩展：`CreateBranch/GetBranch/DeleteBranch` + `doBranch`（404→ErrBranchNotFound、**删除不存在分支 Gitea 返 500 "object does not exist" 归一 NotFound**——幂等重建依赖）；`Merge` 创建 PR 409（同源 PR 已存在）→ `ErrPRExists` + `findOpenPR` 复用（集成重试幂等）。
+- **lane 清洗（e2e 实测两连修）**：集成分支名含 `/`（如 `integration/20260815-1`）——① `labelsFor` 的 lane label 值经 `sanitizeLane`（K8s label 不许 `/`）；② `BaselineWorkloadName` 经 `dns1035`（Service 名 DNS-1035 不许 `/`，dataplane 泳道发现 `dns1035Name` 同款对齐，两侧一致才命中 Endpoints）。
+- 前端：`api/change.ts` + `AppChanges.vue`（应用详情「变更」tab：变更列表/创建弹窗展示 clone 命令 + 批次列表/创建 + 批次抽屉 el-steps 状态机 + 变更 chips 移出 + integrate/approve(confirmDangerous isProd)/release + 关联 run 跳转 + testing/releasing 10s 轮询）+ DevOps 运行记录 branch `integration/` 前缀显「集成」tag。
+- **e2e 全链路已验证（paas-shop）**：建分支→入批→integrate（merge+CI 构建真实 digest）→testing→deploy 泳道（清洗后 Service 名合法）→探活通过→tested→approve→release（merge main+CD run）→released+ReleaseIDs 回填+change released。
+- **留后续**：跨应用批次、变更级审批、冲突预检（merge 前干跑）、PR 实体/评审流、外部仓库变更、自动批次（定时发车）、release 阶段已合并分支 409 细分、批内变更 UI 拖拽排序。
+
+### DevOps UX 业界优秀标准改造（值班台 + 收件箱 + 通知 + 对账，2026-08-16）
+
+解决「各模块不统一不完整、用户需在多列表间横跳」痛点，设计对标 GitLab MR 收件箱制 / Argo 持续对账。核心原则：**让用户只盯一个地方（值班台/通知），且只在需要时被打扰**。spec `docs/superpowers/specs/2026-08-16-devops-ux-excellence-design.md`。
+
+- **后端两轻量端点**：① `GET /api/changes|batches?appId=&status=` 跨应用列表（change.Handler.ServeGlobal，tenant 内跨应用与 /api/buildruns 同款语义，perm pipeline:read；**注意 main.go 装配须 `http.HandlerFunc(ServeGlobal)`——误接 ServeHTTP 会被解析为 appID="api" 返空，已有路由层回归测试**）；② `GET /api/notifications` 通知聚合（`internal/devops/change/notifications.go` 实时拼装无持久化——批次 conflict/testing/releasing/tested(待审批) + run failed/paused/running，severity error>warning>info 排序；run 侧租户过滤由 bridge ListRuns ctx 保证（勿用批次归属白名单——会吞掉无批次应用的 run 通知）；`RunLister` 依赖倒置接口，`runTriggerBridge.ListRunStatuses` 桥接）。
+- **单据一等公民**：五详情独立路由 `/devops/{changes|batches|builds|releases}/:id`（runs 已有）——ChangeDetail（**收件箱五段**：我的代码（分支+clone+commits）/集成批次/测试验证 el-steps/发布状态/时间线）、BatchDetail（el-steps 状态机 + 内联下一步操作 integrate/approve/release + 批内变更表 + 发布记录链接）、BuildDetail（全量日志 monospace + 产出镜像链接）、ReleaseDetail（信息 + 回滚 + **运行态对账卡**：按 (appId,envId) 找基线 workload 展示副本/实际镜像，digest 不一致警示已被覆盖）。详情间链路串联（change↔batch↔run↔release↔workload 双向可走）。
+- **DevOps 中心 = 值班台 + 档案室**：默认 tab 值班台（通知驱动三列：🔴失败待处理/⏸等审批/🏃进行中，点击直达详情，失败数 badge 上 tab；「一切正常 🎉」空态）+ 七 tab 档案室（值班台/运行/变更/批次/构建/镜像/发布），全单据行可进详情页。变更/批次此前在 DevOps 中心完全缺失（用户反馈核心缺口）。
+- **变更收件箱**：AppChanges 列表加「下一步」内联操作列（open 未入批→入批集成按钮 / conflict→解决冲突 / tested→待审批 / released→✓已上线），标题可点跳收件箱详情页。
+- **通知中心（L1）**：`NotificationBell.vue` 顶栏铃铛（message 图标）+ 未读红点（localStorage `paas:notif-read` 记已读 ID，通知 ID 稳定 `target:targetID:status`）+ severity 着色列表 + 点击跳对应详情 + 30s 轮询静默。
+- **明确不做（YAGNI）**：DAG 画布、完整评审流、通知持久化/订阅/Webhook 出站（L3）、漂移检测告警。
+- **横切**：新端点 OpenAPI 登记 + `{data:T}` + camelCase；notifications 权限 pipeline:read（登录态）；轮询全部 onUnmounted clearInterval。
+
+
 ## 前端架构
 
 三套独立 SPA，共享设计系统（Element Plus + 暗黑模式）：
@@ -880,8 +906,10 @@ console-user 导航采用**三层信息架构**（避免「资源」概念被滥
 - **环境菜单（管理面）**：环境实体 CRUD + 跨环境总览（统计卡：工作负载数/健康度/物理落点），点环境进**环境详情页** `/environments/:id`（工作负载总览按类型 + 应用部署矩阵），**不跳工作负载列表**。「在此环境工作」按钮桥接到操作面（switchEnv + 跳工作负载）。
 - 一句话区分：顶栏 scope =「我在哪个环境干活」；环境菜单 =「我管理环境本身」。工作负载页无环境切换控件（去重，环境切换唯一走顶栏）。设计见 `docs/superpowers/specs/2026-07-28-environment-ia-redesign.md`。
 
+**主模块 vs 应用详情维度原则**（2026-08-17 确立，对标 Datadog/Grafana/Jaeger）：应用详情 = 应用维度聚合（各能力以 tab 收敛进应用）；主模块（平台能力入口）= 综合平台视角——**入口全局，维度是过滤器不是门槛**。三条铁律：① 主模块默认租户全局视图，环境/应用/数据服务等维度是可切换的过滤器；② 漏斗式排障：告警总览（置顶入口）→ 实体健康矩阵 → 单实体下钻；③ 告警天然全局，从告警点击下钻到对应实体。落地样板：`Observability.vue` 多维度重构（维度过滤器条 + 告警点击下钻 + 健康矩阵，spec `docs/superpowers/specs/2026-08-17-observability-multi-dimension-design.md`）。审计确认 DevOps 值班台/ConfigCenter/Security/ServiceRegistry 已符合，无需改。
+
 - API 契约：后端 OpenAPI 自动生成前端 TS 类型（Plan 4 起接入 Gateway）。
-- console-admin 的基座源码自带其 `AGENTS.md` 与 `docs/standards/`（四层架构 lib/app/modules/shared），改它时遵循其自身规范。
+- console-admin 的基座源码自带其 `CLAUDE.md` 与 `docs/standards/`（四层架构 lib/app/modules/shared），改它时遵循其自身规范。
 
 ## 平台模块全景
 
@@ -914,5 +942,5 @@ console-user 导航采用**三层信息架构**（避免「资源」概念被滥
 2. **`values-paas-k8s.yaml` 含 dev 密码**（`paas-gitea-bot-2026` / `sk-acme-admin` token）：已加文件级 dev-overlay 声明（标注复制后替换）。重命名为 `.example` 会破坏 `deploy-k8s.sh` 引用，权衡后保留文件名 + 头声明。
 3. **EnvTypeResolver DRY**（pipeline/handler.go 用 `func` 类型，其余 5 处用 `environment.EnvTypeResolver` 接口别名）：pipeline 包内部 func 类型一致自洽，统一为接口别名需改 handler/engine/adapter 多处调用点，纯重构收益小（Minor，YAGNI 暂留）。
 
-**判断**：AGENTS.md 保留（项目导航真源，非泄漏他人信息）；vue-admin 上游 MIT 声明保留（fork 归属合规）。
+**判断**：CLAUDE.md 保留（项目导航真源，非泄漏他人信息）；vue-admin 上游 MIT 声明保留（fork 归属合规）。
 

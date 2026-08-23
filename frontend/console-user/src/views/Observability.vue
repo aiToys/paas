@@ -36,7 +36,11 @@ interface DataService { id: string; kind: string; name: string; envId?: string; 
 type Dim = 'all' | 'env' | 'app' | 'dataservice'
 const dim = ref<Dim>('all')
 const dimEnv = ref('') // env 维度选中值
+// 环境维度过滤真源：'envId|appId' 集合（workloads 反查，应用×环境多对多无 Application.envId）。
+const envAppIDs = ref<Set<string>>(new Set())
 const dimApp = ref('') // app 维度选中值
+// 时间范围选择器（15m/1h/6h/24h，默认 1h；metrics/logs/traces 查询 range 参数）。
+const rangeSel = ref('1h')
 const dimDS = ref('') // dataservice 维度选中值
 
 const apps = ref<App[]>([])
@@ -77,9 +81,10 @@ const dsKindLabel: Record<string, string> = { db: '数据库', cache: '缓存', 
 
 // 当前维度的查询参数：metrics 用 targetType/targetId；logs/traces 用 appId（dataservice 用 targetType）
 const metricsParams = computed((): Record<string, string> => {
-  if (dim.value === 'app' && dimApp.value) return { targetType: 'app', targetId: dimApp.value }
-  if (dim.value === 'dataservice' && dimDS.value) return { targetType: 'dataservice', targetId: dimDS.value }
-  return {} // all / env 维度：租户全局（env 聚合视图由健康矩阵承担）
+  const base: Record<string, string> = { range: rangeSel.value }
+  if (dim.value === 'app' && dimApp.value) return { ...base, targetType: 'app', targetId: dimApp.value }
+  if (dim.value === 'dataservice' && dimDS.value) return { ...base, targetType: 'dataservice', targetId: dimDS.value }
+  return base // all / env 维度：租户全局（env 聚合视图由健康矩阵承担）
 })
 const logsAppId = computed(() => (dim.value === 'app' ? dimApp.value : ''))
 
@@ -103,7 +108,7 @@ const healthRows = computed<HealthRow[]>(() => {
   const find = (t: string, id: string, name: string) =>
     metrics.value.find((m) => m.targetType === t && m.targetId === id && m.name === name)
   for (const a of apps.value) {
-    if (envFilter && a.envId !== envFilter) continue
+    if (envFilter && !envAppIDs.value.has(envFilter + '|' + a.id)) continue
     const r: HealthRow = { key: 'app:' + a.id, type: 'app', id: a.id, name: a.name, sub: '应用',
       cpu: find('app', a.id, 'cpu'), mem: find('app', a.id, 'mem'), rps: find('app', a.id, 'rps'),
       errorRate: find('app', a.id, 'errorRate'), abnormal: false }
@@ -154,6 +159,13 @@ async function loadApps() {
   if (resp.ok) apps.value = (await resp.json()).data ?? []
   const resp2 = await fetchAuth('/api/dataservices')
   if (resp2.ok) dataServices.value = (await resp2.json()).data ?? []
+  // 环境维度过滤真源：应用×环境多对多（Application 无 envId 字段，直接过滤恒空——R9-C2）。
+  // 改按该环境有部署（工作负载）的应用反查：拉全租户 workloads 建 env→appId 集合。
+  const respWl = await fetchAuth('/api/workloads?type=service')
+  if (respWl.ok) {
+    const wls = (await respWl.json()).data ?? []
+    envAppIDs.value = new Set(wls.filter((w: { envId?: string; appId?: string }) => w.envId && w.appId).map((w: { envId: string; appId: string }) => w.envId + '|' + w.appId))
+  }
   // URL 深链恢复维度上下文：?app=（应用详情「监控」入口）/ ?env= / ?ds=
   const qs = (k: string) => (typeof route.query[k] === 'string' ? (route.query[k] as string) : '')
   const app = qs('app'), env = qs('env'), ds = qs('ds')
@@ -180,7 +192,7 @@ async function loadAlerts() {
 }
 
 async function loadLogs() {
-  const params: Record<string, string> = {}
+  const params: Record<string, string> = { range: rangeSel.value }
   if (logsAppId.value) params.appId = logsAppId.value
   if (dim.value === 'dataservice' && dimDS.value) {
     params.targetType = 'dataservice'
@@ -199,7 +211,7 @@ async function loadTraces() {
     await searchTraceById()
     return
   }
-  const params: Record<string, string> = {}
+  const params: Record<string, string> = { range: rangeSel.value }
   if (logsAppId.value) params.appId = logsAppId.value
   if (traceStatus.value) params.status = traceStatus.value
   traces.value = await listTraces<Trace>(params)
@@ -427,6 +439,13 @@ usePolling(() => loadAll(true), 10000)
       </el-select>
       <el-select v-if="dim === 'dataservice'" v-model="dimDS" placeholder="选择数据服务" style="width: 200px" @change="syncUrl(); loadAll()">
         <el-option v-for="d in dataServices" :key="d.id" :label="d.name" :value="d.id" />
+      </el-select>
+      <!-- 时间范围选择器（metrics/logs/traces 查询窗口；后端 RangeFrom ctx 透传 Prom/Loki/Jaeger） -->
+      <el-select v-model="rangeSel" style="width: 110px" @change="loadAll()">
+        <el-option label="最近 15m" value="15m" />
+        <el-option label="最近 1h" value="1h" />
+        <el-option label="最近 6h" value="6h" />
+        <el-option label="最近 24h" value="24h" />
       </el-select>
       <!-- TraceID 直查（页头显著位置，Jaeger 式；回车查询并滚动定位链路区块） -->
       <el-input v-model="traceIdQuery" placeholder="🔍 TraceID 直查" style="width: 240px; margin-left: auto" clearable

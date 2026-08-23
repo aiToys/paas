@@ -84,7 +84,7 @@ func (h *Handler) serveTraces(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	traces, err := h.repo.ListTraces(r.Context(), q.Get("appId"), q.Get("status"), limit)
+	traces, err := h.repo.ListTraces(WithRange(r.Context(), ParseRange(q.Get("range"))), q.Get("appId"), q.Get("status"), limit)
 	if err != nil {
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
@@ -131,7 +131,7 @@ func (h *Handler) serveLogs(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	logs, err := h.repo.ListLogs(r.Context(), q.Get("appId"), q.Get("targetType"), q.Get("targetId"), q.Get("level"), q.Get("q"), q.Get("lane"), limit)
+	logs, err := h.repo.ListLogs(WithRange(r.Context(), ParseRange(q.Get("range"))), q.Get("appId"), q.Get("targetType"), q.Get("targetId"), q.Get("level"), q.Get("q"), q.Get("lane"), limit)
 	if err != nil {
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
@@ -148,7 +148,7 @@ func (h *Handler) serveMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	list, err := h.repo.ListMetrics(r.Context(), q.Get("targetType"), q.Get("targetId"), q.Get("name"))
+	list, err := h.repo.ListMetrics(WithRange(r.Context(), ParseRange(q.Get("range"))), q.Get("targetType"), q.Get("targetId"), q.Get("name"))
 	if err != nil {
 		httputil.WriteInternalError(w, err)
 		return
