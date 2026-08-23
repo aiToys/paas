@@ -50,6 +50,7 @@ import (
 	"github.com/aitoys/paas/internal/messaging"
 	"github.com/aitoys/paas/internal/metrics"
 	"github.com/aitoys/paas/internal/observability"
+	alertengine "github.com/aitoys/paas/internal/observability/alert"
 	"github.com/aitoys/paas/internal/observability/tracing"
 	"github.com/aitoys/paas/internal/security"
 	"github.com/aitoys/paas/internal/service"
@@ -145,6 +146,10 @@ func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, metrics
 		}()
 	}
 	srv := serveHTTP(gw, meter, stores, appliers, metricsReg)
+	// 告警评估引擎（R4-C2）：后台 30s tick 评估 + 状态机 + webhook 出站，随进程 ctx 退出。
+	if obsAlertEngine != nil {
+		obsAlertEngine.Start(ctx)
+	}
 	ran, err := bootstrapCore(ctx, plugins, deps)
 	if err != nil {
 		return err
@@ -351,6 +356,9 @@ func resolveJWTSecret() string {
 //   - EnvTypeResolver：注入 environment store（实现 EnvType 方法），prod:write 校验跨模块复用。
 //
 // 模型目录平台共享（不按租户过滤）；应用/治理/配置等业务模块按租户隔离。
+// obsAlertEngine 由 serveHTTP 构造、run 层启动（serveHTTP 无进程生命周期 ctx 可传）。
+var obsAlertEngine *alertengine.Engine
+
 func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, appliers k8sAppliers, metricsReg *metrics.Registry) *http.Server {
 	apiKey := resolveAPIKey()
 	// P3-2 计量采集：推理 token 用量回写 billing（meter.OnTokens 钩子）。
@@ -545,6 +553,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// 变更管理（单变更 + 集成批次，trunk-based 编排）：service 桥接 gitea client（分支/merge）+
 	// pipeline 包（批次触发 CI/CD run）；handler 注入审计 + prod:write（approve 门禁）。
 	// gitea client 未配置时（env 未配 PAAS_GITEA_URL）创建变更/集成批次报 503 降级，不 panic。
+	// 通知聚合含告警源（changeAlertBridge 桥接评估引擎，serveHTTP 已构造）。
 	changeRunBridge := &runTriggerBridge{
 		pipes: stores.Pipeline, runs: stores.Pipeline, templates: stores.Pipeline,
 		resolver: &paramResolverBridge{apps: stores.Application, envs: stores.Environment, repos: stores.DevOpsRepos},
@@ -594,6 +603,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		change.WithProdWrite(func(r *http.Request) bool { return gateway.RequestAllowed(r, "prod:write") }),
 		change.WithHandlerRepoLookup(changeLookup),
 		change.WithRunLister(changeRunBridge),
+		change.WithAlertLister(&changeAlertBridge{engine: obsAlertEngine}),
 	)
 
 	// 应用配置（工作负载级 env/Secret）：注入 environment store（prod 写校验）。
@@ -634,9 +644,10 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 
 	// 可观测（指标监控 + 告警规则，平台能力横切）。
 	// 惰性时序模拟采集，即时评估告警；不接 prod:write，独立于物理环境。
-	obsRepo := buildObservabilityStore(workloadLister{repo: stores.Workload}, tenantEntityLister{apps: stores.Application, ds: stores.DataService, wls: stores.Workload})
+	obsRepo, alertEngine := buildObservabilityStore(workloadLister{repo: stores.Workload}, tenantEntityLister{apps: stores.Application, ds: stores.DataService, wls: stores.Workload}, stores.AlertRules)
 	obsHandler := observability.NewHandler(obsRepo)
 	obsHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+	obsAlertEngine = alertEngine // 供 run 层 Start（serveHTTP 无进程生命周期 ctx）
 
 	// 安全（密钥/证书 + 审计日志，平台能力横切）。
 	// 注入 UserIDFrom 填审计 actor；Secret 明文存储/掩码返回，写操作自动记审计。

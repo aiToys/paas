@@ -7,6 +7,7 @@ import (
 	"github.com/aitoys/paas/internal/core/application"
 	"github.com/aitoys/paas/internal/dataservice"
 	"github.com/aitoys/paas/internal/observability"
+	alertengine "github.com/aitoys/paas/internal/observability/alert"
 	obcompose "github.com/aitoys/paas/internal/observability/compose"
 	obsmemory "github.com/aitoys/paas/internal/observability/memory"
 	obreal "github.com/aitoys/paas/internal/observability/real"
@@ -26,21 +27,33 @@ import (
 // （cAdvisor/Loki 不带 paas 自定义 label，靠 app→工作负载 ID 解析 pod 集合）。nil 时应用级查询降级返空。
 // entities 桥接 application/dataservice Repository，供全局（targetType 空）指标聚合
 // （可观测大屏「全部」视图健康矩阵）。nil 时全局查询降级返空。
-func buildObservabilityStore(lister observability.AppWorkloadLister, entities observability.TenantEntityLister) observability.Repository {
-	rules := obsmemory.NewStore()
-	metrics := observability.MetricsReader(rules)
+func buildObservabilityStore(lister observability.AppWorkloadLister, entities observability.TenantEntityLister, pgRules observability.RuleStore) (observability.Repository, *alertengine.Engine) {
+	// 告警规则持久化：PG 可用时迁 PG（R4-C1，重启不丢）；否则 memory（含 dev seed）。
+	// memory Store 同时实现 RuleStore/MetricsReader/LogsReader/TracesReader（惰性降级），
+	// 作为三支柱未接真实后端时的兜底 reader；PG 只实现 RuleStore，兜底 reader 需独立 memory 实例。
+	fallback := obsmemory.NewStore()
+	var rules observability.RuleStore = fallback
+	if pgRules != nil {
+		rules = pgRules
+	}
+	metrics := observability.MetricsReader(fallback)
 	if u := os.Getenv("PAAS_PROM_URL"); u != "" {
 		metrics = obreal.NewMetricsStore(u, lister, entities)
 	}
-	logs := observability.LogsReader(rules)
+	logs := observability.LogsReader(fallback)
 	if u := os.Getenv("PAAS_LOKI_URL"); u != "" {
 		logs = obreal.NewLogsStore(u, lister)
 	}
-	traces := observability.TracesReader(rules)
+	traces := observability.TracesReader(fallback)
 	if u := os.Getenv("PAAS_JAEGER_URL"); u != "" {
 		traces = obreal.NewTracesStore(u, lister, entities)
 	}
-	return obcompose.New(rules, metrics, logs, traces)
+	repo := obcompose.New(rules, metrics, logs, traces)
+	// 告警评估引擎（R4-C2）：后台 30s tick 评估全部租户规则 + pending/firing/resolved
+	// 状态机 + firing webhook 出站。rules 必须支持跨租户列举（memory/pg RuleStore 均实现）。
+	engine := alertengine.NewEngine(rules.(alertengine.RuleSource), metrics, 0)
+	repo.WithEngine(engine)
+	return repo, engine
 }
 
 // workloadLister 桥接 workload.Repository → observability.AppWorkloadLister。

@@ -93,8 +93,16 @@ type AlertRule struct {
 	Threshold  float64   `json:"threshold"`
 	Severity   string    `json:"severity"` // critical | warning
 	Enabled    bool      `json:"enabled"`
+	WebhookURL string    `json:"webhookUrl,omitempty"` // 告警 firing 时 POST 通知出站（空=不出站）
 	UpdatedAt  time.Time `json:"updatedAt"`
 }
+
+// 告警状态（评估引擎状态机）。
+const (
+	AlertPending  = "pending"  // 首次命中，未达持续窗口（防瞬时毛刺）
+	AlertFiring   = "firing"   // 持续命中（正式告警 + 出站通知）
+	AlertResolved = "resolved" // 命中后恢复（保留展示，评估继续）
+)
 
 // Validate 校验规则字段。
 func (r AlertRule) Validate() error {
@@ -141,6 +149,7 @@ func (r AlertRule) Breached(value float64) bool {
 type Alert struct {
 	RuleID     string    `json:"ruleId"`
 	RuleName   string    `json:"ruleName"`
+	TenantID   string    `json:"tenantId,omitempty"` // 评估引擎填充（即时评估路径为空，按 ctx 租户隐含）
 	TargetType string    `json:"targetType"`
 	TargetID   string    `json:"targetId"`
 	MetricName string    `json:"metricName"`
@@ -148,8 +157,9 @@ type Alert struct {
 	Threshold  float64   `json:"threshold"`
 	Operator   string    `json:"operator"`
 	Severity   string    `json:"severity"`
-	Status     string    `json:"status"` // firing
+	Status     string    `json:"status"` // pending | firing | resolved
 	FiredAt    time.Time `json:"firedAt"`
+	LastSeen   time.Time `json:"lastSeen,omitempty"` // 最近一次评估命中时间（引擎路径填充）
 }
 
 // 日志级别。

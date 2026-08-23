@@ -63,6 +63,7 @@ function go(n: Notification) {
   markOneRead(n)
   if (n.targetType === 'run') router.push(`/devops/runs/${n.targetId}`)
   else if (n.targetType === 'batch') router.push(`/devops/batches/${n.targetId}`)
+  else if (n.targetType === 'alert') router.push('/platform/observability')
   else router.push(`/devops/changes/${n.targetId}`)
 }
 function markOneRead(n: Notification) {

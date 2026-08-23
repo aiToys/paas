@@ -60,6 +60,8 @@ import (
 	"github.com/aitoys/paas/internal/environment"
 	envmemory "github.com/aitoys/paas/internal/environment/memory"
 	envpg "github.com/aitoys/paas/internal/environment/pg"
+	"github.com/aitoys/paas/internal/observability"
+	obspg "github.com/aitoys/paas/internal/observability/pg"
 	"github.com/aitoys/paas/internal/governance"
 	govmemory "github.com/aitoys/paas/internal/governance/memory"
 	govpg "github.com/aitoys/paas/internal/governance/pg"
@@ -116,6 +118,9 @@ type Stores struct {
 	Pipeline       pipeline.Store
 	Change         change.Repository
 	Service        service.Repository
+	// AlertRules 是告警规则存储（R4-C1 持久化）。PG 路径非 nil（重启不丢）；
+	// 内存路径 nil——observability 内部回退 memory 规则存储（含 dev seed）。
+	AlertRules observability.RuleStore
 }
 
 // buildAllStores 选择持久化后端、构造全模块 store 并完成 seed。
@@ -222,6 +227,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 			Pipeline:       pipelineStore,
 			Change:         changeRepo,
 			Service:        svcRepo,
+			AlertRules:     obspg.NewStore(db),
 		}
 		return stores, db.Close, nil
 	}

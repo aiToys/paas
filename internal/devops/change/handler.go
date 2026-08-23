@@ -56,6 +56,8 @@ type Handler struct {
 	actorFn func(r *http.Request) string
 	// runLister 通知聚合读 run 状态（nil 降级只通知批次侧）。
 	runLister RunLister
+	// alertLister 通知聚合读告警状态（nil 降级不含告警源）。
+	alertLister AlertLister
 }
 
 // HandlerOpt 配置 Handler。
@@ -85,6 +87,9 @@ func WithHandlerRepoLookup(f RepoLookup) HandlerOpt { return func(h *Handler) { 
 
 // WithRunLister 注入 run 状态列表（通知聚合用）。
 func WithRunLister(rl RunLister) HandlerOpt { return func(h *Handler) { h.runLister = rl } }
+
+// WithAlertLister 注入告警状态列表（通知聚合用，评估引擎桥接）。
+func WithAlertLister(al AlertLister) HandlerOpt { return func(h *Handler) { h.alertLister = al } }
 
 // NewHandler 构造 Handler。
 func NewHandler(svc *Service, repo Repository, opts ...HandlerOpt) *Handler {
@@ -156,7 +161,7 @@ func (h *Handler) ServeGlobal(w http.ResponseWriter, r *http.Request) {
 	case "/api/notifications":
 		// 通知依赖批次最新状态（tested 待审批等），先惰性推进再聚合。
 		if _, serr := h.syncAndListBatches(r.Context(), "", ""); serr == nil {
-			list, err = Notifications(r.Context(), h.repo, h.runLister)
+			list, err = Notifications(r.Context(), h.repo, h.runLister, h.alertLister)
 		} else {
 			err = serr
 		}

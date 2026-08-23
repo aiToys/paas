@@ -47,7 +47,7 @@ func TestNotifications(t *testing.T) {
 		{ID: "run-s", AppID: "app-1", Status: "succeeded", Current: ""}, // 成功不通知
 	}}
 
-	notifs, err := Notifications(ctx, store, runs)
+	notifs, err := Notifications(ctx, store, runs, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestNotifications(t *testing.T) {
 	}
 
 	// runLister=nil 降级：只通知批次侧
-	only, err := Notifications(ctx, store, nil)
+	only, err := Notifications(ctx, store, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,11 +90,53 @@ func TestNotifications(t *testing.T) {
 	// 单元层不重复断言——见 runTriggerBridge.ListRunStatuses 调 pipeline.ListRuns）。
 	globex := tenant.WithTenant(context.Background(), "t-globex")
 	globexRuns := &fakeRunLister{} // 模拟真实 bridge：跨租户返空
-	empty, err := Notifications(globex, store, globexRuns)
+	empty, err := Notifications(globex, store, globexRuns, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(empty) != 0 {
 		t.Fatalf("跨租户应返空，got %d", len(empty))
+	}
+}
+
+// fakeAlertLister 可控告警源。
+type fakeAlertLister struct{ items []AlertItem }
+
+func (f *fakeAlertLister) ListAlertItems(ctx context.Context) ([]AlertItem, error) {
+	return f.items, nil
+}
+
+// TestNotificationsAlerts：firing critical→error、pending→info、resolved 不进通知。
+func TestNotificationsAlerts(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	alerts := &fakeAlertLister{items: []AlertItem{
+		{RuleName: "CPU 高", TargetType: "app", TargetID: "app-1", MetricName: "cpu",
+			Severity: "critical", Status: "firing", At: "2026-08-23T10:00:00Z"},
+		{RuleName: "观察中", TargetType: "dataservice", TargetID: "ds-1", MetricName: "mem",
+			Severity: "warning", Status: "pending", At: "2026-08-23T10:01:00Z"},
+		{RuleName: "已恢复", TargetType: "app", TargetID: "app-2", MetricName: "rps",
+			Severity: "warning", Status: "resolved", At: "2026-08-23T10:02:00Z"},
+	}}
+	notifs, err := Notifications(ctx, store, nil, alerts)
+	if err != nil {
+		t.Fatalf("Notifications: %v", err)
+	}
+	var firing, pending, resolved int
+	for _, n := range notifs {
+		switch n.Type {
+		case NotifAlertFiring:
+			firing++
+			if n.Severity != "error" {
+				t.Fatalf("critical firing 应 error, got %s", n.Severity)
+			}
+		case NotifAlertPending:
+			pending++
+		case "alert_resolved":
+			resolved++
+		}
+	}
+	if firing != 1 || pending != 1 || resolved != 0 {
+		t.Fatalf("应 firing=1 pending=1 resolved=0, got %d/%d/%d", firing, pending, resolved)
 	}
 }

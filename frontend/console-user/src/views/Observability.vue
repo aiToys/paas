@@ -44,6 +44,10 @@ const dataServices = ref<DataService[]>([])
 const metrics = ref<MetricSeries[]>([])
 const rules = ref<AlertRule[]>([])
 const alerts = ref<Alert[]>([])
+// 评估引擎状态机分组：firing 正式告警 / pending 观察中 / resolved 已恢复（展示一轮）。
+const firingAlerts = computed(() => alerts.value.filter((a) => a.status === 'firing'))
+const pendingAlerts = computed(() => alerts.value.filter((a) => a.status === 'pending'))
+const resolvedAlerts = computed(() => alerts.value.filter((a) => a.status === 'resolved'))
 const logs = ref<LogEntry[]>([])
 const logLevel = ref('')
 const logQ = ref('')
@@ -296,7 +300,7 @@ async function loadAll(silent = false) {
 const showRule = ref(false)
 const ruleForm = ref({
   name: '', metricName: 'cpu', targetType: 'app' as 'app' | 'env' | 'dataservice' | 'workload', targetId: '',
-  operator: '>', threshold: 80, severity: 'warning', enabled: true,
+  operator: '>', threshold: 80, severity: 'warning', enabled: true, webhookUrl: '',
 })
 const ruleSubmitting = ref(false)
 
@@ -336,7 +340,7 @@ function openRule() {
   const tid = tt === 'dataservice' ? dimDS.value : tt === 'app' ? dimApp.value : ''
   ruleForm.value = {
     name: '', metricName: 'cpu', targetType: tt as typeof ruleForm.value.targetType, targetId: tid,
-    operator: '>', threshold: 80, severity: 'warning', enabled: true,
+    operator: '>', threshold: 80, severity: 'warning', enabled: true, webhookUrl: '',
   }
   showRule.value = true
 }
@@ -357,6 +361,7 @@ async function saveRule() {
       threshold: ruleForm.value.threshold,
       severity: ruleForm.value.severity,
       enabled: ruleForm.value.enabled,
+      webhookUrl: ruleForm.value.webhookUrl.trim() || undefined,
     })
     ElMessage.success('规则已创建')
     showRule.value = false
@@ -432,16 +437,20 @@ usePolling(() => loadAll(true), 10000)
       </el-input>
     </section>
 
-    <!-- 当前告警（置顶入口：先看哪里红了，点击下钻到对应实体） -->
+    <!-- 当前告警（置顶入口：先看哪里红了，点击下钻到对应实体；评估引擎状态机 pending/firing/resolved） -->
     <section class="block">
       <div class="block-title">
         当前告警
-        <span class="cnt" :class="{ firing: alerts.length }">{{ alerts.length }} 条 firing</span>
+        <span class="cnt" :class="{ firing: firingAlerts.length }">{{ firingAlerts.length }} 条 firing</span>
+        <span v-if="pendingAlerts.length" class="cnt pending">{{ pendingAlerts.length }} 条观察中</span>
+        <span v-if="resolvedAlerts.length" class="cnt resolved">{{ resolvedAlerts.length }} 条已恢复</span>
       </div>
       <el-empty v-if="!alerts.length" description="无活跃告警" :image-size="48" />
       <div v-else class="alert-list">
-        <div v-for="(a, i) in alerts" :key="i" class="alert-row clickable" :class="a.severity" @click="drillAlert(a)">
+        <div v-for="(a, i) in alerts" :key="i" class="alert-row clickable" :class="[a.severity, a.status]" @click="drillAlert(a)">
           <span class="sev-tag" :class="a.severity">{{ a.severity === 'critical' ? '严重' : '警告' }}</span>
+          <span v-if="a.status === 'pending'" class="status-tag pending">观察中</span>
+          <span v-else-if="a.status === 'resolved'" class="status-tag resolved">已恢复</span>
           <span class="alert-name">{{ a.ruleName }}</span>
           <span class="alert-target mono">{{ a.targetId }} · {{ a.metricName }}</span>
           <span class="alert-val mono">{{ a.value.toFixed(1) }} {{ a.operator }} {{ a.threshold }}</span>
@@ -721,6 +730,9 @@ usePolling(() => loadAll(true), 10000)
             <el-radio v-for="s in severities" :key="s.value" :value="s.value">{{ s.label }}</el-radio>
           </el-radio-group>
         </el-form-item>
+        <el-form-item label="Webhook">
+          <el-input v-model="ruleForm.webhookUrl" placeholder="选填：触发时 POST 通知该 URL" clearable />
+        </el-form-item>
         <el-form-item label="启用">
           <el-switch v-model="ruleForm.enabled" />
         </el-form-item>
@@ -790,6 +802,12 @@ usePolling(() => loadAll(true), 10000)
 .exc-stack { margin: 4px 0 0; padding: 6px; font-size: 11px; color: var(--text-dim); white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow: auto; }
 .cnt { font-size: 12px; font-weight: 400; color: var(--text-faint); padding: 1px 8px; background: var(--surface-2); border-radius: 8px; }
 .cnt.firing { color: var(--danger); background: var(--danger-soft); }
+.cnt.pending { color: var(--el-color-warning); background: var(--el-color-warning-light-9); }
+.cnt.resolved { color: var(--el-color-success); background: var(--el-color-success-light-9); }
+.status-tag { font-size: 11px; padding: 1px 6px; border-radius: 4px; flex-shrink: 0; }
+.status-tag.pending { color: var(--el-color-warning); background: var(--el-color-warning-light-9); }
+.status-tag.resolved { color: var(--el-color-success); background: var(--el-color-success-light-9); }
+.alert-row.resolved { opacity: 0.6; }
 
 .alert-list { display: flex; flex-direction: column; gap: 6px; }
 .alert-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); border-left: 3px solid var(--warning); font-size: 13px; }

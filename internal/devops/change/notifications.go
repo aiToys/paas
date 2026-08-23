@@ -24,6 +24,8 @@ const (
 	NotifRunPaused      = "run_paused"
 	NotifRunRunning     = "run_running"
 	NotifBatchApprove   = "batch_approve"
+	NotifAlertFiring    = "alert_firing"  // 告警触发（评估引擎 firing）
+	NotifAlertPending   = "alert_pending" // 告警观察中（pending，未达持续窗口）
 )
 
 // Notification 单条通知（camelCase json，前端直取）。
@@ -52,8 +54,25 @@ type RunLister interface {
 	ListRunStatuses(ctx context.Context) ([]RunStatusItem, error)
 }
 
+// AlertItem 告警通知最小字段（AlertLister 返回，避免 change→observability import）。
+type AlertItem struct {
+	RuleName   string
+	TargetType string // app|workload|env|dataservice
+	TargetID   string
+	MetricName string
+	Severity   string // critical|warning
+	Status     string // firing|pending
+	At         string // ISO 时间（通知展示/排序用）
+}
+
+// AlertLister 通知聚合对告警的最小依赖（cmd/core 桥接 observability 评估引擎）。
+type AlertLister interface {
+	ListAlertItems(ctx context.Context) ([]AlertItem, error)
+}
+
 // Notifications 聚合通知（tenant 内，按 at 倒序）。
-func Notifications(ctx context.Context, repo Repository, runs RunLister) ([]Notification, error) {
+// alerts 可为 nil（未注入告警源时跳过，通知其余源不受影响）。
+func Notifications(ctx context.Context, repo Repository, runs RunLister, alerts AlertLister) ([]Notification, error) {
 	var out []Notification
 	batches, err := repo.ListBatches(ctx, "", "")
 	if err != nil {
@@ -113,6 +132,35 @@ func Notifications(ctx context.Context, repo Repository, runs RunLister) ([]Noti
 						ID: "run:" + r.ID + ":running", Type: NotifRunRunning, Severity: "info",
 						Title: fmt.Sprintf("流水线运行中（%s）", r.Current), AppID: r.AppID,
 						TargetType: "run", TargetID: r.ID, At: r.At,
+					})
+				}
+			}
+		}
+	}
+
+	// 告警：firing（error/warning 按 severity）/ pending（info，提示观察中）。
+	// resolved 不进通知（恢复无需打扰）；读失败降级跳过。
+	if alerts != nil {
+		if items, err := alerts.ListAlertItems(ctx); err == nil {
+			for _, a := range items {
+				switch a.Status {
+				case "firing":
+					sev := "warning"
+					if a.Severity == "critical" {
+						sev = "error"
+					}
+					out = append(out, Notification{
+						ID:         "alert:" + a.RuleName + ":" + a.TargetType + ":" + a.TargetID + ":firing",
+						Type:       NotifAlertFiring, Severity: sev,
+						Title:      fmt.Sprintf("告警「%s」触发：%s %s=%s 超阈值（%s）", a.RuleName, a.TargetType, a.TargetID, a.MetricName, a.Status),
+						TargetType: "alert", TargetID: a.TargetType, At: a.At,
+					})
+				case "pending":
+					out = append(out, Notification{
+						ID:         "alert:" + a.RuleName + ":" + a.TargetType + ":" + a.TargetID + ":pending",
+						Type:       NotifAlertPending, Severity: "info",
+						Title:      fmt.Sprintf("告警「%s」观察中：%s %s %s 接近阈值", a.RuleName, a.TargetType, a.TargetID, a.MetricName),
+						TargetType: "alert", TargetID: a.TargetType, At: a.At,
 					})
 				}
 			}

@@ -10,6 +10,7 @@ export interface MetricSeries {
 export interface AlertRule {
   id: string; name: string; metricName: string; targetType: string; targetId: string
   operator: string; threshold: number; severity: string; enabled: boolean
+  webhookUrl?: string // firing 时 POST 通知出站（可选）
 }
 export interface Alert {
   ruleId: string; ruleName: string; targetType?: string; targetId: string

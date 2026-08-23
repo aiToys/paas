@@ -14,6 +14,8 @@ import (
 	"github.com/aitoys/paas/internal/devops/change"
 	"github.com/aitoys/paas/internal/devops/gitea"
 	"github.com/aitoys/paas/internal/devops/pipeline"
+	"github.com/aitoys/paas/internal/observability"
+	alertengine "github.com/aitoys/paas/internal/observability/alert"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
@@ -183,4 +185,36 @@ func changeRepoLookup(repos devops.CodeRepoRepository) change.RepoLookup {
 		}
 		return "", "", "", fmt.Errorf("应用未绑定内置仓库（变更管理需内置 Git 仓库）: %s", appID)
 	}
+}
+
+// changeAlertBridge 桥接告警评估引擎 → change.AlertLister（通知聚合含告警源）。
+// engine nil 时 ListAlertItems 返 nil（通知降级不含告警，不影响批次/run 源）。
+type changeAlertBridge struct {
+	engine *alertengine.Engine
+}
+
+func (b *changeAlertBridge) ListAlertItems(ctx context.Context) ([]change.AlertItem, error) {
+	if b.engine == nil {
+		return nil, nil
+	}
+	alerts, err := b.engine.ListAlerts(ctx, "", "")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]change.AlertItem, 0, len(alerts))
+	for _, a := range alerts {
+		if a.Status == observability.AlertResolved {
+			continue // 恢复不进通知（无需打扰）
+		}
+		at := a.LastSeen
+		if at.IsZero() {
+			at = a.FiredAt
+		}
+		out = append(out, change.AlertItem{
+			RuleName: a.RuleName, TargetType: a.TargetType, TargetID: a.TargetID,
+			MetricName: a.MetricName, Severity: a.Severity, Status: a.Status,
+			At: at.Format(time.RFC3339),
+		})
+	}
+	return out, nil
 }

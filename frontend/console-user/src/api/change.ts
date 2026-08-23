@@ -51,7 +51,7 @@ export const releaseBatch = (appId: string, bid: string) =>
 
 export interface Notification {
   id: string; type: string; severity: 'error' | 'warning' | 'info'
-  title: string; appId: string; targetType: 'batch' | 'run' | 'change'; targetId: string; at: string
+  title: string; appId: string; targetType: 'batch' | 'run' | 'change' | 'alert'; targetId: string; at: string
 }
 
 export const listAllChanges = (appId = '', status = '') =>

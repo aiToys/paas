@@ -18,12 +18,23 @@ type Repo struct {
 	metrics observability.MetricsReader
 	logs    observability.LogsReader
 	traces  observability.TracesReader
+	// engine 评估引擎（R4-C2 后台评估 + 状态机 + webhook 出站）。
+	// 注入后 ListAlerts 读引擎快照；nil 降级即时评估（现状行为）。
+	engine AlertLister
+}
+
+// AlertLister 评估引擎的最小消费接口（避免 compose→alert 循环 import）。
+type AlertLister interface {
+	ListAlerts(ctx context.Context, targetType, targetId string) ([]observability.Alert, error)
 }
 
 // New 创建聚合 Repository。rules 始终是 memory 规则存储；metrics/logs/traces 可为 real 或 memory。
 func New(rules observability.RuleStore, metrics observability.MetricsReader, logs observability.LogsReader, traces observability.TracesReader) *Repo {
 	return &Repo{rules: rules, metrics: metrics, logs: logs, traces: traces}
 }
+
+// WithEngine 注入告警评估引擎（后台周期评估 + pending/firing/resolved 状态机 + webhook 出站）。
+func (r *Repo) WithEngine(e AlertLister) *Repo { r.engine = e; return r }
 
 func (r *Repo) ListMetrics(ctx context.Context, targetType, targetID, name string) ([]observability.MetricSeries, error) {
 	return r.metrics.ListMetrics(ctx, targetType, targetID, name)
@@ -58,10 +69,14 @@ func (r *Repo) ListAllAlertRules(ctx context.Context) ([]observability.AlertRule
 	return r.rules.ListAllAlertRules(ctx)
 }
 
-// ListAlerts 即时评估：遍历 rules，对每 enabled 规则调 metrics reader 取匹配 series 当前值评估。
-// real 模式 metrics 来自 Prometheus，memory 模式来自 mock seed——统一在此评估。
-// targetType/targetId 非空时按维度过滤（仅返回匹配的 firing 告警）。
+// ListAlerts：引擎注入时读引擎快照（含 pending/firing/resolved 状态，评估由后台循环驱动）；
+// 未注入降级即时评估（遍历 rules，对每 enabled 规则调 metrics reader 取匹配 series 当前值评估）。
+// real 模式 metrics 来自 Prometheus，memory 模式来自 mock seed。
+// targetType/targetId 非空时按维度过滤。
 func (r *Repo) ListAlerts(ctx context.Context, targetType, targetId string) ([]observability.Alert, error) {
+	if r.engine != nil {
+		return r.engine.ListAlerts(ctx, targetType, targetId)
+	}
 	rules, err := r.rules.ListAlertRules(ctx)
 	if err != nil {
 		return nil, err
