@@ -30,3 +30,10 @@ func appPodRegex(ids []string) string {
 func lokiPodSelector(ids []string) string {
 	return appPodRegex(ids)
 }
+
+// podRegex 把单 Pod 名（如 ds-1-0）转为匹配全部副本的正则（ds-1-\d+）。
+// STS 扩容 N 副本后指标/日志需覆盖全部 ordinal（与 lokiPodSelector 的 -\d+ 语义一致）。
+// Pod 名本身含正则元字符时 QuoteMeta 防注入。
+func podRegex(pod string) string {
+	return regexp.QuoteMeta(strings.TrimSuffix(pod, "-0")) + `-[\d]+`
+}

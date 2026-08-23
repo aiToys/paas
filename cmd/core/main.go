@@ -634,7 +634,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 
 	// 可观测（指标监控 + 告警规则，平台能力横切）。
 	// 惰性时序模拟采集，即时评估告警；不接 prod:write，独立于物理环境。
-	obsRepo := buildObservabilityStore(workloadLister{repo: stores.Workload}, tenantEntityLister{apps: stores.Application, ds: stores.DataService})
+	obsRepo := buildObservabilityStore(workloadLister{repo: stores.Workload}, tenantEntityLister{apps: stores.Application, ds: stores.DataService, wls: stores.Workload})
 	obsHandler := observability.NewHandler(obsRepo)
 	obsHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
@@ -1444,11 +1444,17 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// metrics 在 recovery 外（statusRecorder 在 recovery 之外才能捕获 panic 写的 500；记
 	//   http_requests_total{method,route,status} + 耗时，route 经 reg.RegisteredPaths() 归一化防高基数）；
 	// otelhttp 最外层（自动建 span，过滤探针/契约/文档端点避免噪音）。
-	rootHandler := metrics.HTTPMiddleware(metricsReg, reg.RegisteredPaths())(recoveryMiddleware(csrfMiddleware(mux)))
+	// spanNameFormatter：HTTP semconv——span 名 = "{method} {route}"（route 用注册模板归一化）。
+	// 修复此前全部 span 固定字面量 "http.server"，Jaeger 服务聚合/按端点找慢请求完全失效。
+	registeredPaths := reg.RegisteredPaths()
+	rootHandler := metrics.HTTPMiddleware(metricsReg, registeredPaths)(recoveryMiddleware(csrfMiddleware(mux)))
 	srv := &http.Server{
 		Addr: ":8080",
 		Handler: securityHeadersMiddleware(otelhttp.NewHandler(rootHandler, "http.server",
-			otelhttp.WithFilter(skipTelemetryPaths))),
+			otelhttp.WithFilter(skipTelemetryPaths),
+			otelhttp.WithSpanNameFormatter(func(method string, r *http.Request) string {
+				return method + " " + metrics.RouteTemplate(registeredPaths, r.URL.Path)
+			}))),
 		ReadHeaderTimeout: 10 * time.Second, // 防 Slowloris 慢速头部攻击
 	}
 	// 仅打印 Key 前缀，避免生产 API Key 明文进容器日志/日志聚合系统（运维确认用长度 + 前 6 字符）。

@@ -38,7 +38,7 @@ func buildObservabilityStore(lister observability.AppWorkloadLister, entities ob
 	}
 	traces := observability.TracesReader(rules)
 	if u := os.Getenv("PAAS_JAEGER_URL"); u != "" {
-		traces = obreal.NewTracesStore(u, lister)
+		traces = obreal.NewTracesStore(u, lister, entities)
 	}
 	return obcompose.New(rules, metrics, logs, traces)
 }
@@ -89,6 +89,7 @@ func (l workloadLister) AppWorkloadNames(ctx context.Context, appID string) ([]s
 type tenantEntityLister struct {
 	apps application.Repository
 	ds   dataservice.Repository
+	wls  workload.Repository
 }
 
 func (l tenantEntityLister) TenantAppIDs(ctx context.Context) ([]string, error) {
@@ -117,4 +118,32 @@ func (l tenantEntityLister) TenantDataServiceIDs(ctx context.Context) ([]string,
 		}
 	}
 	return ids, nil
+}
+
+// TenantServiceNames 列出租户内全部 service 工作负载名（跨应用去重）。
+// trace 租户隔离的可见服务白名单：平台级 ListTraces 与 GetTrace 归属校验共用。
+func (l tenantEntityLister) TenantServiceNames(ctx context.Context) ([]string, error) {
+	list, err := l.apps.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(list))
+	seen := make(map[string]struct{}, len(list))
+	for _, a := range list {
+		wls, err := l.wls.List(ctx, "", a.ID, "", "", "")
+		if err != nil {
+			continue // 单应用失败降级跳过（与 TenantAppIDs 容错语义一致）
+		}
+		for _, w := range wls {
+			if w.Type != "service" || w.Name == "" {
+				continue
+			}
+			if _, dup := seen[w.Name]; dup {
+				continue
+			}
+			seen[w.Name] = struct{}{}
+			names = append(names, w.Name)
+		}
+	}
+	return names, nil
 }

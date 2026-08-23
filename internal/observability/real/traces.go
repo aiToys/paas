@@ -23,13 +23,15 @@ import (
 type TracesStore struct {
 	jaegerURL string
 	client    *http.Client
-	lister    observability.AppWorkloadLister // 应用级查询：app→工作负载名（service 过滤）
+	lister    observability.AppWorkloadLister    // 应用级查询：app→工作负载名（service 过滤）
+	entities  observability.TenantEntityLister   // 租户服务白名单：平台级查询 + GetTrace 归属校验
 }
 
 // NewTracesStore 创建 Jaeger 适配。jaegerURL 为 Jaeger Query 根地址（如 http://jaeger:16686）。
-// lister 可为 nil（应用级查询降级返空，不影响平台级查询）。
-func NewTracesStore(jaegerURL string, lister observability.AppWorkloadLister) *TracesStore {
-	return &TracesStore{jaegerURL: jaegerURL, client: httputil.NewClient(10 * time.Second), lister: lister}
+// lister 可为 nil（应用级查询降级返空）。entities 为 nil 时平台级查询与 GetTrace 归属校验
+// 降级返空（fail-closed，与租户隔离语义一致——宁可无数据不可跨租户泄漏）。
+func NewTracesStore(jaegerURL string, lister observability.AppWorkloadLister, entities observability.TenantEntityLister) *TracesStore {
+	return &TracesStore{jaegerURL: jaegerURL, client: httputil.NewClient(10 * time.Second), lister: lister, entities: entities}
 }
 
 // Jaeger v1 /api/traces 响应结构（最小子集）。
@@ -76,7 +78,21 @@ type jaegerTag struct {
 
 // GetTrace 按 traceID 精确查单条（Jaeger /api/traces/{traceID}）。
 // 排障直查入口：日志/告警/响应头拿到 traceId 后直接定位完整链路。不存在返 ErrTraceNotFound。
+//
+// 租户归属校验（fail-closed）：解析后校验 trace 的 service.name ∈ 本租户服务白名单
+// （TenantServiceNames + 控制面自身），跨租户/未注入 entities 统一 ErrTraceNotFound 不泄漏存在性。
+// traceID 未转义直拼 URL 会路径穿越，先正则校验 hex 格式。
 func (s *TracesStore) GetTrace(ctx context.Context, traceID string) (observability.Trace, error) {
+	if !validTraceID(traceID) {
+		return observability.Trace{}, observability.ErrTraceNotFound
+	}
+	allow, err := s.tenantServices(ctx)
+	if err != nil {
+		return observability.Trace{}, err
+	}
+	if allow == nil {
+		return observability.Trace{}, observability.ErrTraceNotFound // fail-closed：无法确定归属即拒
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.jaegerURL+"/api/traces/"+traceID, nil)
 	if err != nil {
 		return observability.Trace{}, err
@@ -91,6 +107,18 @@ func (s *TracesStore) GetTrace(ctx context.Context, traceID string) (observabili
 	tr, hasErr := parseJaegerTrace(resp.Data[0])
 	if hasErr {
 		tr.Status = observability.TraceError
+	}
+	// 归属校验：任一 span 的 service.name 在租户白名单内即视为本租户 trace
+	//（跨服务调用 trace 可能含他人 client span，但入口在本租户即归属本租户）。
+	ok := false
+	for _, sp := range tr.Spans {
+		if _, hit := allow[sp.Service]; hit {
+			ok = true
+			break
+		}
+	}
+	if !ok {
+		return observability.Trace{}, observability.ErrTraceNotFound
 	}
 	return tr, nil
 }
@@ -142,9 +170,14 @@ func (s *TracesStore) ListTraces(ctx context.Context, appID, status string, limi
 			}
 		}
 	} else {
-		// 平台级：Jaeger /api/traces 要求至少 service 参数（不带返 400），
-		// 先 /api/services 拿全量服务，逐个查 limit 条合并去重（过滤 Jaeger 自身服务）。
-		merged = s.queryAllServices(ctx, start, end, limit)
+		// 平台级（租户全局视图）：以租户服务白名单为查询范围（TenantServiceNames），
+		// 禁止 Jaeger /api/services 全量枚举（会跨租户泄漏其它租户服务名与 trace）。
+		// 未注入 entities 时 fail-closed 返空。
+		allow, err := s.tenantServices(ctx)
+		if err != nil || allow == nil {
+			return []observability.Trace{}, nil
+		}
+		merged = s.queryServices(ctx, s.allowedServiceNames(allow), start, end, limit)
 	}
 
 	// 噪音降权：单 span 且 0ms 的探活类 trace（如 mcp /mcp 健康检查）一次一批占满列表，
@@ -161,12 +194,8 @@ func (s *TracesStore) ListTraces(ctx context.Context, appID, status string, limi
 		merged = signal
 	}
 
-	sort.Slice(merged, func(i, j int) bool { return merged[i].StartedAt.After(merged[j].StartedAt) })
-	if len(merged) > limit {
-		merged = merged[:limit]
-	}
-
-	// status 过滤：trace 状态在 parseTrace 时据 span 错误判定已填充。
+	// status 过滤先于截断（与 memory 路径语义一致：先过滤后取 limit，
+	// 防「前 limit 条多为 success」时 error 过滤后远少于应有数量）。
 	if status != "" {
 		filtered := merged[:0]
 		for _, t := range merged {
@@ -176,13 +205,16 @@ func (s *TracesStore) ListTraces(ctx context.Context, appID, status string, limi
 		}
 		merged = filtered
 	}
+
+	sort.Slice(merged, func(i, j int) bool { return merged[i].StartedAt.After(merged[j].StartedAt) })
+	if len(merged) > limit {
+		merged = merged[:limit]
+	}
 	return merged, nil
 }
 
-// queryAllServices 平台级查询：Jaeger /api/traces 要求至少 service 参数（不带返 400），
-// 故先 /api/services 拿全量服务，逐个查 limit 条合并去重。过滤 Jaeger 自身服务（jaeger-all-in-one）。
-func (s *TracesStore) queryAllServices(ctx context.Context, start, end string, limit int) []observability.Trace {
-	services := s.listServices(ctx)
+// queryAllServices 平台级查询：按给定服务名列表逐个查 limit 条合并去重。
+func (s *TracesStore) queryServices(ctx context.Context, services []string, start, end string, limit int) []observability.Trace {
 	out := make([]observability.Trace, 0, limit)
 	seen := make(map[string]struct{}, limit)
 	for _, svc := range services {
@@ -215,6 +247,48 @@ func (s *TracesStore) listServices(ctx context.Context) []string {
 		return nil
 	}
 	return resp.Data
+}
+
+// tenantServices 返回本租户可见的服务名集合（含控制面 paas-core）。
+// 未注入 entities 或列举失败返 nil（fail-closed——调用方据此拒查/返空，不跨租户泄漏）。
+func (s *TracesStore) tenantServices(ctx context.Context) (map[string]struct{}, error) {
+	if s.entities == nil {
+		return nil, nil
+	}
+	names, err := s.entities.TenantServiceNames(ctx)
+	if err != nil {
+		log.Printf("observability real traces: 枚举租户服务失败: %v", err)
+		return nil, err
+	}
+	allow := make(map[string]struct{}, len(names)+1)
+	for _, n := range names {
+		allow[n] = struct{}{}
+	}
+	allow["paas-core"] = struct{}{} // 控制面自身 trace 对租户可见（排障入口）
+	return allow, nil
+}
+
+// allowedServiceNames 从集合取有序切片（排序保证查询顺序确定性）。
+func (s *TracesStore) allowedServiceNames(allow map[string]struct{}) []string {
+	names := make([]string, 0, len(allow))
+	for n := range allow {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// validTraceID 校验 traceID 为 16-32 位 hex（Jaeger/W3C 格式），防路径穿越与 query 注入。
+func validTraceID(id string) bool {
+	if len(id) < 16 || len(id) > 32 {
+		return false
+	}
+	for _, c := range id {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 // query 调 Jaeger /api/traces，service 空则不限服务。响应一次含完整 span 树，直接 parse。
@@ -343,15 +417,19 @@ func firstParentRef(refs []jaegerRef) string {
 }
 
 // jaegerSpanIsError 判 span 是否出错：error tag=true（OTLP status ERROR 映射）或 HTTP 5xx。
+// HTTP 状态码同时检查新旧 semconv key（>=v1.26 http.response.status_code / 旧版 http.status_code，
+// 大量第三方 instrument 库仍在用旧 key）。
 func jaegerSpanIsError(tags []jaegerTag) bool {
 	for _, t := range tags {
 		if t.Key == "error" && tagBool(t) {
 			return true
 		}
 	}
-	if code := tagStr(tags, "http.response.status_code"); code != "" {
-		if n, err := strconv.Atoi(code); err == nil && n >= 500 {
-			return true
+	for _, key := range []string{"http.response.status_code", "http.status_code"} {
+		if code := tagStr(tags, key); code != "" {
+			if n, err := strconv.Atoi(code); err == nil && n >= 500 {
+				return true
+			}
 		}
 	}
 	return false

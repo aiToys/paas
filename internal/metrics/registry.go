@@ -40,7 +40,9 @@ func NewRegistry() *Registry {
 	}, []string{"tenant", "model", "direction"})
 	r.infDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name: "paas_inference_duration_seconds", Help: "推理请求耗时分布",
-		Buckets: prometheus.DefBuckets,
+		// LLM 流式响应普遍 >10s（DefBuckets 上限），P95 会钳在 10s 系统性低估——
+		// 自定义桶覆盖 0.1s~10min（流式长对话）。
+		Buckets: []float64{0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600},
 	}, []string{"tenant", "model"})
 	for _, c := range [...]prometheus.Collector{r.httpReqs, r.httpDuration, r.infReqTotal, r.infTokensTotal, r.infDuration} {
 		r.reg.MustRegister(c)

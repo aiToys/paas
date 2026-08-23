@@ -50,6 +50,10 @@ func splitPath(p string) []string {
 	return strings.Split(p, "/")
 }
 
+// RouteTemplate 导出 routeTmpl 供 otelhttp span 命名复用（HTTP semconv：span 名 = "{method} {route}"，
+// route 用注册模板归一化防高基数，与 http_requests_total 的 route label 同源单一真源）。
+func RouteTemplate(paths []string, actual string) string { return routeTmpl(paths, actual) }
+
 // HTTPMiddleware 记录 http_requests_total{method,route,status} + http_request_duration_seconds。
 // route 经 paths（已注册模板）归一化，防高基数。
 func HTTPMiddleware(reg *Registry, paths []string) func(http.Handler) http.Handler {

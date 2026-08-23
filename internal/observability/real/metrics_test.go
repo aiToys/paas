@@ -96,7 +96,7 @@ func TestMetricsStoreDataservicePodQuery(t *testing.T) {
 	if out[0].Unit != "cores" || out[0].Current != 0.6 {
 		t.Fatalf("cpu 单位/值错误: unit=%s current=%v", out[0].Unit, out[0].Current)
 	}
-	want := `sum(rate(container_cpu_usage_seconds_total{namespace="paas-x",pod="ds-mysql-0",container="main"}[5m]))`
+	want := `sum(rate(container_cpu_usage_seconds_total{namespace="paas-x",pod=~"ds-mysql-[\\d]+",container="main"}[5m]))`
 	if gotQuery != want {
 		t.Fatalf("dataservice PromQL 应按 pod 标签查 cAdvisor:\n got: %s\nwant: %s", gotQuery, want)
 	}
@@ -130,7 +130,7 @@ func TestMetricsStoreDataserviceMemoryScale(t *testing.T) {
 // 且 PromQL 字符串构造正确（按 ns+pod 限定多租户隔离）。
 func TestDataserviceDefsContainsAllMetrics(t *testing.T) {
 	defs := dataserviceDefs("paas-t-acme", "ds-1-0", "ds-1")
-	// PVC 用量：查 kubelet_volume_stats，PVC 名 data-ds-1-0。
+	// PVC 用量：查 kubelet volume stats，PVC 名正则 data-ds-1-\d+（多副本 max）。
 	disk, ok := defs[observability.MetricDiskUsage]
 	if !ok {
 		t.Fatal("缺 disk_usage")
@@ -138,8 +138,8 @@ func TestDataserviceDefsContainsAllMetrics(t *testing.T) {
 	if !strings.Contains(disk.promQL, "kubelet_volume_stats_used_bytes") {
 		t.Fatalf("disk_usage 应查 kubelet_volume_stats_used_bytes：%s", disk.promQL)
 	}
-	if !strings.Contains(disk.promQL, "data-ds-1-0") {
-		t.Fatalf("disk_usage 应限定 PVC=data-ds-1-0：%s", disk.promQL)
+	if !strings.Contains(disk.promQL, `data-ds-1-[\\d]+`) {
+		t.Fatalf("disk_usage 应限定 PVC=data-ds-1 数字后缀正则：%s", disk.promQL)
 	}
 	// 引擎业务指标全集。
 	for _, key := range []string{

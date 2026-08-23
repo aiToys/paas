@@ -42,7 +42,7 @@ func TestTracesStoreAppLevelByServiceName(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	s := NewTracesStore(srv.URL, &fakeLister{names: []string{"paas-shop-bff"}})
+	s := NewTracesStore(srv.URL, &fakeLister{names: []string{"paas-shop-bff"}}, &fakeEntities{})
 	out, err := s.ListTraces(context.Background(), "app-shop", "", 20)
 	if err != nil || len(out) != 1 {
 		t.Fatalf("解析错误: %v len=%d", err, len(out))
@@ -121,7 +121,7 @@ func TestTracesStoreAppLevelMultiServiceMerge(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	s := NewTracesStore(srv.URL, &fakeLister{names: []string{"s1", "s2"}})
+	s := NewTracesStore(srv.URL, &fakeLister{names: []string{"s1", "s2"}}, &fakeEntities{})
 	out, err := s.ListTraces(context.Background(), "app-x", "", 20)
 	if err != nil || len(out) != 2 {
 		t.Fatalf("多服务应合并 2 条: err=%v len=%d", err, len(out))
@@ -134,7 +134,7 @@ func TestTracesStoreAppLevelNoListerDegrades(t *testing.T) {
 		t.Fatalf("lister 为 nil 时不应查 Jaeger")
 	}))
 	defer srv.Close()
-	s := NewTracesStore(srv.URL, nil)
+	s := NewTracesStore(srv.URL, nil, nil)
 	out, err := s.ListTraces(context.Background(), "app-x", "", 10)
 	if err != nil || len(out) != 0 {
 		t.Fatalf("lister=nil 应用级应降级返空: err=%v len=%d", err, len(out))
@@ -148,7 +148,7 @@ func TestTracesStorePlatformLevelViaServices(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/services":
-			_ = json.NewEncoder(w).Encode(map[string]any{"data": []string{"s1", "s2", "jaeger-all-in-one"}})
+			t.Fatalf("平台级查询不应调 /api/services 全量枚举（跨租户泄漏）")
 		case "/api/traces":
 			svc := r.URL.Query().Get("service")
 			queriedServices = append(queriedServices, svc)
@@ -163,23 +163,27 @@ func TestTracesStorePlatformLevelViaServices(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	s := NewTracesStore(srv.URL, &fakeLister{})
+	s := NewTracesStore(srv.URL, &fakeLister{}, &fakeEntities{svcNames: []string{"s1", "s2"}})
 	out, err := s.ListTraces(context.Background(), "", "", 20)
 	if err != nil {
 		t.Fatalf("平台级查询不应报错: %v", err)
 	}
-	// 应过滤 jaeger-all-in-one，只逐个查 s1/s2。
-	if len(queriedServices) != 2 {
-		t.Fatalf("应过滤 jaeger-all-in-one 只查 s1/s2, got queried=%v", queriedServices)
+	// 应按租户白名单逐个查 s1/s2（+控制面 paas-core；此处 fake 服务端对其它 service 返 data 空）。
+	queried := map[string]bool{}
+	for _, q := range queriedServices {
+		queried[q] = true
 	}
-	if len(out) != 2 {
-		t.Fatalf("应合并 2 条 trace, got %d: %+v", len(out), out)
+	if !queried["s1"] || !queried["s2"] {
+		t.Fatalf("应查白名单服务 s1/s2, got queried=%v", queriedServices)
+	}
+	if len(out) != 3 {
+		t.Fatalf("应合并 3 条 trace（s1/s2/paas-core 控制面）, got %d: %+v", len(out), out)
 	}
 }
 
 // TestTracesStoreBackendDown：后端不可达降级返空非报错。
 func TestTracesStoreBackendDown(t *testing.T) {
-	s := NewTracesStore("http://127.0.0.1:1", &fakeLister{names: []string{"s1"}})
+	s := NewTracesStore("http://127.0.0.1:1", &fakeLister{names: []string{"s1"}}, nil)
 	out, err := s.ListTraces(context.Background(), "app-x", "", 10)
 	if err != nil || len(out) != 0 {
 		t.Fatalf("后端不可达应降级返空非报错: %v len=%d", err, len(out))
@@ -218,7 +222,7 @@ func TestTracesStoreFiltersProbeNoise(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	s := NewTracesStore(srv.URL, &fakeLister{names: []string{"s1"}})
+	s := NewTracesStore(srv.URL, &fakeLister{names: []string{"s1"}}, &fakeEntities{})
 	out, err := s.ListTraces(context.Background(), "app-x", "", 20)
 	if err != nil {
 		t.Fatal(err)
@@ -275,5 +279,43 @@ func TestParseJaegerTraceSpanKindAndPeer(t *testing.T) {
 	// peer.service 优先于 server.address
 	if s := byID["s-http"]; s.Kind != "client" || s.Peer != "product" {
 		t.Fatalf("http client span 应 kind=client peer=product（peer.service 优先）: %+v", s)
+	}
+}
+
+// TestTracesStoreGetTraceTenantGuard：GetTrace 归属校验——trace 任一 span 的 service.name
+// ∈ 本租户白名单才返回；跨租户 trace 统一 ErrTraceNotFound（不泄漏存在性）。
+// entities 为 nil 时 fail-closed（无法确定归属即拒）。
+func TestTracesStoreGetTraceTenantGuard(t *testing.T) {
+	const tid = "3fb7533a3292802d71d84ee00995cc3f"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/traces/"+tid {
+			t.Fatalf("未预期路径: %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{
+				"traceID": tid,
+				"spans": []map[string]any{
+					{"spanID": "s1", "operationName": "GET /", "startTime": 1719500000000000, "duration": 50000, "processID": "p1", "tags": []map[string]any{}},
+				},
+				"processes": map[string]any{"p1": map[string]any{"serviceName": "other-tenant-svc"}},
+			}},
+		})
+	}))
+	defer srv.Close()
+
+	// 归属校验拒绝：service 不在白名单 → ErrTraceNotFound。
+	s := NewTracesStore(srv.URL, nil, &fakeEntities{svcNames: []string{"my-svc"}})
+	if _, err := s.GetTrace(context.Background(), tid); err != observability.ErrTraceNotFound {
+		t.Fatalf("跨租户 trace 应拒: %v", err)
+	}
+	// fail-closed：entities nil → 拒。
+	s2 := NewTracesStore(srv.URL, nil, nil)
+	if _, err := s2.GetTrace(context.Background(), tid); err != observability.ErrTraceNotFound {
+		t.Fatalf("entities nil 应 fail-closed: %v", err)
+	}
+	// 非法 traceID（路径穿越尝试）→ 拒，不发请求。
+	s3 := NewTracesStore(srv.URL, nil, &fakeEntities{svcNames: []string{"my-svc"}})
+	if _, err := s3.GetTrace(context.Background(), "../../api/services"); err != observability.ErrTraceNotFound {
+		t.Fatalf("非法 traceID 应拒: %v", err)
 	}
 }

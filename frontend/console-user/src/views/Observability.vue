@@ -6,6 +6,7 @@
 // 惰性时序：每次加载后端补点；前端 10s 轮询刷新（页面不可见自动暂停）。
 import { computed, onMounted, ref } from 'vue'
 import { usePolling } from '@/composables/usePolling'
+import { fmtMetric, sparkHeights as sparkHeightsRaw } from '@/composables/useMetricFormat'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
@@ -127,7 +128,8 @@ const cards = computed(() =>
     .filter(Boolean) as { name: string; label: string; unit: string; current: number; points: MetricPoint[] }[],
 )
 
-const fmtVal = (v: number) => (v >= 100 ? Math.round(v).toString() : v.toFixed(1))
+// 指标值格式化（公共 composable，Grafana 式单位自适应 + isFinite 守卫）。
+const fmtVal = (v: number, unit = '') => fmtMetric(v, unit)
 
 // spanRows：trace 的 span 树形 flatten（带 depth），驱动 v-for 树形缩进渲染。
 // 每次展开调用一次（非 computed，因 row 是 el-table 展开行动态对象）。
@@ -140,16 +142,8 @@ function traceRowClass({ row }: { row: Trace }): string {
   return row.status === 'error' || errSpanCount(row) ? 'trace-err-row' : ''
 }
 
-// sparkline：把 points 映射成 100% 内的高度数组
-function sparkHeights(points: MetricPoint[]): number[] {
-  if (!points || points.length < 2) return []
-  const vals = points.map((p) => p.value)
-  const min = Math.min(...vals)
-  const max = Math.max(...vals)
-  const span = max - min || 1
-  // 取最近 24 点
-  return vals.slice(-24).map((v) => 20 + ((v - min) / span) * 80)
-}
+// sparkline 高度（公共 composable：基线钉 0 防平坦线 min-max 拉伸失真）
+const sparkHeights = (points: MetricPoint[]) => sparkHeightsRaw(points.map((p) => p.value), 100)
 
 async function loadApps() {
   const resp = await fetchAuth('/api/applications')
@@ -469,11 +463,11 @@ usePolling(() => loadAll(true), 10000)
           <div class="h-metrics">
             <div v-if="r.cpu" class="h-item">
               <span class="h-k">CPU</span>
-              <span class="h-v mono">{{ fmtVal(r.cpu.current) }}{{ r.cpu.unit }}</span>
+              <span class="h-v mono">{{ fmtVal(r.cpu.current, r.cpu.unit ?? '') }}{{ r.cpu.unit === 'cores' ? ' 核' : r.cpu.unit }}</span>
             </div>
             <div v-if="r.mem" class="h-item">
               <span class="h-k">内存</span>
-              <span class="h-v mono">{{ fmtVal(r.mem.current) }}{{ r.mem.unit }}</span>
+              <span class="h-v mono">{{ fmtVal(r.mem.current, r.mem.unit ?? '') }}{{ r.mem.unit }}</span>
             </div>
             <div v-if="r.rps" class="h-item">
               <span class="h-k">RPS</span>
@@ -499,7 +493,7 @@ usePolling(() => loadAll(true), 10000)
         <div v-for="c in cards" :key="c.name" class="metric-card">
           <div class="m-label">{{ c.label }}</div>
           <div class="m-value mono">
-            {{ fmtVal(c.current) }}<span class="m-unit">{{ c.unit }}</span>
+            {{ fmtVal(c.current, c.unit ?? '') }}<span class="m-unit">{{ c.unit }}</span>
           </div>
           <div class="spark">
             <span

@@ -24,6 +24,21 @@ func (f *fakeLister) AppWorkloadNames(ctx context.Context, appID string) ([]stri
 	return f.names, nil
 }
 
+// fakeEntities 实现 observability.TenantEntityLister（测试用）。
+type fakeEntities struct {
+	apps     []string
+	ds       []string
+	svcNames []string
+}
+
+func (f *fakeEntities) TenantAppIDs(ctx context.Context) ([]string, error) { return f.apps, nil }
+func (f *fakeEntities) TenantDataServiceIDs(ctx context.Context) ([]string, error) {
+	return f.ds, nil
+}
+func (f *fakeEntities) TenantServiceNames(ctx context.Context) ([]string, error) {
+	return f.svcNames, nil
+}
+
 func TestLogsStoreSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/loki/api/v1/query_range" {

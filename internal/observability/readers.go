@@ -55,4 +55,8 @@ type AppWorkloadLister interface {
 type TenantEntityLister interface {
 	TenantAppIDs(ctx context.Context) ([]string, error)
 	TenantDataServiceIDs(ctx context.Context) ([]string, error)
+	// TenantServiceNames 列出租户内全部 service 工作负载名（跨应用去重）。
+	// 用于 trace 平台级查询与 GetTrace 归属校验：租户可见的 service.name 集合
+	// 以此为白名单，禁止 Jaeger /api/services 全量枚举（跨租户泄漏）。
+	TenantServiceNames(ctx context.Context) ([]string, error)
 }

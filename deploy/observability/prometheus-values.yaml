@@ -80,8 +80,36 @@ extraScrapeConfigs: |
       - source_labels: [__meta_kubernetes_pod_label_paas_aitoys_dataservice]
         target_label: paas_aitoys_dataservice
 
+  # 应用 Pod 自暴露指标（prometheus.io/scrape 注解发现——controller 给 service Pod 已注）。
+  # 应用 RED 指标（http_requests_total 等，real/metrics listAppMetrics 的 rps/latency/errorRate）
+  # 依赖此 job；透传 lane/tenant/app label 供泳道与租户维度过滤。未注解的 Pod 不抓（keep 过滤）。
+  - job_name: 'kubernetes-pods'
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: "true"
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        regex: (.+)
+        target_label: __metrics_path__
+      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+        regex: ([^:]+)(?::\d+)?;(\d+)
+        replacement: $1:$2
+        target_label: __address__
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_label_paas_aitoys_lane]
+        target_label: lane
+      - source_labels: [__meta_kubernetes_pod_label_paas_aitoys_tenant]
+        target_label: paas_aitoys_tenant
+      - source_labels: [__meta_kubernetes_pod_label_paas_aitoys_app]
+        target_label: paas_aitoys_app
+
 server:
   retention: "7d"
+  # TSDB 磁盘上限兜底（略小于 PVC 10Gi，预留 WAL/head 空间；时间 retention 先被触达即删旧）
+  retentionSize: "9GB"
   persistentVolume:
     enabled: true
     size: 10Gi

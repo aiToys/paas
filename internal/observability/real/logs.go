@@ -59,14 +59,21 @@ func (s *LogsStore) ListLogs(ctx context.Context, appID, targetType, targetID, l
 	tid, _ := tenant.TenantFrom(ctx)
 	ns := tenant.Namespace(tid) // paas-<tenant>，多租户隔离（空 tid 兜底 paas-x）
 	// Pod 名正则：按 targetType 选维度。
-	//   - dataservice：数据服务 STS Pod 名 = <ds-id>-0（StatefulSet Pod，多副本 <ds-id>-N）
+	//   - dataservice：数据服务 STS Pod 名 = <ds-id>-N（StatefulSet 多副本正则）
+	//   - workload：工作负载 Pod 名 = <wl-id>-<hash>-<hash>（单工作负载精确范围）
 	//   - app：appID 指定时解析其工作负载 ID；否则匹配全部 wl-.* Pod（本租户）。
+	//   注意：workload 维度若落入 app 分支会忽略 targetID 把查询范围放大到全租户，须显式分支。
 	podRegex := "wl-.*"
 	if targetType == observability.TargetDataservice {
 		if targetID == "" {
 			return []observability.LogEntry{}, nil // dataservice 需指定 targetID
 		}
 		podRegex = regexp.QuoteMeta(targetID) + "-\\d+"
+	} else if targetType == observability.TargetWorkload {
+		if targetID == "" {
+			return []observability.LogEntry{}, nil // workload 需指定 targetID
+		}
+		podRegex = regexp.QuoteMeta(targetID) + "-.*"
 	} else if appID != "" {
 		if s.lister == nil {
 			return []observability.LogEntry{}, nil // 应用级需 lister

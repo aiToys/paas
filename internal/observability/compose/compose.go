@@ -73,6 +73,14 @@ func (r *Repo) ListAlerts(ctx context.Context, targetType, targetId string) ([]o
 		log.Printf("observability compose ListAlerts: 取 metrics 失败: %v", err)
 		series = nil
 	}
+	// 下推回退：real 模式 app 维度 targetId 空（TargetID="" 规则 = 全部应用）时 reader 返空
+	//（listAppMetrics appID="" 直接返空），但规则本身可评估——回退全租户聚合取 series。
+	// 否则 memory seed 的「全部应用」类规则在 real 模式静默失效（R7-I3）。
+	if len(series) == 0 {
+		if all, aerr := r.metrics.ListMetrics(ctx, "", "", ""); aerr == nil {
+			series = all
+		}
+	}
 	alerts := make([]observability.Alert, 0)
 	for _, rule := range rules {
 		if !rule.Enabled {

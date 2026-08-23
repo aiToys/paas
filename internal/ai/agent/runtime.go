@@ -216,7 +216,7 @@ func (r *Runtime) Run(ctx context.Context, agentID string, msgs []provider.Messa
 	// gen_ai span：OpenTelemetry GenAI 语义约定，接 Jaeger 后可观测 Agent 链路。
 	ctx, span := tracer.Start(ctx, "agent.run",
 		trace.WithAttributes(
-			attribute.String("gen_ai.operation.name", "agent"),
+			attribute.String("gen_ai.operation.name", "invoke_agent"), // semconv 值域：invoke_agent（非 "agent"）
 			attribute.String("gen_ai.system", "paas"),
 			attribute.String("gen_ai.request.model", a.Model),
 			attribute.String("gen_ai.agent.id", agentID),

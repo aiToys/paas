@@ -15,6 +15,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { usePolling } from '@/composables/usePolling'
+import { fmtMetric, sparkHeights as sparkHeightsRaw } from '@/composables/useMetricFormat'
 import { useRouter } from 'vue-router'
 import { fetchAuth } from '@/api'
 import { useUrlState } from '@/composables/useUrlState'
@@ -103,7 +104,8 @@ const replicaSummary = computed(() => {
 const dsKinds = new Set(['db', 'cache', 'mq', 'storage', 'vector', 'search'])
 const depBindings = computed(() => props.bindings.filter((b) => dsKinds.has(b.type)))
 
-const fmtVal = (v: number) => (v >= 100 ? Math.round(v).toString() : v.toFixed(1))
+// 指标值格式化（公共 composable）。
+const fmtVal = (v: number, unit = '') => fmtMetric(v, unit)
 
 // depMetricSeries/Val/Unit：按 metric 名取 DepMetric 上的 series（计算 + 业务指标统一访问）。
 function depMetricSeries(d: DepMetric, name: keyof DepMetric): MetricSeries | undefined {
@@ -142,14 +144,8 @@ const visibleTraces = computed(() =>
   showShallowTraces.value ? traces.value : traces.value.filter((t) => (t.spans?.length || 0) >= 2),
 )
 
-function sparkHeights(points: MetricPoint[]): number[] {
-  if (points.length < 2) return []
-  const vals = points.map((p) => p.value)
-  const min = Math.min(...vals)
-  const max = Math.max(...vals)
-  const span = max - min || 1
-  return vals.slice(-24).map((v) => 20 + ((v - min) / span) * 80)
-}
+// sparkline 高度（公共 composable）。
+const sparkHeights = (points: MetricPoint[]) => sparkHeightsRaw(points.map((p) => p.value), 100)
 
 async function loadMetrics() {
   const resp = await fetchAuth(`/api/observability/metrics?targetType=app&targetId=${props.appId}`)
