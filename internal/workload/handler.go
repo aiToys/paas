@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aitoys/paas/internal/core/application"
 	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/httputil"
 )
@@ -46,6 +47,8 @@ type Handler struct {
 	// 覆盖 store 静态值（reconciler 只回写 CRD status 不回写 store，故读路径需主动回填）。
 	// nil 透传 store 原值（降级：纯内存模式无真实状态）。
 	statusReader StatusReader
+	// Guard 应用级权限 enforcement（受限应用工作负载写需成员角色）；nil 跳过。
+	Guard *application.AppGuard
 }
 
 // NewHandler 创建工作负载 handler。可选 envResolver 注入启用生产写校验。
@@ -76,6 +79,11 @@ func WithStatusReader(r StatusReader) HandlerOpt {
 	return func(h *Handler) { h.statusReader = r }
 }
 
+// WithAppGuard 注入应用级权限 enforcement（受限应用工作负载写需成员角色）。
+func WithAppGuard(g *application.AppGuard) HandlerOpt {
+	return func(h *Handler) { h.Guard = g }
+}
+
 func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) bool {
 	if h.Authorize == nil || h.Authorize(r, perm) {
 		return true
@@ -103,6 +111,15 @@ func (h *Handler) allowProd(w http.ResponseWriter, r *http.Request, envID string
 		return h.allow(w, r, PermProdWrite)
 	}
 	return true
+}
+
+// allowApp 校验受限应用的应用级权限（工作负载写 -> AppActionWrite）；不通过回 403。
+func (h *Handler) allowApp(w http.ResponseWriter, r *http.Request, appID string) bool {
+	if h.Guard == nil || h.Guard.Allow(r, appID, application.AppActionWrite) {
+		return true
+	}
+	httputil.WriteError(w, http.StatusForbidden, "forbidden: 无该应用的应用级权限（write）")
+	return false
 }
 
 // fillStatus 回填 K8s 真实运行状态（注入 statusReader 时覆盖 store 静态值）。
@@ -175,6 +192,9 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == http.MethodPost {
 		if !h.allow(w, r, PermWorkloadWrite) {
+			return
+		}
+		if !h.allowApp(w, r, appID) {
 			return
 		}
 		var w0 Workload
@@ -354,6 +374,9 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
+		if !h.allowApp(w, r, existing.AppID) {
+			return
+		}
 		if !h.allowProd(w, r, existing.EnvID) {
 			return
 		}
@@ -381,6 +404,9 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 		existing, err := h.repo.Get(r.Context(), id)
 		if err != nil {
 			httputil.WriteServiceError(w, http.StatusNotFound, err)
+			return
+		}
+		if !h.allowApp(w, r, existing.AppID) {
 			return
 		}
 		if !h.allowProd(w, r, existing.EnvID) {
@@ -416,6 +442,9 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 		existing, err := h.repo.Get(r.Context(), id)
 		if err != nil {
 			httputil.WriteServiceError(w, http.StatusNotFound, err)
+			return
+		}
+		if !h.allowApp(w, r, existing.AppID) {
 			return
 		}
 		if !h.allowProd(w, r, existing.EnvID) {

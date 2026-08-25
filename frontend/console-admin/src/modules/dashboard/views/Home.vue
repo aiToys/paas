@@ -87,7 +87,7 @@ const statItems = computed(() => {
   return [
     { key: 'users', label: t('dashboard.stat.users'), value: s.users.value, trendPct: s.users.trendPct },
     { key: 'orders', label: t('dashboard.stat.orders'), value: s.orders.value, trendPct: s.orders.trendPct },
-    { key: 'revenue', label: t('dashboard.stat.revenue'), value: s.revenue.value, unit: '¥', trendPct: s.revenue.trendPct },
+    { key: 'revenue', label: t('dashboard.stat.revenue'), value: s.revenue.value, trendPct: s.revenue.trendPct },
     { key: 'active', label: t('dashboard.stat.active'), value: s.active.value, trendPct: s.active.trendPct }
   ]
 })

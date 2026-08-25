@@ -1,5 +1,6 @@
 -- AI Agent（P3）：命名预设，组装 system prompt + 工具 + KB RAG 调底层 LLM。
--- 租户私有；tools/knowledge_bases JSONB（引用 ID 列表）；name 租户内唯一。
+-- 租户私有；tools/knowledge_bases/skills JSONB（引用 ID 列表）；name 租户内唯一。
+-- skills 列由 0031 增量补（已部署实例），此处合并 schema（全新部署一并建）。
 CREATE TABLE IF NOT EXISTS ai_agents (
     id              TEXT PRIMARY KEY,
     tenant_id       TEXT NOT NULL,
@@ -14,5 +15,6 @@ CREATE TABLE IF NOT EXISTS ai_agents (
     enabled         BOOLEAN NOT NULL DEFAULT TRUE,
     created_at      TIMESTAMPTZ NOT NULL,
     updated_at      TIMESTAMPTZ NOT NULL,
+    skills          JSONB NOT NULL DEFAULT '[]',
     UNIQUE (tenant_id, name)
 );

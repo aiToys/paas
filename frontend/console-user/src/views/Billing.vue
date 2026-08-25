@@ -1,4 +1,7 @@
 <script setup lang="ts">
+
+import { useRouter } from 'vue-router'
+const router = useRouter()
 // 设置 → 配额与账单（租户级资源配额 + 用量 + 账单，多租户商业化根基）。
 // 配额用量卡（超限红色告警）+ 生成本期账单 + 账单列表（展开明细 + 支付）。
 // 独立于物理环境，不接 prod:write。
@@ -206,7 +209,11 @@ onMounted(load)
         <el-tag type="info" size="small">应用级 Key 归因</el-tag>
       </div>
       <el-table :data="tokenByApp" size="small">
-        <el-table-column label="应用" prop="appId" min-width="200" />
+        <el-table-column label="应用" min-width="200">
+          <template #default="{ row }">
+            <a class="mono app-link" @click="router.push('/applications/' + row.appId)">{{ row.appId }}</a>
+          </template>
+        </el-table-column>
         <el-table-column label="Token 用量（千）" width="180">
           <template #default="{ row }">
             <span class="mono">{{ row.tokens.toLocaleString() }}</span>
@@ -338,4 +345,6 @@ onMounted(load)
 .strong { font-weight: 600; }
 .text-faint { color: var(--text-faint); }
 .dialog-tip { font-size: 12.5px; color: var(--text-dim); margin: 0 0 12px; }
+.app-link { color: var(--brand); cursor: pointer; }
+.app-link:hover { text-decoration: underline; }
 </style>

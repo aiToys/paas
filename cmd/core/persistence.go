@@ -26,6 +26,12 @@ import (
 	"github.com/aitoys/paas/internal/ai/prompt"
 	promptmemory "github.com/aitoys/paas/internal/ai/prompt/memory"
 	promptpg "github.com/aitoys/paas/internal/ai/prompt/pg"
+	"github.com/aitoys/paas/internal/ai/marketplace"
+	"github.com/aitoys/paas/internal/ai/skill"
+	marketplacememory "github.com/aitoys/paas/internal/ai/marketplace/memory"
+	marketplacepg "github.com/aitoys/paas/internal/ai/marketplace/pg"
+	skillmemory "github.com/aitoys/paas/internal/ai/skill/memory"
+	skillpg "github.com/aitoys/paas/internal/ai/skill/pg"
 	"github.com/aitoys/paas/internal/ai/tool"
 	toolmemory "github.com/aitoys/paas/internal/ai/tool/memory"
 	toolpg "github.com/aitoys/paas/internal/ai/tool/pg"
@@ -94,6 +100,7 @@ func (envNamespaceResolver) Namespace(tid string) string { return tenant.Namespa
 type Stores struct {
 	Identity       identity.Repository
 	Application    application.Repository
+	AppMembers     application.MemberRepository
 	Environment    environment.Repository
 	AppConfig      appconfig.Repository
 	DataService    dataservice.Repository
@@ -113,8 +120,11 @@ type Stores struct {
 	KnowledgeBase  knowledgebase.Repository
 	Tool           tool.Repository
 	Prompt         prompt.Repository
+	Skill          skill.Repository
 	Agent          agent.Repository
+	Marketplace    marketplace.Repository
 	Eval           eval.Repository
+	EvalRuns       eval.RunRepository
 	Pipeline       pipeline.Store
 	Change         change.Repository
 	Service        service.Repository
@@ -174,8 +184,11 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		kbRepo := kbpg.NewStore(db)
 		toolRepo := toolpg.NewStore(db)
 		promptRepo := promptpg.NewStore(db)
+		skillRepo := skillpg.NewStore(db)
 		agentRepo := agentpg.NewStore(db)
+		marketRepo := marketplacepg.NewStore(db)
 		evalRepo := evalpg.NewStore(db)
+		evalRunRepo := evalpg.NewStore(db)
 		msgRepo := messaging.Repository(msgmemory.NewStore())
 		bkRepo := backup.Repository(bkmemory.NewStore())
 		pipelineStore := pipeline.NewPGStore(db.Pool())
@@ -203,7 +216,8 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		stores := &Stores{
 			Identity:       idb,
 			Application:    appRepo,
-			Environment:    envRepo,
+		AppMembers:     applicationpg.NewMemberStore(db),
+		Environment:    envRepo,
 			AppConfig:      appcfgRepo,
 			DataService:    dsRepo,
 			Engine:         rawDs, // PG ds store 同实现 EngineRepository（平台级，无 ApplyRepo 装饰）
@@ -222,8 +236,11 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 			KnowledgeBase:  kbRepo,
 			Tool:           toolRepo,
 			Prompt:         promptRepo,
+			Skill:          skillRepo,
 			Agent:          agentRepo,
+			Marketplace:    marketRepo,
 			Eval:           evalRepo,
+			EvalRuns:       evalRunRepo,
 			Pipeline:       pipelineStore,
 			Change:         changeRepo,
 			Service:        svcRepo,
@@ -266,7 +283,9 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 	kbRepo := kbmemory.NewStore()
 	toolRepo := toolmemory.NewStore()
 	promptRepo := promptmemory.NewStore()
+	skillRepo := skillmemory.NewStore()
 	agentRepo := agentmemory.NewStore()
+	marketRepo := marketplacememory.NewStore()
 	msgRepo := messaging.Repository(msgmemory.NewStore())
 	bkRepo := backup.Repository(bkmemory.NewStore())
 	pipelineStore := pipeline.NewMemoryStore()
@@ -283,6 +302,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 	stores := &Stores{
 		Identity:       idb,
 		Application:    appRepo,
+		AppMembers:     appmemory.NewMemberStore(),
 		Environment:    envRepo,
 		AppConfig:      appcfgRepo,
 		DataService:    dsRepo,
@@ -302,8 +322,11 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		KnowledgeBase:  kbRepo,
 		Tool:           toolRepo,
 		Prompt:         promptRepo,
+		Skill:          skillRepo,
 		Agent:          agentRepo,
+		Marketplace:    marketRepo,
 		Eval:           evalmemory.NewStore(),
+		EvalRuns:       evalmemory.NewStore(),
 		Pipeline:       pipelineStore,
 		Change:         changeRepo,
 		Service:        svcRepo,

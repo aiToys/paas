@@ -22,6 +22,8 @@ type chatReq struct {
 	// Tools 暴露给 LLM 的工具定义（OpenAI 兼容 function calling）；空表示不启用工具调用。
 	// 透传给 provider.Chat，上游模型决定调用时在流末返回 tool_calls（见 serveStream 透传）。
 	Tools []provider.ToolDef `json:"tools,omitempty"`
+	// ConversationID 可选会话 ID（agent:{id} 虚拟模型多轮记忆；普通模型忽略）。
+	ConversationID string `json:"conversationId,omitempty"`
 	// User 是 OpenAI 标准软标签字段：应用内多 agent 归因细分（如 "researcher"/"coder"）。
 	// 不做配额、仅看板聚合；与 AppID（强制计费维度）正交。
 	User string `json:"user,omitempty"`
@@ -63,7 +65,7 @@ func ChatCompletions(gw *Gateway, meter *Meter, agents *AgentDispatcherHolder) h
 		}
 		// Agent 虚拟模型：委托 runtime（不经通道/failover；用量按 agent:{id} 维度计量）。
 		if agents != nil && agents.Match(req.Model) {
-			if err := agents.ServeSSE(w, r, req.Model, req.Messages); err != nil {
+			if err := agents.ServeSSEConv(w, r, req.Model, req.ConversationID, req.Messages); err != nil {
 				// 预检错误（agent 不存在/禁用/护栏拦截）发生在 SSE 写头前，返干净 4xx。
 				// ServeSSE 内部流式错误已无法改 status，仅日志（与 serveStream 同）。
 				switch {

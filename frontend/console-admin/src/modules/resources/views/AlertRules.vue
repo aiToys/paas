@@ -31,7 +31,11 @@
       <el-button :icon="Refresh" @click="fetchList">刷新</el-button>
     </template>
 
-    <template #col-severity="{ row }">
+    <template #col-tenant="{ row }">
+      <el-tag size="small" type="info">{{ row.tenantId }}</el-tag>
+    </template>
+
+        <template #col-severity="{ row }">
       <el-tag :type="row.severity === 'critical' ? 'danger' : 'warning'" size="small">{{ row.severity }}</el-tag>
     </template>
     <template #col-enabled="{ row }">
@@ -64,7 +68,7 @@ const { listData, loading, pagination, searchForm, fetchList, handleSearch, hand
 const tableData = computed(() => listData.value as unknown as Record<string, unknown>[])
 
 const columns = computed<ColumnDef[]>(() => [
-  { prop: 'tenantId', label: '租户', width: 130 },
+  { prop: 'tenantId', label: '租户', width: 130, slot: 'tenant' },
   { prop: 'name', label: '规则名称', minWidth: 140 },
   { prop: 'metricName', label: '指标', width: 120 },
   { prop: 'targetType', label: '目标类型', width: 110 },

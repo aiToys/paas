@@ -31,7 +31,11 @@
       <el-button :icon="Refresh" @click="fetchList">刷新</el-button>
     </template>
 
-    <template #col-protocol="{ row }">
+    <template #col-tenant="{ row }">
+      <el-tag size="small" type="info">{{ row.tenantId }}</el-tag>
+    </template>
+
+        <template #col-protocol="{ row }">
       <el-tag :type="row.protocol === 'grpc' ? 'success' : 'primary'" size="small">{{ row.protocol }}</el-tag>
     </template>
     <template #col-detail="{ row }">
@@ -61,7 +65,7 @@ const { listData, loading, pagination, searchForm, fetchList, handleSearch, hand
 const tableData = computed(() => listData.value as unknown as Record<string, unknown>[])
 
 const columns = computed<ColumnDef[]>(() => [
-  { prop: 'tenantId', label: '租户', width: 130 },
+  { prop: 'tenantId', label: '租户', width: 130, slot: 'tenant' },
   { prop: 'id', label: '服务 ID', minWidth: 160 },
   { prop: 'name', label: '名称', minWidth: 140 },
   { prop: 'protocol', label: '协议', width: 100, slot: 'protocol' },

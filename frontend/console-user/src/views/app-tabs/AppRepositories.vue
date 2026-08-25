@@ -3,9 +3,12 @@
 // 一站式：支持「内置 Gitea 创建」（PaaS 调 Gitea API 建仓，内网 clone）+「绑定外部仓库」（填 gitUrl）。
 // 内置仓库支持平台内浏览（文件树/提交历史），外部仓库仅记录 gitUrl 供构建 clone。
 import { ref, computed, onMounted, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchAuth } from '@/api'
 import RepoBrowser from './RepoBrowser.vue'
+
+const router = useRouter()
 
 const props = defineProps<{ appId: string; focusRepoId?: string }>()
 const emit = defineEmits<{ (e: 'repoFocused'): void }>()
@@ -207,6 +210,7 @@ watch(() => props.appId, load)
       <el-table-column label="操作" width="180">
         <template #default="{ row }">
           <el-button v-if="row.source === 'internal'" text size="small" @click="browseRepo = row">浏览</el-button>
+          <el-button v-if="row.source === 'internal'" text size="small" @click="router.push(`/apps/${props.appId}/repositories/${row.id}/pulls`)">评审</el-button>
           <!-- 迭代旅程审计：开发者需要本机可用的 clone 命令（集群内 FQDN 本机不可达） -->
           <el-button v-if="row.cloneCommand" text size="small" type="primary" @click="showClone(row)">克隆</el-button>
           <el-button text type="danger" size="small" @click="unbind(row)">解绑</el-button>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import { fetchAuth } from '@/api'
@@ -28,6 +28,7 @@ interface ModelListItem {
 }
 
 const route = useRoute()
+const router = useRouter()
 const model = ref('')
 const modelOptions = ref<ModelOpt[]>([])
 const input = ref('')
@@ -51,6 +52,16 @@ onMounted(async () => {
     const resp = await fetchAuth('/api/models')
     const json = await resp.json()
     modelOptions.value = ((json.data ?? []) as ModelListItem[]).map((m) => ({ id: m.id, name: m.name, vendor: m.vendor }))
+    // 并入 Agent 虚拟模型（agent:{id} 走同款 /v1/chat/completions；失败静默——无 Agent 时列表不变）。
+    try {
+      const ra = await fetchAuth('/api/agents')
+      if (ra.ok) {
+        const agents = ((await ra.json()).data ?? []) as Array<{ id: string; name: string }>
+        modelOptions.value.push(
+          ...agents.map((a) => ({ id: `agent:${a.id}`, name: a.name, vendor: 'Agent' }))
+        )
+      }
+    } catch { /* 静默降级 */ }
   } catch {
     ElMessage.error('加载模型列表失败')
   }
@@ -205,6 +216,7 @@ function streamingContent(m: Msg, i: number): boolean {
         <el-select v-model="model" size="small" class="model-select" placeholder="选择模型">
           <el-option v-for="m in modelOptions" :key="m.id" :label="`${m.name}（${m.vendor}）`" :value="m.id" />
         </el-select>
+        <el-button text size="small" @click="router.push('/resources/models')">模型市场</el-button>
         <span class="muted">· 已就绪</span>
       </div>
       <div class="bar-actions">
@@ -235,6 +247,7 @@ function streamingContent(m: Msg, i: number): boolean {
           </div>
         </el-popover>
         <el-button text size="small" :disabled="!messages.length" @click="clearChat">清空</el-button>
+        <el-button text size="small" @click="router.push('/settings/api-keys')">API 密钥</el-button>
         <span v-if="lastTokens > 0" class="tokens mono">{{ lastTokens }} tokens</span>
       </div>
     </div>

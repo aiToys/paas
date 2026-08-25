@@ -359,8 +359,9 @@ watch(() => run.value?.id, autoSelect)
             </div>
             <div class="node-name">{{ s.name }}</div>
             <div class="node-status">{{ stageStatusLabel(s) }}</div>
-            <el-tag v-if="laneOf(s) && laneOf(s) !== 'default'" size="small" type="warning" class="node-lane">
-              {{ laneOf(s) }}
+            <el-tag v-if="laneOf(s) && laneOf(s) !== 'default'" size="small" type="warning" class="node-lane"
+              :title="`泳道 ${laneOf(s)}`">
+              泳道 {{ laneOf(s) }}
             </el-tag>
           </div>
         </template>
@@ -431,7 +432,8 @@ watch(() => run.value?.id, autoSelect)
 }
 .node-name { font-size: 13px; font-weight: 500; color: var(--el-text-color-primary); text-align: center; }
 .node-status { font-size: 11.5px; color: var(--el-text-color-secondary); margin-top: 2px; min-height: 15px; }
-.node-lane { margin-top: 4px; transform: scale(0.85); }
+.node-lane { margin-top: 4px; max-width: 140px; }
+.node-lane :deep(.el-tag__content) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rail-connector {
   flex: 1 1 0; min-width: 28px; height: 2px; margin-top: 23px; /* 6+34/2 对齐圆心 */
   background: var(--el-border-color-lighter);

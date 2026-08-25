@@ -96,9 +96,12 @@ onMounted(load)
         <div class="banner-title">API 密钥</div>
         <div class="banner-desc">密钥用于访问推理 API 与 /dp 数据面。创建后仅显示一次完整值，请妥善保存。</div>
       </div>
-      <button class="create-btn" :disabled="creating" @click="create">
-        {{ creating ? '创建中…' : '+ 创建密钥' }}
-      </button>
+      <div style="display:flex;gap:8px">
+        <button class="create-btn" :disabled="creating" @click="create">
+          {{ creating ? '创建中…' : '+ 创建密钥' }}
+        </button>
+        <button class="create-btn" style="background:transparent;color:var(--brand);border:1px solid var(--brand)" @click="$router.push('/playground')">去 Playground 试用</button>
+      </div>
     </div>
 
     <div v-loading="loading" class="list">

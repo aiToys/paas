@@ -29,6 +29,8 @@ type AgentDispatcher interface {
 	// ServeSSE 以 OpenAI 兼容 SSE 执行 Agent 并写入响应。
 	// model 形如 "agent:<id>"，由实现剥前缀解析 agentID。
 	ServeSSE(w http.ResponseWriter, r *http.Request, model string, msgs []provider.Message) error
+	// ServeSSEConv 带会话 ID 的执行（conversationId 空 = 无状态，与 ServeSSE 等价）。
+	ServeSSEConv(w http.ResponseWriter, r *http.Request, model, conversationID string, msgs []provider.Message) error
 }
 
 // AgentDispatcherHolder 是 AgentDispatcher 的 late-binding 持有者。
@@ -53,4 +55,9 @@ func (h *AgentDispatcherHolder) Match(model string) bool {
 // ServeSSE 委托内部 dispatcher；调用方需先 Match 判定。
 func (h *AgentDispatcherHolder) ServeSSE(w http.ResponseWriter, r *http.Request, model string, msgs []provider.Message) error {
 	return h.v.ServeSSE(w, r, model, msgs)
+}
+
+// ServeSSEConv 委托内部 dispatcher（带会话 ID 多轮记忆）。
+func (h *AgentDispatcherHolder) ServeSSEConv(w http.ResponseWriter, r *http.Request, model, conversationID string, msgs []provider.Message) error {
+	return h.v.ServeSSEConv(w, r, model, conversationID, msgs)
 }

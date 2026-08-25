@@ -855,6 +855,18 @@ internal/dataservice/  领域(DataService + 6 Kind 常量 + KindMeta 表单元�
 - **测试**：governance pg `TestRouteHostRoundTrip`（Create/Update/清空 往返）+ configcenter pg `TestNamespaceServiceIDRoundTrip`（ServiceID 持久化 + ListNamespaces 过滤）。OpenAPI `WithReqBody(结构体)` 自动含新字段（reflector 自动生成 schema）。
 - **留后续**：Route Host 通配符匹配（`*.example.com`）、Host 数组化、实际 ingress/hermes 配置下发（数据面消费）、configcenter 配置变更通知 governance Service。
 
+### Code Review（PR 评审闭环，2026-08-25）
+
+基于内置 Gitea PR API 落地轻量评审闭环：PR 列表 → diff 查看 → 整体评审（approve/request-changes/comment）→ merge。设计见 `docs/superpowers/specs/2026-08-25-code-review-design.md`，计划 `docs/superpowers/plans/2026-08-25-code-review.md`。
+
+- **PR 真源 Gitea，平台不落库**（无新实体/migration）：gitea.Client 扩展 6 方法（`ListPRs/GetPR/GetPRDiff/ReviewPR/MergePR` + `ErrPRNotFound` sentinel）；`GetPRDiff` 走 `.diff` raw 端点（text/plain 绕 doJSON），client 层 `LimitReader(2MB+1)` 防无界读 OOM；`doMerge` 补 422→ErrMergeConflict（Gitea 不可合并实际返 422，change 集成链路语义改进无回归）。
+- **REST**（devops handler `serveRepoPulls`，composite `/repositories/{rid}/pulls[/{number}[/{reviews|merge}]]`）：列表（state 白名单 open/closed/all）/详情+diff（2MB 截断 + truncated 标志）/评审三态/merge。权限：读=`repository:read`；评审=`repository:write`+AppGuard `write`（developer+）；**merge=`repository:write`+AppGuard `release`（maintainer+）**。**归属校验**：`repo.AppID != appID` 返 404（防「非受限 appId+受限 repoID」移花接木绕 AppGuard——审计 R2 Critical 修复）。评审/merge 记审计（`pull_request_review`/`pull_request_merge`，devops handler 新增 `AuditRecorder` 依赖倒置 + `WithAudit` 注入 identityAuditAdapter）。
+- **跨应用聚合** `GET /api/pulls`（mux 精确注册 + OpenAPI）：遍历租户 internal 仓库 `ListPRs(open)`，单仓失败跳过日志降级 + 30s 聚合 deadline（防慢 Gitea 串行长挂）。
+- **前端**：① 应用详情代码仓库 tab internal 仓库「评审」入口 → `Pulls.vue`（state tab + 请求序号防竞态）；② `PullDetail.vue`（`/devops/pulls/:repoId/:number?appId=`）——meta + **自研轻量 diff 解析**（`utils/diff.ts` parseDiff：`diff --git` 分文件、+绿/−红行、\ 与 GIT binary patch 归 meta，不引外部 diff 库）+ 评审三按钮 + merge（confirmDangerous 输入 PR#N 危险确认）；③ DevOps 中心新「评审」tab + 值班台第四列「🔀 等评审」（10s 轮询并入既有 usePolling）。
+- **10 轮深度检查**（R1-R10 并行 agent：安全/多租户/并发/契约/前端/回归/权限矩阵/测试覆盖/修复复核/端到端走查）：修复 3 Critical（appId 移花接木绕 AppGuard、`/api/pulls` mux 未注册致功能静默失效、Pulls.vue appId 误取 query 致列表必空）+ 3 Important（GetPRDiff 无界 ReadAll OOM、聚合串行长挂、列表 tab 竞态）+ 8 Minor（405 显式/state 白名单/审计失败日志/聚合跳过日志/diff meta 行/Pulls 错误提示/PullDetail 缺 appId 防御/`/api/pulls` 非 GET 405）。权限矩阵 21/21 与 spec 一致；回归零破坏（doMerge 422 对 change 集成是语义改进）。
+- **e2e（k8s 已验证）**：Gitea 造真实 PR（分支+提交+建 PR）→ 平台列表/详情 diff/评审 APPROVE 204/聚合/非法 state 400/错误 appId 404/merge 204（PR state=closed merged=true）/审计双记录落库（admin audit-logs 可查 pull_request_*）。
+- **留后续**：行级评论、PR 创建端点（现经 Gitea API/本地 push）、CI 状态挂 PR、评审门禁接变更管理（Change 须 PR 通过才可入批）、diff 渲染大文件虚拟滚动。
+
 ### 变更管理（Change/IntegrationBatch，火车发车模型，2026-08-15）
 
 解决「多个变更合在一起测试、测试成功后同时上线」诉求。设计见 `docs/superpowers/specs/2026-08-15-change-management-design.md`。三实体：`Change`（feat/hotfix 分支粒度，open→integrated→tested→released/abandoned）+ `IntegrationBatch`（临时集成分支 `integration/YYYYMMDD-seq`，collecting→conflict/testing→tested→releasing→released/failed）+ 既有 `Release`（整批上线记录）。**流水线引擎零改动**：批次触发 CI 时 branch=集成分支名，deploy 泳道经 `{{run.branch}}` 占位符天然隔离（集成分支名即 lane）。
@@ -879,6 +891,48 @@ internal/dataservice/  领域(DataService + 6 Kind 常量 + KindMeta 表单元�
 - **通知中心（L1）**：`NotificationBell.vue` 顶栏铃铛（message 图标）+ 未读红点（localStorage `paas:notif-read` 记已读 ID，通知 ID 稳定 `target:targetID:status`）+ severity 着色列表 + 点击跳对应详情 + 30s 轮询静默。
 - **明确不做（YAGNI）**：DAG 画布、完整评审流、通知持久化/订阅/Webhook 出站（L3）、漂移检测告警。
 - **横切**：新端点 OpenAPI 登记 + `{data:T}` + camelCase；notifications 权限 pipeline:read（登录态）；轮询全部 onUnmounted clearInterval。
+
+
+### 应用级权限（App Member + 受限模式，2026-08-24）
+
+解决「权限只到用户（租户角色）级，无法表达应用/服务级粒度——如测试人员无发布权限」。设计对齐 GitHub Repo 成员模式，**渐进启用不破坏存量**：
+
+- **双层权限模型**：租户级 RBAC（identity.BuiltinRoles，管「能干什么类型的事」）× 应用级成员角色（管「能在哪个应用干什么事」）。应用内四角色：`app-owner`（全权+成员管理）/ `app-maintainer`（可发布部署）/ `app-developer`（可开发构建，**不可发布**——测试人员典型角色）/ `app-viewer`（只读）。动作三粒度：`manage`（owner）/ `release`（maintainer+）/ `write`（developer+），授权矩阵 `MemberAllowed`。
+- **受限开关**：`Application.Restricted`（默认 false=租户级 RBAC 即可写，现状不变）；`PUT /api/applications/{id}/restrict` 开启后 enforcement 生效。开启需 application:write + 应用级 manage（防非 owner 先开锁自封）。
+- **AppGuard（enforcement 核心，依赖倒置）**：`application.AppGuard{Apps, Members, IsAdmin, UserIDFn}`——`Allow(r, appID, action)`：非受限/未注入放行（向后兼容）；租户管理员通行；其余查 `MemberRole` 判矩阵，**非成员 fail-closed**。cmd/core 装配桥接 `gateway.IsAdmin` + `gateway.UserIDFrom`，注入 devops/pipeline/workload/application 四 handler。
+- **enforcement 切点**：发布/回滚/promote/流水线审批 → `release`；流水线触发（含 deploy/release/promote/approve stage 的 CD → `release`，纯 CI → `write`）；构建触发/工作负载写（create/scale/schedule/delete）/应用绑定 → `write`；应用删除/restrict/成员管理 → `manage`。读不拦（租户=信任边界，与 API Key 同款取舍）。
+- **数据层**：`app_members` 表（UNIQUE(app_id,user_id)，FK CASCADE）+ applications.restricted 列（migration 0032 + 0001 合并）；memory/pg 双实现 `MemberRepository`（ListMembers/ListAllMembers/GetMember/AddMember(ON CONFLICT 覆盖语义)/RemoveMember/RemoveAppMembers/MemberRole(无记录返空串)）；pg AddMember 前置应用归属校验（防跨租户挂成员）+ LEFT JOIN users 带展示名；级联删应用清成员（appCascadeDeleter + PG CASCADE 双保险）。
+- **REST**：`/api/applications/{id}/members`（GET/POST/DELETE，OpenAPI 4 操作）+ restrict（PUT）。member POST 校验角色合法 + UserLookup 校验用户存在（防悬挂引用）。**租户自助用户列表** `GET /api/users`（任意已认证，强制本租户，不回传 password_hash——成员选择器数据源）。admin 观测面 `GET /api/admin/app-members`（super_admin 跨租户只读）。
+- **前端**：console-user 应用详情新「成员与权限」tab（`app-tabs/AppMembers.vue`：受限开关 el-switch + 二次确认、成员表格角色 inline select 改角色、添加弹窗用户下拉（/api/users filterable）+ 角色选择、空态警示「开启前先加 owner 否则锁死」）；console-admin 资源总览新「应用成员」页（`AppMembers.vue` 跨租户只读观测 + appId→应用名索引，Stamp 图标）。
+- **e2e 验证（k8s）**：developer 加为 app-developer 成员 + 开受限 → 构建 400（放行到业务校验）+ 发布 403「无该应用的应用级权限（release）」；admin 通行到业务校验；移除成员 → 构建 403（fail-closed）；关闭受限 → 恢复 400（现状）。/api/users 200、admin app-members 总览可见。
+- **10 轮深度检查修复（2026-08-24，R1-R10）**：① 绕过缺口——appconfig/change/service 三 handler 补 Guard（configs 写=write、批次 integrate=write/approve·release=release、服务写=write），pipeline retry 按 run.StageRuns 构成判定动作（与触发同源，防失败 CD 重试绕过）；② **提权链封堵**——非受限应用成员管理/开启 restrict 仅租户管理员（防 developer 自封 owner→开 restrict→锁死他人；关闭/受限态仍 owner），+3 回归测试；③ `/api/users` 无 tenant ctx 拒绝（原 ListUsers("") 返全租户用户）；④ app_members 补 RLS 策略（0032+0001，与其他租户表同款纵深）；⑤ 成员增删 + restrict 开关补审计（app_member_add/remove + app_restrict_on/off，经 identityAuditAdapter 落 security）；⑥ webhook 触发不接 Guard（机器凭证语义，与跳过 prod:write 同源，approve 门禁兜底——记录接受）。k8s e2e 复验：提权链 403×2 + 授权链 201 + 审计落库可见。
+- **留后续**：应用级权限前端按钮级显隐（现后端 403 兜底）、服务（Service 实体）级权限粒度、API Key 携带应用成员角色（程序化调用对齐）、restrict 开启时自动将创建者设为 owner、Guard 结果短 TTL 缓存（当前每写请求 +2 点查，索引查询可接受）。
+
+### Agent Skill 支持 + AI 编排 UX + admin 闭环（2026-08-24）
+
+Agent 模块功能补齐：新增 Skill 能力指令包 + 工具/知识库富展示（去裸 ID）+ admin 后台 AI 编排跨租户总览（此前完全缺失的闭环）。
+
+- **Skill 实体（P3.x）**：`internal/ai/skill/`（model + repository + memory + pg + handler，克隆 tool 模块）。Skill = 可复用指令能力包（name/description/instructions/enabled），与 Prompt 互补——Prompt 是整体 system prompt 模板，Skill 是可叠加的能力指令，一个 Agent 可绑多个组合（对标 Claude Skills / GPTs Instructions）。权限复用 agent:read/write。
+- **Agent.Skills 字段**：`Skills []string` JSONB（migration `0031_ai_skill`：ai_skills 表 + ai_agents.skills 列；0014 合并 schema）。memory clone + pg scan 同步深拷。
+- **runtime 注入**：`Runtime.WithSkills(skill.Repository)` 依赖倒置；buildSystem 在 system prompt/PromptRef 之后逐个注入启用的 skill（`# 能力：<name>\n<instructions>`），禁用/缺失静默跳过（与 tool 降级语义一致）。回归测试 `TestBuildSystemInjectsSkills`。
+- **REST**：`/api/skills` CRUD（5 操作 OpenAPI 登记）。
+- **console-user UX**：① `Skills.vue` 新页（含「被 N 个 Agent 引用」+ 删除前引用检查）+ 菜单/路由（`/ai/skills`，闪电方块图标）；② `Agents.vue` 富化——列表 Skill/工具/知识库列显示具名 tag（id→name 索引），表单三选择器 option 带「名称+类型标签+描述」（禁用工具不可选），PromptRef 裸文本改激活版下拉，空资源引导 hint；③ Tools.vue/KnowledgeBases.vue 加「被引用」列（tooltip 列出引用 Agent）。
+- **admin AI 编排闭环**（回答「管理后台没 agent 管理怎么闭环」）：此前 AI 编排 5 实体零 admin 入口。补：① 五仓储（agent/tool/kb/prompt/skill）加 `ListAll`（跨租户带 TenantID，LIMIT 1000，pg prompt 仅 active 版本）；② `internal/ai/admin` 聚合 handler → `/api/admin/ai/{agents|tools|knowledgebases|prompts|skills}`（adminGuard super_admin 只读，5 操作 OpenAPI 登记）；③ console-admin `resources/views/AiOverview.vue` 单页 5 tab（租户列 + 引用计数前端聚合 + id→name 索引展示）+ 菜单「AI 编排」（ChatDotRound，menus.go + mock menu.ts 对齐）。
+- **e2e 验证**：skill CRUD + agent skills roundtrip + admin 5 端点（super_admin 会话 200/普通 admin Key 403）+ 菜单「AI 编排」+ 真实推理注入验证（绑定「写周报」skill 的 agent 输出精确遵循 skill 指令的「每周五下午/三节/markdown」约束）。
+- **留后续**：skill 分组/标签、admin AI 总览写操作（L2 干预：启停/删除，需配额与审计）、工具/KB 删除前的引用强校验（现前端引导后端放行）、skill 版本化、Playground 内嵌 skill 试调。
+
+### AI 编排广场（Marketplace，2026-08-24）
+
+对标 Dify Explore / Coze 商店 / Claude Skills 生态，补齐跨租户能力复用层。设计见 `docs/superpowers/specs/2026-08-24-ai-marketplace-design.md`。
+
+- **统一 Marketplace 实体（方案 A）**：`marketplace_items` 表（平台级公开，同 maas 模型目录先例；migration 0033）存四类实体的脱敏快照（`entityType: skill|prompt|tool|agent` + snapshot JSONB + 分类 + installs 计数 + 发布者），`UNIQUE(entity_type, name, publisher_tenant)` 重发布覆盖。
+- **快照不可变 + fork 安装**：发布即定格（源实体后续修改不影响），更新 = 下架重发（无版本链）；安装 = fork 副本到本租户（同名自动 -2/-3 后缀），之后独立演进。Agent 整包：snapshot 内嵌引用的 skills/prompt/tools（KB 不进——含租户数据），安装时全部 fork 并重写 Agent 引用（skills/tools 按新 ID、PromptRef 按 fork 后 name）。
+- **凭证安全**：`SanitizeConfig` 发布时剔除敏感 key（正则 `apikey|api_key|token|password|passwd|secret|authorization|auth`，不区分大小写，后端真源），快照零凭证；安装者自行补填（前端 hint 提示）。
+- **REST**（`/api/marketplace`，agent:read/write）：列表（?entityType=&category=&q=，snapshot 列表剥离）+ 详情（含 snapshot）+ 发布（POST，category 必填）+ 下架（DELETE，仅发布者/super_admin）+ install + `/published` 我的发布；admin `GET /api/admin/ai/marketplace`（super_admin 总览）。OpenAPI 7 操作。
+- **依赖倒置**：`EntityForker` 接口 + `RegisterAllForkers`（marketplace → agent/skill/prompt/tool 单向，各实体包不反向 import）；cmd/core 装配注入四仓储聚合 `Repos`。
+- **实体字段扩展**：四实体加 `Category`/`InstalledFrom`（migration 0033），Skill 另加 `UseCases`/`Examples`（详情富化，对标 Claude Skills SKILL.md 结构）。
+- **前端**：`Explore.vue` 广场页（`/ai/explore`，AI 分组置顶菜单「广场」）——类型 tab + 分类 pill + 搜索 + 卡片网格 + 详情抽屉（snapshot 预览/组装结构）+ 安装跳落点；四模块页「发布到广场」（`usePublish.ts` composable 复用：选分类→确认快照语义→发布→分类回写）+「来自广场」来源标记；Skills 详情抽屉（instructions/useCases/examples）；admin AiOverview 加广场 tab。
+- **留后续**：评论/评分/点赞、版本链与「源头已更新」提示、官方认证标、KB 广场、安装量防刷、快照导出 YAML、推荐算法。
 
 
 ## 前端架构
@@ -944,3 +998,10 @@ console-user 导航采用**三层信息架构**（避免「资源」概念被滥
 
 **判断**：CLAUDE.md 保留（项目导航真源，非泄漏他人信息）；vue-admin 上游 MIT 声明保留（fork 归属合规）。
 
+### 智能体模块增强（命名 + 多轮记忆 + 评估历史，2026-08-24）
+
+- **命名改「智能体」**：「AI 编排」→「智能体」（console-user 菜单/console-admin 菜单/后端 staticMenus/mock 对齐）。理由：编排（orchestration）在业界指 workflow 流程编排，本模块实际是 Agent 及其能力资产的构建管理，对齐 Coze「智能体」主概念。
+- **Agent 多轮记忆**：`conversationId` 可选参数（handler serveRun + gateway chatReq 透传链 4 层：chatReq→AgentDispatcher.ServeSSEConv→adapter→Runtime.RunConv）；内存 `conversationStore`（per agent×conv 环形 20 条 + 全局 1000 会话惰性清扫防滥用增长）；成功结束后 append 本轮 user/assistant。空 convId = 无状态单轮（现状不变）。Playground 不传（前端自管完整 hist，防双重历史）；试运行弹窗传（单输入框场景）。
+- **评估历史（对标 LangSmith Eval 记录）**：`EvalRun` 实体（migration 0034 eval_runs，JSONB results）+ RunRepository（memory 环形 20 次/agent + pg 惰性 DELETE 清理）；service RunAll 落历史（best-effort 失败记日志）；`GET /api/agent-evals/runs?agentId=` + `/{id}`（OpenAPI 2 操作）；Agents.vue 评估弹窗加历史表（通过率 tag + 点击回看逐用例结果）。
+- **子模块对标结论**：Prompt 版本 diff/KB 检索命中调试/工具调用统计留后续（低价值密度）；多轮记忆与评估历史是最高价值缺口已补。
+- **深度检查（10 轮）**：R1-R6 内联审计修复 7 findings（Explore preview 时序 bug/conversation 无上限/forker TOCTOU 500→409/试运行 conversationId 缺失/死代码/eval 静默失败/gateway 透传）+ R7-R10 确认（Playground 双重历史防避/分发测试补齐/装配回归/前端三套+后端全绿）。k8s 部署 + e2e 复验全通。

@@ -280,3 +280,18 @@ func (a agentDispatcherAdapter) ServeSSE(w http.ResponseWriter, r *http.Request,
 	}
 	return a.rt.ServeSSE(w, r.Context(), agentID, msgs)
 }
+
+// ServeSSEConv 带会话 ID（多轮记忆）的执行。
+func (a agentDispatcherAdapter) ServeSSEConv(w http.ResponseWriter, r *http.Request, model, conversationID string, msgs []provider.Message) error {
+	agentID := strings.TrimPrefix(model, agentModelPrefix)
+	if err := a.rt.CheckInput(r.Context(), agentID, msgs); err != nil {
+		if errors.Is(err, guardrail.ErrBlocked) {
+			return gateway.ErrAgentBlocked
+		}
+		if errors.Is(err, agent.ErrAgentNotFound) {
+			return gateway.ErrAgentNotFound
+		}
+		return err
+	}
+	return a.rt.ServeSSEConv(w, r.Context(), agentID, conversationID, msgs)
+}

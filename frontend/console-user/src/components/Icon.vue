@@ -177,5 +177,10 @@ defineProps<{ name: string; size?: number }>()
       <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" />
       <circle cx="12" cy="14" r="1.5" />
     </template>
+    <!-- Skill：能力指令包（闪电方块，区别于 tool 扳手 / prompt 对话框） -->
+    <template v-else-if="name === 'skill'">
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <polygon points="13 6 9 13 12 13 11 18 15 11 12 11 13 6" fill="currentColor" stroke="none" />
+    </template>
   </svg>
 </template>

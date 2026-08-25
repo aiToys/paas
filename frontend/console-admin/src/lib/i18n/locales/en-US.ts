@@ -217,9 +217,9 @@ export default {
     roleNormal: 'User',
     stat: {
       users: 'Total Users',
-      orders: 'Orders',
-      revenue: 'Revenue',
-      active: 'Active Users'
+      orders: 'Applications',
+      revenue: 'Unpaid Bills',
+      active: 'Active Pipelines'
     },
     quickAction: {
       user: 'User Management',

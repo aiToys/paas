@@ -31,6 +31,7 @@ export interface AdminDataservice {
   kind: string
   name: string
   status: string
+  engineId?: string
 }
 
 export interface ResSearchRequest {
@@ -73,6 +74,19 @@ export const fetchAppList = (params: ResSearchRequest) =>
       (has(a.id, params.keyword ?? '') || has(a.name, params.keyword ?? ''))
     )
   )
+
+// 应用成员（应用级权限）：跨租户总览（super_admin 只读观测）
+export interface AdminAppMember {
+  id: string
+  tenantId: string
+  appId: string
+  userId: string
+  userName?: string
+  role: string
+  createdAt?: string
+}
+
+export const fetchAppMemberList = () => api.get<AdminAppMember[]>('/api/admin/app-members')
 
 export const fetchWorkloadList = (params: ResSearchRequest) =>
   api.get<AdminWorkload[]>('/api/admin/workloads').then((list) =>
@@ -518,6 +532,41 @@ export const fetchServiceDetail = (id: string) =>
   api.get<AdminServiceDetail>(`/api/admin/services/${id}`)
 export const deregisterServiceInstance = (serviceId: string, instanceId: string) =>
   api.del<unknown>(`/api/admin/services/${serviceId}/instances/${instanceId}`)
+// -- 工作负载 drift 修复：PG 有行无 CRD 的 Workload 补投影 --
+export const reconcileWorkloads = () =>
+  api.post<Record<string, number>>('/api/admin/workloads/reconcile')
+
+// -- 环境详情（跨租户）--
+export const fetchEnvironmentDetail = (id: string) =>
+  api.get<AdminEnvironment>(`/api/admin/environments/${id}`)
+
+// -- 流水线运行详情（跨租户；复用 GET /api/admin/pipelineruns/{id}）--
+export interface AdminPipelineRunDetail {
+  id: string
+  tenantId?: string
+  appId: string
+  pipelineId: string
+  branch: string
+  commit: string
+  status: string
+  currentStage: string
+  version?: string
+  stageRuns?: Array<{
+    stage: string
+    name?: string
+    status: string
+    input?: Record<string, unknown>
+    output?: Record<string, unknown>
+    log?: string
+    error?: string
+    startedAt?: string
+    finishedAt?: string
+  }>
+  createdAt: string
+  finishedAt?: string
+}
+export const fetchPipelineRunDetail = (id: string) =>
+  api.get<AdminPipelineRunDetail>(`/api/admin/pipelineruns/${id}`)
 export const deleteService = (id: string) => api.del<unknown>(`/api/admin/services/${id}`)
 
 // -- 可观测：告警规则详情 + 删 --
@@ -539,3 +588,112 @@ export const fetchSecretDetail = (id: string) =>
   api.get<AdminSecretDetail>(`/api/admin/secrets/${id}`)
 export const deleteSecret = (id: string) => api.del<unknown>(`/api/admin/secrets/${id}`)
 
+
+// -- AI 编排：跨租户只读总览（Agent/工具/知识库/提示词/Skill）--
+export interface AdminAgent {
+  id: string
+  tenantId: string
+  name: string
+  description?: string
+  model: string
+  systemPrompt?: string
+  promptRef?: string
+  tools?: string[] | null
+  knowledgeBases?: string[] | null
+  skills?: string[] | null
+  maxSteps?: number
+  enabled: boolean
+  createdAt?: string
+}
+export interface AdminTool {
+  id: string
+  tenantId: string
+  name: string
+  description?: string
+  type: string
+  enabled: boolean
+  createdAt?: string
+}
+export interface AdminKnowledgeBase {
+  id: string
+  tenantId: string
+  name: string
+  embeddingModel: string
+  embeddingDim?: number
+  createdAt?: string
+}
+export interface AdminPrompt {
+  id: string
+  tenantId: string
+  name: string
+  template?: string
+  version?: number
+  active?: boolean
+  createdAt?: string
+}
+export interface AdminSkill {
+  id: string
+  tenantId: string
+  name: string
+  description?: string
+  instructions?: string
+  enabled: boolean
+  createdAt?: string
+}
+
+export const fetchAiAgentList = (params: ResSearchRequest) =>
+  api.get<AdminAgent[]>('/api/admin/ai/agents').then((list) =>
+    filterPage(list, params, (a) =>
+      (!params.tenantId || a.tenantId === params.tenantId) &&
+      (has(a.id, params.keyword ?? '') || has(a.name, params.keyword ?? '') || has(a.model, params.keyword ?? ''))
+    )
+  )
+export const fetchAiToolList = (params: ResSearchRequest) =>
+  api.get<AdminTool[]>('/api/admin/ai/tools').then((list) =>
+    filterPage(list, params, (t) =>
+      (!params.tenantId || t.tenantId === params.tenantId) &&
+      (has(t.id, params.keyword ?? '') || has(t.name, params.keyword ?? '') || has(t.type, params.keyword ?? ''))
+    )
+  )
+export const fetchAiKnowledgeBaseList = (params: ResSearchRequest) =>
+  api.get<AdminKnowledgeBase[]>('/api/admin/ai/knowledgebases').then((list) =>
+    filterPage(list, params, (k) =>
+      (!params.tenantId || k.tenantId === params.tenantId) &&
+      (has(k.id, params.keyword ?? '') || has(k.name, params.keyword ?? ''))
+    )
+  )
+export const fetchAiPromptList = (params: ResSearchRequest) =>
+  api.get<AdminPrompt[]>('/api/admin/ai/prompts').then((list) =>
+    filterPage(list, params, (p) =>
+      (!params.tenantId || p.tenantId === params.tenantId) &&
+      (has(p.id, params.keyword ?? '') || has(p.name, params.keyword ?? ''))
+    )
+  )
+export const fetchAiSkillList = (params: ResSearchRequest) =>
+  api.get<AdminSkill[]>('/api/admin/ai/skills').then((list) =>
+    filterPage(list, params, (s) =>
+      (!params.tenantId || s.tenantId === params.tenantId) &&
+      (has(s.id, params.keyword ?? '') || has(s.name, params.keyword ?? ''))
+    )
+  )
+
+// —— AI 编排广场总览（super_admin 只读；下架走 DELETE /api/marketplace/{id} 需登录用户端凭证，admin 页一期只读发现）——
+export interface AdminMarketItem {
+  id: string
+  entityType: string
+  name: string
+  description: string
+  category: string
+  publisherTenant: string
+  publisherName?: string
+  installs: number
+  createdAt: string
+}
+
+export const fetchAiMarketList = (params: ResSearchRequest) =>
+  api.get<AdminMarketItem[]>('/api/admin/ai/marketplace').then((list) =>
+    filterPage(list, params, (m) =>
+      (!params.tenantId || m.publisherTenant === params.tenantId) &&
+      (has(m.id, params.keyword ?? '') || has(m.name, params.keyword ?? '') || has(m.entityType, params.keyword ?? ''))
+    )
+  )

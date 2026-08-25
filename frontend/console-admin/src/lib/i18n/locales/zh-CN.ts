@@ -217,9 +217,9 @@ export default {
     roleNormal: '普通用户',
     stat: {
       users: '总用户数',
-      orders: '订单数',
-      revenue: '总营收',
-      active: '活跃用户'
+      orders: '应用数',
+      revenue: '未支付账单',
+      active: '进行中流水线'
     },
     quickAction: {
       user: '用户管理',

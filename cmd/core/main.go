@@ -17,10 +17,13 @@ import (
 	"time"
 
 	"github.com/aitoys/paas/internal/ai/agent"
+	aiadmin "github.com/aitoys/paas/internal/ai/admin"
 	"github.com/aitoys/paas/internal/ai/eval"
 	"github.com/aitoys/paas/internal/ai/guardrail"
 	"github.com/aitoys/paas/internal/ai/knowledgebase"
+	"github.com/aitoys/paas/internal/ai/marketplace"
 	"github.com/aitoys/paas/internal/ai/prompt"
+	"github.com/aitoys/paas/internal/ai/skill"
 	"github.com/aitoys/paas/internal/ai/tool"
 	"github.com/aitoys/paas/internal/apiroute"
 	"github.com/aitoys/paas/internal/appconfig"
@@ -419,8 +422,12 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 			h.ServeHTTP(w, r)
 		}))
 	}
-	// dashboard 聚合（console-admin 首页统计）。
-	dashHandler := dashboard.NewHandler(stores.Identity)
+	// dashboard 聚合（console-admin 首页统计）：orders=应用数 / revenue=未支付账单数 / active=进行中流水线。
+	dashHandler := dashboard.NewHandler(stores.Identity,
+		dashboard.WithAppCounter(appCountBridge{repo: stores.Application}),
+		dashboard.WithBillCounter(billCountBridge{repo: stores.Billing}),
+		dashboard.WithRunCounter(runCountBridge{repo: stores.Pipeline}),
+	)
 	// messaging（MQ topic/消费组）：方法级权限 dataservice:read/write（MQ 属数据服务）。
 	msgHandler := messaging.NewHandler(stores.Messaging)
 	msgHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
@@ -456,9 +463,37 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// 应用为主线 REST API：方法级权限由 handler 内部按 application:*/binding:write 校验
 	// 横切配额拦截：创建应用前调 billing.CheckAndInc，超限回 429（stores.Billing 共享用量真源）。
 	// WithWorkloadStats 派生应用 Replicas/Status（从真实工作负载聚合，覆盖 seed 假值）。
+	// appGuard 应用级权限 enforcement（受限应用写操作需成员角色，渐进启用）：
+	// 桥接 gateway.IsAdmin（租户管理员通行）+ UserIDFrom（成员角色查询锚点）。
+	appGuard := &application.AppGuard{
+		Apps:     stores.Application,
+		Members:  stores.AppMembers,
+		IsAdmin:  gateway.IsAdmin,
+		UserIDFn: gateway.UserIDFrom,
+	}
 	appHandler := application.NewHandler(stores.Application,
 		application.WithWorkloadStats(&appWorkloadStats{wlRepo: stores.Workload, status: statusReader}))
 	appHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+	appHandler.Guard = appGuard
+	appHandler.Audit = &identityAuditAdapter{store: stores.Security}
+	appHandler.ActorFn = func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }
+	// 应用成员（应用级权限管理面）：成员 CRUD + 受限开关。UserLookup 校验用户存在防悬挂引用。
+	memberHandler := application.NewMemberHandler(stores.AppMembers, stores.Application)
+	memberHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+	memberHandler.Guard = appGuard
+	memberHandler.Audit = &identityAuditAdapter{store: stores.Security}
+	memberHandler.ActorFn = func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }
+	memberHandler.UserLookup = func(ctx context.Context, userID string) (string, bool) {
+		tid, ok := tenant.TenantFrom(ctx)
+		if !ok {
+			return "", false
+		}
+		u, err := stores.Identity.GetUser(ctx, tid, userID)
+		if err != nil {
+			return "", false
+		}
+		return u.Name, true
+	}
 	appHandler.QuotaCheck = func(ctx context.Context, delta int) error {
 		_, err := stores.Billing.CheckAndInc(ctx, billing.ResApplications, delta)
 		return err
@@ -475,9 +510,10 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// devops 历史记录（仓库/构建/镜像/发布）保留作历史归档，不随应用删除。
 	// admin 删应用复用同一 appCascadeDeleter（DRY，注入 wlQuota）。
 	appHandler.CascadeDelete = appCascadeDeleter{
-		wl:      stores.Workload,
-		cfg:     stores.AppConfig,
-		wlQuota: wlQuotaFn,
+		wl:       stores.Workload,
+		cfg:      stores.AppConfig,
+		members:  stores.AppMembers,
+		wlQuota:  wlQuotaFn,
 	}.CascadeDelete
 
 	// 环境（物理隔离单元 prod|test）：方法级权限 environment:read/write + prod 写校验。
@@ -494,6 +530,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	wlHandler := workload.NewHandler(stores.Workload,
 		workload.WithEnvResolver(stores.Environment),
 		workload.WithStatusReader(statusReader),
+		workload.WithAppGuard(appGuard),
 	)
 	wlHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 	// 横切配额拦截：创建工作负载前调 billing.CheckAndInc，超限回 429。
@@ -525,6 +562,10 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		devops.WithBuildLogStreamer(builder.NewK8sBuildLogStreamer(appliers.clientset)),
 		// 多服务发布 service 必填校验（app 已部署多服务时不传 service 会互相覆盖镜像）。
 		devops.WithWorkloadServiceLister(&wlServiceLister{repo: stores.Workload}),
+		// 应用级权限 enforcement（受限应用发布/回滚/promote 需 app-maintainer+）。
+		devops.WithAppGuard(appGuard),
+		// PR 评审/合并记审计（identityAuditAdapter 同源签名）。
+		devops.WithAudit(&identityAuditAdapter{store: stores.Security}),
 	)
 	devopsHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
@@ -554,6 +595,8 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		pipeline.WithAudit(&identityAuditAdapter{store: stores.Security}),
 		pipeline.WithActorFn(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
 		pipeline.WithPlatformAdmin(func(r *http.Request) bool { return gateway.IsPlatformAdmin(r) }),
+		// 应用级权限 enforcement（受限应用流水线触发/审批需成员角色）。
+		pipeline.WithAppGuard(appGuard),
 	)
 	// 应用创建后置 hook：自动建默认流水线绑定（tpl-ci/tpl-cd），best-effort。
 	appHandler.OnAppCreate = defaultPipelineBinder(stores.Pipeline, stores.Pipeline)
@@ -612,17 +655,21 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		change.WithHandlerRepoLookup(changeLookup),
 		change.WithRunLister(changeRunBridge),
 		change.WithAlertLister(&changeAlertBridge{engine: obsAlertEngine}),
+		change.WithAppGuard(appGuard),
 	)
 
 	// 应用配置（工作负载级 env/Secret）：注入 environment store（prod 写校验）。
 	// Secret 后端明文存储，API 返回固定掩码；与配置中心（服务治理，运行时动态）严格区分。
-	appconfigHandler := appconfig.NewHandler(stores.AppConfig, appconfig.WithEnvResolver(stores.Environment))
+	appconfigHandler := appconfig.NewHandler(stores.AppConfig,
+		appconfig.WithEnvResolver(stores.Environment),
+		appconfig.WithAppGuard(appGuard))
 	appconfigHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
 	// 服务实体（用户声明的服务定义，应用 → 服务 → 环境模型）：写操作记审计。
 	svcHandler := service.NewHandler(stores.Service,
 		service.WithAudit(&identityAuditAdapter{store: stores.Security}),
 		service.WithActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
+		service.WithAppGuard(appGuard),
 	)
 	svcHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
@@ -805,6 +852,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 				case "services":
 					svcHandler.ServeHTTP(w, r)
 					return
+				case "members":
+					memberHandler.ServeHTTP(w, r)
+					return
 				}
 			}
 		}
@@ -841,6 +891,8 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// 镜像库实时视图（registry v2 catalog/tags），复用 devops handler 分发 + image:read 权限。
 	mux.Handle("/api/registry", auth(devopsHandler))
 	mux.Handle("/api/registry/", auth(devopsHandler))
+	// 跨应用 open PR 聚合（DevOps 评审 tab/值班台数据源）——精确路径，无子路径。
+	mux.Handle("/api/pulls", auth(devopsHandler))
 	// 服务治理（注册中心）
 	mux.Handle("/api/services", auth(govHandler))
 	mux.Handle("/api/services/", auth(govHandler))
@@ -971,9 +1023,21 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("DELETE", "/api/prompts/{id}", apiroute.Tags("Prompt"), apiroute.Summary("删单版本"), apiroute.Perm("prompt:write"))
 	reg.Operation("POST", "/api/prompts/{id}/activate", apiroute.Tags("Prompt"), apiroute.Summary("激活该版本"), apiroute.Perm("prompt:write"), apiroute.WithResp(prompt.Prompt{}))
 
+	// AI Skill（P3.x）：可复用指令能力包，Agent 绑定后运行时注入 system prompt。
+	skillHandler := skill.NewHandler(stores.Skill)
+	skillHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+	mux.Handle("/api/skills", auth(skillHandler))
+	mux.Handle("/api/skills/", auth(skillHandler))
+	reg.Operation("GET", "/api/skills", apiroute.Tags("Skill"), apiroute.Summary("Skill 列表"), apiroute.Perm("agent:read"), apiroute.WithResp([]skill.Skill{}))
+	reg.Operation("POST", "/api/skills", apiroute.Tags("Skill"), apiroute.Summary("创建 Skill"), apiroute.Perm("agent:write"), apiroute.WithReqBody(skill.Skill{}), apiroute.WithResp(skill.Skill{}))
+	reg.Operation("GET", "/api/skills/{id}", apiroute.Tags("Skill"), apiroute.Summary("Skill 详情"), apiroute.Perm("agent:read"), apiroute.WithResp(skill.Skill{}))
+	reg.Operation("PUT", "/api/skills/{id}", apiroute.Tags("Skill"), apiroute.Summary("更新 Skill"), apiroute.Perm("agent:write"), apiroute.WithReqBody(skill.Skill{}), apiroute.WithResp(skill.Skill{}))
+	reg.Operation("DELETE", "/api/skills/{id}", apiroute.Tags("Skill"), apiroute.Summary("删除 Skill"), apiroute.Perm("agent:write"))
+
 	// AI Agent（P3）：组装 system prompt + 工具描述 + KB RAG 调底层 LLM。
-	// runtime 注入 MaaS（取 Provider）+ 凭证 + prompt/tool/KB（组装上下文）。
+	// runtime 注入 MaaS（取 Provider）+ 凭证 + prompt/tool/skill/KB（组装上下文）。
 	agentRuntime := agent.NewRuntime(stores.Agent, stores.MaaS, secretResolver{store: stores.Security.(security.SecretStore)}, stores.Prompt, stores.Tool, kbRetriever).
+		WithSkills(stores.Skill).
 		WithGuard(guardrail.NewFromEnv()).
 		WithPromptLog(os.Getenv("PAAS_AI_LOG_PROMPTS") == "true")
 	// 注入 gateway 虚拟模型路由：/v1/chat/completions 收 model="agent:{id}" 时转交 runtime。
@@ -990,8 +1054,8 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("POST", "/api/agents/{id}/run", apiroute.Tags("Agent"), apiroute.Summary("运行 Agent（SSE 流式，OpenAI 兼容）"), apiroute.Perm("agent:write"))
 
 	// AI 评估（P4）：为 Agent 定义测试用例 + 批量跑测评分。service 注入 agentRuntime 作 Runner。
-	evalSvc := eval.NewService(stores.Eval, agentRuntime)
-	evalHandler := eval.NewHandler(stores.Eval, evalSvc)
+	evalSvc := eval.NewService(stores.Eval, agentRuntime).WithRuns(stores.EvalRuns)
+	evalHandler := eval.NewHandler(stores.Eval, evalSvc).WithRuns(stores.EvalRuns)
 	evalHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 	mux.Handle("/api/agent-evals", auth(evalHandler))
 	mux.Handle("/api/agent-evals/", auth(evalHandler))
@@ -999,6 +1063,25 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("POST", "/api/agent-evals", apiroute.Tags("评估"), apiroute.Summary("创建评估用例"), apiroute.Perm("agent:write"), apiroute.WithReqBody(eval.EvalCase{}), apiroute.WithResp(eval.EvalCase{}))
 	reg.Operation("DELETE", "/api/agent-evals/{id}", apiroute.Tags("评估"), apiroute.Summary("删除评估用例"), apiroute.Perm("agent:write"))
 	reg.Operation("POST", "/api/agent-evals/run", apiroute.Tags("评估"), apiroute.Summary("跑某 Agent 全部用例（?agentId=）"), apiroute.Perm("agent:read"), apiroute.WithResp([]eval.EvalResult{}))
+	reg.Operation("GET", "/api/agent-evals/runs", apiroute.Tags("评估"), apiroute.Summary("评估历史列表（?agentId=，最近 20 次/agent）"), apiroute.Perm("agent:read"), apiroute.WithResp([]eval.EvalRun{}))
+	reg.Operation("GET", "/api/agent-evals/runs/{id}", apiroute.Tags("评估"), apiroute.Summary("单次评估历史详情"), apiroute.Perm("agent:read"), apiroute.WithResp(eval.EvalRun{}))
+
+	// AI 编排广场：跨租户共享能力市场（发布脱敏快照 / 浏览搜索 / 安装 fork）。
+	marketHandler := marketplace.NewHandler(stores.Marketplace)
+	marketHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+	marketHandler.IsAdmin = gateway.IsPlatformAdmin
+	marketHandler.PublisherNameFn = func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }
+	marketplace.RegisterAllForkers(marketHandler, &marketplace.Repos{
+		Agents: stores.Agent, Skills: stores.Skill, Prompts: stores.Prompt, Tools: stores.Tool,
+	})
+	mux.Handle("/api/marketplace", auth(marketHandler))
+	mux.Handle("/api/marketplace/", auth(marketHandler))
+	reg.Operation("GET", "/api/marketplace", apiroute.Tags("广场"), apiroute.Summary("广场列表（?entityType=&category=&q=）"), apiroute.Perm("agent:read"), apiroute.WithResp([]marketplace.Item{}))
+	reg.Operation("POST", "/api/marketplace", apiroute.Tags("广场"), apiroute.Summary("发布到广场（脱敏快照）"), apiroute.Perm("agent:write"), apiroute.WithReqBody(marketplace.PublishRequest{}), apiroute.WithResp(marketplace.Item{}))
+	reg.Operation("GET", "/api/marketplace/published", apiroute.Tags("广场"), apiroute.Summary("我的发布"), apiroute.Perm("agent:read"), apiroute.WithResp([]marketplace.Item{}))
+	reg.Operation("GET", "/api/marketplace/{id}", apiroute.Tags("广场"), apiroute.Summary("广场条目详情（含 snapshot）"), apiroute.Perm("agent:read"), apiroute.WithResp(marketplace.Item{}))
+	reg.Operation("DELETE", "/api/marketplace/{id}", apiroute.Tags("广场"), apiroute.Summary("下架（仅发布者/admin）"), apiroute.Perm("agent:write"))
+	reg.Operation("POST", "/api/marketplace/{id}/install", apiroute.Tags("广场"), apiroute.Summary("安装 fork 到本租户"), apiroute.Perm("agent:write"), apiroute.WithResp(marketplace.InstallResult{}))
 
 	mux.Handle("/livez", health.NewHandler())
 
@@ -1030,6 +1113,21 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		apiroute.WithResp(application.Application{}))
 	reg.Operation("DELETE", "/api/applications/{id}",
 		apiroute.Tags("应用"), apiroute.Summary("删除应用（级联清工作负载+配置）"), apiroute.Perm("application:write"))
+	// 应用成员（应用级权限）：成员 CRUD + 受限开关（composite 内部派发）
+	reg.Operation("GET", "/api/applications/{id}/members",
+		apiroute.Tags("应用"), apiroute.Summary("应用成员列表（应用级权限）"), apiroute.Perm("application:read"),
+		apiroute.WithResp([]application.Member{}))
+	reg.Operation("POST", "/api/applications/{id}/members",
+		apiroute.Tags("应用"), apiroute.Summary("添加/更新应用成员角色"), apiroute.Perm("application:write"),
+		apiroute.WithReqBody(application.Member{}), apiroute.WithResp(application.Member{}))
+	reg.Operation("DELETE", "/api/applications/{id}/members/{userId}",
+		apiroute.Tags("应用"), apiroute.Summary("移除应用成员"), apiroute.Perm("application:write"))
+	reg.Operation("PUT", "/api/applications/{id}/restrict",
+		apiroute.Tags("应用"), apiroute.Summary("切换应用级权限受限模式（开启后写操作需成员角色）"),
+		apiroute.Perm("application:write"),
+		apiroute.WithReqBody(struct {
+			Restricted bool `json:"restricted"`
+		}{}), apiroute.WithResp(application.Application{}))
 	reg.Operation("POST", "/api/applications/{id}/bindings",
 		apiroute.Tags("应用"), apiroute.Summary("绑定资源到应用"), apiroute.Perm("binding:write"),
 		apiroute.WithReqBody(struct {
@@ -1126,6 +1224,14 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/applications/{id}/repositories/{rid}/tree", apiroute.Tags("DevOps"), apiroute.Summary("内置仓库文件树（Gitea）"), apiroute.Perm("repository:read"), apiroute.WithResp([]gitea.TreeNode{}))
 	reg.Operation("GET", "/api/applications/{id}/repositories/{rid}/commits", apiroute.Tags("DevOps"), apiroute.Summary("内置仓库提交历史（Gitea）"), apiroute.Perm("repository:read"), apiroute.WithResp([]gitea.Commit{}))
 	reg.Operation("GET", "/api/applications/{id}/repositories/{rid}/file", apiroute.Tags("DevOps"), apiroute.Summary("内置仓库文件内容（?path=）"), apiroute.Perm("repository:read"))
+	reg.Operation("GET", "/api/applications/{id}/repositories/{rid}/pulls", apiroute.Tags("DevOps"), apiroute.Summary("内置仓库 PR 列表（?state=，Gitea）"), apiroute.Perm("repository:read"), apiroute.WithResp([]gitea.PullRequest{}))
+	reg.Operation("GET", "/api/applications/{id}/repositories/{rid}/pulls/{number}", apiroute.Tags("DevOps"), apiroute.Summary("PR 详情 + diff 文本（Code Review）"), apiroute.Perm("repository:read"))
+	reg.Operation("POST", "/api/applications/{id}/repositories/{rid}/pulls/{number}/reviews", apiroute.Tags("DevOps"), apiroute.Summary("PR 整体评审（approve/request-changes/comment）"), apiroute.Perm("repository:write"), apiroute.WithReqBody(struct {
+		Do   string `json:"do"`
+		Body string `json:"body"`
+	}{}))
+	reg.Operation("POST", "/api/applications/{id}/repositories/{rid}/pulls/{number}/merge", apiroute.Tags("DevOps"), apiroute.Summary("合并 PR（应用级 release 动作）"), apiroute.Perm("repository:write"))
+	reg.Operation("GET", "/api/pulls", apiroute.Tags("DevOps"), apiroute.Summary("跨应用 open PR 聚合（评审 tab）"), apiroute.Perm("repository:read"), apiroute.WithResp([]devops.GlobalPull{}))
 	reg.Operation("GET", "/api/releases", apiroute.Tags("DevOps"), apiroute.Summary("跨应用发布列表"), apiroute.Perm("release:read"), apiroute.WithResp([]devops.Release{}))
 	reg.Operation("POST", "/api/releases/{id}/rollback", apiroute.Tags("DevOps"), apiroute.Summary("回滚发布"), apiroute.Perm("release:write"), apiroute.WithResp(devops.Release{}))
 	reg.Operation("POST", "/api/releases/{id}/promote", apiroute.Tags("DevOps"), apiroute.Summary("提升到下一阶环境（发布流水线）"), apiroute.Perm("release:write"), apiroute.WithResp(devops.Release{}))
@@ -1296,6 +1402,20 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/admin/applications", apiroute.Tags("应用管理"), apiroute.Summary("应用列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]application.Application{}))
 	reg.Operation("GET", "/api/admin/applications/{id}", apiroute.Tags("应用管理"), apiroute.Summary("应用详情（跨租户）"), apiroute.Perm("super_admin"))
 	reg.Operation("DELETE", "/api/admin/applications/{id}", apiroute.Tags("应用管理"), apiroute.Summary("强制删除（级联清理 + 回收配额）"), apiroute.Perm("super_admin"))
+	// admin 应用成员总览（应用级权限跨租户观测）：ListAllMembers 只读。
+	mux.Handle("/api/admin/app-members", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		ms, err := stores.AppMembers.ListAllMembers(r.Context())
+		if err != nil {
+			httputil.WriteInternalError(w, err)
+			return
+		}
+		httputil.WriteData(w, ms)
+	})))
+	reg.Operation("GET", "/api/admin/app-members", apiroute.Tags("应用管理"), apiroute.Summary("应用成员列表（跨租户，应用级权限观测）"), apiroute.Perm("super_admin"), apiroute.WithResp([]application.Member{}))
 	// admin 数据服务管理（详情+实例 / 运维 / 代建）：mux.Handle 到 dsAdminHandler（按 method+action 分发），
 	// spec 经 reg.Operation 登记。handler 内 ServeHTTP 已含 GET 列表（掩码 Connection）+ POST 代建 + {id}/{action}。
 	mux.Handle("/api/admin/dataservices", adminGuard(dsAdminHandler))
@@ -1318,6 +1438,27 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/admin/environments", apiroute.Tags("环境管理"), apiroute.Summary("环境列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]environment.Environment{}))
 	reg.Operation("GET", "/api/admin/environments/{id}", apiroute.Tags("环境管理"), apiroute.Summary("环境详情（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp(environment.Environment{}))
 	reg.Operation("POST", "/api/admin/environments", apiroute.Tags("环境管理"), apiroute.Summary("代建环境（指定租户）"), apiroute.Perm("super_admin"))
+
+	// AI 编排跨租户总览（super_admin 只读）：Agent/工具/知识库/提示词/Skill 五实体。
+	// 闭环此前缺口：AI 编排资产此前无任何 admin 入口。资源运维仍在 console-user 租户内。
+	aiAdminHandler := aiadmin.NewHandler(stores.Agent, stores.Tool, stores.KnowledgeBase, stores.Prompt, stores.Skill, stores.Marketplace)
+	mux.Handle("/api/admin/ai/agents", adminGuard(aiAdminHandler))
+	mux.Handle("/api/admin/ai/agents/", adminGuard(aiAdminHandler))
+	mux.Handle("/api/admin/ai/tools", adminGuard(aiAdminHandler))
+	mux.Handle("/api/admin/ai/tools/", adminGuard(aiAdminHandler))
+	mux.Handle("/api/admin/ai/knowledgebases", adminGuard(aiAdminHandler))
+	mux.Handle("/api/admin/ai/knowledgebases/", adminGuard(aiAdminHandler))
+	mux.Handle("/api/admin/ai/prompts", adminGuard(aiAdminHandler))
+	mux.Handle("/api/admin/ai/prompts/", adminGuard(aiAdminHandler))
+	mux.Handle("/api/admin/ai/skills", adminGuard(aiAdminHandler))
+	mux.Handle("/api/admin/ai/skills/", adminGuard(aiAdminHandler))
+	mux.Handle("/api/admin/ai/marketplace", adminGuard(aiAdminHandler))
+	reg.Operation("GET", "/api/admin/ai/marketplace", apiroute.Tags("AI编排管理"), apiroute.Summary("广场条目列表（跨租户，含 snapshot 元信息）"), apiroute.Perm("super_admin"), apiroute.WithResp([]marketplace.Item{}))
+	reg.Operation("GET", "/api/admin/ai/agents", apiroute.Tags("AI编排管理"), apiroute.Summary("Agent 列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]agent.Agent{}))
+	reg.Operation("GET", "/api/admin/ai/tools", apiroute.Tags("AI编排管理"), apiroute.Summary("工具列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]tool.Tool{}))
+	reg.Operation("GET", "/api/admin/ai/knowledgebases", apiroute.Tags("AI编排管理"), apiroute.Summary("知识库列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]knowledgebase.KnowledgeBase{}))
+	reg.Operation("GET", "/api/admin/ai/prompts", apiroute.Tags("AI编排管理"), apiroute.Summary("提示词列表（跨租户，仅激活版本）"), apiroute.Perm("super_admin"), apiroute.WithResp([]prompt.Prompt{}))
+	reg.Operation("GET", "/api/admin/ai/skills", apiroute.Tags("AI编排管理"), apiroute.Summary("Skill 列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]skill.Skill{}))
 	reg.Register("GET", "/api/admin/buildruns", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		list, err := stores.DevOpsBuilds.ListAllBuildRuns(r.Context())
 		renderList(w, list, err)
@@ -1421,6 +1562,10 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("POST", "/dp/register", apiroute.Tags("数据面"), apiroute.Summary("声明服务元信息（幂等）"), apiroute.Perm("dp:write"), apiroute.WithReqBody(dataplane.ServiceInfo{}))
 	reg.Operation("DELETE", "/dp/register", apiroute.Tags("数据面"), apiroute.Summary("反注册服务（?id=）"), apiroute.Perm("dp:write"))
 	reg.Operation("PUT", "/dp/heartbeat", apiroute.Tags("数据面"), apiroute.Summary("心跳（兼容保留，K8s readiness 是真源）"), apiroute.Perm("dp:write"))
+
+	// 租户自助：本租户用户列表（应用成员选择器等场景；任意已认证用户）。
+	reg.Register("GET", "/api/users", auth(http.HandlerFunc(idmHandler.ListTenantUsers)),
+		apiroute.Tags("身份"), apiroute.Summary("本租户用户列表"), apiroute.WithResp([]identity.User{}))
 
 	// identity 管理 API（平台运维域 /api/admin/*，super_admin 通行）。
 	reg.Register("GET", "/api/admin/tenants", adminGuard(http.HandlerFunc(idmHandler.ListTenants)),

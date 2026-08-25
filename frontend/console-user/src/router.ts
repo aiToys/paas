@@ -49,7 +49,7 @@ const routes: RouteRecordRaw[] = [
     path: '/resources/models',
     name: 'res-models',
     component: () => import('@/views/Marketplace.vue'),
-    meta: { title: '模型推理' },
+    meta: { title: '模型市场' },
   },
   {
     path: '/resources/db',
@@ -93,6 +93,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '知识库' },
   },
   {
+    path: '/ai/explore',
+    name: 'ai-explore',
+    component: () => import('@/views/Explore.vue'),
+    meta: { title: '广场' },
+  },
+  {
     path: '/ai/tools',
     name: 'ai-tools',
     component: () => import('@/views/Tools.vue'),
@@ -103,6 +109,12 @@ const routes: RouteRecordRaw[] = [
     name: 'ai-prompts',
     component: () => import('@/views/Prompts.vue'),
     meta: { title: '提示词' },
+  },
+  {
+    path: '/ai/skills',
+    name: 'ai-skills',
+    component: () => import('@/views/Skills.vue'),
+    meta: { title: 'Skill' },
   },
   {
     path: '/ai/agents',
@@ -200,6 +212,20 @@ const routes: RouteRecordRaw[] = [
     name: 'pipeline-run',
     component: () => import('@/views/PipelineRunPage.vue'),
     meta: { title: '流水线运行' },
+  },
+  {
+    // PR 评审详情（Code Review）：diff 渲染 + 整体评审 + merge。appId 经 query 透传。
+    path: '/devops/pulls/:repoId/:number',
+    name: 'pull-detail',
+    component: () => import('@/views/PullDetail.vue'),
+    meta: { title: 'PR 详情' },
+  },
+  {
+    // 单仓库 PR 列表（应用内代码评审入口）
+    path: '/apps/:appId/repositories/:repoId/pulls',
+    name: 'repo-pulls',
+    component: () => import('@/views/Pulls.vue'),
+    meta: { title: '代码评审' },
   },
   {
     // DevOps 单据详情独立页（档案室 + 链路串联）。

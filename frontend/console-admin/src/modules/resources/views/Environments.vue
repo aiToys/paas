@@ -32,7 +32,15 @@
       <el-button :icon="Refresh" @click="fetchList">刷新</el-button>
     </template>
 
-    <template #col-type="{ row }">
+    <template #col-tenant="{ row }">
+      <el-tag size="small" type="info">{{ row.tenantId }}</el-tag>
+    </template>
+
+    <template #col-name="{ row }">
+      <el-button link type="primary" @click="openDetail(row.id)">{{ row.name }}</el-button>
+    </template>
+
+        <template #col-type="{ row }">
       <el-tag :type="row.type === 'prod' ? 'danger' : 'success'" size="small">
         {{ row.type === 'prod' ? '生产' : '测试' }}
       </el-tag>
@@ -40,6 +48,7 @@
   </SearchTable>
 
   <EnvironmentCreateDrawer v-model="createVisible" @created="fetchList" />
+  <EnvironmentDrawer v-model="drawerVisible" :id="detailId" />
 </template>
 
 <script lang="ts" setup>
@@ -50,6 +59,7 @@ import { useCrud } from '@/app/composables/useCrud'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
 import { fetchEnvironmentList, type AdminEnvironment, type ResSearchRequest } from '../api'
 import EnvironmentCreateDrawer from './EnvironmentCreateDrawer.vue'
+import EnvironmentDrawer from './EnvironmentDrawer.vue'
 
 const { listData, loading, pagination, searchForm, fetchList, handleSearch, handleReset, handlePageChange } =
   useCrud<AdminEnvironment>({
@@ -60,11 +70,17 @@ const { listData, loading, pagination, searchForm, fetchList, handleSearch, hand
 
 const tableData = computed(() => listData.value as unknown as Record<string, unknown>[])
 const createVisible = ref(false)
+const drawerVisible = ref(false)
+const detailId = ref('')
+const openDetail = (id: string) => {
+  detailId.value = id
+  drawerVisible.value = true
+}
 
 const columns = computed<ColumnDef[]>(() => [
-  { prop: 'tenantId', label: '租户', width: 130 },
+  { prop: 'tenantId', label: '租户', width: 130, slot: 'tenant' },
   { prop: 'id', label: '环境 ID', minWidth: 150 },
-  { prop: 'name', label: '名称', minWidth: 140 },
+  { prop: 'name', label: '名称', minWidth: 140, slot: 'name' },
   { prop: 'type', label: '类型', width: 100, slot: 'type' },
   { prop: 'cluster', label: '集群', width: 140 }
 ])

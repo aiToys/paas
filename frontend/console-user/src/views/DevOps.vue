@@ -13,6 +13,7 @@ import { confirmDangerous } from '@/composables/useDangerConfirm'
 import { usePolling } from '@/composables/usePolling'
 import { listRuns, type PipelineRun } from '@/api/pipeline'
 import { listAllChanges, listAllBatches, listNotifications, type Change, type IntegrationBatch, type Notification } from '@/api/change'
+import { listGlobalPulls, type GlobalPull } from '@/api/pulls'
 import { imageLink, repoLink } from '@/composables/useDevopsLinks'
 import {
   BUILD_STATUS, RELEASE_STATUS, RUN_STATUS, CHANGE_STATUS, BATCH_STATUS, statusOf,
@@ -53,6 +54,7 @@ const recentRuns = ref<PipelineRun[]>([])
 const changes = ref<Change[]>([])
 const batches = ref<IntegrationBatch[]>([])
 const notifications = ref<Notification[]>([])
+const globalPulls = ref<GlobalPull[]>([])
 const loading = ref(false)
 const busy = ref(false) // 重新构建/回滚 进行中（防重复点击）
 
@@ -65,7 +67,7 @@ const envName = (id: string) => envStore.envs.find((e) => e.id === id)?.name ?? 
 const boardErrors = computed(() => notifications.value.filter((n) => n.severity === 'error'))
 const boardWarnings = computed(() => notifications.value.filter((n) => n.severity === 'warning'))
 const boardInfos = computed(() => notifications.value.filter((n) => n.severity === 'info'))
-const boardTotal = computed(() => boardErrors.value.length + boardWarnings.value.length + boardInfos.value.length)
+const boardTotal = computed(() => boardErrors.value.length + boardWarnings.value.length + boardInfos.value.length + boardPulls.value.length)
 
 function notifGo(n: Notification) {
   if (n.targetType === 'run') router.push(`/devops/runs/${n.targetId}`)
@@ -116,6 +118,11 @@ async function loadBatches() {
 async function loadNotifications() {
   try { notifications.value = await listNotifications() } catch { /* 非关键 */ }
 }
+async function loadPulls() {
+  try { globalPulls.value = await listGlobalPulls() } catch { /* 非关键 */ }
+}
+// 等评审：open PR（跨应用），进入值班台待处理视图
+const boardPulls = computed(() => globalPulls.value)
 // 当前阶段名（运行中显示 stageRuns[currentStage].name）
 function currentStageName(r: PipelineRun): string {
   return r.stageRuns[r.currentStage]?.name ?? '-'
@@ -126,7 +133,7 @@ async function load() {
   try {
     await Promise.all([
       loadBuilds(), loadRegistry(), loadReleases(), loadAppNames(), loadRuns(),
-      loadChanges(), loadBatches(), loadNotifications(),
+      loadChanges(), loadBatches(), loadNotifications(), loadPulls(),
     ])
   } finally {
     loading.value = false
@@ -142,6 +149,7 @@ usePolling(() => {
   loadChanges()
   loadBatches()
   loadNotifications()
+  loadPulls()
 }, 10000)
 
 // 重新构建（构建行操作：用原 repoId 触发新构建）。
@@ -237,6 +245,14 @@ onMounted(async () => { await envStore.loadEnvs(); load() })
               <div class="item-meta">{{ appName(n.appId) }}</div>
             </div>
           </div>
+          <div class="board-col pull">
+            <div class="col-head">🔀 等评审（{{ boardPulls.length }}）</div>
+            <div v-for="p in boardPulls" :key="p.repoId + ':' + p.pr.number" class="board-item"
+              @click="router.push(`/devops/pulls/${p.repoId}/${p.pr.number}?appId=${p.appId}`)">
+              <div class="item-title">#{{ p.pr.number }} {{ p.pr.title }}</div>
+              <div class="item-meta">{{ appName(p.appId) }} · {{ p.pr.head }} → {{ p.pr.base }} · {{ p.pr.user }}</div>
+            </div>
+          </div>
         </div>
       </el-tab-pane>
 
@@ -312,6 +328,35 @@ onMounted(async () => { await envStore.loadEnvs(); load() })
           <el-table-column label="操作" width="90">
             <template #default="{ row }">
               <el-button text type="primary" size="small" @click="router.push(`/devops/changes/${row.id}`)">详情</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </el-tab-pane>
+
+      <!-- 评审（档案室）：跨应用 open PR 聚合，点「查看」进 PR 详情（diff + 评审 + merge） -->
+      <el-tab-pane label="评审" name="pulls">
+        <p class="tab-hint">跨应用待评审 PR（内置仓库，10s 轮询）。点「查看」进 PR 详情看 diff 并评审/合并。</p>
+        <el-table :data="globalPulls" size="small" empty-text="暂无待评审 PR">
+          <el-table-column label="应用" width="140">
+            <template #default="{ row }">
+              <span class="mono clickable" @click="goApp(row.appId)">{{ appName(row.appId) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="PR" width="70">
+            <template #default="{ row }"><span class="mono">#{{ row.pr.number }}</span></template>
+          </el-table-column>
+          <el-table-column prop="pr.title" label="标题" min-width="180" show-overflow-tooltip />
+          <el-table-column label="分支" width="170">
+            <template #default="{ row }"><span class="mono">{{ row.pr.head }} → {{ row.pr.base }}</span></template>
+          </el-table-column>
+          <el-table-column prop="pr.user" label="作者" width="100" />
+          <el-table-column label="创建时间" width="170">
+            <template #default="{ row }">{{ new Date(row.pr.createdAt).toLocaleString() }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="90">
+            <template #default="{ row }">
+              <el-button text type="primary" size="small"
+                @click="router.push(`/devops/pulls/${row.repoId}/${row.pr.number}?appId=${row.appId}`)">查看</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -477,6 +522,7 @@ onMounted(async () => { await envStore.loadEnvs(); load() })
 .board-col.err { border-top: 3px solid var(--el-color-danger); }
 .board-col.warn { border-top: 3px solid var(--el-color-warning); }
 .board-col.info { border-top: 3px solid var(--el-color-primary); }
+.board-col.pull { border-top: 3px solid var(--el-color-success); }
 .col-head { font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--el-text-color-secondary); }
 .board-item { padding: 8px 10px; border-radius: 6px; cursor: pointer; margin-bottom: 6px; background: var(--el-fill-color-lighter); }
 .board-item:hover { background: var(--el-fill-color); }

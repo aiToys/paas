@@ -8,7 +8,8 @@
     @close="onClose"
   >
     <div v-loading="loading">
-      <template v-if="detail">
+      <el-empty v-if="!detail && !loading" description="暂无数据" />
+      <template v-else-if="detail">
         <!-- 基本信息 -->
         <el-descriptions :column="2" border size="small" class="block">
           <el-descriptions-item label="密钥 ID">{{ detail.id }}</el-descriptions-item>

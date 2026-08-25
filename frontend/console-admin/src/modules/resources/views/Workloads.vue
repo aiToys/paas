@@ -29,9 +29,14 @@
 
     <template #actions>
       <el-button :icon="Refresh" @click="fetchList">刷新</el-button>
+      <el-button :loading="reconciling" @click="doReconcile">Drift 修复</el-button>
     </template>
 
-    <template #col-type="{ row }">
+    <template #col-tenant="{ row }">
+      <el-tag size="small" type="info">{{ row.tenantId }}</el-tag>
+    </template>
+
+        <template #col-type="{ row }">
       <el-tag size="small" type="info">{{ typeLabel(row.type) }}</el-tag>
     </template>
     <template #col-status="{ row }">
@@ -50,11 +55,12 @@
 
 <script lang="ts" setup>
 import { computed, ref, onMounted } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import { SearchTable } from '@/app/components'
 import { useCrud } from '@/app/composables/useCrud'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
-import { fetchWorkloadList, type AdminWorkload, type ResSearchRequest } from '../api'
+import { fetchWorkloadList, reconcileWorkloads, type AdminWorkload, type ResSearchRequest } from '../api'
 import WorkloadDrawer from './WorkloadDrawer.vue'
 
 const { listData, loading, pagination, searchForm, fetchList, handleSearch, handleReset, handlePageChange } =
@@ -64,10 +70,32 @@ const { listData, loading, pagination, searchForm, fetchList, handleSearch, hand
     pageSize: 10
   })
 
+const reconciling = ref(false)
+// drift 修复：PG 有行无 CRD 的 Workload 补投影（后端返回各分类计数）。
+const doReconcile = async () => {
+  try {
+    await ElMessageBox.confirm(
+      '将扫描全部租户工作负载，对「数据库有记录但 K8s 缺 CRD」的补投影（drift 修复）。继续？',
+      'Drift 修复',
+      { type: 'warning', confirmButtonText: '执行' }
+    )
+  } catch {
+    return
+  }
+  reconciling.value = true
+  try {
+    const res = await reconcileWorkloads()
+    ElMessage.success(`Drift 修复完成：${JSON.stringify(res)}`)
+    fetchList()
+  } finally {
+    reconciling.value = false
+  }
+}
+
 const tableData = computed(() => listData.value as unknown as Record<string, unknown>[])
 
 const columns = computed<ColumnDef[]>(() => [
-  { prop: 'tenantId', label: '租户', width: 130 },
+  { prop: 'tenantId', label: '租户', width: 130, slot: 'tenant' },
   { prop: 'id', label: '工作负载 ID', minWidth: 150 },
   { prop: 'name', label: '名称', minWidth: 140 },
   { prop: 'type', label: '类型', width: 100, slot: 'type' },

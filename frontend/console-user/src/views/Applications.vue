@@ -3,7 +3,7 @@
 // 每个应用卡片显示「在当前 scope 环境的部署徽标」（前端聚合应用 + 工作负载）。
 // scope 全部时显示「部署在 N 个环境」。环境切换统一走顶栏，本页无环境控件。
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import { fetchAuth } from '@/api'
@@ -124,6 +124,7 @@ const workloads = ref<Workload[]>([])
 const loading = ref(true)
 const envStore = useEnvStore()
 const router = useRouter()
+const route = useRoute()
 
 // 应用名/ID 过滤（搜索词进 URL ?q=，分享链接带筛选）
 const { value: searchQ } = useUrlState('q', '')
@@ -199,6 +200,8 @@ function onKeyChanged() {
 onMounted(() => {
   load()
   envStore.loadEnvs()
+  // 命令面板/外页深链 ?new=1 直开创建弹窗（仅首次进入消费，避免刷新反复弹）。
+  if (route.query.new === '1') openCreate()
   window.addEventListener('paas:key-changed', onKeyChanged)
 })
 onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))

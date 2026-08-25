@@ -31,7 +31,11 @@
       <el-button :icon="Refresh" @click="fetchList">刷新</el-button>
     </template>
 
-    <template #col-status="{ row }">
+    <template #col-tenant="{ row }">
+      <el-tag size="small" type="info">{{ row.tenantId }}</el-tag>
+    </template>
+
+        <template #col-status="{ row }">
       <el-tag :type="releaseStatusType(row.status)" size="small">{{ row.status }}</el-tag>
     </template>
     <template #col-isRollback="{ row }">
@@ -77,7 +81,7 @@ const releaseStatusType = (s: string) =>
   )[s] ?? 'info'
 
 const columns = computed<ColumnDef[]>(() => [
-  { prop: 'tenantId', label: '租户', width: 130 },
+  { prop: 'tenantId', label: '租户', width: 130, slot: 'tenant' },
   { prop: 'id', label: '发布 ID', minWidth: 160 },
   { prop: 'appId', label: '应用', width: 130 },
   { prop: 'envId', label: '环境', width: 130 },

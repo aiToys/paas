@@ -47,6 +47,8 @@ watch(
 )
 // 环境来自全局 store（顶栏环境选择器，唯一环境切换入口）；页面不再有环境切换控件
 const activeEnv = computed(() => envStore.currentEnv)
+// 切环境自动重载（顶栏 scope 切换后数据跟随，不留旧环境数据）。
+watch(activeEnv, () => { load() })
 const items = ref<Workload[]>([])
 const loading = ref(true)
 // 应用上下文过滤（从应用详情「部署 tab」跳来带 ?app=）：只显示该应用工作负载，保留上下文。
@@ -388,6 +390,8 @@ onMounted(async () => {
   }
   loadApps()
   load()
+  // 命令面板深链 ?new=1 直开创建弹窗。
+  if (route.query.new === '1') showCreate.value = true
   window.addEventListener('paas:key-changed', onKeyChanged)
   window.addEventListener('paas:env-changed', onEnvChanged)
 })
@@ -428,7 +432,9 @@ onUnmounted(() => {
       v-else-if="items.length === 0"
       icon="server"
       :text="`当前租户下暂无${tabs.find((t) => t.key === activeType)?.label}工作负载`"
-    />
+    >
+      <el-button type="primary" size="small" @click="showCreate = true">+ 部署工作负载</el-button>
+    </EmptyState>
 
     <div v-else class="table-wrap">
       <table class="tbl">

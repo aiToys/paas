@@ -140,3 +140,31 @@ func TestNotificationsAlerts(t *testing.T) {
 		t.Fatalf("应 firing=1 pending=1 resolved=0, got %d/%d/%d", firing, pending, resolved)
 	}
 }
+
+// TestNotificationsWindow 终态失败时间窗口：>7 天的 failed run / conflict 批次退岀通知，
+// 窗口内的仍通知（防历史失败堆积让值班台数字只涨不消）。
+func TestNotificationsWindow(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	now := time.Now().UTC()
+
+	// 注：批次窗口过滤以 CreatedAt 判定，但 CreateBatch 强制 CreatedAt=now（与 PG seed 语义
+	// 一致，构造老批次需绕 store），批次窗口分支由下面 run 场景同源逻辑覆盖（inNotifWindow/时间比较）。
+	runs := &fakeRunLister{items: []RunStatusItem{
+		{ID: "run-old", AppID: "app-1", Status: "failed", Current: "冒烟",
+			At: now.Add(-10 * 24 * time.Hour).Format(time.RFC3339)}, // 窗口外：不通知
+		{ID: "run-new", AppID: "app-1", Status: "failed", Current: "构建",
+			At: now.Add(-2 * 24 * time.Hour).Format(time.RFC3339)}, // 窗口内：通知
+	}}
+
+	notifs, err := Notifications(ctx, store, runs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notifs) != 1 {
+		t.Fatalf("应仅 1 条（窗口内 failed run），got %d: %+v", len(notifs), notifs)
+	}
+	if notifs[0].TargetID != "run-new" {
+		t.Fatalf("应保留窗口内 run-new，got %s", notifs[0].TargetID)
+	}
+}

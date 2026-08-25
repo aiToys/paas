@@ -602,7 +602,8 @@ usePolling(() => loadAll(true), 10000)
         </el-table-column>
         <el-table-column label="来源" width="140">
           <template #default="{ row }">
-            <span class="mono">{{ apps.find((a) => a.id === row.appId)?.name ?? row.targetId ?? row.appId ?? '—' }}</span>
+            <span v-if="row.appId" class="mono trace-link" @click="router.push('/applications/' + row.appId)">{{ apps.find((a) => a.id === row.appId)?.name ?? row.appId }}</span>
+            <span v-else class="mono">{{ row.targetId ?? '—' }}</span>
           </template>
         </el-table-column>
         <el-table-column prop="message" label="消息" min-width="280" show-overflow-tooltip />
@@ -690,7 +691,8 @@ usePolling(() => loadAll(true), 10000)
         </el-table-column>
         <el-table-column label="应用" width="120">
           <template #default="{ row }">
-            <span class="mono">{{ apps.find((a) => a.id === row.appId)?.name ?? row.appId }}</span>
+            <span v-if="row.appId" class="mono trace-link" @click="router.push('/applications/' + row.appId)">{{ apps.find((a) => a.id === row.appId)?.name ?? row.appId }}</span>
+            <span v-else class="mono">—</span>
           </template>
         </el-table-column>
         <el-table-column label="时长" width="90">

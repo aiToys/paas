@@ -5,6 +5,7 @@ import (
 	"log"
 
 	"github.com/aitoys/paas/internal/appconfig"
+	"github.com/aitoys/paas/internal/core/application"
 	"github.com/aitoys/paas/internal/workload"
 )
 
@@ -14,6 +15,7 @@ import (
 type appCascadeDeleter struct {
 	wl      workload.Repository
 	cfg     appconfig.Repository
+	members application.MemberRepository               // 级联清应用成员（best-effort；PG 侧 CASCADE 已兜底）
 	wlQuota func(ctx context.Context, delta int) error // 工作负载删除成功后回收配额（best-effort）
 }
 
@@ -40,6 +42,12 @@ func (c appCascadeDeleter) CascadeDelete(ctx context.Context, appID string) erro
 	for _, cf := range cfgs {
 		if err := c.cfg.Delete(ctx, cf.ID); err != nil {
 			log.Printf("级联删应用配置失败（best-effort）: app=%s cfg=%s: %v", appID, cf.ID, err) //nolint:gosec // G706 误报
+		}
+	}
+	// 级联清应用成员（内存路径必须；PG 侧 FK CASCADE 已兜底，重复调用幂等）。
+	if c.members != nil {
+		if err := c.members.RemoveAppMembers(ctx, appID); err != nil {
+			log.Printf("级联删应用成员失败（best-effort）: app=%s: %v", appID, err) //nolint:gosec // G706 误报
 		}
 	}
 	return nil

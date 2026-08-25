@@ -154,7 +154,12 @@ async function loadItems() {
   loading.value = true
   try {
     const resp = await fetchAuth(`/api/dataservices?kind=${props.kind}`)
-    if (resp.ok) items.value = (await resp.json()).data ?? []
+    if (resp.ok) {
+      // 按顶栏环境 scope 过滤（后端 list 不支持 envId 参数，前端过滤；列表行带 envId）。
+      const all = (await resp.json()).data ?? []
+      const env = envStore.currentEnv
+      items.value = env ? all.filter((d: DataService) => d.envId === env.id) : all
+    }
   } finally {
     loading.value = false
   }
@@ -170,6 +175,8 @@ async function load() {
 function goDetail(row: DataService) { router.push(`/resources/${row.kind}/${row.id}`) }
 
 watch(() => props.kind, () => { items.value = []; loadItems() })
+// 切环境自动重载（顶栏 scope 切换后数据跟随）。
+watch(() => envStore.currentEnv, () => { loadItems() })
 onMounted(load)
 </script>
 

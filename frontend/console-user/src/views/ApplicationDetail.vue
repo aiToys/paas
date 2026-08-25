@@ -6,6 +6,7 @@ import Icon from '@/components/Icon.vue'
 import { fetchAuth, fetchJSON } from '@/api'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import AppServices from './app-tabs/AppServices.vue'
+import AppMembers from './app-tabs/AppMembers.vue'
 import AppRepositories from './app-tabs/AppRepositories.vue'
 import AppPipelines from './app-tabs/AppPipelines.vue'
 import AppChanges from './app-tabs/AppChanges.vue'
@@ -172,6 +173,12 @@ async function load() {
     latestRelease.value = rels.status === 'fulfilled' && rels.value.length ? rels.value[0] : null
     latestBuild.value = blds.status === 'fulfilled' && blds.value.length ? blds.value[0] : null
   } catch (e) {
+    // 已删实体（书签/外链 404）：明确引导返回应用列表，不留静默半空页。
+    if ((e as Error).message?.includes('not found') || (e as Error).message?.includes('404')) {
+      ElMessage.error('应用不存在或已删除')
+      router.push('/applications')
+      return
+    }
     ElMessage.error('加载应用失败：' + (e as Error).message)
   } finally {
     loading.value = false
@@ -264,10 +271,10 @@ async function unbind(b: Binding) {
 // tab 视觉分组（运行态/资源/DevOps）：防 10 tab 平铺膨胀。
 const tabGroups = [
   { label: '运行态', tabs: ['服务', '概览', '部署', '服务治理', '可观测'] as const },
-  { label: '资源', tabs: ['资源绑定', '配置', '用量'] as const },
+  { label: '资源', tabs: ['资源绑定', '配置', '成员与权限', '用量'] as const },
   { label: 'DevOps', tabs: ['流水线', '变更', '代码仓库', '构建', '镜像', '发布'] as const },
 ]
-type TabName = '服务' | '概览' | '部署' | '服务治理' | '可观测' | '资源绑定' | '配置' | '用量' | '流水线' | '变更' | '代码仓库' | '构建' | '镜像' | '发布'
+type TabName = '服务' | '概览' | '部署' | '服务治理' | '可观测' | '资源绑定' | '配置' | '成员与权限' | '用量' | '流水线' | '变更' | '代码仓库' | '构建' | '镜像' | '发布'
 
 // tab 名 ↔ URL query 值的双向映射（query 用英文短名，避免中文 URL 编码臃肿 + 利于分享）。
 const TAB_TO_Q: Record<TabName, string> = {
@@ -278,6 +285,7 @@ const TAB_TO_Q: Record<TabName, string> = {
   可观测: 'observability',
   资源绑定: 'bindings',
   配置: 'configs',
+  成员与权限: 'members',
   用量: 'usage',
   流水线: 'pipelines',
   变更: 'changes',
@@ -641,6 +649,11 @@ async function deleteApp() {
         <AppConfigs :app-id="app.id" />
       </div>
 
+      <!-- 成员与权限（应用级权限：成员角色 + 受限模式开关） -->
+      <div v-else-if="activeTab === '成员与权限'">
+        <AppMembers :app="app" />
+      </div>
+
       <!-- 用量 -->
       <div v-else-if="activeTab === '用量'">
         <AppUsage :app-id="app.id" />
@@ -873,13 +886,21 @@ async function deleteApp() {
 
 .tabs {
   display: flex;
-  gap: 4px;
+  flex-wrap: nowrap;
+  gap: 2px;
   border-bottom: 1px solid var(--border);
   margin-bottom: 20px;
+  overflow-x: auto;
+  scrollbar-width: none; /* Firefox 隐藏滚动条，靠拖拽/滚轮横向滚动 */
+}
+.tabs::-webkit-scrollbar {
+  display: none;
 }
 .tab {
   position: relative;
-  padding: 10px 16px;
+  padding: 10px 12px;
+  white-space: nowrap;
+  flex-shrink: 0;
   border: none;
   background: transparent;
   color: var(--text-dim);
@@ -898,8 +919,8 @@ async function deleteApp() {
 .tab.on::after {
   content: '';
   position: absolute;
-  left: 16px;
-  right: 16px;
+  left: 12px;
+  right: 12px;
   bottom: -1px;
   height: 2px;
   background: var(--brand);
@@ -1399,12 +1420,14 @@ async function deleteApp() {
 .tab-group-label {
   font-size: 11px;
   color: var(--text-faint);
-  padding: 0 8px 0 0;
-  margin-right: 4px;
+  padding: 0 6px 0 0;
+  margin-right: 2px;
   border-right: 1px solid var(--border);
   align-self: center;
   height: 16px;
   line-height: 16px;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .overview-row { display: flex; gap: 16px; flex-wrap: wrap; }
 .overview-row .topo-card { flex: 1; min-width: 320px; }

@@ -55,7 +55,8 @@ func staticMenus() []Menu {
 					Path:      "/system/user",
 					Name:      "systemUser",
 					Component: "system/user/views/List",
-					Meta:      MenuMeta{Title: "用户管理", Icon: "User", ShowMenu: true},
+					// UserFilled（与个人中心隐藏路由的 User 区分，图标全局唯一）。
+					Meta: MenuMeta{Title: "用户管理", Icon: "UserFilled", ShowMenu: true},
 				},
 				{
 					Path:      "/system/role",
@@ -117,6 +118,13 @@ func staticMenus() []Menu {
 							Name:      "resApplications",
 							Component: "resources/views/Applications",
 							Meta:      MenuMeta{Title: "应用", Icon: "Files", ShowMenu: true},
+						},
+						{
+							// 应用成员：应用级权限（成员角色）跨租户观测。成员治理在 console-user 租户内。
+							Path:      "/resources/app-members",
+							Name:      "resAppMembers",
+							Component: "resources/views/AppMembers",
+							Meta:      MenuMeta{Title: "应用成员", Icon: "Stamp"},
 						},
 						{
 							Path:      "/resources/workloads",
@@ -192,7 +200,8 @@ func staticMenus() []Menu {
 					Path:      "/resources/namespaces",
 					Name:      "resNamespaces",
 					Component: "resources/views/Namespaces",
-					Meta:      MenuMeta{Title: "配置中心", Icon: "FolderOpened", ShowMenu: true},
+					// admin 视角是 namespace 实体列表（非 console-user 的配置中心全功能），名实相符。
+					Meta: MenuMeta{Title: "配置命名空间", Icon: "FolderOpened", ShowMenu: true},
 				},
 				{
 					Path:      "/resources/services",
@@ -212,14 +221,23 @@ func staticMenus() []Menu {
 					Component: "resources/views/Secrets",
 					Meta:      MenuMeta{Title: "密钥", Icon: "DocumentCopy", ShowMenu: true},
 				},
-				{
-					// 引擎目录：admin 配置数据服务引擎（managed/external-shared/dedicated），用户从 enabled 引擎创建实例。
-					Path:      "/resources/engines",
-					Name:      "resEngines",
-					Component: "engine/views/List",
-					Meta:      MenuMeta{Title: "引擎目录", Icon: "Coin", ShowMenu: true},
-				},
 			},
+		},
+		{
+			// 引擎目录：数据服务引擎供给配置（managed/external-shared/dedicated），用户从 enabled 引擎创建实例。
+			// 独立顶级——非横切治理配置（从「平台治理」移出），是数据服务的前置供给目录，紧邻资源总览。
+			Path:      "/resources/engines",
+			Name:      "resEngines",
+			Component: "engine/views/List",
+			Meta:      MenuMeta{Title: "引擎目录", Icon: "Grid", ShowMenu: true},
+		},
+		{
+			// AI 编排：跨租户查看 Agent/Skill/工具/知识库/提示词（super_admin 只读总览）。
+			// 资产运维仍在 console-user 租户内；此处供平台观测各租户 AI 资产与引用关系。
+			Path:      "/resources/ai",
+			Name:      "resAi",
+			Component: "resources/views/AiOverview",
+			Meta:      MenuMeta{Title: "智能体", Icon: "ChatDotRound", ShowMenu: true},
 		},
 		{
 			// 计费审计：配额/账单/审计日志（财务 + 合规）。独立顶级——非业务资源。

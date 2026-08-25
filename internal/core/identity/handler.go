@@ -199,6 +199,26 @@ func (h *Handler) DeleteTenant(w http.ResponseWriter, r *http.Request) {
 
 // —— Users ——
 
+// ListTenantUsers 列出本租户用户（租户自助，任意已认证用户；供应用成员选择器等场景）。
+// 与 ListUsers（admin 跨租户）互补：强制限定调用者租户，不回传 password_hash。
+// tenant ctx 缺失时拒绝（ListUsers("") 会返回全租户，禁止透传空串）。
+func (h *Handler) ListTenantUsers(w http.ResponseWriter, r *http.Request) {
+	tid := callerTenant(r)
+	if tid == "" {
+		httputil.WriteError(w, http.StatusForbidden, "missing tenant context")
+		return
+	}
+	us, err := h.repo.ListUsers(r.Context(), tid)
+	if err != nil {
+		httputil.WriteInternalError(w, err)
+		return
+	}
+	for i := range us {
+		us[i].PasswordHash = ""
+	}
+	httputil.WriteData(w, us)
+}
+
 func (h *Handler) ListUsers(w http.ResponseWriter, r *http.Request) {
 	// 平台超管可按 query tenantId 过滤（空=全租户）；普通 tenant-admin 强制限定本租户。
 	tenantID := r.URL.Query().Get("tenantId")

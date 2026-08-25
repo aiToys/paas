@@ -28,6 +28,20 @@ const (
 	NotifAlertPending   = "alert_pending" // 告警观察中（pending，未达持续窗口）
 )
 
+// NotifWindow 通知时间窗口：超过该时长的终态事件（failed run 等）不再进通知——
+// 历史失败堆积会让值班台数字只涨不消（狼来了），窗口外自然退出。进行中/待审批类
+// （testing/releasing/paused）状态本身会流转，不受窗口约束（按 CreatedAt 也天然新鲜）。
+const NotifWindow = 7 * 24 * time.Hour
+
+// inNotifWindow 判断事件时间是否在通知窗口内（解析失败保守放行，防漏报）。
+func inNotifWindow(iso string, now time.Time) bool {
+	t, err := time.Parse(time.RFC3339, iso)
+	if err != nil {
+		return true
+	}
+	return now.Sub(t) <= NotifWindow
+}
+
 // Notification 单条通知（camelCase json，前端直取）。
 type Notification struct {
 	ID         string `json:"id"` // 稳定 ID（targetType:targetID[:status]，前端记已读用）
@@ -73,6 +87,7 @@ type AlertLister interface {
 // Notifications 聚合通知（tenant 内，按 at 倒序）。
 // alerts 可为 nil（未注入告警源时跳过，通知其余源不受影响）。
 func Notifications(ctx context.Context, repo Repository, runs RunLister, alerts AlertLister) ([]Notification, error) {
+	now := time.Now()
 	var out []Notification
 	batches, err := repo.ListBatches(ctx, "", "")
 	if err != nil {
@@ -81,6 +96,10 @@ func Notifications(ctx context.Context, repo Repository, runs RunLister, alerts 
 	for _, b := range batches {
 		switch b.Status {
 		case BatchConflict:
+			// 冲突若长期未处理也退岀窗口（同 failed run 语义）
+			if now.Sub(b.CreatedAt) > NotifWindow {
+				continue
+			}
 			out = append(out, Notification{
 				ID: "batch:" + b.ID + ":conflict", Type: NotifBatchConflict, Severity: "error",
 				Title: fmt.Sprintf("批次「%s」集成冲突，需解决后重新集成", b.Title), AppID: b.AppID,
@@ -116,6 +135,10 @@ func Notifications(ctx context.Context, repo Repository, runs RunLister, alerts 
 			for _, r := range items {
 				switch r.Status {
 				case "failed":
+					// 终态失败只通知窗口内（历史失败堆积退岀值班台）
+					if !inNotifWindow(r.At, now) {
+						continue
+					}
 					out = append(out, Notification{
 						ID: "run:" + r.ID + ":failed", Type: NotifRunFailed, Severity: "error",
 						Title: fmt.Sprintf("流水线运行失败（%s）", r.Current), AppID: r.AppID,

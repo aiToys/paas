@@ -147,8 +147,8 @@ const nav: NavItem[] = [
   { label: '应用', icon: 'deploy', to: '/applications', section: 'main', primary: true },
   { label: 'DevOps', icon: 'pipeline', to: '/devops', section: 'main' },
   { label: 'Playground', icon: 'playground', to: '/playground', section: 'main' },
-  // AI 服务：模型是平台共享的「能力调用」（非租户私有存储资源），与 Playground 配套属高频。
-  { label: 'AI 服务', icon: 'market', to: '/resources/models', section: 'main' },
+  // 模型市场：平台共享「能力调用」（非租户私有资源），与 Playground 配套属高频；命名全站统一「模型市场」。
+  { label: '模型市场', icon: 'market', to: '/resources/models', section: 'main' },
   // —— 资源与能力：创建后少动，默认折叠，各自记忆展开态 ——
   {
     label: '资源中心', icon: 'database', section: 'resources', group: 'resources',
@@ -171,10 +171,12 @@ const nav: NavItem[] = [
     ],
   },
   {
-    label: 'AI 编排', icon: 'pipeline', section: 'resources', group: 'ai',
+    label: '智能体', icon: 'bot', section: 'resources', group: 'ai',
     children: [
+      { label: '广场', icon: 'rocket', to: '/ai/explore' },
       { label: '工具', icon: 'tool', to: '/ai/tools' },
       { label: '提示词', icon: 'prompt', to: '/ai/prompts' },
+      { label: 'Skill', icon: 'skill', to: '/ai/skills' },
       { label: 'Agent', icon: 'bot', to: '/ai/agents' },
     ],
   },
@@ -222,7 +224,7 @@ watch(
 
 const settings = [
   { label: 'API 密钥', icon: 'key', to: '/settings/api-keys' },
-  { label: '配额与账单', icon: 'zap', to: '/settings/billing' },
+  { label: '配额与账单', icon: 'usage', to: '/settings/billing' },
 ]
 
 const pageTitle = computed(() => (route.meta.title as string) || '控制台')

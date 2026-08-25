@@ -26,7 +26,7 @@ export const ALL_MENUS = [
         path: '/system/user',
         name: 'systemUser',
         component: 'system/user/views/List',
-        meta: { title: '用户管理', icon: 'User', showMenu: true }
+        meta: { title: '用户管理', icon: 'UserFilled', showMenu: true }
       },
       {
         path: '/system/role',
@@ -82,6 +82,12 @@ export const ALL_MENUS = [
             name: 'resApplications',
             component: 'resources/views/Applications',
             meta: { title: '应用', icon: 'Files', showMenu: true }
+          },
+          {
+            path: '/resources/app-members',
+            name: 'resAppMembers',
+            component: 'resources/views/AppMembers',
+            meta: { title: '应用成员', icon: 'Stamp', showMenu: true }
           },
           {
             path: '/resources/workloads',
@@ -143,13 +149,13 @@ export const ALL_MENUS = [
       {
         path: '/resources/platform',
         name: 'resPlatform',
-        meta: { title: '平台能力', icon: 'SetUp', showMenu: true },
+        meta: { title: '平台治理', icon: 'SetUp', showMenu: true },
         children: [
           {
             path: '/resources/namespaces',
             name: 'resNamespaces',
             component: 'resources/views/Namespaces',
-            meta: { title: '配置中心', icon: 'FolderOpened', showMenu: true }
+            meta: { title: '配置命名空间', icon: 'FolderOpened', showMenu: true }
           },
           {
             path: '/resources/services',
@@ -168,14 +174,22 @@ export const ALL_MENUS = [
             name: 'resSecrets',
             component: 'resources/views/Secrets',
             meta: { title: '密钥', icon: 'DocumentCopy', showMenu: true }
-          },
-          {
-            path: '/resources/engines',
-            name: 'resEngines',
-            component: 'engine/views/List',
-            meta: { title: '引擎目录', icon: 'Coin', showMenu: true }
           }
         ]
+      },
+      {
+        // 引擎目录：数据服务前置供给配置，独立顶级（对齐后端 menus.go）
+        path: '/resources/engines',
+        name: 'resEngines',
+        component: 'engine/views/List',
+        meta: { title: '引擎目录', icon: 'Grid', showMenu: true }
+      },
+      {
+        // AI 编排：Agent/Skill/工具/知识库/提示词跨租户总览（对齐后端 menus.go）
+        path: '/resources/ai',
+        name: 'resAi',
+        component: 'resources/views/AiOverview',
+        meta: { title: '智能体', icon: 'ChatDotRound', showMenu: true }
       },
       {
         path: '/resources/billing',

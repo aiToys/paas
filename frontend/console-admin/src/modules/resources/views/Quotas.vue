@@ -31,6 +31,10 @@
       <el-button :icon="Refresh" @click="fetchList">刷新</el-button>
     </template>
 
+    <template #col-tenant="{ row }">
+      <el-tag size="small" type="info">{{ row.tenantId }}</el-tag>
+    </template>
+
     <template #col-limits="{ row }">
       <span
         v-for="[k, v] in Object.entries((row.limits || {}) as Record<string, number>)"
@@ -80,7 +84,7 @@ const { listData, loading, pagination, searchForm, fetchList, handleSearch, hand
 const tableData = computed(() => listData.value as unknown as Record<string, unknown>[])
 
 const columns = computed<ColumnDef[]>(() => [
-  { prop: 'tenantId', label: '租户', width: 160 },
+  { prop: 'tenantId', label: '租户', width: 160, slot: 'tenant' },
   { prop: 'limits', label: '配额上限', minWidth: 400, slot: 'limits' },
   { prop: 'updatedAt', label: '更新时间', width: 180, formatter: tableTimeFormatter },
   { prop: 'action', label: '操作', width: 90, slot: 'action', hideable: false }

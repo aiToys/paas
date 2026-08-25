@@ -7,6 +7,8 @@ import (
 
 	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/httputil"
+
+	"github.com/aitoys/paas/internal/core/application"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -32,6 +34,8 @@ type Handler struct {
 	repo        Repository
 	envResolver EnvTypeResolver
 	Authorize   func(r *http.Request, perm string) bool
+	// Guard 应用级权限 enforcement（受限应用配置写需成员角色）；nil 跳过。
+	Guard *application.AppGuard
 }
 
 // NewHandler 创建应用配置 handler。
@@ -49,6 +53,11 @@ type HandlerOpt func(*Handler)
 // WithEnvResolver 注入环境类型解析器，启用生产写权限校验。
 func WithEnvResolver(r EnvTypeResolver) HandlerOpt {
 	return func(h *Handler) { h.envResolver = r }
+}
+
+// WithAppGuard 注入应用级权限 enforcement（受限应用配置写需成员角色）。
+func WithAppGuard(g *application.AppGuard) HandlerOpt {
+	return func(h *Handler) { h.Guard = g }
 }
 
 func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) bool {
@@ -109,6 +118,10 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request, appID 
 		if !h.allow(w, r, PermConfigWrite) {
 			return
 		}
+		if h.Guard != nil && !h.Guard.Allow(r, appID, application.AppActionWrite) {
+			httputil.WriteError(w, http.StatusForbidden, "forbidden: 无该应用的应用级权限（write）")
+			return
+		}
 		var item ConfigItem
 		if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
 			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
@@ -140,6 +153,10 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request, appID, cfgID
 		return
 	}
 	if !h.allow(w, r, PermConfigWrite) {
+		return
+	}
+	if h.Guard != nil && !h.Guard.Allow(r, appID, application.AppActionWrite) {
+		httputil.WriteError(w, http.StatusForbidden, "forbidden: 无该应用的应用级权限（write）")
 		return
 	}
 	// 校验配置归属该 app + 取 EnvID 校验生产权限。

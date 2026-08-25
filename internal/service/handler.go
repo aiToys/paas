@@ -11,6 +11,8 @@ import (
 
 	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/pkg/tenant"
+
+	"github.com/aitoys/paas/internal/core/application"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -37,6 +39,8 @@ type Handler struct {
 	auditRec  AuditRecorder
 	actorFn   func(*http.Request) string
 	Authorize func(r *http.Request, perm string) bool
+	// Guard 应用级权限 enforcement（受限应用服务写需成员角色）；nil 跳过。
+	Guard *application.AppGuard
 }
 
 // HandlerOpt 配置 Handler。
@@ -57,11 +61,25 @@ func NewHandler(repo Repository, opts ...HandlerOpt) *Handler {
 	return h
 }
 
+// WithAppGuard 注入应用级权限 enforcement（受限应用服务写需成员角色）。
+func WithAppGuard(g *application.AppGuard) HandlerOpt {
+	return func(h *Handler) { h.Guard = g }
+}
+
 func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) bool {
 	if h.Authorize == nil || h.Authorize(r, perm) {
 		return true
 	}
 	httputil.WriteError(w, http.StatusForbidden, "forbidden: missing "+perm)
+	return false
+}
+
+// allowApp 校验受限应用的应用级权限（服务写 -> write）；不通过回 403。
+func (h *Handler) allowApp(w http.ResponseWriter, r *http.Request, appID string) bool {
+	if h.Guard == nil || h.Guard.Allow(r, appID, application.AppActionWrite) {
+		return true
+	}
+	httputil.WriteError(w, http.StatusForbidden, "forbidden: 无该应用的应用级权限（write）")
 	return false
 }
 
@@ -128,6 +146,9 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request, appID 
 		if !h.allow(w, r, PermServiceWrite) {
 			return
 		}
+		if !h.allowApp(w, r, appID) {
+			return
+		}
 		var s Service
 		if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
 			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
@@ -172,6 +193,9 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request, appID, sid s
 		if !h.allow(w, r, PermServiceWrite) {
 			return
 		}
+		if !h.allowApp(w, r, appID) {
+			return
+		}
 		var s Service
 		if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
 			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
@@ -192,6 +216,9 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request, appID, sid s
 		httputil.WriteData(w, s)
 	case http.MethodDelete:
 		if !h.allow(w, r, PermServiceWrite) {
+			return
+		}
+		if !h.allowApp(w, r, appID) {
 			return
 		}
 		if err := h.repo.Delete(r.Context(), appID, sid); err != nil {

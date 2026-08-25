@@ -38,6 +38,7 @@
     </template>
     <template #col-actions="{ row }">
       <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
+      <el-button link type="primary" size="small" @click="viewInstances(row.id)">查看实例</el-button>
       <el-button link type="danger" size="small" @click="handleDelete(row)">删除</el-button>
     </template>
   </SearchTable>
@@ -52,6 +53,7 @@
 
 <script lang="ts" setup>
 import { ref, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
 import { SearchTable } from '@/app/components'
@@ -89,8 +91,14 @@ const columns = computed<ColumnDef[]>(() => [
   { prop: 'mode', label: '模式', minWidth: 180, slot: 'mode' },
   { prop: 'enabled', label: '状态', width: 100, slot: 'enabled' },
   { prop: 'order', label: '排序', width: 80 },
-  { prop: 'actions', label: '操作', width: 120, fixed: 'right', slot: 'actions' },
+  { prop: 'actions', label: '操作', width: 190, fixed: 'right', slot: 'actions' },
 ])
+
+const router = useRouter()
+// 互链：跳数据服务页按引擎预过滤（?engine=<id>）。
+const viewInstances = (engineId: string) => {
+  router.push({ path: '/resources/dataservices', query: { engine: engineId } })
+}
 
 const drawerVisible = ref(false)
 const drawerMode = ref<'add' | 'edit'>('add')

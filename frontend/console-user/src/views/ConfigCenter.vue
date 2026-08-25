@@ -249,7 +249,7 @@ watch(() => route.params.nsId, load)
         </el-table-column>
         <el-table-column label="关联服务" min-width="140">
           <template #default="{ row }">
-            <span v-if="row.serviceId">{{ serviceName(row.serviceId) }}</span>
+            <a v-if="row.serviceId" class="svc-link" @click="router.push(`/platform/governance/services/${row.serviceId}`)">{{ serviceName(row.serviceId) }}</a>
             <span v-else class="dim">-</span>
           </template>
         </el-table-column>
@@ -421,4 +421,6 @@ watch(() => route.params.nsId, load)
 .kv-row { display: flex; gap: 16px; font-size: 13px; }
 .kv-key { color: var(--brand); min-width: 200px; }
 .kv-val { color: var(--text); word-break: break-all; }
+.svc-link { color: var(--brand); cursor: pointer; font-weight: 500; }
+.svc-link:hover { text-decoration: underline; }
 </style>

@@ -23,6 +23,8 @@ import (
 	"github.com/aitoys/paas/internal/devops/gitea"
 	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/pkg/tenant"
+
+	"github.com/aitoys/paas/internal/core/application"
 )
 
 // 权限常量（复用流水线权限域：变更管理是流水线的上游编排）。
@@ -58,6 +60,8 @@ type Handler struct {
 	runLister RunLister
 	// alertLister 通知聚合读告警状态（nil 降级不含告警源）。
 	alertLister AlertLister
+	// appGuard 应用级权限 enforcement（受限应用 integrate/approve/release 需成员角色）；nil 跳过。
+	appGuard *application.AppGuard
 }
 
 // HandlerOpt 配置 Handler。
@@ -66,6 +70,11 @@ type HandlerOpt func(*Handler)
 // WithAuthorize 注入权限校验。
 func WithAuthorize(f func(r *http.Request, perm string) bool) HandlerOpt {
 	return func(h *Handler) { h.Authorize = f }
+}
+
+// WithAppGuard 注入应用级权限 enforcement（受限应用批次动作需成员角色）。
+func WithAppGuard(g *application.AppGuard) HandlerOpt {
+	return func(h *Handler) { h.appGuard = g }
 }
 
 // WithAudit 注入审计记录器。
@@ -388,6 +397,19 @@ func (h *Handler) serveBatches(w http.ResponseWriter, r *http.Request, appID str
 
 	// /batches/{bid}/integrate|approve|release
 	if len(parts) == 4 && r.Method == http.MethodPost {
+		// 应用级权限：受限应用的批次动作需成员角色（integrate=write；approve/release=release 动作）。
+		if h.appGuard != nil {
+			if b, err := h.repo.GetBatch(ctx, bid); err == nil {
+				action := application.AppActionRelease
+				if parts[3] == "integrate" {
+					action = application.AppActionWrite
+				}
+				if !h.appGuard.Allow(r, b.AppID, action) {
+					httputil.WriteError(w, http.StatusForbidden, "forbidden: 无该应用的应用级权限（"+action+"）")
+					return
+				}
+			}
+		}
 		switch parts[3] {
 		case "integrate":
 			if !h.allow(w, r, PermPipelineWrite) {

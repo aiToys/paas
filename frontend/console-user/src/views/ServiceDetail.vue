@@ -64,6 +64,11 @@ async function load() {
       // 实例来源：discovered=数据面 Endpoint 真源（readiness probe 维活，心跳无意义）；
       // manual=手动注册表（应用上报，心跳维活）。discovered 模式隐藏「心跳」按钮。
       instancesDiscovered.value = payload.instancesSource === 'discovered'
+    } else if (resp.status === 404) {
+      // 已删实体：明确引导返回，不留静默空页（书签/外链进来 404 可感知）。
+      ElMessage.error('服务不存在或已删除')
+      router.push('/platform/governance')
+      return
     }
     await loadConfigNs()
   } catch (e) {

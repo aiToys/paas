@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS applications (
     "desc"    TEXT NOT NULL DEFAULT '',
     replicas  TEXT NOT NULL DEFAULT '',
     rps       TEXT NOT NULL DEFAULT '',
+    restricted BOOLEAN NOT NULL DEFAULT FALSE,
     UNIQUE (tenant_id, name)
 );
 CREATE INDEX IF NOT EXISTS idx_apps_tenant ON applications(tenant_id);
@@ -76,6 +77,25 @@ CREATE TABLE IF NOT EXISTS application_bindings (
     UNIQUE (app_id, type, name)
 );
 CREATE INDEX IF NOT EXISTS idx_bindings_app ON application_bindings(app_id);
+
+-- 应用成员（应用级权限：用户 × 应用 × 应用内角色；restricted 应用写操作需角色匹配）。
+CREATE TABLE IF NOT EXISTS app_members (
+    id         TEXT PRIMARY KEY,
+    tenant_id  TEXT NOT NULL,
+    app_id     TEXT NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+    user_id    TEXT NOT NULL,
+    role       TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    UNIQUE (app_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_app_members_tenant ON app_members(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_app_members_user ON app_members(user_id);
+-- app_members RLS（与其他租户表同款纵深防御）
+ALTER TABLE app_members ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS app_members_tenant_isolation ON app_members;
+CREATE POLICY app_members_tenant_isolation ON app_members
+  USING (tenant_id = current_setting('app.tenant_id', true) OR current_setting('app.tenant_id', true) IS NULL);
+
 
 -- ===== environment：物理环境（生产/测试），独立一等公民 =====
 CREATE TABLE IF NOT EXISTS environments (

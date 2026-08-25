@@ -147,6 +147,7 @@ func TestCatalogModelsRichInfo(t *testing.T) {
 type stubAgentDispatcher struct {
 	gotModel string
 	gotN     int
+	gotConv  string
 }
 
 func (s *stubAgentDispatcher) Match(model string) bool { return strings.HasPrefix(model, "agent:") }
@@ -156,6 +157,10 @@ func (s *stubAgentDispatcher) ServeSSE(w http.ResponseWriter, _ *http.Request, m
 	w.Header().Set("Content-Type", "text/event-stream")
 	_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"agent-echo\"}}]}\n\ndata: [DONE]\n\n"))
 	return nil
+}
+func (s *stubAgentDispatcher) ServeSSEConv(w http.ResponseWriter, r *http.Request, model, convID string, msgs []provider.Message) error {
+	s.gotConv = convID
+	return s.ServeSSE(w, r, model, msgs)
 }
 
 // agent:{id} 虚拟模型路由：holder.Match 命中时委托 dispatcher，不查 catalog 通道。
@@ -194,6 +199,9 @@ type errAgentDispatcher struct{ sentinel error }
 func (e *errAgentDispatcher) Match(model string) bool { return strings.HasPrefix(model, "agent:") }
 func (e *errAgentDispatcher) ServeSSE(_ http.ResponseWriter, _ *http.Request, _ string, _ []provider.Message) error {
 	return e.sentinel
+}
+func (e *errAgentDispatcher) ServeSSEConv(w http.ResponseWriter, r *http.Request, model, _ string, msgs []provider.Message) error {
+	return e.ServeSSE(w, r, model, msgs)
 }
 
 // agent 不存在 -> 404（SSE 写头前预检，干净状态码非空流）。
