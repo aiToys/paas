@@ -151,3 +151,28 @@ func TestNonEmpty(t *testing.T) {
 		t.Fatal()
 	}
 }
+
+// TestGetServiceEnvLaneFallback：无 ctx lane 时 GetService 应回落 SelfLane env，
+// URL 带 &lane=<env 泳道>（L3 零改动染色核心链路）。
+func TestGetServiceEnvLaneFallback(t *testing.T) {
+	var gotLane string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotLane = r.URL.Query().Get("lane")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"service":   "user-svc",
+			"instances": []map[string]any{{"id": "a", "ip": "10.0.0.1", "port": 8080, "cluster": "default"}},
+			"signature": "abc",
+		})
+	}))
+	defer srv.Close()
+	t.Setenv("PAAS_LANE_ID", "feature-env")
+	selfLane.Store("")
+	t.Cleanup(func() { selfLane.Store("") })
+	reg := &paasRegistry{base: srv.URL + "/dp", token: "sk-1", client: srv.Client()}
+	if _, err := reg.GetService(context.Background(), "user-svc"); err != nil {
+		t.Fatalf("GetService 失败: %v", err)
+	}
+	if gotLane != "feature-env" {
+		t.Fatalf("URL lane = %q, want feature-env（env 回落）", gotLane)
+	}
+}
