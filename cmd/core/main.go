@@ -148,6 +148,20 @@ func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, metrics
 			}
 		}()
 	}
+	// 泳道闲置回收（L3）：周期扫描非 default 泳道 Workload，闲置超 TTL 且无活跃 run 则删除
+	// （stores.Workload 已 ApplyRepo 装饰，Delete 投影删 CRD）。env PAAS_LANE_GC_INTERVAL=0 禁用。
+	if v := envDuration("PAAS_LANE_GC_INTERVAL", 30*time.Minute); v > 0 {
+		gc := &workload.LaneGC{
+			Repos:    stores.Workload,
+			Runs:     laneRunChecker{runs: stores.Pipeline},
+			EnvType:  stores.Environment.EnvType, // 与 workload handler 同源注入
+			TTL:      envDuration("PAAS_LANE_TTL", 72*time.Hour),
+			MaxSweep: 20,
+		}
+		stopGC := gc.Start(ctx, v)
+		defer stopGC()
+		log.Printf("[laneGC] 启动：间隔 %s TTL %s", v, gc.TTL)
+	}
 	srv := serveHTTP(gw, meter, stores, appliers, metricsReg)
 	// 告警评估引擎（R4-C2）：后台 30s tick 评估 + 状态机 + webhook 出站，随进程 ctx 退出。
 	if obsAlertEngine != nil {
