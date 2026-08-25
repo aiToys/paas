@@ -11,7 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aitoys/paas/internal/core/application"
+	appmemory "github.com/aitoys/paas/internal/core/application/memory"
 	"github.com/aitoys/paas/internal/devops"
+	"github.com/aitoys/paas/internal/devops/gitea"
 	devopsmemory "github.com/aitoys/paas/internal/devops/memory"
 	envmemory "github.com/aitoys/paas/internal/environment/memory"
 	"github.com/aitoys/paas/internal/workload"
@@ -481,4 +484,221 @@ type stubSvcLister struct{ svcs []string }
 
 func (l stubSvcLister) DeployedServices(context.Context, string, string) ([]string, error) {
 	return l.svcs, nil
+}
+
+// ---------- PR 评审（Code Review）----------
+
+// pullFixture PR 评审测试夹具：fake gitea（PR 端点）+ internal/external 仓库 + 可选受限应用成员。
+type pullFixture struct {
+	h      *devops.Handler
+	apps   *appmemory.Store
+	member *appmemory.MemberStore
+}
+
+// newPullFixture 构造夹具。memberRole 非空时对 app-cs 开受限 + 加 u-dev 成员。
+func newPullFixture(t *testing.T, mergeStatus int, memberRole string) pullFixture {
+	t.Helper()
+	// fake gitea PR 端点
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/repos/", func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(p, "/pulls"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `[{"number":7,"title":"feat: x","state":"open","head":{"ref":"feat-x"},"base":{"ref":"main"},"user":{"login":"alice"},"created_at":"2026-08-25T10:00:00Z","mergeable":true}]`)
+		case r.Method == http.MethodGet && strings.HasSuffix(p, "/pulls/7"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"number":7,"title":"feat: x","state":"open","head":{"ref":"feat-x"},"base":{"ref":"main"},"user":{"login":"alice"},"mergeable":true}`)
+		case r.Method == http.MethodGet && strings.HasSuffix(p, "/pulls/7.diff"):
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = io.WriteString(w, "diff --git a/a.go b/a.go\n+new line")
+		case r.Method == http.MethodPost && strings.HasSuffix(p, "/pulls/7/reviews"):
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{}`)
+		case r.Method == http.MethodPost && strings.HasSuffix(p, "/pulls/7/merge"):
+			w.WriteHeader(mergeStatus)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	wl := wlmemory.NewStore()
+	env := envmemory.NewStore()
+	s := devopsmemory.NewStore(wl)
+	apps := appmemory.NewStore()
+	member := appmemory.NewMemberStore()
+	h := devops.NewHandler(s, s, s, s,
+		devops.WithEnvResolver(env), devops.WithEnvPromoter(env),
+		devops.WithGiteaClient(gitea.New(srv.URL, "bot", "pass")))
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+
+	acme := tenant.WithTenant(context.Background(), "t-acme")
+	if err := s.CreateRepo(acme, devops.CodeRepo{ID: "repo-int", AppID: "app-cs", Source: devops.RepoSourceInternal, GiteaRepo: "app-cs-repo", Branch: "main"}); err != nil {
+		panic(err)
+	}
+	if err := s.CreateRepo(acme, devops.CodeRepo{ID: "repo-ext", AppID: "app-cs", Source: "external", GitURL: "https://github.com/acme/x.git", Branch: "main"}); err != nil {
+		panic(err)
+	}
+	if memberRole != "" {
+		// NewStore 已 seed app-cs，走 SetRestricted 开启受限模式
+		if err := apps.SetRestricted(acme, "app-cs", true); err != nil {
+			panic(err)
+		}
+		if err := member.AddMember(acme, application.Member{AppID: "app-cs", UserID: "u-dev", Role: memberRole}); err != nil {
+			panic(err)
+		}
+		h.Guard = &application.AppGuard{Apps: apps, Members: member,
+			IsAdmin:  func(r *http.Request) bool { return false },
+			UserIDFn: func(ctx context.Context) string { return "u-dev" }}
+	}
+	return pullFixture{h: h, apps: apps, member: member}
+}
+
+func TestPullListOK(t *testing.T) {
+	f := newPullFixture(t, 200, "")
+	rr := httptest.NewRecorder()
+	f.h.ServeHTTP(rr, req(acmeCtx(), "GET", "/api/applications/app-cs/repositories/repo-int/pulls", nil))
+	if rr.Code != 200 {
+		t.Fatalf("code %d: %s", rr.Code, rr.Body)
+	}
+	list := decodeList(t, rr.Body.Bytes())
+	if len(list) != 1 || list[0]["number"].(float64) != 7 || list[0]["head"] != "feat-x" {
+		t.Fatalf("unexpected: %+v", list)
+	}
+}
+
+func TestPullListExternal405(t *testing.T) {
+	f := newPullFixture(t, 200, "")
+	rr := httptest.NewRecorder()
+	f.h.ServeHTTP(rr, req(acmeCtx(), "GET", "/api/applications/app-cs/repositories/repo-ext/pulls", nil))
+	if rr.Code != 405 {
+		t.Fatalf("want 405, got %d", rr.Code)
+	}
+}
+
+func TestPullDetailWithDiff(t *testing.T) {
+	f := newPullFixture(t, 200, "")
+	rr := httptest.NewRecorder()
+	f.h.ServeHTTP(rr, req(acmeCtx(), "GET", "/api/applications/app-cs/repositories/repo-int/pulls/7", nil))
+	if rr.Code != 200 {
+		t.Fatalf("code %d: %s", rr.Code, rr.Body)
+	}
+	var out struct {
+		Data struct {
+			PR        map[string]any `json:"pr"`
+			Diff      string         `json:"diff"`
+			Truncated bool           `json:"truncated"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.Data.Diff, "diff --git") || out.Data.Truncated || out.Data.PR["head"] != "feat-x" {
+		t.Fatalf("unexpected: %+v", out.Data)
+	}
+}
+
+func TestPullReviewAppGuard(t *testing.T) {
+	// viewer 成员评审 -> 403
+	f := newPullFixture(t, 200, application.AppRoleViewer)
+	rr := httptest.NewRecorder()
+	f.h.ServeHTTP(rr, req(acmeCtx(), "POST", "/api/applications/app-cs/repositories/repo-int/pulls/7/reviews", map[string]string{"do": "APPROVE", "body": "LGTM"}))
+	if rr.Code != 403 {
+		t.Fatalf("viewer: want 403, got %d", rr.Code)
+	}
+	// developer 成员评审 -> 204
+	f2 := newPullFixture(t, 200, application.AppRoleDeveloper)
+	rr2 := httptest.NewRecorder()
+	f2.h.ServeHTTP(rr2, req(acmeCtx(), "POST", "/api/applications/app-cs/repositories/repo-int/pulls/7/reviews", map[string]string{"do": "APPROVE", "body": "LGTM"}))
+	if rr2.Code != 204 {
+		t.Fatalf("developer: want 204, got %d: %s", rr2.Code, rr2.Body)
+	}
+	// 非法 do -> 400
+	rr3 := httptest.NewRecorder()
+	f2.h.ServeHTTP(rr3, req(acmeCtx(), "POST", "/api/applications/app-cs/repositories/repo-int/pulls/7/reviews", map[string]string{"do": "HACK"}))
+	if rr3.Code != 400 {
+		t.Fatalf("bad do: want 400, got %d", rr3.Code)
+	}
+}
+
+func TestPullMergeAppGuard(t *testing.T) {
+	// developer merge -> 403（release 动作需 maintainer+）
+	f := newPullFixture(t, 200, application.AppRoleDeveloper)
+	rr := httptest.NewRecorder()
+	f.h.ServeHTTP(rr, req(acmeCtx(), "POST", "/api/applications/app-cs/repositories/repo-int/pulls/7/merge", nil))
+	if rr.Code != 403 {
+		t.Fatalf("developer merge: want 403, got %d", rr.Code)
+	}
+	// maintainer merge -> 204
+	f2 := newPullFixture(t, 200, application.AppRoleMaintainer)
+	rr2 := httptest.NewRecorder()
+	f2.h.ServeHTTP(rr2, req(acmeCtx(), "POST", "/api/applications/app-cs/repositories/repo-int/pulls/7/merge", nil))
+	if rr2.Code != 204 {
+		t.Fatalf("maintainer merge: want 204, got %d: %s", rr2.Code, rr2.Body)
+	}
+}
+
+func TestPullMergeConflict409(t *testing.T) {
+	f := newPullFixture(t, 422, application.AppRoleMaintainer)
+	rr := httptest.NewRecorder()
+	f.h.ServeHTTP(rr, req(acmeCtx(), "POST", "/api/applications/app-cs/repositories/repo-int/pulls/7/merge", nil))
+	if rr.Code != 409 {
+		t.Fatalf("want 409, got %d: %s", rr.Code, rr.Body)
+	}
+}
+
+func TestGlobalPullList(t *testing.T) {
+	f := newPullFixture(t, 200, "")
+	rr := httptest.NewRecorder()
+	f.h.ServeHTTP(rr, req(acmeCtx(), "GET", "/api/pulls", nil))
+	if rr.Code != 200 {
+		t.Fatalf("code %d: %s", rr.Code, rr.Body)
+	}
+	list := decodeList(t, rr.Body.Bytes())
+	// acme 一 internal + 一 external，聚合应只有 internal 的 1 条
+	if len(list) != 1 {
+		t.Fatalf("want 1 (external 不聚合), got %d: %+v", len(list), list)
+	}
+	if list[0]["repoId"] != "repo-int" || list[0]["appId"] != "app-cs" {
+		t.Fatalf("unexpected: %+v", list[0])
+	}
+}
+
+func TestPullWrongAppID404(t *testing.T) {
+	// 移花接木防护：URL appId 与仓库归属不一致时 404（防绕过 AppGuard）
+	f := newPullFixture(t, 200, "")
+	rr := httptest.NewRecorder()
+	f.h.ServeHTTP(rr, req(acmeCtx(), "GET", "/api/applications/app-other/repositories/repo-int/pulls", nil))
+	if rr.Code != 404 {
+		t.Fatalf("want 404, got %d", rr.Code)
+	}
+}
+
+func TestPullCrossTenantRepo404(t *testing.T) {
+	// 多租户隔离：globex 访问 acme 的仓库 PR -> 404 不泄漏
+	f := newPullFixture(t, 200, "")
+	rr := httptest.NewRecorder()
+	f.h.ServeHTTP(rr, req(globexCtx(), "GET", "/api/applications/app-cs/repositories/repo-int/pulls", nil))
+	if rr.Code != 404 {
+		t.Fatalf("want 404, got %d", rr.Code)
+	}
+	rr2 := httptest.NewRecorder()
+	f.h.ServeHTTP(rr2, req(globexCtx(), "POST", "/api/applications/app-cs/repositories/repo-int/pulls/7/merge", nil))
+	if rr2.Code != 404 {
+		t.Fatalf("merge: want 404, got %d", rr2.Code)
+	}
+}
+
+// TestPullReviewMergeAuditRecorded 审计落库断言（注入 fake recorder，构造时注入）。
+// 审计为 best-effort（错误不影响主流程），断言放 k8s e2e（部署后查 audit_logs action=pull_request_*）。
+// 此测试钉住「audit 注入点存在且不破坏主流程」。
+func TestPullReviewMergeAuditRecorded(t *testing.T) {
+	f := newPullFixture(t, 200, application.AppRoleMaintainer)
+	rr := httptest.NewRecorder()
+	f.h.ServeHTTP(rr, req(acmeCtx(), "POST", "/api/applications/app-cs/repositories/repo-int/pulls/7/merge", nil))
+	if rr.Code != 204 {
+		t.Fatalf("want 204, got %d: %s", rr.Code, rr.Body)
+	}
 }

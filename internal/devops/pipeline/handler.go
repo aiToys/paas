@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/aitoys/paas/internal/core/application"
 	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/pkg/tenant"
@@ -79,6 +80,8 @@ type Handler struct {
 	actorFn func(r *http.Request) string
 	// isPlatformAdmin 判定调用者是否平台超管（admin 模板 CRUD 用，nil 保守按 false）。
 	isPlatformAdmin func(*http.Request) bool
+	// appGuard 应用级权限 enforcement（受限应用触发/审批需成员角色）；nil 跳过。
+	appGuard *application.AppGuard
 }
 
 // HandlerOpt 配置 Handler。
@@ -122,6 +125,11 @@ func WithActorFn(f func(r *http.Request) string) HandlerOpt {
 // WithPlatformAdmin 注入平台超管判定（admin 模板 CRUD 用）。
 func WithPlatformAdmin(f func(*http.Request) bool) HandlerOpt {
 	return func(h *Handler) { h.isPlatformAdmin = f }
+}
+
+// WithAppGuard 注入应用级权限 enforcement（受限应用流水线触发需 write、审批需 release）。
+func WithAppGuard(g *application.AppGuard) HandlerOpt {
+	return func(h *Handler) { h.appGuard = g }
 }
 
 // platformAdmin 判定调用者是否平台超管；未注入时保守按 false（最小权限）。
@@ -523,6 +531,14 @@ func (h *Handler) serveRuns(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteError(w, http.StatusServiceUnavailable, "engine not configured")
 			return
 		}
+		// 应用级权限：审批门禁是生产发布动作，受限应用需 release（app-maintainer+）。
+		if h.appGuard != nil {
+			if run, err := h.runs.GetRun(r.Context(), id); err == nil {
+				if !h.allowApp(w, r, run.AppID, application.AppActionRelease) {
+					return
+				}
+			}
+		}
 		stageIdx := atoiSafe(parts[2])
 		if err := h.engine.Resume(r.Context(), id, stageIdx); err != nil {
 			httputil.WriteServiceError(w, toHTTPStatus(err), err)
@@ -555,6 +571,22 @@ func (h *Handler) serveRuns(w http.ResponseWriter, r *http.Request) {
 		if !h.allow(w, r, PermPipelineWrite) {
 			return
 		}
+		// 应用级权限：重试会重新执行后续 stage（含 CD 的 deploy/release），按 run 的
+		// stage 构成判定动作（与 triggerRun 同源：含 deploy/release/promote/approve → release）。
+		if h.appGuard != nil {
+			if run, err := h.runs.GetRun(r.Context(), id); err == nil {
+				action := application.AppActionWrite
+				for _, sr := range run.StageRuns {
+					if sr.Type == StageDeploy || sr.Type == StageRelease || sr.Type == StagePromote || sr.Type == StageApprove {
+						action = application.AppActionRelease
+						break
+					}
+				}
+				if !h.allowApp(w, r, run.AppID, action) {
+					return
+				}
+			}
+		}
 		if h.engine == nil {
 			httputil.WriteError(w, http.StatusServiceUnavailable, "engine not configured")
 			return
@@ -568,6 +600,15 @@ func (h *Handler) serveRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputil.WriteError(w, http.StatusNotFound, "not found")
+}
+
+// allowApp 校验受限应用的应用级权限；未注入/非受限放行，不通过回 403。
+func (h *Handler) allowApp(w http.ResponseWriter, r *http.Request, appID, action string) bool {
+	if h.appGuard == nil || h.appGuard.Allow(r, appID, action) {
+		return true
+	}
+	httputil.WriteError(w, http.StatusForbidden, "forbidden: 无该应用的应用级权限（"+action+"）")
+	return false
 }
 
 // triggerRun POST /api/applications/{id}/pipelines/{pid}/run。
@@ -612,6 +653,20 @@ func (h *Handler) triggerRun(w http.ResponseWriter, r *http.Request, appID, pid 
 	if msg := validateDeployEnvs(resolved); msg != "" {
 		httputil.WriteError(w, http.StatusBadRequest, msg)
 		return
+	}
+	// 应用级权限：受限应用触发需成员角色——含 deploy/release/promote/approve stage 的 CD 流水线
+	// 需 release 权限（app-maintainer+，测试人员被拦），纯 CI（build/test）需 write（app-developer+）。
+	if h.appGuard != nil {
+		action := application.AppActionWrite
+		for _, st := range resolved {
+			if st.Type == StageDeploy || st.Type == StageRelease || st.Type == StagePromote || st.Type == StageApprove {
+				action = application.AppActionRelease
+				break
+			}
+		}
+		if !h.allowApp(w, r, appID, action) {
+			return
+		}
 	}
 	// prod:write 校验：deploy stage 目标环境为 prod，或 promote stage 目标环境（前序 deploy envId
 	// 的下一阶）为 prod 时，要求调用者持 prod:write（防 developer 经 [deploy test, promote] 绕过）

@@ -188,3 +188,102 @@ func TestBranchAPIErrors(t *testing.T) {
 		t.Fatalf("GetBranch 404 期望 ErrBranchNotFound, got %v", err)
 	}
 }
+
+// ---------- PR 评审（Code Review）----------
+
+// fakePRGitea 启动 fake Gitea server 覆盖 PR 端点。
+// reviewBody 记录 reviews 请求体；mergeStatus 控制 merge 端点返回。
+func fakePRGitea(t *testing.T, mergeStatus int) (*httptest.Server, *Client, *map[string]any) {
+	t.Helper()
+	var review map[string]any
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/repos/", func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(p, "/pulls"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `[{"number":7,"title":"feat: x","body":"desc","state":"open",
+				"head":{"ref":"feat-x"},"base":{"ref":"main"},"user":{"login":"alice"},
+				"created_at":"2026-08-25T10:00:00Z","merged":false,"mergeable":true,
+				"html_url":"http://g/pulls/7"}]`)
+		case r.Method == http.MethodGet && strings.HasSuffix(p, "/pulls/7"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"number":7,"title":"feat: x","state":"open","head":{"ref":"feat-x"},"base":{"ref":"main"},"user":{"login":"alice"},"mergeable":true}`)
+		case r.Method == http.MethodGet && strings.HasSuffix(p, "/pulls/7.diff"):
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = io.WriteString(w, "diff --git a/main.go b/main.go\n+hello")
+		case r.Method == http.MethodPost && strings.HasSuffix(p, "/pulls/7/reviews"):
+			b, _ := io.ReadAll(r.Body)
+			review = map[string]any{}
+			_ = json.Unmarshal(b, &review)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{}`)
+		case r.Method == http.MethodPost && strings.HasSuffix(p, "/pulls/7/merge"):
+			w.WriteHeader(mergeStatus)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv, New(srv.URL, "bot", "pass"), &review
+}
+
+func TestListPRs(t *testing.T) {
+	_, c, _ := fakePRGitea(t, 200)
+	prs, err := c.ListPRs(context.Background(), "bot", "app", "open")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prs) != 1 || prs[0].Number != 7 || prs[0].Head != "feat-x" || prs[0].Base != "main" || prs[0].User != "alice" || !prs[0].Mergeable {
+		t.Fatalf("unexpected: %+v", prs)
+	}
+}
+
+func TestGetPR(t *testing.T) {
+	_, c, _ := fakePRGitea(t, 200)
+	pr, err := c.GetPR(context.Background(), "bot", "app", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr.Number != 7 || pr.Head != "feat-x" {
+		t.Fatalf("unexpected: %+v", pr)
+	}
+}
+
+func TestGetPRDiff(t *testing.T) {
+	_, c, _ := fakePRGitea(t, 200)
+	diff, err := c.GetPRDiff(context.Background(), "bot", "app", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diff != "diff --git a/main.go b/main.go\n+hello" {
+		t.Fatalf("diff mismatch: %q", diff)
+	}
+}
+
+func TestReviewPR(t *testing.T) {
+	_, c, rev := fakePRGitea(t, 200)
+	if err := c.ReviewPR(context.Background(), "bot", "app", 7, "APPROVE", "LGTM"); err != nil {
+		t.Fatal(err)
+	}
+	if (*rev)["Do"] != "APPROVE" || (*rev)["body"] != "LGTM" {
+		t.Fatalf("review body: %+v", *rev)
+	}
+}
+
+func TestMergePR(t *testing.T) {
+	_, c, _ := fakePRGitea(t, 200)
+	if err := c.MergePR(context.Background(), "bot", "app", 7); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestMergePRConflict(t *testing.T) {
+	for _, status := range []int{http.StatusConflict, http.StatusUnprocessableEntity} {
+		_, c, _ := fakePRGitea(t, status)
+		if err := c.MergePR(context.Background(), "bot", "app", 7); !errors.Is(err, ErrMergeConflict) {
+			t.Fatalf("status %d: want ErrMergeConflict, got %v", status, err)
+		}
+	}
+}

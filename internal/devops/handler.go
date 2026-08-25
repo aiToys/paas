@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,6 +17,9 @@ import (
 	"github.com/aitoys/paas/internal/devops/registry"
 	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/httputil"
+	"github.com/aitoys/paas/pkg/tenant"
+
+	"github.com/aitoys/paas/internal/core/application"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -78,6 +82,15 @@ type Handler struct {
 	Authorize func(r *http.Request, perm string) bool
 	// UserIDFrom 从身份 ctx 取用户 ID（填 Release.CreatedBy）；nil 则空。
 	UserIDFrom func(ctx context.Context) string
+	// Guard 应用级权限 enforcement（受限应用发布/回滚需 app-maintainer+）；nil 跳过。
+	Guard *application.AppGuard
+	// audit 审计记录器（PR 评审/合并）；nil 跳过。
+	audit AuditRecorder
+}
+
+// AuditRecorder 审计记录（依赖倒置，与 pipeline.AuditRecorder 同源签名，cmd/core 桥接）。
+type AuditRecorder interface {
+	Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error
 }
 
 // NewHandler 创建 DevOps handler。
@@ -105,6 +118,16 @@ func WithEnvPromoter(p EnvPromoter) HandlerOpt {
 // WithUserIDFrom 注入用户 ID 解析器，填充 Release.CreatedBy。
 func WithUserIDFrom(f func(context.Context) string) HandlerOpt {
 	return func(h *Handler) { h.UserIDFrom = f }
+}
+
+// WithAppGuard 注入应用级权限 enforcement（受限应用发布/回滚/promote 需成员角色）。
+// WithAudit 注入审计记录器（PR 评审/合并记审计）。
+func WithAudit(a AuditRecorder) HandlerOpt {
+	return func(h *Handler) { h.audit = a }
+}
+
+func WithAppGuard(g *application.AppGuard) HandlerOpt {
+	return func(h *Handler) { h.Guard = g }
 }
 
 // WithGiteaClient 注入内置 Git 后端客户端，启用 internal 来源建仓 + 仓库浏览。
@@ -165,6 +188,30 @@ func (h *Handler) allowProd(w http.ResponseWriter, r *http.Request, envID string
 	return true
 }
 
+// allowApp 校验受限应用的 应用级权限（发布/回滚/promote -> AppActionRelease；构建 -> AppActionWrite）。
+// Guard 未注入或应用非受限时放行（向后兼容）；不通过回 403。
+func (h *Handler) allowApp(w http.ResponseWriter, r *http.Request, appID, action string) bool {
+	if h.Guard == nil || h.Guard.Allow(r, appID, action) {
+		return true
+	}
+	httputil.WriteError(w, http.StatusForbidden, "forbidden: 无该应用的应用级权限（"+action+"）")
+	return false
+}
+
+// recordAudit best-effort 记审计（错误不影响主流程）。actor 从身份 ctx 取。
+func (h *Handler) recordAudit(r *http.Request, action, resourceType, resourceID, detail string) {
+	if h.audit == nil {
+		return
+	}
+	tid, _ := tenant.TenantFrom(r.Context())
+	if tid == "" {
+		tid = "platform"
+	}
+	if err := h.audit.Record(r.Context(), tid, h.userID(r.Context()), action, resourceType, resourceID, detail); err != nil {
+		log.Printf("[devops] 审计记录失败 %s %s: %v", action, resourceID, err)
+	}
+}
+
 func (h *Handler) userID(ctx context.Context) string {
 	if h.UserIDFrom == nil {
 		return ""
@@ -191,6 +238,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveReleases(w, r, "")
 	case strings.HasSuffix(path, "/rollback"), strings.HasSuffix(path, "/promote"):
 		h.serveReleaseAction(w, r)
+	case path == "/api/pulls":
+		// 跨应用 open PR 聚合（DevOps 评审 tab 数据源）
+		h.serveGlobalPulls(w, r)
 	case path == "/api/registry/repositories":
 		// registry 实时视图：列平台镜像仓库所有镜像仓库名（catalog，地址取自 PAAS_REGISTRY）
 		h.serveRegistryCatalog(w, r)
@@ -219,8 +269,16 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 		case 3:
 			h.serveRepoDelete(w, r, parts[2])
 		case 4:
-			// /repositories/{rid}/{tree|commits} 仓库内容浏览（仅 internal）
-			h.serveRepoBrowse(w, r, parts[2], parts[3])
+			if parts[3] == "pulls" {
+				// /repositories/{rid}/pulls PR 列表（仅 internal）
+				h.serveRepoPulls(w, r, appID, parts[2], parts[3:])
+			} else {
+				// /repositories/{rid}/{tree|commits|file} 仓库内容浏览（仅 internal）
+				h.serveRepoBrowse(w, r, parts[2], parts[3])
+			}
+		case 5, 6:
+			// /repositories/{rid}/pulls/{number}[/{reviews|merge}] PR 评审闭环（仅 internal）
+			h.serveRepoPulls(w, r, appID, parts[2], parts[3:])
 		default:
 			httputil.WriteError(w, http.StatusNotFound, "not found")
 		}
@@ -422,6 +480,219 @@ func (h *Handler) serveRepoBrowse(w http.ResponseWriter, r *http.Request, repoID
 	}
 }
 
+// ---------- PR 评审（Code Review）----------
+
+// maxPullDiffBytes PR diff 响应体积上限（2MB），大 PR 截断防御。
+const maxPullDiffBytes = 2 << 20
+
+// serveRepoPulls 处理 PR 评审闭环子路由（Code Review，真源 Gitea，平台不落库）：
+//
+//	GET  .../pulls?state=               PR 列表
+//	GET  .../pulls/{number}             详情 + diff 文本
+//	POST .../pulls/{number}/reviews     整体评审（approve/request-changes/comment）
+//	POST .../pulls/{number}/merge       合并
+//
+// 权限：读=repository:read；评审=write+AppGuard write；merge=write+AppGuard release。
+// 仅 internal 仓库；评审/merge 记审计。
+func (h *Handler) serveRepoPulls(w http.ResponseWriter, r *http.Request, appID, repoID string, rest []string) {
+	if h.giteaClient == nil {
+		httputil.WriteError(w, http.StatusServiceUnavailable, "内置 Git 后端未启用")
+		return
+	}
+	repo, err := h.repos.GetRepo(r.Context(), repoID)
+	if err != nil {
+		httputil.WriteError(w, http.StatusNotFound, "仓库不存在")
+		return
+	}
+	// 归属校验：URL appId 必须与仓库真实归属一致，防「移花接木」——用非受限应用的
+	// appId 搭配受限应用的 repoID 绕过 AppGuard 的 merge/reviews 动作校验。
+	if repo.AppID != appID {
+		httputil.WriteError(w, http.StatusNotFound, "仓库不存在")
+		return
+	}
+	if repo.Source != RepoSourceInternal {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "外部仓库不支持平台内浏览，请到外部 Git 平台查看")
+		return
+	}
+	owner := repo.GiteaOwner
+	if owner == "" {
+		owner = h.giteaClient.Username()
+	}
+	name := repo.GiteaRepo
+
+	switch len(rest) {
+	case 1: // 列表
+		if r.Method != http.MethodGet {
+			httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if !h.allow(w, r, PermRepoRead) {
+			return
+		}
+		state := r.URL.Query().Get("state")
+		switch state {
+		case "", "open", "closed", "all":
+		default:
+			httputil.WriteError(w, http.StatusBadRequest, "state 取值非法（open/closed/all）")
+			return
+		}
+		prs, err := h.giteaClient.ListPRs(r.Context(), owner, name, state)
+		if err != nil {
+			h.writeGiteaErr(w, err)
+			return
+		}
+		httputil.WriteData(w, prs)
+	case 2: // 详情 + diff
+		if r.Method != http.MethodGet {
+			httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if !h.allow(w, r, PermRepoRead) {
+			return
+		}
+		number, ok := parsePullNumber(w, rest[1])
+		if !ok {
+			return
+		}
+		pr, err := h.giteaClient.GetPR(r.Context(), owner, name, number)
+		if errors.Is(err, gitea.ErrPRNotFound) {
+			httputil.WriteError(w, http.StatusNotFound, "PR 不存在")
+			return
+		} else if err != nil {
+			h.writeGiteaErr(w, err)
+			return
+		}
+		diff, err := h.giteaClient.GetPRDiff(r.Context(), owner, name, number)
+		if err != nil && !errors.Is(err, gitea.ErrPRNotFound) {
+			h.writeGiteaErr(w, err)
+			return
+		}
+		truncated := false
+		if len(diff) > maxPullDiffBytes {
+			diff = diff[:maxPullDiffBytes]
+			truncated = true
+		}
+		httputil.WriteData(w, map[string]any{"pr": pr, "diff": diff, "truncated": truncated})
+	case 3: // 动作
+		if r.Method != http.MethodPost {
+			httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		number, ok := parsePullNumber(w, rest[1])
+		if !ok || !h.allow(w, r, PermRepoWrite) {
+			return
+		}
+		switch rest[2] {
+		case "reviews":
+			if !h.allowApp(w, r, appID, application.AppActionWrite) {
+				return
+			}
+			var in struct {
+				Do   string `json:"do"` // APPROVE|REQUEST_CHANGES|COMMENT
+				Body string `json:"body"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+				httputil.WriteError(w, http.StatusBadRequest, "请求体非法")
+				return
+			}
+			switch in.Do {
+			case "APPROVE", "REQUEST_CHANGES", "COMMENT":
+			default:
+				httputil.WriteError(w, http.StatusBadRequest, "do 取值非法（APPROVE/REQUEST_CHANGES/COMMENT）")
+				return
+			}
+			if err := h.giteaClient.ReviewPR(r.Context(), owner, name, number, in.Do, in.Body); err != nil {
+				h.writeGiteaErr(w, err)
+				return
+			}
+			h.recordAudit(r, "pull_request_review", "repository", repoID, fmt.Sprintf("PR#%d %s", number, in.Do))
+			w.WriteHeader(http.StatusNoContent)
+		case "merge":
+			if !h.allowApp(w, r, appID, application.AppActionRelease) {
+				return
+			}
+			if err := h.giteaClient.MergePR(r.Context(), owner, name, number); err != nil {
+				if errors.Is(err, gitea.ErrMergeConflict) {
+					httputil.WriteError(w, http.StatusConflict, "合并失败：存在冲突或 PR 不可合并")
+					return
+				}
+				h.writeGiteaErr(w, err)
+				return
+			}
+			h.recordAudit(r, "pull_request_merge", "repository", repoID, fmt.Sprintf("PR#%d", number))
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			httputil.WriteError(w, http.StatusNotFound, "not found")
+		}
+	default:
+		httputil.WriteError(w, http.StatusNotFound, "not found")
+	}
+}
+
+// GlobalPull 跨应用 PR 聚合项（带 repoId/appId 定位信息，评审 tab 数据源）。
+type GlobalPull struct {
+	RepoID   string            `json:"repoId"`
+	RepoName string            `json:"repoName"`
+	AppID    string            `json:"appId"`
+	PR       gitea.PullRequest `json:"pr"`
+}
+
+// serveGlobalPulls 跨应用聚合 open PR（GET /api/pulls）。
+// 遍历租户内 internal 仓库逐个 ListPRs(open)；单仓库 Gitea 失败跳过（降级不阻断列表）。
+func (h *Handler) serveGlobalPulls(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.allow(w, r, PermRepoRead) {
+		return
+	}
+	if h.giteaClient == nil {
+		httputil.WriteData(w, []GlobalPull{})
+		return
+	}
+	repos, err := h.repos.ListRepos(r.Context(), "")
+	if err != nil {
+		httputil.WriteServiceError(w, http.StatusInternalServerError, err)
+		return
+	}
+	// 整体 deadline：串行遍历 N 仓库 × 单仓库 15s 超时，慢 Gitea 下防请求长挂
+	// （deadline 到后剩余仓库跳过，已聚合部分正常返回——降级语义与单仓库失败一致）。
+	aggCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	out := make([]GlobalPull, 0)
+	for _, repo := range repos {
+		if aggCtx.Err() != nil {
+			break
+		}
+		if repo.Source != RepoSourceInternal || repo.GiteaRepo == "" {
+			continue
+		}
+		owner := repo.GiteaOwner
+		if owner == "" {
+			owner = h.giteaClient.Username()
+		}
+		prs, err := h.giteaClient.ListPRs(aggCtx, owner, repo.GiteaRepo, "open")
+		if err != nil {
+			log.Printf("[devops] PR 聚合跳过仓库 %s: %v", repo.ID, err)
+			continue // 单仓库失败/超时跳过（降级）
+		}
+		for _, pr := range prs {
+			out = append(out, GlobalPull{RepoID: repo.ID, RepoName: repo.GiteaRepo, AppID: repo.AppID, PR: pr})
+		}
+	}
+	httputil.WriteData(w, out)
+}
+
+func parsePullNumber(w http.ResponseWriter, s string) (int, bool) {
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		httputil.WriteError(w, http.StatusBadRequest, "PR number 非法")
+		return 0, false
+	}
+	return n, true
+}
+
 // ---------- 镜像库实时视图（registry v2）----------
 
 // serveRegistryCatalog 列 registry 所有镜像仓库名（GET /api/registry/repositories）。
@@ -498,6 +769,10 @@ func (h *Handler) serveBuildRuns(w http.ResponseWriter, r *http.Request, appID s
 	}
 	if r.Method == http.MethodPost {
 		if !h.allow(w, r, PermBuildWrite) {
+			return
+		}
+		// 应用级权限：受限应用构建需 app-developer 及以上。
+		if !h.allowApp(w, r, appID, application.AppActionWrite) {
 			return
 		}
 		var b BuildRun
@@ -740,6 +1015,10 @@ func (h *Handler) serveReleases(w http.ResponseWriter, r *http.Request, appID st
 		}
 		input.AppID = appID
 		input.CreatedBy = h.userID(r.Context())
+		// 应用级权限：受限应用发布需 app-maintainer 及以上（测试人员 app-developer 被拦）。
+		if !h.allowApp(w, r, appID, application.AppActionRelease) {
+			return
+		}
 		// 生产环境发布需 prod:write（developer 被拦，生产只读）
 		if !h.allowProd(w, r, input.EnvID) {
 			return
@@ -783,6 +1062,10 @@ func (h *Handler) serveReleaseAction(w http.ResponseWriter, r *http.Request) {
 	orig, err := h.releases.GetRelease(r.Context(), releaseID)
 	if err != nil {
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
+		return
+	}
+	// 应用级权限：受限应用回滚/promote 需 app-maintainer 及以上。
+	if !h.allowApp(w, r, orig.AppID, application.AppActionRelease) {
 		return
 	}
 	switch action {

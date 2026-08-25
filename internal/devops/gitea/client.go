@@ -551,7 +551,8 @@ func (c *Client) doMerge(ctx context.Context, path string, body any) error {
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusCreated:
 		return nil
-	case http.StatusConflict:
+	case http.StatusConflict, http.StatusUnprocessableEntity:
+		// 409 冲突；422 Gitea 不可合并（冲突/分叉），同归冲突语义
 		return ErrMergeConflict
 	case http.StatusNotFound:
 		return ErrRepoNotFound
@@ -562,4 +563,129 @@ func (c *Client) doMerge(ctx context.Context, path string, body any) error {
 		log.Printf("gitea merge %s 返回 %d: %s", path, resp.StatusCode, string(b))
 		return fmt.Errorf("gitea merge %s 返回 %d", path, resp.StatusCode)
 	}
+}
+
+// ---------- PR 评审（Code Review）----------
+
+// ErrPRNotFound PR 不存在（归一 Gitea 404）。
+var ErrPRNotFound = errors.New("PR 不存在")
+
+// maxPullDiffBytes PR diff 读取上限（与 devops handler 的响应截断上限同值，2MB）。
+const maxPullDiffBytes = 2 << 20
+
+// PullRequest Gitea PR 视图（评审闭环展示所需字段子集；嵌套 ref/login 展平）。
+type PullRequest struct {
+	Number    int       `json:"number"`
+	Title     string    `json:"title"`
+	Body      string    `json:"body"`
+	State     string    `json:"state"` // open|closed
+	Head      string    `json:"head"`
+	Base      string    `json:"base"`
+	User      string    `json:"user"`
+	CreatedAt time.Time `json:"createdAt"`
+	Merged    bool      `json:"merged"`
+	Mergeable bool      `json:"mergeable"`
+}
+
+// giteaPull wire 结构（Gitea API 原生嵌套形状）。
+type giteaPull struct {
+	Number    int    `json:"number"`
+	Title     string `json:"title"`
+	Body      string `json:"body"`
+	State     string `json:"state"`
+	Head      struct {
+		Ref string `json:"ref"`
+	} `json:"head"`
+	Base struct {
+		Ref string `json:"ref"`
+	} `json:"base"`
+	User struct {
+		Login string `json:"login"`
+	} `json:"user"`
+	CreatedAt time.Time `json:"created_at"`
+	Merged    bool      `json:"merged"`
+	Mergeable bool      `json:"mergeable"`
+}
+
+func (g giteaPull) toPull() PullRequest {
+	return PullRequest{Number: g.Number, Title: g.Title, Body: g.Body, State: g.State,
+		Head: g.Head.Ref, Base: g.Base.Ref, User: g.User.Login, CreatedAt: g.CreatedAt,
+		Merged: g.Merged, Mergeable: g.Mergeable}
+}
+
+// ListPRs 列 PR。state: open|closed|all（空=open）。
+func (c *Client) ListPRs(ctx context.Context, owner, repo, state string) ([]PullRequest, error) {
+	if state == "" {
+		state = "open"
+	}
+	p := fmt.Sprintf("/api/v1/repos/%s/%s/pulls?state=%s", pathEscape(owner), pathEscape(repo), url.QueryEscape(state))
+	var wire []giteaPull
+	if err := c.doJSON(ctx, http.MethodGet, p, nil, &wire); err != nil {
+		return nil, err
+	}
+	out := make([]PullRequest, len(wire))
+	for i, g := range wire {
+		out[i] = g.toPull()
+	}
+	return out, nil
+}
+
+// GetPR 单个 PR 详情。不存在返 ErrPRNotFound。
+func (c *Client) GetPR(ctx context.Context, owner, repo string, number int) (PullRequest, error) {
+	p := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d", pathEscape(owner), pathEscape(repo), number)
+	var wire giteaPull
+	if err := c.doJSON(ctx, http.MethodGet, p, nil, &wire); err != nil {
+		if errors.Is(err, ErrRepoNotFound) {
+			return PullRequest{}, ErrPRNotFound
+		}
+		return PullRequest{}, err
+	}
+	return wire.toPull(), nil
+}
+
+// GetPRDiff 取 PR 原始 unified diff 文本（.diff 端点，text/plain，绕过 doJSON 的 JSON 解码）。
+// 不存在返 ErrPRNotFound。
+func (c *Client) GetPRDiff(ctx context.Context, owner, repo string, number int) (string, error) {
+	if c.baseURL == "" {
+		return "", ErrGiteaUnavailable
+	}
+	p := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d.diff", pathEscape(owner), pathEscape(repo), number)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+p, nil)
+	if err != nil {
+		return "", ErrGiteaUnavailable
+	}
+	req.Header.Set("Accept", "text/plain")
+	req.SetBasicAuth(c.username, c.password)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrGiteaUnavailable, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNotFound {
+		return "", ErrPRNotFound
+	}
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("gitea diff %s 返回 %d", p, resp.StatusCode)
+		return "", fmt.Errorf("gitea diff 返回 %d", resp.StatusCode)
+	}
+	// 读取上限 maxPullDiffBytes+1：+1 字节用于判定截断；防恶意/超大 diff 无界读撑爆内存
+	// （handler 层截断发生在内存峰值之后，此处是真正的防线）。
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxPullDiffBytes+1))
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// ReviewPR 提交整体评审。do: APPROVE|REQUEST_CHANGES|COMMENT。
+func (c *Client) ReviewPR(ctx context.Context, owner, repo string, number int, do, body string) error {
+	p := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/reviews", pathEscape(owner), pathEscape(repo), number)
+	var out any
+	return c.doJSON(ctx, http.MethodPost, p, map[string]any{"Do": do, "body": body}, &out)
+}
+
+// MergePR 按 number 合并 PR（merge commit 模式）。复用 doMerge 的冲突映射。
+func (c *Client) MergePR(ctx context.Context, owner, repo string, number int) error {
+	p := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/merge", pathEscape(owner), pathEscape(repo), number)
+	return c.doMerge(ctx, p, map[string]any{"Do": "merge", "MergeTitleField": "", "MergeMessageField": ""})
 }
