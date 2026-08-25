@@ -22,7 +22,7 @@ import { useUrlState } from '@/composables/useUrlState'
 import {
   type Span, type Trace,
   buildSpanTree, flattenSpanTree, spanWidth, spanLeft, spanChips, errSpanCount,
-  spanKindBadge, spanServiceLabel,
+  spanKindBadge, spanServiceLabel, spanLane, traceHasLane,
 } from '@/composables/useSpanTree'
 
 type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
@@ -313,6 +313,7 @@ watch(() => props.bindings, () => loadDeps(), { deep: true })
                     <span class="span-mono">{{ Math.round(row.durationMs / 2) }}ms</span>
                     <span class="span-mono">{{ row.durationMs }}ms</span>
                   </div>
+                  <div v-if="traceHasLane(row)" class="lane-legend">🛣 泳道标识——该 span 流量走了对应 feature 泳道；无标识 = default 基线</div>
                   <div v-for="node in spanRows(row)" :key="node.span.id"
                     class="span-card" :class="{ 'span-err': node.span.isError }"
                     :style="{ paddingLeft: 10 + node.depth * 18 + 'px' }">
@@ -320,6 +321,7 @@ watch(() => props.bindings, () => loadDeps(), { deep: true })
                       <span class="span-bar" :style="{ width: spanWidth(node.span, row) + '%', left: spanLeft(node.span, row) + '%' }" />
                       <span v-if="node.depth > 0" class="span-tree-line" />
                       <span v-if="spanKindBadge(node.span.kind)" class="span-kind" :title="spanKindBadge(node.span.kind)!.title">{{ spanKindBadge(node.span.kind)!.text }}</span>
+                      <span v-if="spanLane(node.span)" class="lane-chip" title="该 span 流量走了对应 feature 泳道">🛣 {{ spanLane(node.span) }}</span>
                       <span class="mono span-svc">{{ spanServiceLabel(node.span) }}</span>
                       <span class="span-op">{{ node.span.operation }}</span>
                       <span class="mono span-dur">{{ node.span.durationMs }}ms</span>
@@ -455,6 +457,8 @@ watch(() => props.bindings, () => loadDeps(), { deep: true })
 .span-bar { position: absolute; left: 0; bottom: 0; height: 4px; width: 0; background: rgba(99, 102, 241, 0.5); border-radius: 3px; z-index: 0; }
 .span-err .span-bar { background: rgba(239, 68, 68, 0.55); }
 .span-kind { flex-shrink: 0; font-size: 11px; padding: 0 5px; border-radius: 3px; background: rgba(99, 102, 241, 0.12); color: var(--brand); position: relative; z-index: 1; cursor: help; }
+.lane-chip { flex-shrink: 0; margin-left: 6px; padding: 0 6px; border-radius: 3px; font-size: 11px; background: var(--el-color-warning-light-9); color: var(--el-color-warning-dark-2); cursor: help; }
+.lane-legend { margin: 2px 0 6px; font-size: 12px; color: var(--el-color-warning-dark-2); }
 .span-svc { color: var(--brand); min-width: 100px; position: relative; z-index: 1; }
 .span-op { flex: 1; color: var(--text-dim); position: relative; z-index: 1; }
 .span-dur { color: var(--text-faint); position: relative; z-index: 1; }

@@ -161,6 +161,16 @@ export function spanKindBadge(kind?: string): { text: string; title: string } | 
  * spanServiceLabel：span 服务列文案——client span 显示「调用方 → 真实对端」。
  * 如 bff 的 redis client span 显示「bff → redis」，而非只显示调用方 bff（对端语义丢失）。
  */
+/** spanLane：取 span 的泳道（paas.lane 属性；无 = default 基线）。 */
+export function spanLane(span: Span): string {
+  return span.tags?.['paas.lane'] || ''
+}
+
+/** traceHasLane：trace 是否含泳道 span（图例仅在含泳道时显示）。 */
+export function traceHasLane(row: Trace): boolean {
+  return (row.spans || []).some((s) => spanLane(s))
+}
+
 export function spanServiceLabel(sp: Span): string {
   if (sp.kind === 'client' && sp.peer) return `${sp.service} → ${sp.peer}`
   return sp.service
