@@ -48,6 +48,17 @@ func (s *Store) List(ctx context.Context) ([]prompt.Prompt, error) {
 	return out, nil
 }
 
+// ListAll admin 跨租户列表（带 TenantID）。
+func (s *Store) ListAll(ctx context.Context) ([]prompt.Prompt, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]prompt.Prompt, 0, len(s.prompts))
+	for _, p := range s.prompts {
+		out = append(out, clone(p))
+	}
+	return out, nil
+}
+
 func (s *Store) Get(ctx context.Context, id string) (prompt.Prompt, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {

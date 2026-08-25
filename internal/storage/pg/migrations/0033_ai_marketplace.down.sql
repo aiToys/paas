@@ -1,0 +1,11 @@
+DROP TABLE IF EXISTS marketplace_items;
+ALTER TABLE ai_agents DROP COLUMN IF EXISTS installed_from;
+ALTER TABLE ai_agents DROP COLUMN IF EXISTS category;
+ALTER TABLE ai_tools DROP COLUMN IF EXISTS installed_from;
+ALTER TABLE ai_tools DROP COLUMN IF EXISTS category;
+ALTER TABLE ai_prompts DROP COLUMN IF EXISTS installed_from;
+ALTER TABLE ai_prompts DROP COLUMN IF EXISTS category;
+ALTER TABLE ai_skills DROP COLUMN IF EXISTS installed_from;
+ALTER TABLE ai_skills DROP COLUMN IF EXISTS examples;
+ALTER TABLE ai_skills DROP COLUMN IF EXISTS use_cases;
+ALTER TABLE ai_skills DROP COLUMN IF EXISTS category;

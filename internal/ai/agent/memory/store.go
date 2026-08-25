@@ -40,7 +40,9 @@ func clone(a agent.Agent) agent.Agent {
 	copy(t, a.Tools)
 	k := make([]string, len(a.KnowledgeBases))
 	copy(k, a.KnowledgeBases)
-	a.Tools, a.KnowledgeBases = t, k
+	s := make([]string, len(a.Skills))
+	copy(s, a.Skills)
+	a.Tools, a.KnowledgeBases, a.Skills = t, k, s
 	return a
 }
 
@@ -56,6 +58,17 @@ func (s *Store) List(ctx context.Context) ([]agent.Agent, error) {
 		if a.TenantID == tid {
 			out = append(out, clone(a))
 		}
+	}
+	return out, nil
+}
+
+// ListAll admin 跨租户列表（带 TenantID）。
+func (s *Store) ListAll(ctx context.Context) ([]agent.Agent, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]agent.Agent, 0, len(s.agents))
+	for _, a := range s.agents {
+		out = append(out, clone(a))
 	}
 	return out, nil
 }

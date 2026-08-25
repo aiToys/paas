@@ -24,7 +24,7 @@ type Store struct {
 func NewStore(db *storagepg.DB) *Store { return &Store{db: db} }
 
 // 列顺序与 scan 对齐（列错位 panic 警示）。
-const toolCols = `id, tenant_id, name, description, type, config, enabled, created_at, updated_at`
+const toolCols = `id, tenant_id, name, description, type, config, category, installed_from, enabled, created_at, updated_at`
 
 func (s *Store) newID() string {
 	s.seq.Add(1)
@@ -40,7 +40,7 @@ func marshalConfig(m map[string]string) ([]byte, error) {
 
 func scanTool(r storagepg.RowScanner, t *tool.Tool) error {
 	var cfgRaw []byte
-	if err := r.Scan(&t.ID, &t.TenantID, &t.Name, &t.Description, &t.Type, &cfgRaw, &t.Enabled, &t.CreatedAt, &t.UpdatedAt); err != nil {
+	if err := r.Scan(&t.ID, &t.TenantID, &t.Name, &t.Description, &t.Type, &cfgRaw, &t.Category, &t.InstalledFrom, &t.Enabled, &t.CreatedAt, &t.UpdatedAt); err != nil {
 		return err
 	}
 	t.Config = map[string]string{}
@@ -57,6 +57,25 @@ func (s *Store) List(ctx context.Context) ([]tool.Tool, error) {
 	}
 	rows, err := s.db.Pool().Query(ctx,
 		`SELECT `+toolCols+` FROM ai_tools WHERE tenant_id=$1 ORDER BY created_at DESC`, tid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]tool.Tool, 0)
+	for rows.Next() {
+		var t tool.Tool
+		if err = scanTool(rows, &t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ListAll admin 跨租户列表（不过滤 tenant，LIMIT 防大表）。
+func (s *Store) ListAll(ctx context.Context) ([]tool.Tool, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+toolCols+` FROM ai_tools ORDER BY created_at DESC LIMIT 1000`)
 	if err != nil {
 		return nil, err
 	}
@@ -106,8 +125,8 @@ func (s *Store) Create(ctx context.Context, t tool.Tool) (tool.Tool, error) {
 	t.UpdatedAt = now
 	cfg, _ := marshalConfig(t.Config)
 	_, err = s.db.Pool().Exec(ctx,
-		`INSERT INTO ai_tools (`+toolCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-		t.ID, t.TenantID, t.Name, t.Description, t.Type, cfg, t.Enabled, t.CreatedAt, t.UpdatedAt)
+		`INSERT INTO ai_tools (`+toolCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+		t.ID, t.TenantID, t.Name, t.Description, t.Type, cfg, t.Category, t.InstalledFrom, t.Enabled, t.CreatedAt, t.UpdatedAt)
 	if err != nil {
 		if storagepg.IsUniqueViolation(err) {
 			return tool.Tool{}, tool.ErrToolExists
@@ -129,9 +148,9 @@ func (s *Store) Update(ctx context.Context, t tool.Tool) (tool.Tool, error) {
 	t.UpdatedAt = time.Now()
 	cfg, _ := marshalConfig(t.Config)
 	ct, err := s.db.Pool().Exec(ctx,
-		`UPDATE ai_tools SET name=$1, description=$2, type=$3, config=$4, enabled=$5, updated_at=$6
-		 WHERE id=$7 AND tenant_id=$8`,
-		t.Name, t.Description, t.Type, cfg, t.Enabled, t.UpdatedAt, t.ID, t.TenantID)
+		`UPDATE ai_tools SET name=$1, description=$2, type=$3, config=$4, category=$5, installed_from=$6, enabled=$7, updated_at=$8
+		 WHERE id=$9 AND tenant_id=$10`,
+		t.Name, t.Description, t.Type, cfg, t.Category, t.InstalledFrom, t.Enabled, t.UpdatedAt, t.ID, t.TenantID)
 	if err != nil {
 		if storagepg.IsUniqueViolation(err) {
 			return tool.Tool{}, tool.ErrToolExists

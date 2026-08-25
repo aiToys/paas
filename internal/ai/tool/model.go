@@ -23,15 +23,17 @@ const (
 
 // Tool 工具定义（租户私有）。
 type Tool struct {
-	ID          string            `json:"id"`
-	TenantID    string            `json:"tenantId"`
-	Name        string            `json:"name"`        // 租户内唯一
-	Description string            `json:"description"` // 给 LLM 看的用途说明
-	Type        string            `json:"type"`        // mcp | http | builtin
-	Config      map[string]string `json:"config"`      // 类型相关配置
-	Enabled     bool              `json:"enabled"`
-	CreatedAt   time.Time         `json:"createdAt"`
-	UpdatedAt   time.Time         `json:"updatedAt"`
+	ID            string            `json:"id"`
+	TenantID      string            `json:"tenantId"`
+	Name          string            `json:"name"`        // 租户内唯一
+	Description   string            `json:"description"` // 给 LLM 看的用途说明
+	Type          string            `json:"type"`        // mcp | http | builtin
+	Config        map[string]string `json:"config"`      // 类型相关配置
+	Category      string            `json:"category,omitempty"`      // 广场分类
+	InstalledFrom string            `json:"installedFrom,omitempty"` // 来源 marketplace item ID（空=自建）
+	Enabled       bool              `json:"enabled"`
+	CreatedAt     time.Time         `json:"createdAt"`
+	UpdatedAt     time.Time         `json:"updatedAt"`
 }
 
 // MCP Config key 约定（Config map 的 key，type=mcp 时用）。

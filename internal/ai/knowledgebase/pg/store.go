@@ -120,6 +120,25 @@ func (s *Store) List(ctx context.Context) ([]knowledgebase.KnowledgeBase, error)
 	return out, rows.Err()
 }
 
+// ListAll admin 跨租户列表（不过滤 tenant，LIMIT 防大表）。
+func (s *Store) ListAll(ctx context.Context) ([]knowledgebase.KnowledgeBase, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+kbCols+` FROM ai_knowledgebases ORDER BY created_at DESC LIMIT 1000`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]knowledgebase.KnowledgeBase, 0)
+	for rows.Next() {
+		var k knowledgebase.KnowledgeBase
+		if err = scanKB(rows, &k); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) Get(ctx context.Context, id string) (knowledgebase.KnowledgeBase, error) {
 	tid, err := storagepg.TenantOrErr(ctx)
 	if err != nil {

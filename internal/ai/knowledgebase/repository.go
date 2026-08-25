@@ -10,6 +10,8 @@ type Repository interface {
 	// ---- KB ----
 	// List 列本租户 KB，按 CreatedAt 倒序。
 	List(ctx context.Context) ([]KnowledgeBase, error)
+	// ListAll admin 跨租户列表（带 TenantID）。
+	ListAll(ctx context.Context) ([]KnowledgeBase, error)
 	// Get 读取单条 KB（跨租户 ErrKBNotFound）。
 	Get(ctx context.Context, id string) (KnowledgeBase, error)
 	// Create 创建（Validate + 租户内 name 唯一）。

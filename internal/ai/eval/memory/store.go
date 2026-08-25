@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -15,9 +16,12 @@ import (
 type Store struct {
 	mu    sync.RWMutex
 	cases map[string]eval.EvalCase
+	runs  map[string]eval.EvalRun
 }
 
-func NewStore() *Store { return &Store{cases: make(map[string]eval.EvalCase)} }
+func NewStore() *Store {
+	return &Store{cases: make(map[string]eval.EvalCase), runs: make(map[string]eval.EvalRun)}
+}
 
 func randID() string {
 	b := make([]byte, 8)
@@ -128,4 +132,68 @@ func (s *Store) EvalCasesCount(ctx context.Context) (int, error) {
 		}
 	}
 	return n, nil
+}
+
+// —— EvalRun 历史（环形截断，每 agent 保留最近 20 次）——
+const maxRunsPerAgent = 20
+
+func (s *Store) ListRuns(ctx context.Context, agentID string) ([]eval.EvalRun, error) {
+	tid, err := tenantOrErr(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]eval.EvalRun, 0)
+	for _, r := range s.runs {
+		if r.TenantID == tid && (agentID == "" || r.AgentID == agentID) {
+			out = append(out, r)
+		}
+	}
+	// 最近优先
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}
+
+func (s *Store) GetRun(ctx context.Context, id string) (eval.EvalRun, error) {
+	tid, err := tenantOrErr(ctx)
+	if err != nil {
+		return eval.EvalRun{}, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	r, ok := s.runs[id]
+	if !ok || r.TenantID != tid {
+		return eval.EvalRun{}, eval.ErrEvalRunNotFound
+	}
+	return r, nil
+}
+
+func (s *Store) CreateRun(ctx context.Context, in eval.EvalRun) (eval.EvalRun, error) {
+	tid, err := tenantOrErr(ctx)
+	if err != nil {
+		return eval.EvalRun{}, err
+	}
+	if in.ID == "" {
+		in.ID = "evalrun-" + randID()
+	}
+	in.TenantID = tid
+	in.CreatedAt = time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.runs[in.ID] = in
+	// 环形截断：同 agent 仅保留最近 maxRunsPerAgent 次
+	var ids []string
+	for id, r := range s.runs {
+		if r.TenantID == tid && r.AgentID == in.AgentID {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) > maxRunsPerAgent {
+		sort.Slice(ids, func(i, j int) bool { return s.runs[ids[i]].CreatedAt.After(s.runs[ids[j]].CreatedAt) })
+		for _, id := range ids[maxRunsPerAgent:] {
+			delete(s.runs, id)
+		}
+	}
+	return in, nil
 }

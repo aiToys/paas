@@ -4,6 +4,7 @@ package pg
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync/atomic"
@@ -126,4 +127,93 @@ func (s *Store) EvalCasesCount(ctx context.Context) (int, error) {
 	var n int
 	err := s.db.Pool().QueryRow(ctx, `SELECT COUNT(*) FROM ai_eval_cases`).Scan(&n)
 	return n, err
+}
+
+// —— EvalRun 历史（每 agent 最近 20 次，Create 后惰性清理旧记录）——
+
+func (s *Store) ListRuns(ctx context.Context, agentID string) ([]eval.EvalRun, error) {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return nil, err
+	}
+	q := `SELECT id, tenant_id, agent_id, total, passed, results, duration_ms, created_at
+	      FROM eval_runs WHERE tenant_id=$1`
+	args := []any{tid}
+	if agentID != "" {
+		q += ` AND agent_id=$2`
+		args = append(args, agentID)
+	}
+	q += ` ORDER BY created_at DESC LIMIT 100`
+	rows, err := s.db.Pool().Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]eval.EvalRun, 0)
+	for rows.Next() {
+		var r eval.EvalRun
+		var resRaw []byte
+		if err := rows.Scan(&r.ID, &r.TenantID, &r.AgentID, &r.Total, &r.Passed, &resRaw, &r.DurationMs, &r.CreatedAt); err != nil {
+			return nil, err
+		}
+		r.Results = []eval.EvalResult{}
+		if len(resRaw) > 0 && string(resRaw) != "null" {
+			_ = json.Unmarshal(resRaw, &r.Results)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetRun(ctx context.Context, id string) (eval.EvalRun, error) {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return eval.EvalRun{}, err
+	}
+	row := s.db.Pool().QueryRow(ctx,
+		`SELECT id, tenant_id, agent_id, total, passed, results, duration_ms, created_at
+		 FROM eval_runs WHERE id=$1 AND tenant_id=$2`, id, tid)
+	var r eval.EvalRun
+	var resRaw []byte
+	if err := row.Scan(&r.ID, &r.TenantID, &r.AgentID, &r.Total, &r.Passed, &resRaw, &r.DurationMs, &r.CreatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return eval.EvalRun{}, eval.ErrEvalRunNotFound
+		}
+		return eval.EvalRun{}, err
+	}
+	r.Results = []eval.EvalResult{}
+	if len(resRaw) > 0 && string(resRaw) != "null" {
+		_ = json.Unmarshal(resRaw, &r.Results)
+	}
+	return r, nil
+}
+
+func (s *Store) CreateRun(ctx context.Context, in eval.EvalRun) (eval.EvalRun, error) {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return eval.EvalRun{}, err
+	}
+	if in.ID == "" {
+		in.ID = s.newRunID()
+	}
+	in.TenantID = tid
+	in.CreatedAt = time.Now()
+	resRaw, _ := json.Marshal(in.Results)
+	if _, err := s.db.Pool().Exec(ctx,
+		`INSERT INTO eval_runs (id, tenant_id, agent_id, total, passed, results, duration_ms, created_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		in.ID, in.TenantID, in.AgentID, in.Total, in.Passed, resRaw, in.DurationMs, in.CreatedAt); err != nil {
+		return eval.EvalRun{}, err
+	}
+	// 每 agent 只留最近 20 次（防历史膨胀）
+	_, _ = s.db.Pool().Exec(ctx,
+		`DELETE FROM eval_runs WHERE tenant_id=$1 AND agent_id=$2 AND id NOT IN (
+		   SELECT id FROM eval_runs WHERE tenant_id=$1 AND agent_id=$2 ORDER BY created_at DESC LIMIT 20)`,
+		tid, in.AgentID)
+	return in, nil
+}
+
+func (s *Store) newRunID() string {
+	s.seq.Add(1)
+	return fmt.Sprintf("evalrun-%d-%d", time.Now().UnixNano(), s.seq.Load())
 }

@@ -12,3 +12,10 @@ type Repository interface {
 	// EvalCasesCount 全表（seed 判空用）。
 	EvalCasesCount(ctx context.Context) (int, error)
 }
+
+// RunRepository 评估历史仓储（ListRuns 最近优先 + CreateRun + 环形截断在 store 内做）。
+type RunRepository interface {
+	ListRuns(ctx context.Context, agentID string) ([]EvalRun, error) // agentID 空列全部（最近优先）
+	GetRun(ctx context.Context, id string) (EvalRun, error)
+	CreateRun(ctx context.Context, r EvalRun) (EvalRun, error)
+}

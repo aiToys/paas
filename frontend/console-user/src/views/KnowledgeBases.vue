@@ -2,7 +2,7 @@
 // 资源中心 → 知识库（RAG）：文档上传->切片->embedding->向量检索。
 // KB 引用 dataservice vector(qdrant)+storage(minio) 实例（不自建），复用 MaaS embedding 模型。
 // 租户私有；不绑物理环境（无 prod:write）。文档上传异步解析+索引，状态轮询 parsing->indexed/failed。
-import { onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchJSON, fetchAuth } from '@/api'
 
@@ -19,9 +19,22 @@ interface Document {
 }
 interface ChunkHit { chunk: { content: string; seq: number }; score: number }
 interface DSItem { id: string; name: string; kind: string }
+interface Agent { id: string; name: string; knowledgeBases: string[] | null }
 
 const kbs = ref<KnowledgeBase[]>([])
+const agents = ref<Agent[]>([])
 const loading = ref(false)
+
+// 被 Agent 引用计数（kb id -> 引用它的 Agent 名列表）
+const usage = computed(() => {
+  const m: Record<string, string[]> = {}
+  for (const a of agents.value) {
+    for (const kid of a.knowledgeBases || []) {
+      ;(m[kid] ||= []).push(a.name)
+    }
+  }
+  return m
+})
 const vectorDS = ref<DSItem[]>([])
 const storageDS = ref<DSItem[]>([])
 
@@ -31,7 +44,12 @@ const DOC_STATUS_TYPE: Record<string, string> = { parsing: 'warning', indexed: '
 async function load() {
   loading.value = true
   try {
-    kbs.value = await fetchJSON<KnowledgeBase[]>('/api/knowledgebases')
+    const [k, a] = await Promise.all([
+      fetchJSON<KnowledgeBase[]>('/api/knowledgebases'),
+      fetchJSON<Agent[]>('/api/agents'),
+    ])
+    kbs.value = k
+    agents.value = a
   } catch (e) {
     ElMessage.error('加载知识库失败：' + (e as Error).message)
   } finally {
@@ -221,6 +239,16 @@ onUnmounted(stopPoll)
         </el-empty>
       </template>
       <el-table-column prop="name" label="名称" />
+      <el-table-column label="被引用" min-width="140">
+        <template #default="{ row }">
+          <template v-if="usage[row.id]?.length">
+            <el-tooltip :content="usage[row.id].join('、')">
+              <el-tag size="small" type="primary">{{ usage[row.id].length }} 个 Agent</el-tag>
+            </el-tooltip>
+          </template>
+          <span v-else style="color: var(--el-text-color-placeholder)">未引用</span>
+        </template>
+      </el-table-column>
       <el-table-column prop="embeddingModel" label="向量模型" width="180" />
       <el-table-column prop="embeddingDim" label="维度" width="90" />
       <el-table-column label="创建时间" width="180">

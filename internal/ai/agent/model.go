@@ -22,6 +22,9 @@ type Agent struct {
 	PromptRef      string    `json:"promptRef"`      // 引用 prompt 模板 name（SystemPrompt 为空时用）
 	Tools          []string  `json:"tools"`          // 引用 tool ID 列表（描述注入 system prompt）
 	KnowledgeBases []string  `json:"knowledgeBases"` // 引用 KB ID（RAG 检索注入上下文）
+	Skills         []string  `json:"skills"`         // 引用 skill ID 列表（指令能力包，注入 system prompt）
+	Category       string    `json:"category,omitempty"`      // 广场分类
+	InstalledFrom  string    `json:"installedFrom,omitempty"` // 来源 marketplace item ID（空=自建）
 	MaxSteps       int       `json:"maxSteps"`       // FunctionCalling 最大步数（防死循环，默认 5）
 	Enabled        bool      `json:"enabled"`
 	CreatedAt      time.Time `json:"createdAt"`

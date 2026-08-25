@@ -4,10 +4,12 @@
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchJSON, fetchAuth } from '@/api'
+import { usePublish } from '@/composables/usePublish'
 
 interface Prompt {
   id: string; name: string; template: string
   variables?: string[]
+  category?: string; installedFrom?: string
   version: number; active: boolean
   createdAt: string
 }
@@ -84,6 +86,12 @@ async function activate(p: Prompt) {
   load()
 }
 
+// 发布到广场（发布 active 版本快照）
+const { publish } = usePublish('prompt', async (row, category) => {
+  // Prompt 无 Update 端点（版本不可变）——分类只随发布快照走，不回写
+  void row; void category
+}, load)
+
 async function remove(p: Prompt) {
   await ElMessageBox.confirm(`删除「${p.name} v${p.version}」？`, '删除确认', { type: 'warning' })
   const resp = await fetchAuth(`/api/prompts/${p.id}`, { method: 'DELETE' })
@@ -124,7 +132,8 @@ onMounted(load)
           <el-table-column label="操作" width="180">
             <template #default="{ row }">
               <el-button size="small" :disabled="row.active" @click="activate(row)">激活</el-button>
-              <el-button size="small" type="danger" @click="remove(row)">删除</el-button>
+              <el-button size="small" type="primary" link @click="publish(row)">发布</el-button>
+              <el-button size="small" type="danger" link @click="remove(row)">删除</el-button>
             </template>
           </el-table-column>
         </el-table>

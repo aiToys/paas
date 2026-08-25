@@ -1,0 +1,2 @@
+ALTER TABLE ai_agents DROP COLUMN IF EXISTS skills;
+DROP TABLE IF EXISTS ai_skills;

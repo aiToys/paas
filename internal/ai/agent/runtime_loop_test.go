@@ -60,6 +60,7 @@ type stubRepo struct{ a Agent }
 
 func (s *stubRepo) Get(_ context.Context, _ string) (Agent, error) { return s.a, nil }
 func (s *stubRepo) List(context.Context) ([]Agent, error)          { panic("unused") }
+func (s *stubRepo) ListAll(context.Context) ([]Agent, error)       { panic("unused") }
 func (s *stubRepo) Create(context.Context, Agent) (Agent, error)   { panic("unused") }
 func (s *stubRepo) Update(context.Context, Agent) (Agent, error)   { panic("unused") }
 func (s *stubRepo) Delete(context.Context, string) error           { panic("unused") }

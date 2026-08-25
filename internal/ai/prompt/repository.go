@@ -6,6 +6,7 @@ import "context"
 // Create 同 name 自动 version+1 + 激活（旧版 deactive）。GetActive 取当前激活版本。
 type Repository interface {
 	List(ctx context.Context) ([]Prompt, error)         // 列全部版本（按 name, version desc）
+	ListAll(ctx context.Context) ([]Prompt, error)      // admin 跨租户（带 TenantID）
 	Get(ctx context.Context, id string) (Prompt, error) // 取单版本
 	Create(ctx context.Context, p Prompt) (Prompt, error)
 	SetActive(ctx context.Context, id string) (Prompt, error) // 激活某版本（同 name 其他 deactive）

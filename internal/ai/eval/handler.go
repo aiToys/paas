@@ -22,13 +22,19 @@ const (
 //	POST   /api/agent-evals            创建用例（body=EvalCase）
 //	DELETE /api/agent-evals/{id}       删用例
 //	POST   /api/agent-evals/run?agentId=  跑某 Agent 全部用例（返 []EvalResult）
+//	GET    /api/agent-evals/runs?agentId= 评估历史（最近 20 次/agent）
+//	GET    /api/agent-evals/runs/{id}     单次历史详情（含逐用例结果）
 type Handler struct {
 	repo      Repository
 	service   *Service
+	runs      RunRepository
 	Authorize func(r *http.Request, perm string) bool
 }
 
 func NewHandler(repo Repository, svc *Service) *Handler { return &Handler{repo: repo, service: svc} }
+
+// WithRuns 注入评估历史仓储。
+func (h *Handler) WithRuns(r RunRepository) *Handler { h.runs = r; return h }
 
 func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) bool {
 	if h.Authorize == nil || h.Authorize(r, perm) {
@@ -46,6 +52,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveCollection(w, r)
 	case path == "/api/agent-evals/run":
 		h.serveRun(w, r)
+	case path == "/api/agent-evals/runs":
+		h.serveRuns(w, r)
+	case strings.HasPrefix(path, "/api/agent-evals/runs/"):
+		h.serveRunItem(w, r, strings.TrimPrefix(path, "/api/agent-evals/runs/"))
 	case strings.HasPrefix(path, "/api/agent-evals/"):
 		h.serveItem(w, r)
 	default:
@@ -130,8 +140,52 @@ func (h *Handler) serveRun(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteData(w, results)
 }
 
+// serveRuns 评估历史列表（?agentId= 可选过滤）。
+func (h *Handler) serveRuns(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.allow(w, r, PermEvalRead) {
+		return
+	}
+	if h.runs == nil {
+		httputil.WriteError(w, http.StatusServiceUnavailable, "评估历史未装配")
+		return
+	}
+	list, err := h.runs.ListRuns(r.Context(), r.URL.Query().Get("agentId"))
+	if err != nil {
+		httputil.WriteInternalError(w, err)
+		return
+	}
+	httputil.WriteData(w, list)
+}
+
+// serveRunItem 单次评估历史详情。
+func (h *Handler) serveRunItem(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodGet || id == "" {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.allow(w, r, PermEvalRead) {
+		return
+	}
+	if h.runs == nil {
+		httputil.WriteError(w, http.StatusServiceUnavailable, "评估历史未装配")
+		return
+	}
+	run, err := h.runs.GetRun(r.Context(), id)
+	if err != nil {
+		h.writeErr(w, err)
+		return
+	}
+	httputil.WriteData(w, run)
+}
+
 func (h *Handler) writeErr(w http.ResponseWriter, err error) {
 	switch {
+	case err == ErrEvalRunNotFound:
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
 	case err == ErrEvalCaseNotFound:
 		httputil.WriteError(w, http.StatusNotFound, err.Error())
 	case err == ErrEvalCaseExists:

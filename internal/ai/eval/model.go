@@ -8,7 +8,8 @@
 //   - exact：输出 trim 后等于期望（最严格）
 //   - regex：期望为正则，输出匹配即通过
 //
-// 租户私有；不绑物理环境（无 prod:write）。EvalResult 不持久化（按需跑，结果即时返回）。
+// 租户私有；不绑物理环境（无 prod:write）。EvalRun 持久化历史（对标 LangSmith 评估记录：
+// 回归趋势 + 改动前后对比），每 Agent 保留最近 N 次防膨胀。
 package eval
 
 import (
@@ -41,7 +42,19 @@ type EvalCase struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
-// EvalResult 单用例运行结果（不持久化）。
+// EvalRun 一次批量评估的历史记录（持久化，趋势/对比用）。
+type EvalRun struct {
+	ID         string       `json:"id"`
+	TenantID   string       `json:"tenantId"`
+	AgentID    string       `json:"agentId"`
+	Total      int          `json:"total"`
+	Passed     int          `json:"passed"`
+	Results    []EvalResult `json:"results"` // JSONB
+	DurationMs int64        `json:"durationMs"`
+	CreatedAt  time.Time    `json:"createdAt"`
+}
+
+// EvalResult 单用例运行结果（随 EvalRun 持久化）。
 type EvalResult struct {
 	CaseID     string `json:"caseId"`
 	Name       string `json:"name"`
@@ -60,6 +73,7 @@ type Runner interface {
 var (
 	ErrEvalCaseNotFound = errors.New("评估用例不存在")
 	ErrEvalCaseExists   = errors.New("评估用例已存在")
+	ErrEvalRunNotFound  = errors.New("评估记录不存在")
 )
 
 // Validate 校验用例。

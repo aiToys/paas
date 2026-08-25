@@ -87,6 +87,18 @@ func (s *Store) List(ctx context.Context) ([]knowledgebase.KnowledgeBase, error)
 	return out, nil
 }
 
+// ListAll admin 跨租户列表（带 TenantID）。
+func (s *Store) ListAll(ctx context.Context) ([]knowledgebase.KnowledgeBase, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]knowledgebase.KnowledgeBase, 0, len(s.kbs))
+	for _, k := range s.kbs {
+		out = append(out, k)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}
+
 func (s *Store) Get(ctx context.Context, id string) (knowledgebase.KnowledgeBase, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {

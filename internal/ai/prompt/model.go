@@ -15,14 +15,16 @@ import (
 
 // Prompt 提示词模板（一个版本一行）。
 type Prompt struct {
-	ID        string    `json:"id"`
-	TenantID  string    `json:"tenantId"`
-	Name      string    `json:"name"`      // 租户内唯一逻辑名（多版本共用）
-	Template  string    `json:"template"`  // 模板文本（{{.Var}} 占位）
-	Variables []string  `json:"variables"` // 声明变量
-	Version   int       `json:"version"`   // 版本号（同 name 单调递增）
-	Active    bool      `json:"active"`    // 是否当前激活版本（同 name 仅一个 active）
-	CreatedAt time.Time `json:"createdAt"`
+	ID            string    `json:"id"`
+	TenantID      string    `json:"tenantId"`
+	Name          string    `json:"name"`      // 租户内唯一逻辑名（多版本共用）
+	Template      string    `json:"template"`  // 模板文本（{{.Var}} 占位）
+	Variables     []string  `json:"variables"` // 声明变量
+	Category      string    `json:"category,omitempty"`      // 广场分类
+	InstalledFrom string    `json:"installedFrom,omitempty"` // 来源 marketplace item ID（空=自建）
+	Version       int       `json:"version"`   // 版本号（同 name 单调递增）
+	Active        bool      `json:"active"`    // 是否当前激活版本（同 name 仅一个 active）
+	CreatedAt     time.Time `json:"createdAt"`
 }
 
 // Validate 校验（创建前调）。

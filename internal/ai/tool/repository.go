@@ -6,6 +6,7 @@ import "context"
 // ToolsCount 全表（不经 tenant，seed 判空用，与 dataservice/KB 同款）。
 type Repository interface {
 	List(ctx context.Context) ([]Tool, error)
+	ListAll(ctx context.Context) ([]Tool, error) // admin 跨租户（带 TenantID）
 	Get(ctx context.Context, id string) (Tool, error)
 	Create(ctx context.Context, t Tool) (Tool, error)
 	Update(ctx context.Context, t Tool) (Tool, error)

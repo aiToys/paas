@@ -23,7 +23,7 @@ type Store struct {
 func NewStore(db *storagepg.DB) *Store { return &Store{db: db} }
 
 // 列顺序（tools/knowledge_bases JSONB）。
-const agentCols = `id, tenant_id, name, description, model, system_prompt, prompt_ref, tools, knowledge_bases, max_steps, enabled, created_at, updated_at`
+const agentCols = `id, tenant_id, name, description, model, system_prompt, prompt_ref, tools, knowledge_bases, skills, category, installed_from, max_steps, enabled, created_at, updated_at`
 
 func (s *Store) newID() string {
 	s.seq.Add(1)
@@ -38,9 +38,9 @@ func marshalStrList(v []string) ([]byte, error) {
 }
 
 func scanAgent(r storagepg.RowScanner, a *agent.Agent) error {
-	var toolsRaw, kbRaw []byte
+	var toolsRaw, kbRaw, skillsRaw []byte
 	if err := r.Scan(&a.ID, &a.TenantID, &a.Name, &a.Description, &a.Model, &a.SystemPrompt, &a.PromptRef,
-		&toolsRaw, &kbRaw, &a.MaxSteps, &a.Enabled, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		&toolsRaw, &kbRaw, &skillsRaw, &a.Category, &a.InstalledFrom, &a.MaxSteps, &a.Enabled, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		return err
 	}
 	a.Tools = []string{}
@@ -50,6 +50,10 @@ func scanAgent(r storagepg.RowScanner, a *agent.Agent) error {
 	}
 	if len(kbRaw) > 0 && string(kbRaw) != "null" {
 		_ = json.Unmarshal(kbRaw, &a.KnowledgeBases)
+	}
+	a.Skills = []string{}
+	if len(skillsRaw) > 0 && string(skillsRaw) != "null" {
+		_ = json.Unmarshal(skillsRaw, &a.Skills)
 	}
 	return nil
 }
@@ -61,6 +65,25 @@ func (s *Store) List(ctx context.Context) ([]agent.Agent, error) {
 	}
 	rows, err := s.db.Pool().Query(ctx,
 		`SELECT `+agentCols+` FROM ai_agents WHERE tenant_id=$1 ORDER BY created_at DESC`, tid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]agent.Agent, 0)
+	for rows.Next() {
+		var a agent.Agent
+		if err = scanAgent(rows, &a); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// ListAll admin 跨租户列表（不过滤 tenant，LIMIT 防大表）。
+func (s *Store) ListAll(ctx context.Context) ([]agent.Agent, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+agentCols+` FROM ai_agents ORDER BY created_at DESC LIMIT 1000`)
 	if err != nil {
 		return nil, err
 	}
@@ -113,9 +136,10 @@ func (s *Store) Create(ctx context.Context, a agent.Agent) (agent.Agent, error) 
 	a.CreatedAt, a.UpdatedAt = now, now
 	tools, _ := marshalStrList(a.Tools)
 	kbs, _ := marshalStrList(a.KnowledgeBases)
+	skills, _ := marshalStrList(a.Skills)
 	_, err = s.db.Pool().Exec(ctx,
-		`INSERT INTO ai_agents (`+agentCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-		a.ID, a.TenantID, a.Name, a.Description, a.Model, a.SystemPrompt, a.PromptRef, tools, kbs, a.MaxSteps, a.Enabled, a.CreatedAt, a.UpdatedAt)
+		`INSERT INTO ai_agents (`+agentCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+		a.ID, a.TenantID, a.Name, a.Description, a.Model, a.SystemPrompt, a.PromptRef, tools, kbs, skills, a.Category, a.InstalledFrom, a.MaxSteps, a.Enabled, a.CreatedAt, a.UpdatedAt)
 	if err != nil {
 		if storagepg.IsUniqueViolation(err) {
 			return agent.Agent{}, agent.ErrAgentExists
@@ -140,11 +164,12 @@ func (s *Store) Update(ctx context.Context, a agent.Agent) (agent.Agent, error) 
 	a.UpdatedAt = time.Now()
 	tools, _ := marshalStrList(a.Tools)
 	kbs, _ := marshalStrList(a.KnowledgeBases)
+	skills, _ := marshalStrList(a.Skills)
 	ct, err := s.db.Pool().Exec(ctx,
 		`UPDATE ai_agents SET name=$1, description=$2, model=$3, system_prompt=$4, prompt_ref=$5,
-		 tools=$6, knowledge_bases=$7, max_steps=$8, enabled=$9, updated_at=$10
-		 WHERE id=$11 AND tenant_id=$12`,
-		a.Name, a.Description, a.Model, a.SystemPrompt, a.PromptRef, tools, kbs, a.MaxSteps, a.Enabled, a.UpdatedAt, a.ID, a.TenantID)
+		 tools=$6, knowledge_bases=$7, skills=$8, max_steps=$9, enabled=$10, updated_at=$11
+		 WHERE id=$12 AND tenant_id=$13`,
+		a.Name, a.Description, a.Model, a.SystemPrompt, a.PromptRef, tools, kbs, skills, a.MaxSteps, a.Enabled, a.UpdatedAt, a.ID, a.TenantID)
 	if err != nil {
 		if storagepg.IsUniqueViolation(err) {
 			return agent.Agent{}, agent.ErrAgentExists

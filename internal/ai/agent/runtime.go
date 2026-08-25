@@ -16,6 +16,7 @@ import (
 	"github.com/aitoys/paas/internal/ai/guardrail"
 	"github.com/aitoys/paas/internal/ai/knowledgebase"
 	"github.com/aitoys/paas/internal/ai/prompt"
+	"github.com/aitoys/paas/internal/ai/skill"
 	"github.com/aitoys/paas/internal/ai/tool"
 	"github.com/aitoys/paas/internal/ai/tool/mcp"
 	"github.com/aitoys/paas/internal/maas"
@@ -46,11 +47,15 @@ type Runtime struct {
 	resolver provider.CredentialResolver
 	prompts  prompt.Repository
 	tools    tool.Repository
+	skills   skill.Repository
 	kb       *knowledgebase.Retriever
 	guard    guardrail.Guard // 输入/输出护栏（nil 全放行）
 	// promptLogEnabled 为 true 时，结构化日志记录输入/输出摘要（脱敏长度），便于审计/调试。
 	promptLogEnabled bool
 }
+
+// WithSkills 注入 skill 仓储（依赖倒置；不调则 skill 维度降级跳过）。
+func (r *Runtime) WithSkills(s skill.Repository) *Runtime { r.skills = s; return r }
 
 // WithGuard 注入护栏（依赖倒置；不调则全放行）。
 func (r *Runtime) WithGuard(g guardrail.Guard) *Runtime { r.guard = g; return r }
@@ -83,13 +88,26 @@ func lastUserText(msgs []provider.Message) string {
 	return ""
 }
 
-// buildSystem 组装 system prompt：agent.SystemPrompt 或 PromptRef 模板 + KB RAG 上下文。
+// buildSystem 组装 system prompt：agent.SystemPrompt 或 PromptRef 模板 + Skill 能力指令 + KB RAG 上下文。
 // 工具描述不在此注入（启用工具时以结构化 ToolDef 传 LLM，见 buildTools）。
 func (r *Runtime) buildSystem(ctx context.Context, a Agent, msgs []provider.Message) string {
 	sys := a.SystemPrompt
 	if sys == "" && a.PromptRef != "" && r.prompts != nil {
 		if p, err := r.prompts.GetActive(ctx, a.PromptRef); err == nil {
 			sys = p.Template
+		}
+	}
+	// Skill 能力指令：逐个注入（启用的 skill 才生效，缺失/禁用静默跳过——与 tool 降级语义一致）。
+	if len(a.Skills) > 0 && r.skills != nil {
+		for _, sid := range a.Skills {
+			s, err := r.skills.Get(ctx, sid)
+			if err != nil || !s.Enabled {
+				continue
+			}
+			if sys != "" {
+				sys += "\n\n"
+			}
+			sys += "# 能力：" + s.Name + "\n" + s.Instructions
 		}
 	}
 	// KB RAG：用最后一条 user 消息检索，注入相关切片。
@@ -189,13 +207,23 @@ func (r *Runtime) buildTools(ctx context.Context, a Agent) ([]provider.ToolDef, 
 // 启用工具时进入多轮循环；底层 LLM 不可达（凭证/模型缺失）返脱敏错误。
 // 输入护栏在调 LLM 前拦截（命中返 ErrBlocked）；输出护栏逐段检（命中截断 + ErrBlocked）。
 // 整轮包在 gen_ai OTel span 内（接 Jaeger 后 /api/observability/traces 可观测）。
+// Run 运行 Agent。conversationId 非空时启用多轮记忆：历史前置 + 本轮追加（内存环形，见 memory.go）。
 func (r *Runtime) Run(ctx context.Context, agentID string, msgs []provider.Message, onChunk func(provider.Chunk)) error {
+	return r.RunConv(ctx, agentID, "", msgs, onChunk)
+}
+
+// RunConv 带会话 ID 的运行（conversationId 空 = 无状态单轮，现状不变）。
+func (r *Runtime) RunConv(ctx context.Context, agentID, conversationID string, msgs []provider.Message, onChunk func(provider.Chunk)) error {
 	a, err := r.agents.Get(ctx, agentID)
 	if err != nil {
 		return err
 	}
 	if !a.Enabled {
 		return fmt.Errorf("agent 已禁用")
+	}
+	// 多轮记忆：conversationId 非空时前置历史（不含 system——runLoop 每轮重建）。
+	if conversationID != "" {
+		msgs = append(conversations.loadHistory(agentID, conversationID), msgs...)
 	}
 	// 输入护栏：检查最后一条用户消息（拦截滥用/越权提示）。
 	if r.guard != nil {
@@ -227,12 +255,30 @@ func (r *Runtime) Run(ctx context.Context, agentID string, msgs []provider.Messa
 		log.Printf("[ai] agent=%s model=%s inputChars=%d", agentID, a.Model, totalChars(msgs)) //nolint:gosec // agentID/模型名来自 admin 配置实体
 	}
 
-	err = r.runLoop(ctx, p, a, msgs, onChunk)
+	// 收集本轮 assistant 输出（会话记忆追加用；包装 onChunk 不影响流式回调）
+	var finalText strings.Builder
+	wrapped := func(c provider.Chunk) {
+		if c.Content != "" {
+			finalText.WriteString(c.Content)
+		}
+		if onChunk != nil {
+			onChunk(c)
+		}
+	}
+	err = r.runLoop(ctx, p, a, msgs, wrapped)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
+		return err
 	}
 	span.SetAttributes(attribute.Int("gen_ai.agent.max_steps", a.MaxSteps))
-	return err
+	// 多轮记忆：成功结束后追加本轮 user + assistant（user 取原始最后一条）
+	if conversationID != "" && len(msgs) > 0 {
+		last := msgs[len(msgs)-1]
+		if last.Role == "user" {
+			conversations.appendHistory(agentID, conversationID, last, provider.Message{Role: "assistant", Content: finalText.String()})
+		}
+	}
+	return nil
 }
 
 // CheckInput 仅做输入护栏预检（不调 LLM），供 handler 在开 SSE 前返回干净 422。
@@ -355,6 +401,11 @@ func truncate(s string, n int) string {
 // ServeSSE 把 Agent 运行以 OpenAI 兼容 SSE 输出（data: {choices:[{delta:{content}}]}）。
 // 供 handler /run 端点复用 gateway 流式协议（前端 Playground 可直接消费）。
 func (r *Runtime) ServeSSE(w http.ResponseWriter, ctx context.Context, agentID string, msgs []provider.Message) error {
+	return r.ServeSSEConv(w, ctx, agentID, "", msgs)
+}
+
+// ServeSSEConv 带会话 ID 的 SSE 运行（conversationId 空 = 无状态，现状不变）。
+func (r *Runtime) ServeSSEConv(w http.ResponseWriter, ctx context.Context, agentID, conversationID string, msgs []provider.Message) error {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		return fmt.Errorf("streaming unsupported")
@@ -368,7 +419,7 @@ func (r *Runtime) ServeSSE(w http.ResponseWriter, ctx context.Context, agentID s
 		flusher.Flush()
 	}
 	writeSSE(map[string]any{"choices": []map[string]any{{"delta": map[string]string{"role": "assistant"}}}})
-	err := r.Run(ctx, agentID, msgs, func(c provider.Chunk) {
+	err := r.RunConv(ctx, agentID, conversationID, msgs, func(c provider.Chunk) {
 		if c.Content == "" && c.Reasoning == "" {
 			return
 		}

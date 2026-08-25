@@ -22,7 +22,7 @@ type Store struct {
 
 func NewStore(db *storagepg.DB) *Store { return &Store{db: db} }
 
-const promptCols = `id, tenant_id, name, template, variables, version, active, created_at`
+const promptCols = `id, tenant_id, name, template, variables, category, installed_from, version, active, created_at`
 
 func (s *Store) newID() string {
 	s.seq.Add(1)
@@ -38,7 +38,7 @@ func marshalVars(v []string) ([]byte, error) {
 
 func scanPrompt(r storagepg.RowScanner, p *prompt.Prompt) error {
 	var vRaw []byte
-	if err := r.Scan(&p.ID, &p.TenantID, &p.Name, &p.Template, &vRaw, &p.Version, &p.Active, &p.CreatedAt); err != nil {
+	if err := r.Scan(&p.ID, &p.TenantID, &p.Name, &p.Template, &vRaw, &p.Category, &p.InstalledFrom, &p.Version, &p.Active, &p.CreatedAt); err != nil {
 		return err
 	}
 	p.Variables = []string{}
@@ -55,6 +55,25 @@ func (s *Store) List(ctx context.Context) ([]prompt.Prompt, error) {
 	}
 	rows, err := s.db.Pool().Query(ctx,
 		`SELECT `+promptCols+` FROM ai_prompts WHERE tenant_id=$1 ORDER BY name, version DESC`, tid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]prompt.Prompt, 0)
+	for rows.Next() {
+		var p prompt.Prompt
+		if err = scanPrompt(rows, &p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// ListAll admin 跨租户列表（仅 active 版本，LIMIT 防大表）。
+func (s *Store) ListAll(ctx context.Context) ([]prompt.Prompt, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+promptCols+` FROM ai_prompts WHERE active ORDER BY name LIMIT 1000`)
 	if err != nil {
 		return nil, err
 	}
@@ -132,8 +151,8 @@ func (s *Store) Create(ctx context.Context, p prompt.Prompt) (prompt.Prompt, err
 		return prompt.Prompt{}, err
 	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO ai_prompts (`+promptCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-		p.ID, p.TenantID, p.Name, p.Template, vars, p.Version, p.Active, p.CreatedAt); err != nil {
+		`INSERT INTO ai_prompts (`+promptCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		p.ID, p.TenantID, p.Name, p.Template, vars, p.Category, p.InstalledFrom, p.Version, p.Active, p.CreatedAt); err != nil {
 		return prompt.Prompt{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {

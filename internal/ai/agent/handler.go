@@ -172,7 +172,8 @@ func (h *Handler) serveRun(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	var req struct {
-		Messages []provider.Message `json:"messages"`
+		Messages       []provider.Message `json:"messages"`
+		ConversationID string             `json:"conversationId,omitempty"` // 非空启用多轮记忆（历史前置 + 本轮追加）
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -194,7 +195,7 @@ func (h *Handler) serveRun(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		return
 	}
-	if err := h.runtime.ServeSSE(w, r.Context(), id, req.Messages); err != nil {
+	if err := h.runtime.ServeSSEConv(w, r.Context(), id, req.ConversationID, req.Messages); err != nil {
 		// SSE 已开始则无法改 status，仅日志（ServeSSE 内部已 flush 错误信息由 [DONE] 收尾）
 		_ = err
 	}
