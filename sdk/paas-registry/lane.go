@@ -8,6 +8,10 @@ import (
 )
 
 // LaneHeader 流量染色 HTTP header 名。服务间调用透传此 header 即得联调泳道上下文。
+//
+// 染色语义（诚实边界）：SDK 的服务发现与出站注入按「ctx lane > 自身部署泳道（PAAS_LANE_ID env）
+// > 无」解析。非 SDK 应用（裸 http client 直连 Service DNS）不经此链路，不自动染色——这类应用
+// 跨泳道联调仍需入口侧显式指定（部署隔离仍生效，只是不降级发现）。
 const LaneHeader = "x-paas-lane"
 
 // laneKey 是 ctx 携带 lane 的 key（私有类型避免与其他包冲突）。
