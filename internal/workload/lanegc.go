@@ -2,6 +2,7 @@ package workload
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 )
@@ -26,6 +27,7 @@ type LaneGC struct {
 	MaxSweep int              // 单轮删除上限（默认 20）
 	Now      func() time.Time // 测试注入时钟
 	Log      *log.Logger      // 可空（nil 用 log.Default）
+	Audit    AdminAuditRecorder // 可空（nil 跳过审计）；回收是删除用户资源，审计只增不删（合规）
 }
 
 // Sweep 执行一轮回收，返回删除数。单轮上限 MaxSweep（防 TTL 误配短引发雪崩）；
@@ -71,6 +73,11 @@ func (g *LaneGC) Sweep(ctx context.Context) int {
 		}
 		g.logf("laneGC: 回收闲置泳道 workload=%s app=%s lane=%s（闲置 %s）",
 			w.ID, w.AppID, w.LaneID, now.Sub(idleSince).Round(time.Minute))
+		if g.Audit != nil {
+			// best-effort：审计失败不阻断回收（日志已留痕），与 handler 层审计同款取舍。
+			_ = g.Audit.Record(ctx, w.TenantID, "lane-gc", "lane_gc", "workload", w.ID,
+				fmt.Sprintf("回收闲置泳道 app=%s lane=%s 闲置=%s", w.AppID, w.LaneID, now.Sub(idleSince).Round(time.Minute)))
+		}
 		deleted++
 	}
 	return deleted

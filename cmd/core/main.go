@@ -157,6 +157,7 @@ func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, metrics
 			EnvType:  stores.Environment.EnvType, // 与 workload handler 同源注入
 			TTL:      envDuration("PAAS_LANE_TTL", 72*time.Hour),
 			MaxSweep: 20,
+			Audit:    &identityAuditAdapter{store: stores.Security}, // lane_gc 审计（spec 承诺，审计只增不删）
 		}
 		stopGC := gc.Start(ctx, v)
 		defer stopGC()
