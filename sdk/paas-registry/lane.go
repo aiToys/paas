@@ -3,6 +3,8 @@ package paasregistry
 import (
 	"context"
 	"net/http"
+	"os"
+	"sync/atomic"
 )
 
 // LaneHeader 流量染色 HTTP header 名。服务间调用透传此 header 即得联调泳道上下文。
@@ -64,13 +66,41 @@ func LaneMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// ApplyLaneHeader 从 ctx 取 lane 注入 outgoing 请求的 x-paas-lane header。
+// ApplyLaneHeader 注入 outgoing 请求的 x-paas-lane header（lane 解析经 resolveLane：
+// ctx lane 优先，缺失回落自身部署泳道 SelfLane env）。
 // 应用调下游服务前调用（与 paas-registry GetService 配套，完成跨服务染色透传）。
-// lane 空 / ctx 无 lane 时不注入（保持 default 行为，向后兼容）。
+// lane 解析为空时不注入（保持 default 行为，向后兼容）。
 func ApplyLaneHeader(ctx context.Context, req *http.Request) {
-	lane := LaneFromCtx(ctx)
-	if lane == "" || lane == "default" {
+	lane := resolveLane(ctx)
+	if lane == "" {
 		return
 	}
 	req.Header.Set(LaneHeader, lane)
+}
+
+// selfLane 进程级缓存自身部署泳道（sync.OnceValue 语义，手动 atomic 兜空重读）。
+var selfLane atomic.Value // string
+
+// SelfLane 返回自身部署泳道（reconciler 注入的 PAAS_LANE_ID env）。
+// 空缺 / "default" 返 ""（基线）。首次调用读取并缓存。
+// 这是「应用零改动染色」核心：应用不挂 LaneMiddleware 时，出站调用回落到自身泳道。
+func SelfLane() string {
+	if v, ok := selfLane.Load().(string); ok && v != "" {
+		return v
+	}
+	v := os.Getenv("PAAS_LANE_ID")
+	if v == "" || v == "default" {
+		v = "" // 基线统一空串
+	}
+	selfLane.Store(v)
+	return v
+}
+
+// resolveLane lane 解析优先级：显式 ctx lane > SelfLane env > ""。
+// ctx lane 是入口/上游指定的染色（如网关注入 header）；env 是自身部署泳道。
+func resolveLane(ctx context.Context) string {
+	if lane := LaneFromCtx(ctx); lane != "" {
+		return lane
+	}
+	return SelfLane()
 }

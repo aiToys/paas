@@ -66,3 +66,49 @@ func TestApplyLaneHeaderFromCtx(t *testing.T) {
 		t.Fatalf("空 lane 不应注入 header，得 %q", got)
 	}
 }
+
+func TestSelfLaneFromEnv(t *testing.T) {
+	t.Setenv("PAAS_LANE_ID", "feature-x")
+	resetSelfLaneForTest(t)
+	if got := SelfLane(); got != "feature-x" {
+		t.Fatalf("SelfLane = %q, want feature-x", got)
+	}
+}
+
+func TestSelfLaneDefaultEmpty(t *testing.T) {
+	t.Setenv("PAAS_LANE_ID", "default")
+	resetSelfLaneForTest(t)
+	if got := SelfLane(); got != "" {
+		t.Fatalf("default 应返空串, got %q", got)
+	}
+}
+
+func TestResolveLanePriority(t *testing.T) {
+	t.Setenv("PAAS_LANE_ID", "feature-env")
+	resetSelfLaneForTest(t)
+	// ctx 显式 > env
+	ctx := WithLane(context.Background(), "feature-ctx")
+	if got := resolveLane(ctx); got != "feature-ctx" {
+		t.Fatalf("ctx 优先: got %q", got)
+	}
+	// ctx 无 lane -> env 回落
+	if got := resolveLane(context.Background()); got != "feature-env" {
+		t.Fatalf("env 回落: got %q", got)
+	}
+}
+
+func TestApplyLaneHeaderEnvFallback(t *testing.T) {
+	t.Setenv("PAAS_LANE_ID", "feature-env")
+	resetSelfLaneForTest(t)
+	req, _ := http.NewRequest("GET", "http://x", nil)
+	ApplyLaneHeader(context.Background(), req)
+	if got := req.Header.Get(LaneHeader); got != "feature-env" {
+		t.Fatalf("env 回落注入: got %q", got)
+	}
+}
+
+// resetSelfLaneForTest 重置 SelfLane 缓存（t.Setenv 后重新读 env）。
+func resetSelfLaneForTest(t *testing.T) {
+	selfLane.Store("")
+	t.Cleanup(func() { selfLane.Store("") })
+}

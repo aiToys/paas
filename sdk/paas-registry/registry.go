@@ -79,7 +79,7 @@ func (r *paasRegistry) Deregister(ctx context.Context, ins *types.Instance) erro
 // lane 空 / ctx 无 lane 不加 query（向后兼容，返 default 基线实例）。
 func (r *paasRegistry) GetService(ctx context.Context, name string) (*types.ServiceEntry, error) {
 	u := r.base + "/instances?service=" + url.QueryEscape(name)
-	if lane := LaneFromCtx(ctx); lane != "" {
+	if lane := resolveLane(ctx); lane != "" {
 		u += "&lane=" + url.QueryEscape(lane)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
