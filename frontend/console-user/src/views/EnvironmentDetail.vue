@@ -97,7 +97,8 @@ const byType = computed(() => {
   return m
 })
 
-// 应用部署矩阵：工作负载反推 appID + 应用信息
+// 应用部署矩阵（应用 × 泳道）：工作负载反推 appID + 应用信息。
+// 列 = 本环境全部泳道（default 固定第一列 + feature 按名排序）；格 = 就绪比 + 服务数。
 const appMatrix = computed(() => {
   const byApp = new Map<string, Workload[]>()
   for (const w of workloads.value) {
@@ -107,17 +108,29 @@ const appMatrix = computed(() => {
   }
   return [...byApp.entries()].map(([appId, wls]) => {
     const app = apps.value.find((a) => a.id === appId)
-    const reps = wls.reduce((s, w) => s + w.replicas, 0)
-    const ready = wls.reduce((s, w) => s + w.ready, 0)
-    const degraded = wls.some((w) => w.ready < w.replicas || w.status === 'failed')
-    // 聚合该应用在本环境的泳道（排除 default 基线，只显 feature 泳道；无 feature = 仅基线）。
-    const laneSet = new Set<string>()
-    for (const w of wls) {
-      const lane = w.laneId && w.laneId !== 'default' ? w.laneId : ''
-      if (lane) laneSet.add(lane)
-    }
-    return { app, appId, count: wls.length, reps, ready, degraded, lanes: [...laneSet] }
+    return { app, appId, count: wls.length }
   })
+})
+
+// 泳道列集合：default 固定第一列，feature 按名排序。
+const laneCols = computed(() => {
+  const lanes = new Set(workloads.value.map((w) => w.laneId || 'default'))
+  lanes.add('default')
+  return [...lanes].sort((a, b) => (a === 'default' ? -1 : b === 'default' ? 1 : a.localeCompare(b)))
+})
+
+// 泳道矩阵：map[appId][lane] -> { ready, replicas, count }
+const laneMatrix = computed(() => {
+  const m: Record<string, Record<string, { ready: number; replicas: number; count: number }>> = {}
+  for (const w of workloads.value) {
+    const lane = w.laneId || 'default'
+    m[w.appId] ??= {}
+    const cell = m[w.appId][lane] ??= { ready: 0, replicas: 0, count: 0 }
+    cell.ready += w.ready || 0
+    cell.replicas += w.replicas || 0
+    cell.count++
+  }
+  return m
 })
 
 async function workHere() {
@@ -204,9 +217,9 @@ watch(() => route.params.id, load)
       </section>
 
       <section class="card">
-        <h3 class="card-title">应用部署矩阵</h3>
+        <h3 class="card-title">应用部署矩阵（应用 × 泳道）</h3>
         <el-table :data="appMatrix" size="small" empty-text="该环境尚无部署">
-          <el-table-column label="应用" min-width="200">
+          <el-table-column label="应用" min-width="200" fixed="left">
             <template #default="{ row }">
               <div class="app-cell" @click="openApp(row.appId)">
                 <div v-if="row.app" class="a-icon small" :style="{ background: row.app.gradient }">
@@ -216,27 +229,28 @@ watch(() => route.params.id, load)
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="工作负载" width="100">
-            <template #default="{ row }"><span class="mono">{{ row.count }}</span></template>
-          </el-table-column>
-          <el-table-column label="副本就绪" width="120">
-            <template #default="{ row }">
-              <span class="mono" :class="{ warn: row.degraded }">{{ row.ready }}/{{ row.reps }}</span>
+          <el-table-column
+            v-for="lane in laneCols"
+            :key="lane"
+            :label="lane === 'default' ? '基线' : `泳道 ${lane}`"
+            min-width="150"
+          >
+            <template #header>
+              <span :class="{ 'lane-header-feature': lane !== 'default' }">
+                {{ lane === 'default' ? '基线' : `泳道 ${lane}` }}
+              </span>
             </template>
-          </el-table-column>
-          <el-table-column label="泳道" min-width="140">
             <template #default="{ row }">
-              <span v-if="!row.lanes.length" class="lane-base">基线</span>
-              <el-tag v-for="lane in row.lanes" :key="lane" type="warning" size="small" effect="plain" class="lane-tag">
-                {{ lane }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="状态" width="100">
-            <template #default="{ row }">
-              <el-tag :type="row.degraded ? 'warning' : 'success'" size="small">
-                {{ row.degraded ? '有异常' : '正常' }}
-              </el-tag>
+              <template v-if="laneMatrix[row.appId]?.[lane]">
+                <div class="lane-cell">
+                  <span
+                    class="mono"
+                    :class="{ warn: laneMatrix[row.appId][lane].ready < laneMatrix[row.appId][lane].replicas }"
+                  >{{ laneMatrix[row.appId][lane].ready }}/{{ laneMatrix[row.appId][lane].replicas }}</span>
+                  <span class="lane-svc-count">{{ laneMatrix[row.appId][lane].count }} 服务</span>
+                </div>
+              </template>
+              <span v-else-if="lane !== 'default'" class="lane-fallback">↩ 基线</span>
             </template>
           </el-table-column>
         </el-table>
@@ -435,11 +449,20 @@ watch(() => route.params.id, load)
   color: var(--text-faint);
   font-size: 14px;
 }
-.lane-base {
+.lane-header-feature {
+  color: var(--el-color-warning);
+}
+.lane-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.lane-svc-count {
+  font-size: 12px;
+  color: var(--text-faint);
+}
+.lane-fallback {
   color: var(--text-faint);
   font-size: 12px;
-}
-.lane-tag {
-  margin-right: 4px;
 }
 </style>
