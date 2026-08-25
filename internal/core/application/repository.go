@@ -17,4 +17,6 @@ type Repository interface {
 	BindResource(ctx context.Context, id, resourceType, name string) (Application, error)
 	// Unbind 移除应用的某个绑定项，返回更新后的应用。
 	Unbind(ctx context.Context, id, resourceType, name string) (Application, error)
+	// SetRestricted 切换应用级权限受限模式（true=写操作需成员角色匹配）。
+	SetRestricted(ctx context.Context, id string, restricted bool) error
 }

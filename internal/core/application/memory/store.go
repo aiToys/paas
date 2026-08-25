@@ -209,6 +209,23 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// SetRestricted 切换应用级权限受限模式（租户隔离：跨租户 not found）。
+func (s *Store) SetRestricted(ctx context.Context, id string, restricted bool) error {
+	tid, ok := tenant.TenantFrom(ctx)
+	if !ok {
+		return fmt.Errorf("missing tenant context")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, hit := s.apps[id]
+	if !hit || a.TenantID != tid {
+		return fmt.Errorf("应用不存在: %s", id)
+	}
+	a.Restricted = restricted
+	s.apps[id] = a
+	return nil
+}
+
 // SeedApps 返回平台预置示例应用，供内存仓储自灌与 PG 仓储迁移后 seed 复用同一真源。
 // 导出以避免 seed 数据在 cmd/core 重复定义（DRY）。
 func SeedApps() []application.Application { return seed() }

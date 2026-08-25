@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/aitoys/paas/internal/httputil"
+
+	adminutil "github.com/aitoys/paas/internal/web/admin"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -50,6 +52,28 @@ type Handler struct {
 	// stats 工作负载聚合统计（可选）；注入后 List 派生真实 Replicas/Status（覆盖 seed 假值）。
 	// nil 透传 seed 原值（降级：无 workload repo 可查）。
 	stats WorkloadStats
+	// Guard 应用级权限 enforcement（受限应用 restrict 端点校验）；nil 跳过。
+	Guard *AppGuard
+	// Audit restrict 开关审计（权限模型变更高敏感）；nil 跳过。
+	Audit adminutil.AuditRecorder
+	// ActorFn 从请求取操作者（审计用）；nil 则空。
+	ActorFn func(r *http.Request) string
+}
+
+// auditRestrict 记受限开关审计（best-effort）。
+func (h *Handler) auditRestrict(r *http.Request, appID string, restricted bool) {
+	if h.Audit == nil {
+		return
+	}
+	actor := ""
+	if h.ActorFn != nil {
+		actor = h.ActorFn(r)
+	}
+	action := "app_restrict_off"
+	if restricted {
+		action = "app_restrict_on"
+	}
+	_ = h.Audit.Record(r.Context(), "", actor, action, "application", appID, "")
 }
 
 // HandlerOpt 配置 Handler。
@@ -169,9 +193,59 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// PUT /api/applications/{id}/restrict —— 切换应用级权限受限模式（body: {"restricted":bool}）。
+	// 权限语义（防权限提升链，与 member handler allowManage 同源）：
+	//   - 非受限 → 开启：仅租户管理员（开启是初始 owner 授予的前置，不能让 developer 自开自封）。
+	//   - 受限 → 关闭/保持：app-owner（或租户管理员通行）。
+	if r.Method == http.MethodPut && len(parts) == 2 && parts[1] == "restrict" {
+		if !h.allow(w, r, PermApplicationWrite) {
+			return
+		}
+		if h.Guard != nil {
+			a, err := h.repo.Get(r.Context(), id)
+			if err != nil {
+				httputil.WriteServiceError(w, http.StatusNotFound, err)
+				return
+			}
+			if !a.Restricted {
+				if h.Guard.IsAdmin == nil || !h.Guard.IsAdmin(r) {
+					httputil.WriteError(w, http.StatusForbidden, "forbidden: 开启受限模式需租户管理员（初始 owner 授予）")
+					return
+				}
+			} else if !h.Guard.Allow(r, id, AppActionManage) {
+				httputil.WriteError(w, http.StatusForbidden, "forbidden: 需应用所有者（app-owner）权限")
+				return
+			}
+		}
+		var body struct {
+			Restricted bool `json:"restricted"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+			return
+		}
+		if err := h.repo.SetRestricted(r.Context(), id, body.Restricted); err != nil {
+			httputil.WriteServiceError(w, http.StatusNotFound, err)
+			return
+		}
+		h.auditRestrict(r, id, body.Restricted)
+		a, err := h.repo.Get(r.Context(), id)
+		if err != nil {
+			httputil.WriteServiceError(w, http.StatusNotFound, err)
+			return
+		}
+		httputil.WriteData(w, a)
+		return
+	}
+
 	// DELETE /api/applications/{id} —— 删除应用（含跨 store 关联资源级联清理）。
 	if r.Method == http.MethodDelete && len(parts) == 1 {
 		if !h.allow(w, r, PermApplicationWrite) {
+			return
+		}
+		// 应用级权限：受限应用删除需 owner（manage）。
+		if h.Guard != nil && !h.Guard.Allow(r, id, AppActionManage) {
+			httputil.WriteError(w, http.StatusForbidden, "forbidden: 需应用所有者（app-owner）权限")
 			return
 		}
 		// 先校验存在性 + 归属（跨租户 not found 不泄漏）。
@@ -202,6 +276,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !h.allow(w, r, PermBindingWrite) {
 			return
 		}
+		// 应用级权限：受限应用绑定资源需 write（app-developer+）。
+		if h.Guard != nil && !h.Guard.Allow(r, id, AppActionWrite) {
+			httputil.WriteError(w, http.StatusForbidden, "forbidden: 无该应用的应用级权限（write）")
+			return
+		}
 		var body struct {
 			Type string `json:"type"`
 			Name string `json:"name"`
@@ -230,6 +309,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// DELETE /api/applications/{id}/bindings/{type}/{name}
 	if r.Method == http.MethodDelete && len(parts) == 4 && parts[1] == "bindings" {
 		if !h.allow(w, r, PermBindingWrite) {
+			return
+		}
+		// 应用级权限：受限应用解绑需 write（app-developer+）。
+		if h.Guard != nil && !h.Guard.Allow(r, id, AppActionWrite) {
+			httputil.WriteError(w, http.StatusForbidden, "forbidden: 无该应用的应用级权限（write）")
 			return
 		}
 		a, err := h.repo.Unbind(r.Context(), id, parts[2], parts[3])

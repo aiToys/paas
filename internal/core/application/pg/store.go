@@ -101,7 +101,7 @@ func (s *Store) Create(ctx context.Context, a application.Application) error {
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err = tx.Exec(ctx, appInsert, a.ID, a.TenantID, a.Name, a.Initial, a.Env,
-		a.Status, a.Gradient, a.Desc, a.Replicas, a.RPS); err != nil {
+		a.Status, a.Gradient, a.Desc, a.Replicas, a.RPS, a.Restricted); err != nil {
 		if pg.IsUniqueViolation(err) {
 			return fmt.Errorf("应用%w", pg.ErrAlreadyExists)
 		}
@@ -202,13 +202,30 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	return tx.Commit(ctx)
 }
 
+// SetRestricted 切换应用级权限受限模式（租户隔离：不匹配视为不存在）。
+func (s *Store) SetRestricted(ctx context.Context, id string, restricted bool) error {
+	tid, err := pg.TenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	ct, err := s.db.Pool().Exec(ctx,
+		`UPDATE applications SET restricted=$1 WHERE id=$2 AND tenant_id=$3`, restricted, id, tid)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("应用不存在: %s", id)
+	}
+	return nil
+}
+
 // —— 扫描 / 聚合辅助 ——
 
-const appSelect = `SELECT id, tenant_id, name, initial, env, status, gradient, "desc", replicas, rps FROM applications`
+const appSelect = `SELECT id, tenant_id, name, initial, env, status, gradient, "desc", replicas, rps, restricted FROM applications`
 
 const appInsert = `INSERT INTO applications
-(id, tenant_id, name, initial, env, status, gradient, "desc", replicas, rps)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
+(id, tenant_id, name, initial, env, status, gradient, "desc", replicas, rps, restricted)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
 
 const bindingInsert = `INSERT INTO application_bindings (app_id, ord, type, name, note) VALUES ($1, $2, $3, $4, $5)`
 
@@ -216,7 +233,7 @@ const bindingInsert = `INSERT INTO application_bindings (app_id, ord, type, name
 func scanApp(r pg.RowScanner) (*application.Application, error) {
 	a := &application.Application{}
 	if err := r.Scan(&a.ID, &a.TenantID, &a.Name, &a.Initial, &a.Env,
-		&a.Status, &a.Gradient, &a.Desc, &a.Replicas, &a.RPS); err != nil {
+		&a.Status, &a.Gradient, &a.Desc, &a.Replicas, &a.RPS, &a.Restricted); err != nil {
 		return nil, err
 	}
 	return a, nil

@@ -50,8 +50,12 @@ type Application struct {
 	Desc      string        `json:"desc"`
 	Resources ResourceCount `json:"resources"` // 派生：各类资源计数
 	Bindings  []Binding     `json:"bindings"`  // 真源：具体绑定项
-	Replicas  string        `json:"replicas"`
-	RPS       string        `json:"rps"`
+	Replicas   string        `json:"replicas"`
+	RPS        string        `json:"rps"`
+	// Restricted 开启应用级权限 enforcement（成员角色制）。
+	// false（默认）= 租户级 RBAC 即可写（现状，向后兼容）；true = 写操作需应用成员角色匹配
+	// （如 app-developer 不可发布）。渐进启用：存量应用默认关闭，管理员按需开启。
+	Restricted bool `json:"restricted"`
 }
 
 // Recount 根据 Bindings 重算 ResourceCount。

@@ -26,6 +26,16 @@ func (s *stubRepo) Get(_ context.Context, id string) (Application, error) {
 	}
 	return Application{}, assertNotFoundErr
 }
+func (s *stubRepo) SetRestricted(_ context.Context, id string, restricted bool) error {
+	for i := range s.apps {
+		if s.apps[i].ID == id {
+			s.apps[i].Restricted = restricted
+			return nil
+		}
+	}
+	return ErrMemberNotFound
+}
+
 func (s *stubRepo) Create(_ context.Context, a Application) error {
 	s.apps = append(s.apps, a)
 	return nil
