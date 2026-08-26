@@ -4,30 +4,38 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 type gcFakeRepo struct {
 	stubRepo
-	items   []Workload
-	deleted []string
+	items    []Workload
+	deleted  []string
+	delCtxOK []bool // Delete 时 ctx 是否含租户（防「无租户 ctx GC 静默失效」回归）
 }
 
 func (f *gcFakeRepo) ListAll(ctx context.Context) ([]Workload, error) { return f.items, nil }
 func (f *gcFakeRepo) Delete(ctx context.Context, id string) error {
+	_, ok := tenant.TenantFrom(ctx)
+	f.delCtxOK = append(f.delCtxOK, ok)
 	f.deleted = append(f.deleted, id)
 	return nil
 }
 
-type gcFakeRuns struct{ last map[string]time.Time }
+type gcFakeRuns struct {
+	last   map[string]time.Time
+	active map[string]bool
+}
 
-func (f gcFakeRuns) LastActive(ctx context.Context, tenantID, appID, lane string) (time.Time, error) {
-	return f.last[appID+"/"+lane], nil
+func (f gcFakeRuns) LastActive(ctx context.Context, tenantID, appID, lane string) (LaneActivity, error) {
+	return LaneActivity{Active: f.active[appID+"/"+lane], Last: f.last[appID+"/"+lane]}, nil
 }
 
 type errRuns struct{}
 
-func (errRuns) LastActive(context.Context, string, string, string) (time.Time, error) {
-	return time.Time{}, context.DeadlineExceeded
+func (errRuns) LastActive(context.Context, string, string, string) (LaneActivity, error) {
+	return LaneActivity{}, context.DeadlineExceeded
 }
 
 func newGC(items []Workload, last map[string]time.Time) (*LaneGC, *gcFakeRepo) {
@@ -53,6 +61,9 @@ func TestSweepDeletesIdleLane(t *testing.T) {
 	if n := g.Sweep(context.Background()); n != 1 || len(repo.deleted) != 1 {
 		t.Fatalf("应删 1 个, got n=%d deleted=%v", n, repo.deleted)
 	}
+	if !repo.delCtxOK[0] {
+		t.Fatal("Delete ctx 应含租户（无租户 ctx 真实 store 会拒删，GC 静默失效）")
+	}
 }
 
 func TestSweepKeepsDefaultAndFresh(t *testing.T) {
@@ -63,11 +74,20 @@ func TestSweepKeepsDefaultAndFresh(t *testing.T) {
 }
 
 func TestSweepRecentRunBlocks(t *testing.T) {
-	// Workload 很旧但最近有活跃 run（联调中）-> 不回收
+	// Workload 很旧但最近有终态 run -> 不回收（TTL 从最近活跃起算）
 	g, repo := newGC([]Workload{wl("w1", "feature-x", gcOld)},
 		map[string]time.Time{"a1/feature-x": gcRecent})
 	if n := g.Sweep(context.Background()); n != 0 || len(repo.deleted) != 0 {
-		t.Fatalf("活跃 run 应阻止回收, got %v", repo.deleted)
+		t.Fatalf("最近终态 run 应刷新闲置计时, got %v", repo.deleted)
+	}
+}
+
+func TestSweepActiveRunBlocks(t *testing.T) {
+	// Workload 很旧、无终态 run 但有进行中 run（running/paused）-> 禁止回收（部署/联调中）
+	g, _ := newGC([]Workload{wl("w1", "feature-x", gcOld)}, nil)
+	g.Runs = gcFakeRuns{active: map[string]bool{"a1/feature-x": true}}
+	if n := g.Sweep(context.Background()); n != 0 {
+		t.Fatalf("进行中 run 应禁止回收, got %d", n)
 	}
 }
 
@@ -76,6 +96,15 @@ func TestSweepSkipsProd(t *testing.T) {
 	g.EnvType = func(context.Context, string) (string, error) { return "prod", nil }
 	if n := g.Sweep(context.Background()); n != 0 {
 		t.Fatalf("prod 泳道不回收, got %d", n)
+	}
+}
+
+func TestSweepEnvTypeErrorSkips(t *testing.T) {
+	// prod 护栏 fail-closed：EnvType 查询失败也跳过（环境 store 抖动不误删生产泳道）
+	g, _ := newGC([]Workload{wl("w1", "feature-x", gcOld)}, nil)
+	g.EnvType = func(context.Context, string) (string, error) { return "", context.DeadlineExceeded }
+	if n := g.Sweep(context.Background()); n != 0 {
+		t.Fatalf("EnvType 查询失败应跳过（fail-closed）, got %d", n)
 	}
 }
 
@@ -94,6 +123,18 @@ func TestSweepRunCheckErrorSkips(t *testing.T) {
 	g, _ := newGC([]Workload{wl("w1", "feature-x", gcOld)}, nil)
 	g.Runs = errRuns{}
 	if n := g.Sweep(context.Background()); n != 0 {
-		t.Fatalf("查询失败应跳过（fail-open）, got %d", n)
+		t.Fatalf("查询失败应跳过（fail-open 下轮再试）, got %d", n)
+	}
+}
+
+func TestSweepQuotaDec(t *testing.T) {
+	g, repo := newGC([]Workload{wl("w1", "feature-x", gcOld)}, nil)
+	var quotaTenant string
+	g.Quota = func(ctx context.Context, tenantID string) { quotaTenant = tenantID }
+	if n := g.Sweep(context.Background()); n != 1 {
+		t.Fatalf("应删 1 个, got %d", n)
+	}
+	if quotaTenant != "t1" || len(repo.deleted) != 1 {
+		t.Fatalf("配额应按租户回退, got tenant=%q", quotaTenant)
 	}
 }

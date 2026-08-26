@@ -102,8 +102,9 @@ func SelfLane() string {
 
 // resolveLane lane 解析优先级：显式 ctx lane > SelfLane env > ""。
 // ctx lane 是入口/上游指定的染色（如网关注入 header）；env 是自身部署泳道。
+// 字面 "default" 归一为 ""（基线不上线：不注入 header、URL 不带 lane query，减噪）。
 func resolveLane(ctx context.Context) string {
-	if lane := LaneFromCtx(ctx); lane != "" {
+	if lane := LaneFromCtx(ctx); lane != "" && lane != "default" {
 		return lane
 	}
 	return SelfLane()

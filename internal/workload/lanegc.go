@@ -5,33 +5,47 @@ import (
 	"fmt"
 	"log"
 	"time"
+
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
-// LaneActivityChecker 查询某 (app, lane) 的最近活跃时间（最近终态 run 的 FinishedAt；无 run 返零值）。
+// LaneActivity 某条泳道的活跃度判定结果。
+type LaneActivity struct {
+	Active bool      // 有进行中（非终态）run——联调/部署中，禁止回收
+	Last   time.Time // 最近终态 run 的 FinishedAt；无 run 返零值
+}
+
+// LaneActivityChecker 查询某 (app, lane) 的活跃度（进行中 run + 最近终态时间）。
 // 依赖倒置：workload 不 import pipeline。查询错误时调用方跳过该 lane（fail-open 下轮再试）。
 type LaneActivityChecker interface {
-	LastActive(ctx context.Context, tenantID, appID, lane string) (time.Time, error)
+	LastActive(ctx context.Context, tenantID, appID, lane string) (LaneActivity, error)
 }
 
 // EnvType 查询环境类型（prod 跳过回收）。依赖倒置：复用 environment.EnvTypeResolver 语义。
 type EnvType func(ctx context.Context, envID string) (string, error)
 
+// QuotaDec 回收后配额回退（-1）。可空；cmd/core 桥接 billing（与 handler 删除路径同源）。
+type QuotaDec func(ctx context.Context, tenantID string)
+
 // LaneGC 闲置泳道回收：周期扫描非 default 泳道 Workload，闲置超 TTL 且无活跃 run 则删除。
-// 「闲置」= max(Workload.CreatedAt, 最近终态 run FinishedAt) 距今超 TTL（Workload 无 UpdatedAt，
-// 以创建时间 + run 活跃度近似，CI 重跑会刷新 run 侧时间，足够判定）。
+// 「闲置」= 无进行中 run 且 max(Workload.CreatedAt, 最近终态 run FinishedAt) 距今超 TTL
+// （Workload 无 UpdatedAt，以创建时间 + run 活跃度近似，CI 重跑会刷新 run 侧时间，足够判定）。
 type LaneGC struct {
-	Repos    Repository       // 跨租户列出（ListAll）+ 删除（经 Applier 装饰）
+	Repos    Repository         // 跨租户列出（ListAll）+ 删除（经 Applier 装饰）
 	Runs     LaneActivityChecker
 	EnvType  EnvType
-	TTL      time.Duration    // 闲置阈值（默认 72h）
-	MaxSweep int              // 单轮删除上限（默认 20）
-	Now      func() time.Time // 测试注入时钟
-	Log      *log.Logger      // 可空（nil 用 log.Default）
+	Quota    QuotaDec           // 可空（nil 跳过配额回退）
+	TTL      time.Duration      // 闲置阈值（默认 72h）
+	MaxSweep int                // 单轮删除上限（默认 20）
+	Now      func() time.Time   // 测试注入时钟
+	Log      *log.Logger        // 可空（nil 用 log.Default）
 	Audit    AdminAuditRecorder // 可空（nil 跳过审计）；回收是删除用户资源，审计只增不删（合规）
 }
 
 // Sweep 执行一轮回收，返回删除数。单轮上限 MaxSweep（防 TTL 误配短引发雪崩）；
-// prod 环境泳道跳过（灰度泳道回收策略留后续）；run 查询失败跳过该 lane（fail-open 下轮再试）。
+// prod 环境泳道跳过（灰度泳道回收策略留后续）；EnvType/run 查询失败跳过该 lane（保守，下轮再试）。
+// Delete/EnvType/审计均按 Workload.TenantID 派生租户 ctx——store 层强制租户过滤，
+// 无租户 ctx 会全部报错致 GC 静默失效（R1-R5 审计 Critical 修复）。
 func (g *LaneGC) Sweep(ctx context.Context) int {
 	now := g.Now()
 	ttl := g.TTL
@@ -47,35 +61,57 @@ func (g *LaneGC) Sweep(ctx context.Context) int {
 		g.logf("laneGC: list all: %v", err)
 		return 0
 	}
+	// LastActive 按 (app, lane) 去重缓存：同泳道多服务 Workload 不重复查（R4 N+1 修复）。
+	lastActiveCache := map[string]LaneActivity{}
 	deleted := 0
 	for _, w := range wls {
 		if deleted >= maxSweep {
 			break
 		}
+		if ctx.Err() != nil {
+			break // 进程退出：剩余候选下轮（GC 幂等重扫，无中间态）
+		}
 		if w.LaneID == "" || w.LaneID == LaneDefault {
 			continue // 基线不回收
 		}
-		if et, err := g.EnvType(ctx, w.EnvID); err == nil && et == "prod" {
-			continue // 生产泳道不自动回收
+		wctx := tenant.WithTenant(ctx, w.TenantID) // store 层强制租户，派生后 EnvType/Delete 才能通过
+		// prod 护栏 fail-closed：查询失败也跳过（环境 store 抖动期间不误删生产泳道）。
+		et, err := g.EnvType(wctx, w.EnvID)
+		if err != nil || et == "prod" {
+			continue
+		}
+		ck := w.TenantID + "/" + w.AppID + "/" + w.LaneID
+		act, ok := lastActiveCache[ck]
+		if !ok {
+			var err error
+			act, err = g.Runs.LastActive(wctx, w.TenantID, w.AppID, w.LaneID)
+			if err != nil {
+				continue // 查询失败跳过，下轮再试
+			}
+			lastActiveCache[ck] = act
+		}
+		if act.Active {
+			continue // 有进行中 run（联调/部署中），禁止回收（R1 Important 修复）
 		}
 		idleSince := w.CreatedAt
-		if last, err := g.Runs.LastActive(ctx, w.TenantID, w.AppID, w.LaneID); err != nil {
-			continue // 查询失败跳过，下轮再试
-		} else if last.After(idleSince) {
-			idleSince = last
+		if act.Last.After(idleSince) {
+			idleSince = act.Last
 		}
 		if now.Sub(idleSince) <= ttl {
 			continue // 仍在 TTL 内
 		}
-		if err := g.Repos.Delete(ctx, w.ID); err != nil {
+		if err := g.Repos.Delete(wctx, w.ID); err != nil {
 			g.logf("laneGC: delete %s: %v", w.ID, err)
 			continue
+		}
+		if g.Quota != nil {
+			g.Quota(wctx, w.TenantID) // 配额回退，防反复创建+GC 后配额泄漏（R3 F2 修复）
 		}
 		g.logf("laneGC: 回收闲置泳道 workload=%s app=%s lane=%s（闲置 %s）",
 			w.ID, w.AppID, w.LaneID, now.Sub(idleSince).Round(time.Minute))
 		if g.Audit != nil {
 			// best-effort：审计失败不阻断回收（日志已留痕），与 handler 层审计同款取舍。
-			_ = g.Audit.Record(ctx, w.TenantID, "lane-gc", "lane_gc", "workload", w.ID,
+			_ = g.Audit.Record(wctx, w.TenantID, "lane-gc", "lane_gc", "workload", w.ID,
 				fmt.Sprintf("回收闲置泳道 app=%s lane=%s 闲置=%s", w.AppID, w.LaneID, now.Sub(idleSince).Round(time.Minute)))
 		}
 		deleted++

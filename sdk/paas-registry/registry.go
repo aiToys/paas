@@ -74,9 +74,10 @@ func (r *paasRegistry) Deregister(ctx context.Context, ins *types.Instance) erro
 
 // GetService 调 GET /dp/instances?service=<name>[&lane=<lane>]，解析为 zeus ServiceEntry。
 // 返回的实例仅含 ready（PaaS 侧从 K8s Endpoints Addresses 过滤）。
-// lane 从 ctx 取（由应用 HTTP middleware 从 x-paas-lane header 注入）；
-// 非空时 URL 加 &lane=<lane>，数据面按 feature 泳道优先 + 缺失降级 default 返回。
-// lane 空 / ctx 无 lane 不加 query（向后兼容，返 default 基线实例）。
+// lane 解析经 resolveLane：显式 ctx lane（middleware 从 x-paas-lane header 注入）优先，
+// 缺失回落自身部署泳道（SelfLane env，应用零改动染色）；非空时 URL 加 &lane=<lane>，
+// 数据面按 feature 泳道优先 + 缺失降级 default 返回。
+// lane 空 / default 不加 query（向后兼容，返 default 基线实例）。
 func (r *paasRegistry) GetService(ctx context.Context, name string) (*types.ServiceEntry, error) {
 	u := r.base + "/instances?service=" + url.QueryEscape(name)
 	if lane := resolveLane(ctx); lane != "" {

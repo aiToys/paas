@@ -7,30 +7,37 @@ import (
 	"time"
 
 	"github.com/aitoys/paas/internal/devops/pipeline"
+	"github.com/aitoys/paas/internal/workload"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // laneRunChecker 桥接 pipeline.RunRepository -> workload.LaneActivityChecker（依赖倒置，
-// workload 不 import pipeline）。最近活跃 = 该 (app, lane) 全部 run 的最近 FinishedAt
-// （run.Branch == lane 是 L1 锁定的关联约定）。ListRuns 按 ctx tenant 过滤，须派生租户 ctx。
+// workload 不 import pipeline）。run.Branch == lane 是 L1 锁定的关联约定：
+//   - Active：存在非终态（running/paused）run——联调/部署中，禁止回收；
+//   - Last：最近终态 run 的 FinishedAt（闲置计时基准）。
+// ListRuns 按 ctx tenant 过滤，须派生租户 ctx。
 type laneRunChecker struct{ runs pipeline.RunRepository }
 
-func (c laneRunChecker) LastActive(ctx context.Context, tenantID, appID, lane string) (time.Time, error) {
+func (c laneRunChecker) LastActive(ctx context.Context, tenantID, appID, lane string) (workload.LaneActivity, error) {
 	ctx = tenant.WithTenant(ctx, tenantID)
 	runs, err := c.runs.ListRuns(ctx, appID, "", "")
 	if err != nil {
-		return time.Time{}, err
+		return workload.LaneActivity{}, err
 	}
-	var last time.Time
+	var act workload.LaneActivity
 	for _, r := range runs {
-		if r.Branch != lane || r.FinishedAt.IsZero() {
+		if r.Branch != lane {
 			continue
 		}
-		if r.FinishedAt.After(last) {
-			last = r.FinishedAt
+		if r.FinishedAt.IsZero() {
+			act.Active = true // 非终态 run（running/paused），部署/联调进行中
+			continue
+		}
+		if r.FinishedAt.After(act.Last) {
+			act.Last = r.FinishedAt
 		}
 	}
-	return last, nil
+	return act, nil
 }
 
 // envDuration 读 env 时长配置，缺省/解析失败回落默认值（PAAS_LANE_GC_INTERVAL=0 显式禁用）。
