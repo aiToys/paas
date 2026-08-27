@@ -607,6 +607,12 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 			gitea: giteaBridgeInst, status: statusReader, services: stores.Service,
 		},
 		Gitea: giteaBridgeInst,
+		// 泳道实体化：非 default 泳道 deploy 前懒建 Lane 实体（TTL 回收/泳道管理真源）。
+		LaneEnsurer: laneEnsurerBridge{lanes: stores.Lane},
+		// 应用级资源模板：deploy 未显式指定 resources 时的默认值。
+		AppResourceLookup: appResourceLookupBridge{apps: stores.Application},
+		// 联调泳道副本降级的 prod 判定（复用 envTypeBridge，与 handler 校验同源）。
+		EnvType: envTypeBridge(stores.Environment),
 	}
 	pipelineHandler := pipeline.NewHandler(stores.Pipeline, stores.Pipeline, stores.Pipeline, pipeEngine,
 		pipeline.WithAuthorize(func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }),

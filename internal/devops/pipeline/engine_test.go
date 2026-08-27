@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -36,9 +37,11 @@ type fakeReleaser struct {
 	pollErr   error  // PollWorkloadReady 错误（可选，模拟 deploy 后探活失败）
 	domain    string // Deploy/WorkloadDomain 返回（空则默认 wl-{id}.svc.cluster.local)
 
-	deployLane  string // Deploy 收到的 lane（断言用）
-	deployPort  int    // Deploy 收到的 port（断言用）
-	deploySvcID string // Deploy 收到的 serviceID（断言用，服务模型 Phase 1 透传）
+	deployLane      string          // Deploy 收到的 lane（断言用）
+	deployPort      int             // Deploy 收到的 port（断言用）
+	deploySvcID     string          // Deploy 收到的 serviceID（断言用，服务模型 Phase 1 透传）
+	deployResources DeployResources // Deploy 收到的 resources（断言用，资源规格注入）
+	deployReplicas  int             // Deploy 收到的 replicas（断言用，联调泳道降级）
 
 	promoteRel devops.Release // Promote 返回（空则默认 Release{ID:"rel-promoted"}）
 	promoteErr error
@@ -80,10 +83,12 @@ func (f *fakeReleaser) SetVersion(ctx context.Context, releaseIDs []string, vers
 }
 
 // Deploy stub：返有效部署记录（rel-fake/wl-fake）+ 尊重 domain 字段，供 execDeploy 链路测试可控。
-func (f *fakeReleaser) Deploy(ctx context.Context, appID, envID, lane, service, serviceID, imageID string, port, containerPort int, sourceRunID string) (devops.Release, string, error) {
+func (f *fakeReleaser) Deploy(ctx context.Context, appID, envID, lane, service, serviceID, imageID string, port, containerPort int, resources DeployResources, replicas int, sourceRunID string) (devops.Release, string, error) {
 	f.deployLane = lane
 	f.deployPort = port
 	f.deploySvcID = serviceID
+	f.deployResources = resources
+	f.deployReplicas = replicas
 	if f.deployErr != nil {
 		return devops.Release{}, "", f.deployErr
 	}
@@ -1065,5 +1070,191 @@ func TestEngineBaselineSameBranchSkipsMerge(t *testing.T) {
 	}
 	if !strings.Contains(sr.Log, "无变更可合并") {
 		t.Errorf("日志应含明确跳过说明，got %q", sr.Log)
+	}
+}
+
+// fakeLaneEnsurer 记录 Ensure 调用（泳道实体化懒建断言用）。
+type fakeLaneEnsurer struct {
+	calls [][2]string
+	err   error
+}
+
+func (f *fakeLaneEnsurer) Ensure(ctx context.Context, envID, name string) error {
+	f.calls = append(f.calls, [2]string{envID, name})
+	return f.err
+}
+
+// fakeAppResourceLookup 返回固定资源模板（应用默认值断言用）。
+type fakeAppResourceLookup struct {
+	tpl DeployResources
+	err error
+}
+
+func (f fakeAppResourceLookup) Template(ctx context.Context, appID string) (DeployResources, error) {
+	return f.tpl, f.err
+}
+
+// TestExecDeployLaneEnsure：非 default 泳道 deploy 前懒建 Lane 实体；
+// default 泳道不调 Ensure（基线无需实体）。
+func TestExecDeployLaneEnsure(t *testing.T) {
+	s := NewMemoryStore()
+	r := seedPipeline(t, s, "p-lane-ensure", "app-le", KindCI, []StageDef{
+		{Name: "部署", Type: StageDeploy, Params: map[string]any{
+			"envId": "env-test", "lane": "feature-x",
+			"imageSource": ImageSelected, "imageId": "img-1",
+		}},
+	})
+	ensurer := &fakeLaneEnsurer{}
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: &fakeReleaser{}, LaneEnsurer: ensurer}
+	if err := eng.Advance(acmeCtxEngine(), r.ID); err != nil {
+		t.Fatalf("Advance 失败: %v", err)
+	}
+	if len(ensurer.calls) != 1 || ensurer.calls[0] != [2]string{"env-test", "feature-x"} {
+		t.Errorf("Ensure 调用期望 [env-test feature-x]，got %v", ensurer.calls)
+	}
+	// Log 含泳道实体就绪事件
+	run, _ := s.GetRun(acmeCtxEngine(), r.ID)
+	if !strings.Contains(run.StageRuns[0].Log, "泳道实体就绪") {
+		t.Errorf("Log 应含泳道实体就绪，got %q", run.StageRuns[0].Log)
+	}
+
+	// default 泳道不调 Ensure
+	s2 := NewMemoryStore()
+	r2 := seedPipeline(t, s2, "p-lane-def", "app-le2", KindCI, []StageDef{
+		{Name: "部署", Type: StageDeploy, Params: map[string]any{
+			"envId": "env-test", "imageSource": ImageSelected, "imageId": "img-1",
+		}},
+	})
+	ensurer2 := &fakeLaneEnsurer{}
+	eng2 := &Engine{Pipelines: s2, Runs: s2, Builds: fakeBuilder{}, Releases: &fakeReleaser{}, LaneEnsurer: ensurer2}
+	if err := eng2.Advance(acmeCtxEngine(), r2.ID); err != nil {
+		t.Fatalf("Advance 失败: %v", err)
+	}
+	if len(ensurer2.calls) != 0 {
+		t.Errorf("default 泳道不应调 Ensure，got %d 次", len(ensurer2.calls))
+	}
+}
+
+// TestExecDeployLaneEnsureFailed：Ensure 出错 stage failed + run failed。
+func TestExecDeployLaneEnsureFailed(t *testing.T) {
+	s := NewMemoryStore()
+	r := seedPipeline(t, s, "p-lane-err", "app-le3", KindCI, []StageDef{
+		{Name: "部署", Type: StageDeploy, Params: map[string]any{
+			"envId": "env-test", "lane": "feature-y",
+			"imageSource": ImageSelected, "imageId": "img-1",
+		}},
+	})
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: &fakeReleaser{},
+		LaneEnsurer: &fakeLaneEnsurer{err: fmt.Errorf("db down")}}
+	_ = eng.Advance(acmeCtxEngine(), r.ID) // stage 内部 failed，Advance 对已终态 run 返 nil
+	run, _ := s.GetRun(acmeCtxEngine(), r.ID)
+	if run.Status != RunFailed || run.StageRuns[0].Status != StageFailed {
+		t.Fatalf("期望 run/stage failed，got %s/%s", run.Status, run.StageRuns[0].Status)
+	}
+	if !strings.Contains(run.StageRuns[0].Error, "泳道实体创建失败") {
+		t.Errorf("Error 应含泳道实体创建失败，got %q", run.StageRuns[0].Error)
+	}
+}
+
+// TestExecDeployResources：资源规格优先级——stage params 显式 resources > 应用模板 > 空。
+func TestExecDeployResources(t *testing.T) {
+	// ① 显式 resources 覆盖应用默认
+	s := NewMemoryStore()
+	r := seedPipeline(t, s, "p-res-1", "app-r1", KindCI, []StageDef{
+		{Name: "部署", Type: StageDeploy, Params: map[string]any{
+			"envId": "env-test", "imageSource": ImageSelected, "imageId": "img-1",
+			"resources": map[string]any{"cpuRequest": "250m", "memLimit": "512Mi"},
+		}},
+	})
+	rel := &fakeReleaser{}
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: rel,
+		AppResourceLookup: fakeAppResourceLookup{tpl: DeployResources{CPURequest: "1", MemLimit: "2Gi"}}}
+	if err := eng.Advance(acmeCtxEngine(), r.ID); err != nil {
+		t.Fatalf("Advance 失败: %v", err)
+	}
+	if rel.deployResources != (DeployResources{CPURequest: "250m", MemLimit: "512Mi"}) {
+		t.Errorf("显式 resources 应覆盖应用模板，got %+v", rel.deployResources)
+	}
+
+	// ② 无显式 -> 应用模板
+	s2 := NewMemoryStore()
+	r2 := seedPipeline(t, s2, "p-res-2", "app-r2", KindCI, []StageDef{
+		{Name: "部署", Type: StageDeploy, Params: map[string]any{
+			"envId": "env-test", "imageSource": ImageSelected, "imageId": "img-1",
+		}},
+	})
+	rel2 := &fakeReleaser{}
+	eng2 := &Engine{Pipelines: s2, Runs: s2, Builds: fakeBuilder{}, Releases: rel2,
+		AppResourceLookup: fakeAppResourceLookup{tpl: DeployResources{CPURequest: "500m"}}}
+	if err := eng2.Advance(acmeCtxEngine(), r2.ID); err != nil {
+		t.Fatalf("Advance 失败: %v", err)
+	}
+	if rel2.deployResources.CPURequest != "500m" {
+		t.Errorf("应用模板应生效，got %+v", rel2.deployResources)
+	}
+
+	// ③ 两者皆空 + Lookup 失败降级空（不 fail）
+	s3 := NewMemoryStore()
+	r3 := seedPipeline(t, s3, "p-res-3", "app-r3", KindCI, []StageDef{
+		{Name: "部署", Type: StageDeploy, Params: map[string]any{
+			"envId": "env-test", "imageSource": ImageSelected, "imageId": "img-1",
+		}},
+	})
+	rel3 := &fakeReleaser{}
+	eng3 := &Engine{Pipelines: s3, Runs: s3, Builds: fakeBuilder{}, Releases: rel3,
+		AppResourceLookup: fakeAppResourceLookup{err: fmt.Errorf("not found")}}
+	if err := eng3.Advance(acmeCtxEngine(), r3.ID); err != nil {
+		t.Fatalf("Lookup 失败应降级不 fail: %v", err)
+	}
+	if !rel3.deployResources.IsEmpty() {
+		t.Errorf("Lookup 失败应透传空，got %+v", rel3.deployResources)
+	}
+	run3, _ := s3.GetRun(acmeCtxEngine(), r3.ID)
+	if run3.Status != RunSucceeded {
+		t.Errorf("run 应 succeeded，got %s", run3.Status)
+	}
+}
+
+// TestExecDeployLaneReplicaDowngrade：联调泳道副本降级——非 prod 环境 + 非 default 泳道 +
+// replicas>1 截断为 1；prod 环境不降级；EnvType 未注入保守不降级。
+func TestExecDeployLaneReplicaDowngrade(t *testing.T) {
+	deploy := func(t *testing.T, lane string, envType EnvTypeResolver) (*fakeReleaser, *memoryStore) {
+		t.Helper()
+		s := NewMemoryStore()
+		params := map[string]any{
+			"envId": "env-test", "imageSource": ImageSelected, "imageId": "img-1", "replicas": 3,
+		}
+		if lane != "" {
+			params["lane"] = lane
+		}
+		r := seedPipeline(t, s, "p-rep-"+lane+fmt.Sprint(envType == nil), "app-rep", KindCI, []StageDef{
+			{Name: "部署", Type: StageDeploy, Params: params},
+		})
+		rel := &fakeReleaser{}
+		eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: rel, EnvType: envType}
+		if err := eng.Advance(acmeCtxEngine(), r.ID); err != nil {
+			t.Fatalf("Advance 失败: %v", err)
+		}
+		return rel, s
+	}
+	// 非 prod 测试环境 + feature 泳道：降级为 1
+	rel, _ := deploy(t, "feature-x", func(ctx context.Context, envID string) (string, error) { return "test", nil })
+	if rel.deployReplicas != 1 {
+		t.Errorf("非 prod 联调泳道副本应降级 1，got %d", rel.deployReplicas)
+	}
+	// prod 环境：不降级
+	rel, _ = deploy(t, "gray-x", func(ctx context.Context, envID string) (string, error) { return "prod", nil })
+	if rel.deployReplicas != 3 {
+		t.Errorf("prod 泳道副本不应降级，got %d", rel.deployReplicas)
+	}
+	// EnvType 未注入：保守按 prod 不降级（fail-closed）
+	rel, _ = deploy(t, "feature-z", nil)
+	if rel.deployReplicas != 3 {
+		t.Errorf("EnvType 未注入应保守不降级，got %d", rel.deployReplicas)
+	}
+	// default 泳道：不降级（基线按显式副本）
+	rel, _ = deploy(t, "", func(ctx context.Context, envID string) (string, error) { return "test", nil })
+	if rel.deployReplicas != 3 {
+		t.Errorf("default 泳道不应降级，got %d", rel.deployReplicas)
 	}
 }

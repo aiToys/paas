@@ -94,7 +94,7 @@ type CodeRepo struct {
 	// CloneCommand 开发者本机 clone 命令（handler 运行时从 giteaExternalURL 填充，不落库；
 	// 凭证用占位符——真实凭证不回传前端，用户向管理员索取或用个人凭证）。external 仓库空。
 	CloneCommand string    `json:"cloneCommand,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
+	CreatedAt    time.Time `json:"createdAt"`
 }
 
 // Validate 校验仓库字段：external 时 GitURL/Branch 必填；internal 时 GitURL 可空（建仓后回填），
@@ -254,9 +254,30 @@ type ReleaseInput struct {
 	Strategy  string `json:"strategy"`
 	// Port/ContainerPort 仅在「新建基线 Workload」时设定（驱动 reconciler 建 Service，供 smoke 探活/服务发现）。
 	// 复用既有 Workload 时忽略（端口属 Workload 既有配置）。0 = 不建 Service（向后兼容）。
-	Port          int    `json:"port,omitempty"`
-	ContainerPort int    `json:"containerPort,omitempty"`
-	CreatedBy     string `json:"-"` // handler 从身份 ctx 注入，非用户提交
+	Port          int `json:"port,omitempty"`
+	ContainerPort int `json:"containerPort,omitempty"`
+	// Resources 容器资源规格：新建基线 Workload 时写入；既有 Workload 且非空时覆盖更新。
+	// 空 = 保持现状（向后兼容）。
+	Resources ResourceSpecInput `json:"resources,omitempty"`
+	// Replicas 期望副本：>0 时新建 Workload 用该值（联调泳道降级后的值在此生效）；
+	// 0 = 沿用默认（服务定义 Replicas 或 1）。既有 Workload 不改副本（副本归扩缩容语义）。
+	Replicas  int    `json:"replicas,omitempty"`
+	CreatedBy string `json:"-"` // handler 从身份 ctx 注入，非用户提交
+}
+
+// ResourceSpecInput 是 ReleaseInput 的资源规格（K8s Quantity 字符串）。
+// 与 workload.ResourceSpec 同构；独立定义避免 devops -> workload 反向耦合
+// （devops 的 store 已 import workload，此处独立类型供 API 输入层解耦）。
+type ResourceSpecInput struct {
+	CPURequest string `json:"cpuRequest,omitempty"`
+	CPULimit   string `json:"cpuLimit,omitempty"`
+	MemRequest string `json:"memRequest,omitempty"`
+	MemLimit   string `json:"memLimit,omitempty"`
+}
+
+// IsEmpty 四字段全空（未指定资源规格）。
+func (r ResourceSpecInput) IsEmpty() bool {
+	return r.CPURequest == "" && r.CPULimit == "" && r.MemRequest == "" && r.MemLimit == ""
 }
 
 type fieldErr struct{ field string }

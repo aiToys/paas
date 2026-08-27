@@ -22,5 +22,8 @@ type Repository interface {
 	UpdateImage(ctx context.Context, id, image, imageRef string) (Workload, error)
 	// SetServiceID 回填服务实体关联（存量回填/新部署写入）。跨租户访问返回 not found（不泄漏）。
 	SetServiceID(ctx context.Context, id, serviceID string) error
+	// SetResources 覆盖容器资源规格（deploy 显式 resources 时更新既有 Workload）。
+	// 跨租户访问返回 not found（不泄漏）。
+	SetResources(ctx context.Context, id string, res ResourceSpec) error
 	Delete(ctx context.Context, id string) error
 }

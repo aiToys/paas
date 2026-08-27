@@ -57,6 +57,8 @@ func (s *stubRepo) SetServiceID(_ context.Context, id, serviceID string) error {
 	}
 	return errNotFound
 }
+
+func (s *stubRepo) SetResources(_ context.Context, id string, res ResourceSpec) error { return nil }
 func (s *stubRepo) UpdateImage(_ context.Context, id, image, imageRef string) (Workload, error) {
 	for _, w := range s.list {
 		if w.ID == id {

@@ -20,6 +20,7 @@ import (
 	"github.com/aitoys/paas/internal/devops/gitea"
 	"github.com/aitoys/paas/internal/devops/pipeline"
 	"github.com/aitoys/paas/internal/environment"
+	"github.com/aitoys/paas/internal/lane"
 	"github.com/aitoys/paas/internal/service"
 	"github.com/aitoys/paas/internal/workload"
 	"github.com/aitoys/paas/pkg/tenant"
@@ -207,7 +208,7 @@ func (r *releaseBridge) SetVersion(ctx context.Context, releaseIDs []string, ver
 // port/containerPort 仅新建 Workload 时设定（驱动 reconciler 建 Service）。sourceRunID 非空回填追溯。
 // serviceID 关联服务实体（服务模型 Phase 1）；service+serviceID 均空时自动采用 app 唯一服务
 // （单服务应用零操作——默认绑定 pipeline 不写 overrides 也能带出 Port/Replicas/ServiceID）。
-func (r *releaseBridge) Deploy(ctx context.Context, appID, envID, lane, service, serviceID, imageID string, port, containerPort int, sourceRunID string) (devops.Release, string, error) {
+func (r *releaseBridge) Deploy(ctx context.Context, appID, envID, lane, service, serviceID, imageID string, port, containerPort int, resources pipeline.DeployResources, replicas int, sourceRunID string) (devops.Release, string, error) {
 	if service == "" && serviceID == "" && r.services != nil {
 		// 单服务自动采用：恰 1 个服务实体时零操作打通 Port/ServiceID；多服务/无服务保持空（向后兼容）。
 		if svcs, err := r.services.List(ctx, appID); err == nil && len(svcs) == 1 {
@@ -217,6 +218,11 @@ func (r *releaseBridge) Deploy(ctx context.Context, appID, envID, lane, service,
 	rel, err := r.releases.CreateRelease(ctx, devops.ReleaseInput{
 		AppID: appID, EnvID: envID, LaneID: lane, Service: service, ServiceID: serviceID, ImageID: imageID,
 		Port: port, ContainerPort: containerPort,
+		Resources: devops.ResourceSpecInput{
+			CPURequest: resources.CPURequest, CPULimit: resources.CPULimit,
+			MemRequest: resources.MemRequest, MemLimit: resources.MemLimit,
+		},
+		Replicas: replicas,
 	})
 	if err != nil {
 		return devops.Release{}, "", err
@@ -407,3 +413,28 @@ func (b serviceLookupBridge) GetService(ctx context.Context, appID, serviceID st
 	}
 	return devops.ServiceDef{ID: s.ID, Name: s.Name, Port: s.Port, Replicas: s.Replicas}, nil
 }
+
+// laneEnsurerBridge 桥接 pipeline.LaneEnsurer -> lane.Repository.EnsureByName（依赖倒置）。
+type laneEnsurerBridge struct{ lanes lane.Repository }
+
+func (b laneEnsurerBridge) Ensure(ctx context.Context, envID, name string) error {
+	_, err := b.lanes.EnsureByName(ctx, envID, name)
+	return err
+}
+
+// appResourceLookupBridge 桥接 pipeline.AppResourceLookup -> application.Repository（依赖倒置）。
+type appResourceLookupBridge struct{ apps application.Repository }
+
+func (b appResourceLookupBridge) Template(ctx context.Context, appID string) (pipeline.DeployResources, error) {
+	app, err := b.apps.Get(ctx, appID)
+	if err != nil {
+		return pipeline.DeployResources{}, err
+	}
+	return pipeline.DeployResources{
+		CPURequest: app.ResourceTemplate.CPURequest, CPULimit: app.ResourceTemplate.CPULimit,
+		MemRequest: app.ResourceTemplate.MemRequest, MemLimit: app.ResourceTemplate.MemLimit,
+	}, nil
+}
+
+var _ pipeline.LaneEnsurer = laneEnsurerBridge{}
+var _ pipeline.AppResourceLookup = appResourceLookupBridge{}

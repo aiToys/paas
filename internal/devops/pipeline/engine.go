@@ -47,11 +47,39 @@ type Releaser interface {
 	// service 标识同 app 多服务（空=单服务）；serviceID 关联服务实体（服务模型 Phase 1，驱动 Port/Replicas 回填，
 	// adapter 在 service+serviceID 均空时自动解析 app 唯一服务）；port/containerPort 非零时在新建 Workload 时设定
 	// （驱动 reconciler 建 Service，供 smoke 探活/服务发现）；复用既有 Workload 时忽略（端口属 Workload 既有配置）。
-	// sourceRunID 非空时回填到部署记录。
-	Deploy(ctx context.Context, appID, envID, lane, service, serviceID, imageID string, port, containerPort int, sourceRunID string) (deployment devops.Release, domain string, err error)
+	// sourceRunID 非空时回填到部署记录。resources 资源规格（新建 Workload 时写入；既有 Workload
+	// 且 resources 非空时覆盖更新）。replicas 期望副本（0=沿用默认，联调泳道降级后的值）。
+	Deploy(ctx context.Context, appID, envID, lane, service, serviceID, imageID string, port, containerPort int, resources DeployResources, replicas int, sourceRunID string) (deployment devops.Release, domain string, err error)
 	// Publish 打版本号里程碑：Image.Version 回填 + git tag（commit 非空且仓库为 internal 时）。
 	// 不部署（部署是 deploy stage 的事）。返回 tagSha（未打 tag 时为空串）。
 	Publish(ctx context.Context, appID, imageID, version, commit string) (tagSha string, err error)
+}
+
+// DeployResources 是 deploy stage 的容器资源规格（K8s Quantity 字符串）。
+// 与 workload.ResourceSpec / application.ResourceTemplate 同构——pipeline 不 import
+// workload/application（依赖倒置），cmd/core 桥接时转换。
+type DeployResources struct {
+	CPURequest string `json:"cpuRequest,omitempty"`
+	CPULimit   string `json:"cpuLimit,omitempty"`
+	MemRequest string `json:"memRequest,omitempty"`
+	MemLimit   string `json:"memLimit,omitempty"`
+}
+
+// IsEmpty 四字段全空（未指定资源规格，透传空保持 Workload 现状）。
+func (r DeployResources) IsEmpty() bool {
+	return r.CPURequest == "" && r.CPULimit == "" && r.MemRequest == "" && r.MemLimit == ""
+}
+
+// LaneEnsurer 桥接 lane.Repository.EnsureByName（依赖倒置，pipeline 不 import lane）。
+// deploy 到非 default 泳道前懒建 Lane 实体（幂等，存在返回既有）。
+type LaneEnsurer interface {
+	Ensure(ctx context.Context, envID, name string) error
+}
+
+// AppResourceLookup 桥接 application.Repository（依赖倒置）：取应用级资源规格模板，
+// deploy stage 未显式指定 resources 时作默认值。
+type AppResourceLookup interface {
+	Template(ctx context.Context, appID string) (DeployResources, error)
 }
 
 // GiteaMerger 桥接 gitea.Client（baseline stage 合并主干）。
@@ -71,6 +99,12 @@ type Engine struct {
 	Builds    BuildRunner
 	Releases  Releaser
 	Gitea     GiteaMerger // 可选，nil 时 baseline 跳过 merge 仅打版本
+	// LaneEnsurer 可选：非 default 泳道 deploy 前懒建 Lane 实体；nil 时跳过（仅按名部署，无实体记录）。
+	LaneEnsurer LaneEnsurer
+	// AppResourceLookup 可选：deploy 未显式指定 resources 时取应用级资源模板；nil 或失败降级空（best-effort）。
+	AppResourceLookup AppResourceLookup
+	// EnvType 联调泳道副本降级的 prod 判定（nil 时保守按 prod 处理，不降级副本）。
+	EnvType EnvTypeResolver
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
@@ -326,9 +360,37 @@ func (e *Engine) execDeploy(ctx context.Context, run *PipelineRun, stage StageDe
 	// 模板不填（app-specific），应用经 Pipeline.paramOverrides 覆盖（如 paas-shop product=8081）。
 	port := intOr(stage.Params, "port", 0)
 	cport := intOr(stage.Params, "containerPort", port)
+	// 泳道实体化（Lane 一等公民）：非 default 泳道 deploy 前懒建 Lane 实体（幂等，存在返回既有）。
+	// Ensure 失败 stage failed（实体是泳道管理/TTL 回收的真源，缺失致泳道成为黑盒）。
+	if lane != LaneDefault && e.LaneEnsurer != nil {
+		if err := e.LaneEnsurer.Ensure(ctx, envID, lane); err != nil {
+			err := fmt.Errorf("泳道实体创建失败 %s: %w", lane, err)
+			sr.Error = err.Error()
+			return true, err
+		}
+		logf(sr, "泳道实体就绪 %s", lane)
+	}
+	// 资源规格解析（优先级）：① stage params 显式 resources > ② 应用级 ResourceTemplate > ③ 空（保持现状）。
+	// Lookup 失败 best-effort 降级空（应用查不到/未注入不应阻断部署——资源规格是优化项非正确性项）。
+	res := parseDeployResources(stage.Params)
+	if res.IsEmpty() && e.AppResourceLookup != nil {
+		if tpl, err := e.AppResourceLookup.Template(ctx, run.AppID); err == nil {
+			res = tpl
+		} else {
+			logf(sr, "应用资源模板读取失败（降级空）: %v", err)
+		}
+	}
+	// 联调泳道副本降级：非 default 泳道 + 非 prod 环境 + 显式 replicas>1 时截断为 1
+	//（联调泳道只需验证功能，省资源；prod 环境不降级——灰度泳道按显式副本走）。
+	// EnvType nil 时保守按 prod 处理不降级（fail-closed，与 allowProdFlow 同源语义）。
+	replicas := intOr(stage.Params, "replicas", 0)
+	if lane != LaneDefault && replicas > 1 && !e.laneIsProd(ctx, envID) {
+		logf(sr, "联调泳道副本降级 %d -> 1（非 prod 环境泳道单副本验证）", replicas)
+		replicas = 1
+	}
 	logf(sr, "部署镜像 %s 到 env=%s lane=%s service=%s serviceId=%s", imageID, envID, lane, service, serviceID)
 	// prod 环境写受 prod:write 保护（adapter 内 CreateRelease 走 EnvTypeResolver）
-	deployment, domain, err := e.Releases.Deploy(ctx, run.AppID, envID, lane, service, serviceID, imageID, port, cport, run.ID)
+	deployment, domain, err := e.Releases.Deploy(ctx, run.AppID, envID, lane, service, serviceID, imageID, port, cport, res, replicas, run.ID)
 	if err != nil {
 		sr.Error = err.Error()
 		return true, err
@@ -723,6 +785,31 @@ func intOr(params map[string]any, key string, def int) int {
 		}
 	}
 	return def
+}
+
+// parseDeployResources 从 stage params 解析资源规格（同 buildArgs 的 getStringMap 模式）。
+// key：cpuRequest/cpuLimit/memRequest/memLimit；非字符串值跳过。
+func parseDeployResources(params map[string]any) DeployResources {
+	m := getStringMap(params, "resources")
+	return DeployResources{
+		CPURequest: m["cpuRequest"],
+		CPULimit:   m["cpuLimit"],
+		MemRequest: m["memRequest"],
+		MemLimit:   m["memLimit"],
+	}
+}
+
+// laneIsProd 判定目标环境是否 prod（联调泳道副本降级用）。EnvType 未注入或解析失败时
+// 保守返 true（按 prod 处理不降级，fail-closed 防误降级生产灰度泳道副本）。
+func (e *Engine) laneIsProd(ctx context.Context, envID string) bool {
+	if e.EnvType == nil {
+		return true
+	}
+	etype, err := e.EnvType(ctx, envID)
+	if err != nil || etype == environment.TypeProd {
+		return true
+	}
+	return false
 }
 
 // getStringMap 从 params 取 map[string]string（buildArgs 等字符串映射）。

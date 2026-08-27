@@ -75,6 +75,20 @@ func (r *ApplyRepo) UpdateImage(ctx context.Context, id, image, imageRef string)
 	return saved, nil
 }
 
+// SetResources 覆盖资源规格并投影数据面（reconciler 据 CRD spec.resources 更新容器 resources）。
+func (r *ApplyRepo) SetResources(ctx context.Context, id string, res ResourceSpec) error {
+	if err := r.Repository.SetResources(ctx, id, res); err != nil {
+		return err
+	}
+	if r.applier != nil {
+		if w, err := r.Repository.Get(ctx, id); err == nil {
+			w = withTenant(ctx, w)
+			r.applyLog("set-resources", w.ID, r.applier.Apply(ctx, w))
+		}
+	}
+	return nil
+}
+
 // UpdateSchedule 修改 cron schedule 并投影数据面（reconciler 据 CRD spec.schedule 更新 K8s CronJob）。
 func (r *ApplyRepo) UpdateSchedule(ctx context.Context, id, schedule string) (Workload, error) {
 	saved, err := r.Repository.UpdateSchedule(ctx, id, schedule)

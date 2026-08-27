@@ -602,6 +602,15 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 		if _, err := s.workload.UpdateImage(ctx, wl.ID, display, img.Digest); err != nil {
 			return devops.Release{}, err
 		}
+		// 显式资源规格非空时覆盖既有 Workload（规格变更随发布生效）；空保持现状（向后兼容）。
+		if !input.Resources.IsEmpty() {
+			if err := s.workload.SetResources(ctx, wl.ID, workload.ResourceSpec{
+				CPURequest: input.Resources.CPURequest, CPULimit: input.Resources.CPULimit,
+				MemRequest: input.Resources.MemRequest, MemLimit: input.Resources.MemLimit,
+			}); err != nil {
+				return devops.Release{}, err
+			}
+		}
 	} else {
 		// 无基线 Workload -> 创建（基线 service）
 		// Name 规则：多服务（service 非空）用 `<app>-<service>-svc[-<lane>]`，单服务（service 空）用 `<app>-svc[-<lane>]`。
@@ -622,9 +631,13 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 				port, cport = bases[0].Port, bases[0].ContainerPort
 			}
 		}
-		replicas := 1
-		if svcDef != nil && svcDef.Replicas > 0 {
+		// 副本优先级：input.Replicas（deploy stage 显式，含联调泳道降级后的值）> 服务定义 > 1。
+		replicas := input.Replicas
+		if replicas <= 0 && svcDef != nil && svcDef.Replicas > 0 {
 			replicas = svcDef.Replicas
+		}
+		if replicas <= 0 {
+			replicas = 1
 		}
 		wl = workload.Workload{
 			ID:            newID("wl"),
@@ -640,8 +653,12 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 			Port:          port,
 			ContainerPort: cport,
 			Replicas:      replicas,
-			Status:        workload.StatusDeploying,
-			CreatedAt:     time.Now(),
+			Resources: workload.ResourceSpec{
+				CPURequest: input.Resources.CPURequest, CPULimit: input.Resources.CPULimit,
+				MemRequest: input.Resources.MemRequest, MemLimit: input.Resources.MemLimit,
+			},
+			Status:    workload.StatusDeploying,
+			CreatedAt: time.Now(),
 		}
 		if err := s.workload.Create(ctx, wl); err != nil {
 			return devops.Release{}, err
