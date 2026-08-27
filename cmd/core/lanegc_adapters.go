@@ -15,6 +15,7 @@ import (
 // workload 不 import pipeline）。run.Branch == lane 是 L1 锁定的关联约定：
 //   - Active：存在非终态（running/paused）run——联调/部署中，禁止回收；
 //   - Last：最近终态 run 的 FinishedAt（闲置计时基准）。
+//
 // ListRuns 按 ctx tenant 过滤，须派生租户 ctx。
 type laneRunChecker struct{ runs pipeline.RunRepository }
 
@@ -52,4 +53,30 @@ func envDuration(key string, def time.Duration) time.Duration {
 		return def
 	}
 	return d
+}
+
+// laneWorkloadLister 桥接 workload.Repository -> lane.WorkloadLister（Detail 聚合，
+// 依赖倒置避免 lane -> workload 反向控制）。List 空参数=跨应用全类型，按 lane 过滤。
+type laneWorkloadLister struct{ repos workload.Repository }
+
+func (l laneWorkloadLister) ListByLane(ctx context.Context, envID, laneID string) ([]workload.Workload, error) {
+	return l.repos.List(ctx, envID, "", laneID, "", "")
+}
+
+// laneRunLister 桥接 pipeline.RunRepository -> lane.RunLister（Detail 聚合 + Close 前置校验）。
+// run.Branch == lane.Name 是 spec 锁定的关联约定；ListRuns("", "", "") 跨应用全量后按 branch 过滤。
+type laneRunLister struct{ runs pipeline.RunRepository }
+
+func (l laneRunLister) ListByBranch(ctx context.Context, branch string) ([]pipeline.RunSummary, error) {
+	runs, err := l.runs.ListRuns(ctx, "", "", "")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]pipeline.RunSummary, 0, len(runs))
+	for _, r := range runs {
+		if r.Branch == branch {
+			out = append(out, r.Summarize())
+		}
+	}
+	return out, nil
 }

@@ -217,3 +217,24 @@ func (s StageDef) validate() error {
 	}
 	return nil
 }
+
+// RunSummary 是 run 的轻量摘要（跨模块聚合展示用，如 lane 详情 RecentRuns；
+// 避免 lane 包 import 全量 PipelineRun 耦合 StageRuns 大字段）。
+type RunSummary struct {
+	ID         string    `json:"id"`
+	AppID      string    `json:"appId"`
+	PipelineID string    `json:"pipelineId"`
+	Branch     string    `json:"branch"`
+	Status     string    `json:"status"`
+	CreatedAt  time.Time `json:"createdAt"`
+	FinishedAt time.Time `json:"finishedAt,omitempty"`
+}
+
+// Summarize 投影 PipelineRun 为摘要。
+func (r PipelineRun) Summarize() RunSummary {
+	return RunSummary{
+		ID: r.ID, AppID: r.AppID, PipelineID: r.PipelineID,
+		Branch: r.Branch, Status: r.Status,
+		CreatedAt: r.CreatedAt, FinishedAt: r.FinishedAt,
+	}
+}

@@ -23,13 +23,13 @@ import (
 	"github.com/aitoys/paas/internal/ai/knowledgebase"
 	kbmemory "github.com/aitoys/paas/internal/ai/knowledgebase/memory"
 	kbpg "github.com/aitoys/paas/internal/ai/knowledgebase/pg"
+	"github.com/aitoys/paas/internal/ai/marketplace"
+	marketplacememory "github.com/aitoys/paas/internal/ai/marketplace/memory"
+	marketplacepg "github.com/aitoys/paas/internal/ai/marketplace/pg"
 	"github.com/aitoys/paas/internal/ai/prompt"
 	promptmemory "github.com/aitoys/paas/internal/ai/prompt/memory"
 	promptpg "github.com/aitoys/paas/internal/ai/prompt/pg"
-	"github.com/aitoys/paas/internal/ai/marketplace"
 	"github.com/aitoys/paas/internal/ai/skill"
-	marketplacememory "github.com/aitoys/paas/internal/ai/marketplace/memory"
-	marketplacepg "github.com/aitoys/paas/internal/ai/marketplace/pg"
 	skillmemory "github.com/aitoys/paas/internal/ai/skill/memory"
 	skillpg "github.com/aitoys/paas/internal/ai/skill/pg"
 	"github.com/aitoys/paas/internal/ai/tool"
@@ -66,15 +66,18 @@ import (
 	"github.com/aitoys/paas/internal/environment"
 	envmemory "github.com/aitoys/paas/internal/environment/memory"
 	envpg "github.com/aitoys/paas/internal/environment/pg"
-	"github.com/aitoys/paas/internal/observability"
-	obspg "github.com/aitoys/paas/internal/observability/pg"
 	"github.com/aitoys/paas/internal/governance"
 	govmemory "github.com/aitoys/paas/internal/governance/memory"
 	govpg "github.com/aitoys/paas/internal/governance/pg"
+	"github.com/aitoys/paas/internal/lane"
+	lanememory "github.com/aitoys/paas/internal/lane/memory"
+	lanepg "github.com/aitoys/paas/internal/lane/pg"
 	"github.com/aitoys/paas/internal/maas"
 	mapg "github.com/aitoys/paas/internal/maas/pg"
 	"github.com/aitoys/paas/internal/messaging"
 	msgmemory "github.com/aitoys/paas/internal/messaging/memory"
+	"github.com/aitoys/paas/internal/observability"
+	obspg "github.com/aitoys/paas/internal/observability/pg"
 	"github.com/aitoys/paas/internal/security"
 	secmemory "github.com/aitoys/paas/internal/security/memory"
 	secpg "github.com/aitoys/paas/internal/security/pg"
@@ -128,6 +131,7 @@ type Stores struct {
 	Pipeline       pipeline.Store
 	Change         change.Repository
 	Service        service.Repository
+	Lane           lane.Repository
 	// AlertRules 是告警规则存储（R4-C1 持久化）。PG 路径非 nil（重启不丢）；
 	// 内存路径 nil——observability 内部回退 memory 规则存储（含 dev seed）。
 	AlertRules observability.RuleStore
@@ -168,7 +172,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		}
 		svcRepo := svcpg.NewStore(db)
 		devopsRepo := devopspg.NewStore(db, wlRepo, devopspg.WithServiceLookup(serviceLookupBridge{repos: svcRepo})) // Release 编排经 workload.Repository 接口透明
-		devopsRepo.SetPipeline(devopsPipeline)      // PAAS_DEVOPS_REAL=true 接真实 git/docker
+		devopsRepo.SetPipeline(devopsPipeline)                                                                       // PAAS_DEVOPS_REAL=true 接真实 git/docker
 		govRepo := govpg.NewStore(db)
 		// K8s 启用：governance Route 写投影聚合 Ingress（按 host 多 path，hermes/nginx 标准）。
 		// applier 持裸 govRepo（RouteStore+ServiceStore），ApplyRepo 包装后给 handler（无循环引用）。
@@ -193,6 +197,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		bkRepo := backup.Repository(bkmemory.NewStore())
 		pipelineStore := pipeline.NewPGStore(db.Pool())
 		changeRepo := changepg.NewStore(db)
+		laneRepo := lanepg.NewStore(db)
 
 		seedPGAllIfEmpty(ctx, idb, appRepo, envRepo, appcfgRepo, rawDs, rawWl,
 			devopsRepo, govRepo, ccRepo, billingRepo, secRepo)
@@ -216,8 +221,8 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		stores := &Stores{
 			Identity:       idb,
 			Application:    appRepo,
-		AppMembers:     applicationpg.NewMemberStore(db),
-		Environment:    envRepo,
+			AppMembers:     applicationpg.NewMemberStore(db),
+			Environment:    envRepo,
 			AppConfig:      appcfgRepo,
 			DataService:    dsRepo,
 			Engine:         rawDs, // PG ds store 同实现 EngineRepository（平台级，无 ApplyRepo 装饰）
@@ -244,6 +249,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 			Pipeline:       pipelineStore,
 			Change:         changeRepo,
 			Service:        svcRepo,
+			Lane:           laneRepo,
 			AlertRules:     obspg.NewStore(db),
 		}
 		return stores, db.Close, nil
@@ -290,6 +296,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 	bkRepo := backup.Repository(bkmemory.NewStore())
 	pipelineStore := pipeline.NewMemoryStore()
 	changeRepo := change.NewMemoryStore()
+	laneRepo := lanememory.NewStore()
 	svcRepo := svcRepo0
 	// 存量回填：为无 ServiceID 的既有工作负载幂等建 Service 实体（两路径同源，失败不阻断启动）。
 	backfillTenantIDs(ctx, idb, svcRepo, wlRepo)
@@ -330,6 +337,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		Pipeline:       pipelineStore,
 		Change:         changeRepo,
 		Service:        svcRepo,
+		Lane:           laneRepo,
 	}
 	return stores, nil, nil
 }

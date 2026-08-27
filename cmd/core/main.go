@@ -16,8 +16,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aitoys/paas/internal/ai/agent"
 	aiadmin "github.com/aitoys/paas/internal/ai/admin"
+	"github.com/aitoys/paas/internal/ai/agent"
 	"github.com/aitoys/paas/internal/ai/eval"
 	"github.com/aitoys/paas/internal/ai/guardrail"
 	"github.com/aitoys/paas/internal/ai/knowledgebase"
@@ -49,6 +49,7 @@ import (
 	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/governance"
 	"github.com/aitoys/paas/internal/httputil"
+	"github.com/aitoys/paas/internal/lane"
 	"github.com/aitoys/paas/internal/maas"
 	"github.com/aitoys/paas/internal/messaging"
 	"github.com/aitoys/paas/internal/metrics"
@@ -531,10 +532,10 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// devops 历史记录（仓库/构建/镜像/发布）保留作历史归档，不随应用删除。
 	// admin 删应用复用同一 appCascadeDeleter（DRY，注入 wlQuota）。
 	appHandler.CascadeDelete = appCascadeDeleter{
-		wl:       stores.Workload,
-		cfg:      stores.AppConfig,
-		members:  stores.AppMembers,
-		wlQuota:  wlQuotaFn,
+		wl:      stores.Workload,
+		cfg:     stores.AppConfig,
+		members: stores.AppMembers,
+		wlQuota: wlQuotaFn,
 	}.CascadeDelete
 
 	// 环境（物理隔离单元 prod|test）：方法级权限 environment:read/write + prod 写校验。
@@ -638,7 +639,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	tplHandler := &templateBootstrapHandler{
 		apps: appHandler, repos: stores.DevOpsRepos, svcRepo: stores.Service,
 		pipes: stores.Pipeline, gitea: giteaClient,
-		imageReg: os.Getenv("PAAS_IMAGE_REGISTRY"),
+		imageReg:    os.Getenv("PAAS_IMAGE_REGISTRY"),
 		coreBaseURL: os.Getenv("PAAS_CORE_BASE_URL"),
 		trigger: func(r *http.Request, appID, pid, branch string) (pipeline.PipelineRun, error) {
 			runID, err := changeRunBridge.TriggerAppRun(r.Context(), appID, pid, branch)
@@ -702,6 +703,17 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		governance.WithAudit(&identityAuditAdapter{store: stores.Security}))
 	govHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 	govHandler.CallerUserID = gateway.UserIDFrom // ctx 版签名与 identity.CallerUserID 同源
+
+	// 泳道管理（环境维度的运行时隔离单元，一等实体）：生产建泳道护栏（联调只在测试环境）+
+	// 详情聚合（该泳道工作负载 + 最近 run）+ 生命周期审计。
+	laneHandler := lane.NewHandler(stores.Lane,
+		lane.WithEnvResolver(stores.Environment),
+		lane.WithWorkloadLister(laneWorkloadLister{repos: stores.Workload}),
+		lane.WithRunLister(laneRunLister{runs: stores.Pipeline}),
+		lane.WithAudit(&identityAuditAdapter{store: stores.Security}),
+	)
+	laneHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+	laneHandler.CallerUserID = gateway.UserIDFrom
 	// 数据面 SDK 接入 API（/dp/）：把 K8s Endpoints 暴露为 zeus 兼容服务发现真源。
 	// 鉴权复用 auth（dp token = API Key，绑 tenant）；reader 从 appliers.clientset 读 Endpoints
 	// （非集群部署 clientset=nil，/dp/instances 降级返空，与现状一致不破坏）。
@@ -914,6 +926,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	mux.Handle("/api/registry/", auth(devopsHandler))
 	// 跨应用 open PR 聚合（DevOps 评审 tab/值班台数据源）——精确路径，无子路径。
 	mux.Handle("/api/pulls", auth(devopsHandler))
+	// 泳道管理
+	mux.Handle("/api/lanes", auth(laneHandler))
+	mux.Handle("/api/lanes/", auth(laneHandler))
 	// 服务治理（注册中心）
 	mux.Handle("/api/services", auth(govHandler))
 	mux.Handle("/api/services/", auth(govHandler))
@@ -1316,6 +1331,11 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("POST", "/api/routes", apiroute.Tags("服务治理"), apiroute.Summary("创建路由"), apiroute.Perm("governance:write"), apiroute.WithReqBody(governance.Route{}), apiroute.WithResp(governance.Route{}))
 	reg.Operation("PUT", "/api/routes/{id}", apiroute.Tags("服务治理"), apiroute.Summary("更新路由"), apiroute.Perm("governance:write"), apiroute.WithReqBody(governance.Route{}), apiroute.WithResp(governance.Route{}))
 	reg.Operation("DELETE", "/api/routes/{id}", apiroute.Tags("服务治理"), apiroute.Summary("删除路由"), apiroute.Perm("governance:write"))
+	reg.Operation("GET", "/api/lanes", apiroute.Tags("泳道"), apiroute.Summary("泳道列表"), apiroute.Perm("governance:read"), apiroute.WithResp([]lane.Lane{}))
+	reg.Operation("POST", "/api/lanes", apiroute.Tags("泳道"), apiroute.Summary("创建泳道（生产拒建）"), apiroute.Perm("governance:write"), apiroute.WithReqBody(lane.Lane{}), apiroute.WithResp(lane.Lane{}))
+	reg.Operation("GET", "/api/lanes/{id}", apiroute.Tags("泳道"), apiroute.Summary("泳道详情（聚合工作负载+最近 run）"), apiroute.Perm("governance:read"), apiroute.WithResp(lane.LaneDetail{}))
+	reg.Operation("PUT", "/api/lanes/{id}", apiroute.Tags("泳道"), apiroute.Summary("更新泳道"), apiroute.Perm("governance:write"), apiroute.WithReqBody(lane.Lane{}), apiroute.WithResp(lane.Lane{}))
+	reg.Operation("DELETE", "/api/lanes/{id}", apiroute.Tags("泳道"), apiroute.Summary("关闭泳道（仅标记 closed，幂等）"), apiroute.Perm("governance:write"), apiroute.WithResp(lane.Lane{}))
 	reg.Operation("GET", "/api/breakers", apiroute.Tags("服务治理"), apiroute.Summary("熔断器列表"), apiroute.Perm("governance:read"), apiroute.WithResp([]governance.CircuitBreaker{}))
 	reg.Operation("POST", "/api/breakers", apiroute.Tags("服务治理"), apiroute.Summary("创建熔断器"), apiroute.Perm("governance:write"), apiroute.WithReqBody(governance.CircuitBreaker{}), apiroute.WithResp(governance.CircuitBreaker{}))
 	reg.Operation("PUT", "/api/breakers/{id}", apiroute.Tags("服务治理"), apiroute.Summary("更新熔断器"), apiroute.Perm("governance:write"), apiroute.WithReqBody(governance.CircuitBreaker{}), apiroute.WithResp(governance.CircuitBreaker{}))
