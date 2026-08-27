@@ -11,6 +11,8 @@ import (
 
 	"github.com/aitoys/paas/internal/httputil"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	adminutil "github.com/aitoys/paas/internal/web/admin"
 )
 
@@ -193,6 +195,39 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// PUT /api/applications/{id}/resource-template —— 设置应用级资源规格默认值
+	// （四字段 K8s Quantity 字符串；空=清除继承，deploy 回退 BestEffort——生产受拒建护栏拦截）。
+	// 权限：application:write + 受限应用 Guard write 动作（与工作负载写同粒度）。
+	if r.Method == http.MethodPut && len(parts) == 2 && parts[1] == "resource-template" {
+		if !h.allow(w, r, PermApplicationWrite) {
+			return
+		}
+		if !h.Guard.Allow(r, id, AppActionWrite) {
+			httputil.WriteError(w, http.StatusForbidden, "forbidden: 无该应用的应用级权限（write）")
+			return
+		}
+		var body ResourceTemplate
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+			return
+		}
+		if err := validateResourceTemplate(body); err != nil {
+			httputil.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := h.repo.SetResourceTemplate(r.Context(), id, body); err != nil {
+			httputil.WriteServiceError(w, http.StatusNotFound, err)
+			return
+		}
+		a, err := h.repo.Get(r.Context(), id)
+		if err != nil {
+			httputil.WriteServiceError(w, http.StatusNotFound, err)
+			return
+		}
+		httputil.WriteData(w, a)
+		return
+	}
+
 	// PUT /api/applications/{id}/restrict —— 切换应用级权限受限模式（body: {"restricted":bool}）。
 	// 权限语义（防权限提升链，与 member handler allowManage 同源）：
 	//   - 非受限 → 开启：仅租户管理员（开启是初始 owner 授予的前置，不能让 developer 自开自封）。
@@ -335,3 +370,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeData 写成功响应（统一 {data:T} 契约，与 List 一致；下游 fetchJSON<T> 期望此包裹）。
+
+// validateResourceTemplate 校验四字段 Quantity 格式（K8s 同款语法；空字段跳过）。
+// 与 workload.ResourceSpec.Validate 同语义但独立实现——application 不 import workload（模块边界）。
+func validateResourceTemplate(t ResourceTemplate) error {
+	fields := map[string]string{
+		"cpuRequest": t.CPURequest, "cpuLimit": t.CPULimit,
+		"memRequest": t.MemRequest, "memLimit": t.MemLimit,
+	}
+	for name, v := range fields {
+		if v == "" {
+			continue
+		}
+		if _, err := resource.ParseQuantity(v); err != nil {
+			return fmt.Errorf("字段非法: %s（K8s Quantity 格式，如 500m/2/256Mi/1Gi）", name)
+		}
+	}
+	return nil
+}

@@ -42,10 +42,38 @@ interface App {
   bindings: Binding[]
   replicas: string
   rps: string
+  resourceTemplate?: { cpuRequest?: string; cpuLimit?: string; memRequest?: string; memLimit?: string }
 }
 
 const app = ref<App | null>(null)
 const loading = ref(true)
+
+// —— 资源规格默认值（应用级 ResourceTemplate：deploy 未显式指定时继承）——
+const resFields = [
+  { key: 'cpuRequest' as const, label: 'CPU 请求', ph: '如 500m' },
+  { key: 'cpuLimit' as const, label: 'CPU 上限', ph: '如 2' },
+  { key: 'memRequest' as const, label: '内存请求', ph: '如 256Mi' },
+  { key: 'memLimit' as const, label: '内存上限', ph: '如 1Gi' },
+]
+const resForm = ref({ cpuRequest: '', cpuLimit: '', memRequest: '', memLimit: '' })
+const resSaving = ref(false)
+
+async function saveResTemplate() {
+  if (!app.value) return
+  resSaving.value = true
+  try {
+    app.value = await fetchJSON<App>(`/api/applications/${app.value.id}/resource-template`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(resForm.value),
+    })
+    ElMessage.success('资源规格默认值已保存')
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  } finally {
+    resSaving.value = false
+  }
+}
 
 // 资源类型元信息：图标 / 标签 / 主色。
 // 资源中心 = 数据服务；dal 兼容历史 seed，gov 兼容「应用接入治理」语义。
@@ -159,6 +187,12 @@ async function load() {
   try {
     // fetchJSON 自动解包 {data:T} 契约，杜绝手动 json.data ?? json 的契约遗漏。
     app.value = await fetchJSON<App>(`/api/applications/${id}`)
+    // 资源规格默认值回填表单（应用级 ResourceTemplate）
+    const rt = app.value.resourceTemplate
+    resForm.value.cpuRequest = rt?.cpuRequest ?? ''
+    resForm.value.cpuLimit = rt?.cpuLimit ?? ''
+    resForm.value.memRequest = rt?.memRequest ?? ''
+    resForm.value.memLimit = rt?.memLimit ?? ''
     // 并行加载该应用的工作负载（部署 tab）与环境（分组映射）；任一失败不阻塞主信息。
     const [ws, es, mt, rels, blds] = await Promise.allSettled([
       fetchJSON<Workload[]>(`/api/applications/${id}/workloads`),
@@ -644,8 +678,22 @@ async function deleteApp() {
         <AppReleases :app-id="app.id" :picked-image-id="pickedImageId" />
       </div>
 
-      <!-- 配置（工作负载级 env/Secret） -->
+      <!-- 配置（工作负载级 env/Secret + 应用级资源规格默认值） -->
       <div v-else-if="activeTab === '配置'">
+        <div class="card" style="margin-bottom: 16px; padding: 16px">
+          <h3 class="card-title">资源规格默认值（新部署继承）</h3>
+          <el-form inline>
+            <el-form-item v-for="f in resFields" :key="f.key" :label="f.label">
+              <el-input v-model="resForm[f.key]" :placeholder="f.ph" style="width: 120px" />
+            </el-form-item>
+            <el-form-item>
+              <el-button size="small" type="primary" :loading="resSaving" @click="saveResTemplate">保存</el-button>
+            </el-form-item>
+          </el-form>
+          <div style="font-size: 12px; color: var(--el-text-color-secondary)">
+            留空 = 不继承（BestEffort）。生产环境部署必须有 CPU/内存规格，建议至少填 CPU 请求/内存请求。
+          </div>
+        </div>
         <AppConfigs :app-id="app.id" />
       </div>
 
@@ -711,6 +759,16 @@ async function deleteApp() {
 .detail {
   max-width: 1100px;
   margin: 0 auto;
+}
+/* 资源规格默认值卡（配置 tab 顶部） */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.card-title {
+  font-size: 14px;
+  margin: 0 0 12px;
 }
 /* 面包屑紧凑身份条：替代旧 header 大卡片，回收首屏垂直空间。 */
 .crumb {

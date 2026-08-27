@@ -248,3 +248,20 @@ func seed() []application.Application {
 			Gradient: "linear-gradient(135deg,#ec4899,#8b5cf6)", Desc: "工具调用 Agent，多模型协同"},
 	}
 }
+
+// SetResourceTemplate 覆盖应用级资源规格默认值（租户隔离：跨租户 not found）。
+func (s *Store) SetResourceTemplate(ctx context.Context, id string, t application.ResourceTemplate) error {
+	tid, ok := tenant.TenantFrom(ctx)
+	if !ok {
+		return fmt.Errorf("missing tenant context")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, hit := s.apps[id]
+	if !hit || a.TenantID != tid {
+		return fmt.Errorf("应用不存在: %s", id)
+	}
+	a.ResourceTemplate = t
+	s.apps[id] = a
+	return nil
+}

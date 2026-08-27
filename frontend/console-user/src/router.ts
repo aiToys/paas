@@ -44,6 +44,15 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '环境详情' },
   },
 
+  // -- 泳道：环境内运行隔离单元（一等实体） --
+  // 从环境详情泳道矩阵列头点入；详情聚合服务部署表 + 最近 run + trace 入口。
+  {
+    path: '/lanes/:id',
+    name: 'lane-detail',
+    component: () => import('@/views/LaneDetail.vue'),
+    meta: { title: '泳道详情' },
+  },
+
   // —— 资源中心：数据服务（可绑定 Add-on） ——
   {
     path: '/resources/models',

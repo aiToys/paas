@@ -1167,6 +1167,10 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		apiroute.WithReqBody(application.Member{}), apiroute.WithResp(application.Member{}))
 	reg.Operation("DELETE", "/api/applications/{id}/members/{userId}",
 		apiroute.Tags("应用"), apiroute.Summary("移除应用成员"), apiroute.Perm("application:write"))
+	reg.Operation("PUT", "/api/applications/{id}/resource-template",
+		apiroute.Tags("应用"), apiroute.Summary("设置应用级资源规格默认值（deploy 未显式指定时继承）"),
+		apiroute.Perm("application:write"),
+		apiroute.WithReqBody(application.ResourceTemplate{}), apiroute.WithResp(application.Application{}))
 	reg.Operation("PUT", "/api/applications/{id}/restrict",
 		apiroute.Tags("应用"), apiroute.Summary("切换应用级权限受限模式（开启后写操作需成员角色）"),
 		apiroute.Perm("application:write"),

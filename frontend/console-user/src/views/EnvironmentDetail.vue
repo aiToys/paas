@@ -7,6 +7,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import { fetchAuth } from '@/api'
+import { listLanes, createLane, closeLane, type Lane as LaneEntity } from '@/api/lane'
+import { confirmDangerous } from '@/composables/useDangerConfirm'
 import { useEnvStore } from '@/stores/env'
 
 interface Env {
@@ -60,6 +62,63 @@ const KIND_LABEL: Record<string, string> = {
   db: '数据库', cache: '缓存', mq: '消息队列', storage: '对象存储', vector: '向量数据库', search: '搜索引擎',
 }
 
+// —— 泳道实体管理（一等实体：显式创建/关闭，workload 反推的泳道仅是未实体化的裸分支）——
+const lanes = ref<LaneEntity[]>([])
+const laneDlg = ref(false)
+const laneForm = ref<{ name: string; mode: 'standard' | 'permanent'; description: string }>({ name: '', mode: 'standard', description: '' })
+
+async function loadLanes() {
+  try {
+    lanes.value = await listLanes(route.params.id as string)
+  } catch { /* 后端不可用降级为空，矩阵仍按 workload 反推 */ }
+}
+
+function openLaneManager() {
+  laneDlg.value = true
+  loadLanes()
+}
+
+// 列头点入泳道详情：优先实体（name 精确匹配），无实体时先懒建视图兜底——直接按名查列表。
+async function goLane(name: string) {
+  await loadLanes()
+  const hit = lanes.value.find((l) => l.name === name && l.status === 'active')
+  if (hit) {
+    router.push(`/lanes/${hit.id}`)
+  } else {
+    // 裸分支泳道（无实体）：懒建实体再进详情（与 deploy EnsureByName 同语义）
+    try {
+      const created = await createLane({ envId: route.params.id as string, name, mode: 'standard' })
+      router.push(`/lanes/${created.id}`)
+    } catch (e) {
+      ElMessage.error((e as Error).message)
+    }
+  }
+}
+
+async function onCreateLane() {
+  if (!laneForm.value.name) { ElMessage.warning('泳道名必填（小写字母数字与 -）'); return }
+  try {
+    await createLane({ envId: route.params.id as string, ...laneForm.value })
+    ElMessage.success('泳道已创建')
+    laneForm.value = { name: '', mode: 'standard', description: '' }
+    await loadLanes()
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  }
+}
+
+async function onCloseLane(l: LaneEntity) {
+  const ok = await confirmDangerous({ action: '关闭泳道', target: l.name, requireNameConfirm: true, isProd: env.value?.type === 'prod' })
+  if (!ok) return
+  try {
+    await closeLane(l.id)
+    ElMessage.success('泳道已关闭')
+    await loadLanes()
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  }
+}
+
 async function load() {
   loading.value = true
   try {
@@ -70,6 +129,7 @@ async function load() {
       fetchAuth('/api/applications'),
       fetchAuth('/api/dataservices'),
     ])
+    loadLanes() // 非阻塞：泳道实体列表独立加载（失败降级空）
     if (eResp.ok) {
       const all = ((await eResp.json()).data ?? []) as Env[]
       env.value = all.find((e) => e.id === id) ?? null
@@ -217,7 +277,10 @@ watch(() => route.params.id, load)
       </section>
 
       <section class="card">
-        <h3 class="card-title">应用部署矩阵（应用 × 泳道）</h3>
+        <h3 class="card-title">
+          应用部署矩阵（应用 × 泳道）
+          <el-button size="small" style="float: right" @click="openLaneManager">管理泳道</el-button>
+        </h3>
         <el-table :data="appMatrix" size="small" empty-text="该环境尚无部署">
           <el-table-column label="应用" min-width="200" fixed="left">
             <template #default="{ row }">
@@ -236,7 +299,11 @@ watch(() => route.params.id, load)
             min-width="150"
           >
             <template #header>
-              <span :class="{ 'lane-header-feature': lane !== 'default' }">
+              <span
+                :class="{ 'lane-header-feature': lane !== 'default' }"
+                :style="lane !== 'default' ? 'cursor: pointer' : ''"
+                @click="lane !== 'default' && goLane(lane)"
+              >
                 {{ lane === 'default' ? '基线' : `泳道 ${lane}` }}
               </span>
             </template>
@@ -257,6 +324,53 @@ watch(() => route.params.id, load)
       </section>
     </template>
     <div v-else class="empty">环境不存在或无权访问</div>
+
+    <!-- 泳道实体管理：显式创建（standard/permanent）+ 关闭（同步回收工作负载） -->
+    <el-dialog v-model="laneDlg" title="管理泳道" width="640px">
+      <el-form inline @submit.prevent="onCreateLane">
+        <el-form-item label="泳道名">
+          <el-input v-model="laneForm.name" placeholder="如 feature-pay（小写字母数字-）" style="width: 200px" />
+        </el-form-item>
+        <el-form-item label="模式">
+          <el-select v-model="laneForm.mode" style="width: 140px">
+            <el-option label="常规（闲置可回收）" value="standard" />
+            <el-option label="常驻（GC 不回收）" value="permanent" />
+          </el-select>
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" @click="onCreateLane">创建</el-button>
+        </el-form-item>
+      </el-form>
+      <el-table :data="lanes" size="small" empty-text="暂无实体化泳道（矩阵中的泳道为裸分支，点列头可实体化）">
+        <el-table-column prop="name" label="泳道" min-width="140">
+          <template #default="{ row }">
+            <router-link :to="`/lanes/${row.id}`" style="color: var(--el-color-primary); text-decoration: none">
+              {{ row.name }}
+            </router-link>
+          </template>
+        </el-table-column>
+        <el-table-column prop="mode" label="模式" width="120">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.mode === 'permanent' ? 'warning' : 'info'">
+              {{ row.mode === 'permanent' ? '常驻' : '常规' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="status" label="状态" width="90">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.status === 'active' ? 'success' : 'info'">{{ row.status }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="description" label="说明" min-width="140" show-overflow-tooltip />
+        <el-table-column label="操作" width="90">
+          <template #default="{ row }">
+            <el-button v-if="row.status === 'active'" size="small" type="danger" link @click="onCloseLane(row)">
+              关闭
+            </el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-dialog>
   </div>
 </template>
 

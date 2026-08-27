@@ -36,6 +36,16 @@ func (s *stubRepo) SetRestricted(_ context.Context, id string, restricted bool) 
 	return ErrMemberNotFound
 }
 
+func (s *stubRepo) SetResourceTemplate(_ context.Context, id string, t ResourceTemplate) error {
+	for i := range s.apps {
+		if s.apps[i].ID == id {
+			s.apps[i].ResourceTemplate = t
+			return nil
+		}
+	}
+	return ErrMemberNotFound
+}
+
 func (s *stubRepo) Create(_ context.Context, a Application) error {
 	s.apps = append(s.apps, a)
 	return nil

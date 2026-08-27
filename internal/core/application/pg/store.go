@@ -294,3 +294,21 @@ func (s *Store) attachBindings(ctx context.Context, ids []string, apps map[strin
 	}
 	return nil
 }
+
+// SetResourceTemplate 覆盖应用级资源规格默认值（租户隔离：不匹配视为不存在）。
+func (s *Store) SetResourceTemplate(ctx context.Context, id string, t application.ResourceTemplate) error {
+	tid, err := pg.TenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	ct, err := s.db.Pool().Exec(ctx,
+		`UPDATE applications SET resource_template=$1 WHERE id=$2 AND tenant_id=$3`,
+		marshalResourceTemplate(t), id, tid)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("应用不存在: %s", id)
+	}
+	return nil
+}

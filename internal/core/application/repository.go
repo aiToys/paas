@@ -19,4 +19,6 @@ type Repository interface {
 	Unbind(ctx context.Context, id, resourceType, name string) (Application, error)
 	// SetRestricted 切换应用级权限受限模式（true=写操作需成员角色匹配）。
 	SetRestricted(ctx context.Context, id string, restricted bool) error
+	// SetResourceTemplate 覆盖应用级资源规格默认值（deploy 未显式指定时继承；空=清除继承）。
+	SetResourceTemplate(ctx context.Context, id string, t ResourceTemplate) error
 }

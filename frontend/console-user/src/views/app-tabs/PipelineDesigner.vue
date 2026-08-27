@@ -102,6 +102,30 @@ function commitBuildArgs(stageIdx: number, rows: Array<{ k: string; v: string }>
   else delete overrides.value[k]
 }
 
+// resources 覆盖（deploy stage 容器资源规格，四字段 Quantity 字符串）。
+// key 格式 "<stageIdx>.resources"（engine parseDeployResources 消费）；空 map = 继承应用级默认。
+const RES_FIELDS = [
+  { key: 'cpuRequest', label: 'CPU 请求', ph: '500m' },
+  { key: 'cpuLimit', label: 'CPU 上限', ph: '2' },
+  { key: 'memRequest', label: '内存请求', ph: '256Mi' },
+  { key: 'memLimit', label: '内存上限', ph: '1Gi' },
+] as const
+
+function getResField(stageIdx: number, field: string): string {
+  const m = (overrides.value[overrideKey(stageIdx, 'resources')] as Record<string, string> | undefined) ?? {}
+  return m[field] ?? ''
+}
+function setResField(stageIdx: number, field: string, val: string) {
+  const m: Record<string, string> = {}
+  for (const f of RES_FIELDS) {
+    const v = f.key === field ? val : getResField(stageIdx, f.key)
+    if (v) m[f.key] = v
+  }
+  const k = overrideKey(stageIdx, 'resources')
+  if (Object.keys(m).length) overrides.value[k] = m
+  else delete overrides.value[k]
+}
+
 async function save() {
   if (!pipeline.value) return
   saving.value = true
@@ -200,6 +224,17 @@ onMounted(load)
         <el-input :model-value="getOverride(d.i, 'port')" @update:model-value="(v: string) => setOverride(d.i, 'port', v)"
                   placeholder="留空 = 不建 Service；新建 Workload 时驱动建 K8s Service（如 8081）" clearable />
         <div class="override-hint">ContainerPort 缺省取 port；端口驱动 reconciler 建 Service 供 smoke 探活/服务发现。</div>
+        <div class="override-label" style="margin-top: 12px;">阶段「{{ d.s.name }}」资源规格（resources）</div>
+        <el-form inline>
+          <el-form-item v-for="f in RES_FIELDS" :key="f.key" :label="f.label">
+            <el-input :model-value="getResField(d.i, f.key)" @update:model-value="(v: string) => setResField(d.i, f.key, v)"
+                      :placeholder="f.ph" style="width: 110px" />
+          </el-form-item>
+        </el-form>
+        <div class="override-hint">留空 = 继承应用级资源规格默认值（配置 tab）；生产环境必须最终有规格（应用级或此处）。</div>
+        <div class="override-label" style="margin-top: 12px;">阶段「{{ d.s.name }}」副本数（replicas）</div>
+        <el-input :model-value="getOverride(d.i, 'replicas')" @update:model-value="(v: string) => setOverride(d.i, 'replicas', v)"
+                  placeholder="留空 = 服务定义默认；联调泳道自动降为 1" clearable />
       </div>
       <div v-for="b in buildStages" :key="b.i" class="override-item">
         <div class="override-label">阶段「{{ b.s.name }}」构建参数（buildArgs，如 SERVICE=product）</div>
