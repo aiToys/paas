@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/aitoys/paas/internal/devops/pipeline"
@@ -49,6 +50,12 @@ type AuditRecorder interface {
 	Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error
 }
 
+// Reclaimer 泳道资源回收（依赖倒置：lane 不 import workload 的 LaneGC 具体类型，
+// cmd/core 桥接 workload.LaneGC.ReclaimLane，防关闭路径与 GC 两处删除逻辑漂移——spec 风险 7.4）。
+type Reclaimer interface {
+	ReclaimLane(ctx context.Context, tenantID, envID, laneName string) (int, error)
+}
+
 // Handler 暴露泳道 REST API。
 //
 // 路由：
@@ -65,6 +72,7 @@ type Handler struct {
 	envResolver EnvTypeResolver
 	workloads   WorkloadLister
 	runs        RunLister
+	reclaimer   Reclaimer
 	auditLog    AuditRecorder
 	Authorize   func(r *http.Request, perm string) bool
 	// CallerUserID 取调用者用户 ID（main.go 注入 gateway.UserIDFrom，依赖倒置避免 lane -> gateway import）。
@@ -96,6 +104,12 @@ func WithWorkloadLister(l WorkloadLister) HandlerOpt {
 // WithRunLister 注入 run 摘要列表器（Detail 聚合 + Close 前置校验；未注入跳过校验）。
 func WithRunLister(l RunLister) HandlerOpt {
 	return func(h *Handler) { h.runs = l }
+}
+
+// WithReclaimer 注入泳道资源回收器（DELETE 关闭时同步回收该泳道全部工作负载；
+// 未注入保持仅标记 closed 的旧语义——向后兼容）。回收失败不回滚 closed（GC 兜底清遗留）。
+func WithReclaimer(r Reclaimer) HandlerOpt {
+	return func(h *Handler) { h.reclaimer = r }
 }
 
 // WithAudit 注入审计记录器（泳道生命周期变更记审计：lane_create/lane_update/lane_close）。
@@ -272,7 +286,20 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request) {
 			writeLaneError(w, err)
 			return
 		}
-		h.audit(r, "lane_close", id, "env="+cur.EnvID+" name="+cur.Name)
+		// 关闭即回收：同步删除该泳道全部工作负载（ReclaimLane 内部逐 workload 派生租户
+		// ctx + Delete + 配额回退 + 审计）。best-effort：实体已 closed 不回滚，回收失败
+		// 的遗留由 laneGC 兜底清扫；detail 记录回收数供审计追溯。
+		detail := "env=" + cur.EnvID + " name=" + cur.Name
+		if h.reclaimer != nil {
+			tid, _ := tenant.TenantFrom(r.Context())
+			n, err := h.reclaimer.ReclaimLane(r.Context(), tid, cur.EnvID, cur.Name)
+			if err != nil {
+				detail += " 资源回收失败: " + err.Error() + "（遗留由 GC 兜底清扫）"
+			} else {
+				detail += " 回收工作负载数=" + strconv.Itoa(n)
+			}
+		}
+		h.audit(r, "lane_close", id, detail)
 		httputil.WriteData(w, closed)
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")

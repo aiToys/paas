@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/aitoys/paas/internal/devops/pipeline"
+	"github.com/aitoys/paas/internal/lane"
 	"github.com/aitoys/paas/internal/workload"
 	"github.com/aitoys/paas/pkg/tenant"
 )
@@ -79,4 +80,35 @@ func (l laneRunLister) ListByBranch(ctx context.Context, branch string) ([]pipel
 		}
 	}
 	return out, nil
+}
+
+// laneStatusBridge 桥接 lane.Repository -> workload.LaneStatusStore（依赖倒置，
+// workload 不 import lane）。Mode 取泳道模式（permanent 常驻 GC 跳过）；
+// MarkClosed 回收后同步实体 closed（幂等；无实体=纯遗留泳道，忽略）。
+type laneStatusBridge struct{ lanes laneRepository }
+
+// laneRepository 收窄 lane.Repository 到 GC 联动所需的最小面（Mode/MarkClosed 仅需 GetByName/Close）。
+type laneRepository interface {
+	GetByName(ctx context.Context, envID, name string) (lane.Lane, error)
+	Close(ctx context.Context, id string) (lane.Lane, error)
+}
+
+func (b laneStatusBridge) Mode(ctx context.Context, envID, name string) (string, error) {
+	ln, err := b.lanes.GetByName(ctx, envID, name)
+	if err != nil {
+		return "", err // 不存在等错误交调用方保守跳过
+	}
+	return ln.Mode, nil
+}
+
+func (b laneStatusBridge) MarkClosed(ctx context.Context, envID, name string) error {
+	ln, err := b.lanes.GetByName(ctx, envID, name)
+	if err != nil {
+		return nil // 无实体（纯遗留泳道）：无需标记
+	}
+	if ln.Status == lane.StatusClosed {
+		return nil // 幂等
+	}
+	_, err = b.lanes.Close(ctx, ln.ID)
+	return err
 }

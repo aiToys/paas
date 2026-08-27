@@ -150,27 +150,29 @@ func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, metrics
 		}()
 	}
 	// 泳道闲置回收（L3）：周期扫描非 default 泳道 Workload，闲置超 TTL 且无活跃 run 则删除
-	// （stores.Workload 已 ApplyRepo 装饰，Delete 投影删 CRD）。env PAAS_LANE_GC_INTERVAL=0 禁用。
+	// （stores.Workload 已 ApplyRepo 装饰，Delete 投影删 CRD）。env PAAS_LANE_GC_INTERVAL=0 禁周期扫描
+	// （gc 仍构造——lane handler 关闭泳道时经 ReclaimLane 同步回收工作负载，复用同一删除逻辑）。
+	gc := &workload.LaneGC{
+		Repos:  stores.Workload,
+		Runs:   laneRunChecker{runs: stores.Pipeline},
+		EnvType:  stores.Environment.EnvType, // 与 workload handler 同源注入
+		Lanes:  laneStatusBridge{lanes: stores.Lane}, // permanent 常驻跳过 + 回收后 MarkClosed
+		TTL:    envDuration("PAAS_LANE_TTL", 72*time.Hour),
+		MaxSweep: 20,
+		Quota: func(ctx context.Context, tenantID string) {
+			// 配额回退与 handler 删除路径同源（CheckAndInc -1，幂等）。
+			if _, err := stores.Billing.CheckAndInc(ctx, billing.ResWorkloads, -1); err != nil {
+				log.Printf("[laneGC] 配额回退失败: %v", err)
+			}
+		},
+		Audit: &identityAuditAdapter{store: stores.Security}, // lane_gc 审计（spec 承诺，审计只增不删）
+	}
 	if v := envDuration("PAAS_LANE_GC_INTERVAL", 30*time.Minute); v > 0 {
-		gc := &workload.LaneGC{
-			Repos:    stores.Workload,
-			Runs:     laneRunChecker{runs: stores.Pipeline},
-			EnvType:  stores.Environment.EnvType, // 与 workload handler 同源注入
-			TTL:      envDuration("PAAS_LANE_TTL", 72*time.Hour),
-			MaxSweep: 20,
-			Quota: func(ctx context.Context, tenantID string) {
-				// 配额回退与 handler 删除路径同源（CheckAndInc -1，幂等）。
-				if _, err := stores.Billing.CheckAndInc(ctx, billing.ResWorkloads, -1); err != nil {
-					log.Printf("[laneGC] 配额回退失败: %v", err)
-				}
-			},
-			Audit: &identityAuditAdapter{store: stores.Security}, // lane_gc 审计（spec 承诺，审计只增不删）
-		}
 		stopGC := gc.Start(ctx, v)
 		defer stopGC()
 		log.Printf("[laneGC] 启动：间隔 %s TTL %s", v, gc.TTL)
 	}
-	srv := serveHTTP(gw, meter, stores, appliers, metricsReg)
+	srv := serveHTTP(gw, meter, stores, appliers, metricsReg, gc)
 	// 告警评估引擎（R4-C2）：后台 30s tick 评估 + 状态机 + webhook 出站，随进程 ctx 退出。
 	if obsAlertEngine != nil {
 		obsAlertEngine.Start(ctx)
@@ -388,7 +390,7 @@ var (
 	obsAlertEngine *alertengine.Engine
 )
 
-func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, appliers k8sAppliers, metricsReg *metrics.Registry) *http.Server {
+func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, appliers k8sAppliers, metricsReg *metrics.Registry, laneReclaimer *workload.LaneGC) *http.Server {
 	apiKey := resolveAPIKey()
 	// P3-2 计量采集：推理 token 用量回写 billing（meter.OnTokens 钩子）。
 	// appID 来自应用级 Key（强制归因到应用）；user 是 agent 软标签（仅日志，不入 billing 聚合）。
@@ -717,6 +719,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		lane.WithWorkloadLister(laneWorkloadLister{repos: stores.Workload}),
 		lane.WithRunLister(laneRunLister{runs: stores.Pipeline}),
 		lane.WithAudit(&identityAuditAdapter{store: stores.Security}),
+		lane.WithReclaimer(laneReclaimer), // 关闭泳道同步回收工作负载（与 LaneGC 同源删除逻辑）
 	)
 	laneHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 	laneHandler.CallerUserID = gateway.UserIDFrom

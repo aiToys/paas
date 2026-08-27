@@ -384,9 +384,16 @@ func (e *Engine) execDeploy(ctx context.Context, run *PipelineRun, stage StageDe
 	//（联调泳道只需验证功能，省资源；prod 环境不降级——灰度泳道按显式副本走）。
 	// EnvType nil 时保守按 prod 处理不降级（fail-closed，与 allowProdFlow 同源语义）。
 	replicas := intOr(stage.Params, "replicas", 0)
-	if lane != LaneDefault && replicas > 1 && !e.laneIsProd(ctx, envID) {
-		logf(sr, "联调泳道副本降级 %d -> 1（非 prod 环境泳道单副本验证）", replicas)
-		replicas = 1
+	if lane != LaneDefault && !e.laneIsProd(ctx, envID) {
+		// 联调泳道单副本验证：显式 >1 截断为 1；未显式（0）也置 1——
+		// 0 会让 store 回退服务定义 Replicas（如 3），逃逸泳道降级语义（审查 Important 修复）。
+		if replicas == 0 {
+			replicas = 1
+			logf(sr, "联调泳道未显式副本，单副本验证（不沿用服务定义副本）")
+		} else if replicas > 1 {
+			logf(sr, "联调泳道副本降级 %d -> 1（非 prod 环境泳道单副本验证）", replicas)
+			replicas = 1
+		}
 	}
 	logf(sr, "部署镜像 %s 到 env=%s lane=%s service=%s serviceId=%s", imageID, envID, lane, service, serviceID)
 	// prod 环境写受 prod:write 保护（adapter 内 CreateRelease 走 EnvTypeResolver）

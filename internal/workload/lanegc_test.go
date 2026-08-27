@@ -138,3 +138,98 @@ func TestSweepQuotaDec(t *testing.T) {
 		t.Fatalf("配额应按租户回退, got tenant=%q", quotaTenant)
 	}
 }
+
+// fakeLaneStatus 是 LaneStatusStore 的测试替身（permanent 联动 + MarkClosed 幂等验证）。
+type fakeLaneStatus struct {
+	modes      map[string]string // key: envID+"/"+name -> mode
+	closedKeys []string
+}
+
+func (f *fakeLaneStatus) Mode(_ context.Context, envID, name string) (string, error) {
+	m, ok := f.modes[envID+"/"+name]
+	if !ok {
+		return "", errNotFound // 无实体（纯遗留泳道）
+	}
+	return m, nil
+}
+func (f *fakeLaneStatus) MarkClosed(_ context.Context, envID, name string) error {
+	if _, ok := f.modes[envID+"/"+name]; !ok {
+		return nil // 无实体忽略
+	}
+	f.closedKeys = append(f.closedKeys, envID+"/"+name)
+	return nil
+}
+
+func TestSweepPermanentLaneSkipped(t *testing.T) {
+	g, repo := newGC([]Workload{wl("w1", "feature-x", gcOld)}, nil)
+	g.Lanes = &fakeLaneStatus{modes: map[string]string{"e1/feature-x": "permanent"}}
+	if n := g.Sweep(context.Background()); n != 0 || len(repo.deleted) != 0 {
+		t.Fatalf("permanent 泳道 GC 永不回收, got %v", repo.deleted)
+	}
+}
+
+func TestSweepLaneStatusErrorSkips(t *testing.T) {
+	// 实体查询失败保守跳过（fail-closed，下轮再试），不误删
+	g, _ := newGC([]Workload{wl("w1", "feature-x", gcOld)}, nil)
+	g.Lanes = errLaneStatus{}
+	if n := g.Sweep(context.Background()); n != 0 {
+		t.Fatalf("Lane 实体查询失败应跳过, got %d", n)
+	}
+}
+
+type errLaneStatus struct{}
+
+func (errLaneStatus) Mode(context.Context, string, string) (string, error) {
+	return "", context.DeadlineExceeded
+}
+func (errLaneStatus) MarkClosed(context.Context, string, string) error { return nil }
+
+func TestSweepMarksLaneClosed(t *testing.T) {
+	g, _ := newGC([]Workload{wl("w1", "feature-x", gcOld)}, nil)
+	ls := &fakeLaneStatus{modes: map[string]string{"e1/feature-x": "standard"}}
+	g.Lanes = ls
+	if n := g.Sweep(context.Background()); n != 1 {
+		t.Fatalf("应删 1 个, got %d", n)
+	}
+	if len(ls.closedKeys) != 1 || ls.closedKeys[0] != "e1/feature-x" {
+		t.Fatalf("回收后应 MarkClosed, got %v", ls.closedKeys)
+	}
+}
+
+func TestReclaimLaneDeletesAndMarksClosed(t *testing.T) {
+	repo := &gcFakeRepo{items: []Workload{
+		wl("w1", "feature-x", gcOld), wl("w2", "feature-x", gcOld), wl("w3", "default", gcOld),
+	}}
+	// ReclaimLane 走 List（stubRepo.List 忽略过滤参数返全量），fake 需按 lane 过滤——重写 List。
+	repo.list = repo.items
+	g := &LaneGC{
+		Repos: &laneFilterRepo{gcFakeRepo: repo, lane: "feature-x"},
+		Runs:  gcFakeRuns{},
+		EnvType: func(context.Context, string) (string, error) { return "test", nil },
+	}
+	ls := &fakeLaneStatus{modes: map[string]string{"e1/feature-x": "standard"}}
+	g.Lanes = ls
+	n, err := g.ReclaimLane(context.Background(), "t1", "e1", "feature-x")
+	if err != nil || n != 2 {
+		t.Fatalf("应回收 2 个, got n=%d err=%v", n, err)
+	}
+	if len(ls.closedKeys) != 1 {
+		t.Fatalf("回收后应 MarkClosed, got %v", ls.closedKeys)
+	}
+}
+
+// laneFilterRepo 装饰 gcFakeRepo：List 按 LaneID 过滤（stubRepo.List 忽略过滤参数）。
+type laneFilterRepo struct {
+	*gcFakeRepo
+	lane string
+}
+
+func (f *laneFilterRepo) List(_ context.Context, _, _, laneID, _, _ string) ([]Workload, error) {
+	out := make([]Workload, 0)
+	for _, w := range f.items {
+		if w.LaneID == laneID {
+			out = append(out, w)
+		}
+	}
+	return out, nil
+}
