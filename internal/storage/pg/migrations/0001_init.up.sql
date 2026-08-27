@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS applications (
     replicas  TEXT NOT NULL DEFAULT '',
     rps       TEXT NOT NULL DEFAULT '',
     restricted BOOLEAN NOT NULL DEFAULT FALSE,
+    resource_template JSONB NOT NULL DEFAULT '{}',    -- 应用资源模板（CPU/内存 requests/limits，新工作负载默认规格）
     UNIQUE (tenant_id, name)
 );
 CREATE INDEX IF NOT EXISTS idx_apps_tenant ON applications(tenant_id);
@@ -166,6 +167,7 @@ CREATE TABLE IF NOT EXISTS workloads (
     port           INTEGER NOT NULL DEFAULT 0,        -- Service 对外端口（>0 才建 Service）
     container_port INTEGER NOT NULL DEFAULT 0,        -- Pod 监听端口（0 取 port）
     domain         TEXT NOT NULL DEFAULT '',         -- 对外域名（非空时建 Ingress，host=domain -> Service:port）
+    resources      JSONB NOT NULL DEFAULT '{}',     -- 容器资源规格（CPU/内存 requests/limits，Quantity 字符串）
     created_at     TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_wl_lookup ON workloads(tenant_id, env_id, app_id, type);

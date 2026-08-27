@@ -5,6 +5,7 @@ package pg
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -101,7 +102,8 @@ func (s *Store) Create(ctx context.Context, a application.Application) error {
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err = tx.Exec(ctx, appInsert, a.ID, a.TenantID, a.Name, a.Initial, a.Env,
-		a.Status, a.Gradient, a.Desc, a.Replicas, a.RPS, a.Restricted); err != nil {
+		a.Status, a.Gradient, a.Desc, a.Replicas, a.RPS, a.Restricted,
+		marshalResourceTemplate(a.ResourceTemplate)); err != nil {
 		if pg.IsUniqueViolation(err) {
 			return fmt.Errorf("应用%w", pg.ErrAlreadyExists)
 		}
@@ -221,21 +223,45 @@ func (s *Store) SetRestricted(ctx context.Context, id string, restricted bool) e
 
 // —— 扫描 / 聚合辅助 ——
 
-const appSelect = `SELECT id, tenant_id, name, initial, env, status, gradient, "desc", replicas, rps, restricted FROM applications`
+const appSelect = `SELECT id, tenant_id, name, initial, env, status, gradient, "desc", replicas, rps, restricted, resource_template FROM applications`
 
 const appInsert = `INSERT INTO applications
-(id, tenant_id, name, initial, env, status, gradient, "desc", replicas, rps, restricted)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`
+(id, tenant_id, name, initial, env, status, gradient, "desc", replicas, rps, restricted, resource_template)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`
 
 const bindingInsert = `INSERT INTO application_bindings (app_id, ord, type, name, note) VALUES ($1, $2, $3, $4, $5)`
+
+// marshalResourceTemplate 序列化应用资源模板；零值 -> '{}'（与列 DEFAULT 一致）。
+func marshalResourceTemplate(t application.ResourceTemplate) []byte {
+	if t == (application.ResourceTemplate{}) {
+		return []byte(`{}`)
+	}
+	b, err := json.Marshal(t)
+	if err != nil { // 纯字符串字段不会失败，防御性兜底
+		return []byte(`{}`)
+	}
+	return b
+}
+
+// unmarshalResourceTemplate 反序列化；nil/空/null/无效 -> 零值（nil 安全）。
+func unmarshalResourceTemplate(raw []byte) application.ResourceTemplate {
+	var t application.ResourceTemplate
+	if len(raw) == 0 {
+		return t
+	}
+	_ = json.Unmarshal(raw, &t)
+	return t
+}
 
 // scanApp 通过 storagepg.RowScanner 抽象 QueryRow 与 Row 两种 Scan 来源。
 func scanApp(r pg.RowScanner) (*application.Application, error) {
 	a := &application.Application{}
+	var tplRaw []byte
 	if err := r.Scan(&a.ID, &a.TenantID, &a.Name, &a.Initial, &a.Env,
-		&a.Status, &a.Gradient, &a.Desc, &a.Replicas, &a.RPS, &a.Restricted); err != nil {
+		&a.Status, &a.Gradient, &a.Desc, &a.Replicas, &a.RPS, &a.Restricted, &tplRaw); err != nil {
 		return nil, err
 	}
+	a.ResourceTemplate = unmarshalResourceTemplate(tplRaw)
 	return a, nil
 }
 

@@ -406,3 +406,51 @@ func TestSanitizeLane(t *testing.T) {
 		}
 	}
 }
+
+// 资源规格映射（Task 3）：CRD resources -> container.Resources 四字段；非法 Quantity fail-fast。
+func TestReconcileResourcesMapping(t *testing.T) {
+	scheme := newScheme(t)
+	w := &v1alpha1.Workload{
+		ObjectMeta: metav1.ObjectMeta{Name: "wl-res", Namespace: "default"},
+		Spec: v1alpha1.WorkloadSpec{TenantID: "t-acme", AppID: "app-cs", Type: "service",
+			Name: "wl-res", Image: "nginx", Replicas: 1,
+			Resources: v1alpha1.ResourceSpec{CPURequest: "500m", CPULimit: "2", MemRequest: "256Mi", MemLimit: "1Gi"}},
+	}
+	cl := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(w).WithStatusSubresource(&v1alpha1.Workload{}).Build()
+	r := &WorkloadReconciler{Client: cl, Scheme: scheme}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "wl-res", Namespace: "default"}}); err != nil {
+		t.Fatalf("reconcile 失败: %v", err)
+	}
+	var dep appsv1.Deployment
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "wl-res", Namespace: "default"}, &dep); err != nil {
+		t.Fatalf("应创建 Deployment: %v", err)
+	}
+	res := dep.Spec.Template.Spec.Containers[0].Resources
+	if res.Requests.Cpu().String() != "500m" || res.Requests.Memory().String() != "256Mi" {
+		t.Fatalf("requests 映射错误: %v", res.Requests)
+	}
+	if res.Limits.Cpu().String() != "2" || res.Limits.Memory().String() != "1Gi" {
+		t.Fatalf("limits 映射错误: %v", res.Limits)
+	}
+}
+
+// 非法 Quantity：podSpec 返错，reconciler 回写 failed（fail-fast，不让 Deployment 无限重试）。
+func TestPodSpecInvalidQuantityFails(t *testing.T) {
+	w := &v1alpha1.Workload{Spec: v1alpha1.WorkloadSpec{
+		Resources: v1alpha1.ResourceSpec{CPURequest: "bogus"}}}
+	if _, err := podSpec(w); err == nil {
+		t.Fatal("非法 Quantity 应返错")
+	}
+}
+
+// 空 resources：BestEffort（不设 Requests/Limits），向后兼容。
+func TestPodSpecEmptyResourcesBestEffort(t *testing.T) {
+	w := &v1alpha1.Workload{Spec: v1alpha1.WorkloadSpec{Image: "nginx"}}
+	spec, err := podSpec(w)
+	if err != nil {
+		t.Fatalf("空 resources 不应报错: %v", err)
+	}
+	if spec.Containers[0].Resources.Requests != nil || spec.Containers[0].Resources.Limits != nil {
+		t.Fatal("空 resources 应 BestEffort（无 Requests/Limits）")
+	}
+}

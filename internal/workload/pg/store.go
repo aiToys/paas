@@ -6,6 +6,7 @@ package pg
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -25,15 +26,42 @@ type Store struct {
 func NewStore(db *pg.DB) *Store { return &Store{db: db} }
 
 // wlCols 与 model.Workload 字段顺序对齐（scan 列顺序必须一致）。
-const wlCols = `id, tenant_id, app_id, env_id, lane_id, service, service_id, type, name, image, image_ref, replicas, ready, status, schedule, command, port, container_port, domain, created_at`
+const wlCols = `id, tenant_id, app_id, env_id, lane_id, service, service_id, type, name, image, image_ref, replicas, ready, status, schedule, command, port, container_port, domain, resources, created_at`
+
+// marshalResources 把 ResourceSpec 序列化为 JSONB 字节；零值 -> '{}'（与列 DEFAULT 一致）。
+func marshalResources(r workload.ResourceSpec) []byte {
+	if r.IsEmpty() {
+		return []byte(`{}`)
+	}
+	b, err := json.Marshal(r)
+	if err != nil { // 纯字符串字段，不会失败；防御性兜底
+		return []byte(`{}`)
+	}
+	return b
+}
+
+// unmarshalResources 反序列化 JSONB 为 ResourceSpec；nil/空/null/无效 -> 零值（nil 安全）。
+func unmarshalResources(raw []byte) workload.ResourceSpec {
+	var r workload.ResourceSpec
+	if len(raw) == 0 {
+		return r
+	}
+	_ = json.Unmarshal(raw, &r)
+	return r
+}
 
 // scanWL 通过 pg.RowScanner 抽象 QueryRow 与 Row 两种 Scan 来源。
 func scanWL(r pg.RowScanner, w *workload.Workload) error {
-	return r.Scan(
+	var resRaw []byte
+	if err := r.Scan(
 		&w.ID, &w.TenantID, &w.AppID, &w.EnvID, &w.LaneID, &w.Service, &w.ServiceID, &w.Type,
 		&w.Name, &w.Image, &w.ImageRef, &w.Replicas, &w.Ready,
-		&w.Status, &w.Schedule, &w.Command, &w.Port, &w.ContainerPort, &w.Domain, &w.CreatedAt,
-	)
+		&w.Status, &w.Schedule, &w.Command, &w.Port, &w.ContainerPort, &w.Domain, &resRaw, &w.CreatedAt,
+	); err != nil {
+		return err
+	}
+	w.Resources = unmarshalResources(resRaw)
+	return nil
 }
 
 // List 按租户 + 可选 envID/appID/laneID/wtype/service 过滤；空串表示该维度不过滤（与内存语义一致）。
@@ -140,10 +168,10 @@ func (s *Store) Create(ctx context.Context, w workload.Workload) error {
 		w.LaneID = workload.LaneDefault
 	}
 	_, err = s.db.Pool().Exec(ctx,
-		`INSERT INTO workloads (`+wlCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+		`INSERT INTO workloads (`+wlCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
 		w.ID, w.TenantID, w.AppID, w.EnvID, w.LaneID, w.Service, w.ServiceID, w.Type,
 		w.Name, w.Image, w.ImageRef, w.Replicas, w.Ready,
-		w.Status, w.Schedule, w.Command, w.Port, w.ContainerPort, w.Domain, w.CreatedAt)
+		w.Status, w.Schedule, w.Command, w.Port, w.ContainerPort, w.Domain, marshalResources(w.Resources), w.CreatedAt)
 	if pg.IsUniqueViolation(err) {
 		// 同租户 Name 唯一约束：Name 即 K8s Service 名，同名会让 reconciler 抢建同一
 		// K8s Service（AlreadyOwned）无限 requeue（审计第 6 轮 I2）。主键冲突同理。

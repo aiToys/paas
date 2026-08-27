@@ -250,3 +250,32 @@ func TestCreateProdWorkloadRequiresProdWrite(t *testing.T) {
 		`{"id":"wl-y","envId":"env-test","type":"service","name":"n","image":"img","replicas":1}`))
 	assert.Equal(t, http.StatusCreated, rec2.Code)
 }
+
+// 生产禁 BestEffort（Task 3 标准基线）：prod 环境创建空 resources 拒 400，带规格放行；test 环境空放行。
+func TestCreateProdRejectsEmptyResources(t *testing.T) {
+	repo := &stubRepo{}
+	h := NewHandler(repo, WithEnvResolver(stubEnvResolver{"prod"}))
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+
+	// prod + 空 resources -> 400
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, acmeReq(http.MethodPost, "/api/applications/app-cs/workloads",
+		`{"id":"wl-p","envId":"env-prod","type":"service","name":"n","image":"img","replicas":1}`))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Empty(t, repo.saved.ID, "prod 空 resources 不应创建")
+
+	// prod + 带规格 -> 201
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, acmeReq(http.MethodPost, "/api/applications/app-cs/workloads",
+		`{"id":"wl-p2","envId":"env-prod","type":"service","name":"n2","image":"img","replicas":1,
+		  "resources":{"cpuRequest":"500m","memRequest":"256Mi"}}`))
+	assert.Equal(t, http.StatusCreated, rec2.Code)
+
+	// test + 空 resources -> 201（联调泳道可 BestEffort）
+	h2 := NewHandler(repo, WithEnvResolver(stubEnvResolver{"test"}))
+	h2.Authorize = h.Authorize
+	rec3 := httptest.NewRecorder()
+	h2.ServeHTTP(rec3, acmeReq(http.MethodPost, "/api/applications/app-cs/workloads",
+		`{"id":"wl-t","envId":"env-test","type":"service","name":"n3","image":"img","replicas":1}`))
+	assert.Equal(t, http.StatusCreated, rec3.Code)
+}

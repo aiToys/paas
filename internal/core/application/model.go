@@ -54,8 +54,19 @@ type Application struct {
 	RPS        string        `json:"rps"`
 	// Restricted 开启应用级权限 enforcement（成员角色制）。
 	// false（默认）= 租户级 RBAC 即可写（现状，向后兼容）；true = 写操作需应用成员角色匹配
-	// （如 app-developer 不可发布）。渐进启用：存量应用默认关闭，管理员按需开启。
+	//（如 app-developer 不可发布）。渐进启用：存量应用默认关闭，管理员按需开启。
 	Restricted bool `json:"restricted"`
+	// ResourceTemplate 是应用级资源规格默认值（新工作负载 deploy 时未显式指定 resources 则继承）。
+	// 两级来源：deploy stage params 覆盖 > 此模板 > 空（BestEffort，仅联调泳道可接受）。
+	ResourceTemplate ResourceTemplate `json:"resourceTemplate,omitempty"`
+}
+
+// ResourceTemplate 是应用级资源规格模板（K8s Quantity 字符串；与 workload.ResourceSpec 同构）。
+type ResourceTemplate struct {
+	CPURequest string `json:"cpuRequest,omitempty"` // 如 "500m"
+	CPULimit   string `json:"cpuLimit,omitempty"`   // 如 "2"
+	MemRequest string `json:"memRequest,omitempty"` // 如 "512Mi"
+	MemLimit   string `json:"memLimit,omitempty"`   // 如 "1Gi"
 }
 
 // Recount 根据 Bindings 重算 ResourceCount。

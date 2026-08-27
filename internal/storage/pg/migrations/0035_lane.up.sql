@@ -21,3 +21,7 @@ ALTER TABLE lanes ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS lanes_tenant_isolation ON lanes;
 CREATE POLICY lanes_tenant_isolation ON lanes
   USING (tenant_id = current_setting('app.tenant_id', true) OR current_setting('app.tenant_id', true) IS NULL);
+
+-- 资源规格（Task 3）：工作负载容器资源 + 应用资源模板（同 migration 追加：项目未发布生产，合并可接受）。
+ALTER TABLE workloads ADD COLUMN IF NOT EXISTS resources JSONB NOT NULL DEFAULT '{}';
+ALTER TABLE applications ADD COLUMN IF NOT EXISTS resource_template JSONB NOT NULL DEFAULT '{}';

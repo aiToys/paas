@@ -122,6 +122,17 @@ func (h *Handler) allowApp(w http.ResponseWriter, r *http.Request, appID string)
 	return false
 }
 
+// isProdEnv 判定目标环境是否生产（未注入 resolver / 查询失败返 false——
+// 生产判定仅用于「空 resources 拒绝」增强校验，权限护栏仍由 allowProd fail-closed 兜底；
+// 查询失败时放行 resources 校验不误伤测试环境，allowProd 已在同路径拦住写权限）。
+func (h *Handler) isProdEnv(ctx context.Context, envID string) bool {
+	if h.envResolver == nil || envID == "" {
+		return false
+	}
+	etype, err := h.envResolver.EnvType(ctx, envID)
+	return err == nil && etype == "prod"
+}
+
 // fillStatus 回填 K8s 真实运行状态（注入 statusReader 时覆盖 store 静态值）。
 // 读路径降级：失败仅忽略不阻塞（真实状态不可得时返 store 原值，优于 5xx）。
 func (h *Handler) fillStatus(ctx context.Context, list []Workload) {
@@ -209,6 +220,13 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 		}
 		// 生产环境创建工作负载需 prod:write（developer 被拦，生产只读）
 		if !h.allowProd(w, r, w0.EnvID) {
+			return
+		}
+		// 生产禁 BestEffort（标准基线）：Pod 无 requests/limits 驱逐优先级最高且无上限互挤，
+		// 生产工作负载必须配置资源规格。仅拦新写——存量基线（Update 路径）豁免。
+		if h.isProdEnv(r.Context(), w0.EnvID) && w0.Resources.IsEmpty() {
+			httputil.WriteError(w, http.StatusBadRequest,
+				"生产工作负载必须配置资源规格（CPU/内存 requests，可在应用设置配默认模板）")
 			return
 		}
 		// 横切配额拦截：创建前检查工作负载数配额，超限回 429（不创建）。

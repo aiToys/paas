@@ -68,8 +68,12 @@ func (a *K8sApplier) Apply(ctx context.Context, w workload.Workload) error {
 			Port:          clampInt32(w.Port),          // 端口投影，驱动 reconciler 建 Service + readiness probe
 			ContainerPort: clampInt32(w.ContainerPort), // 0 时不建 Service（向后兼容）
 			Domain:        w.Domain,                    // 域名投影，驱动 reconciler 建 Ingress（host -> Service:Port）
-			Schedule:      w.Schedule,
-			Command:       w.Command,
+			Resources: v1alpha1.ResourceSpec{ // 资源规格投影（Pod requests/limits；空=BestEffort）
+				CPURequest: w.Resources.CPURequest, CPULimit: w.Resources.CPULimit,
+				MemRequest: w.Resources.MemRequest, MemLimit: w.Resources.MemLimit,
+			},
+			Schedule: w.Schedule,
+			Command:  w.Command,
 		}
 		return nil
 	})

@@ -85,6 +85,20 @@ spec:
               replicas:
                 format: int32
                 type: integer
+              resources:
+                description: |-
+                  Resources 是容器资源规格（CPU/内存 requests/limits，K8s Quantity 字符串）。
+                  空字段跳过映射（BestEffort）；生产环境由控制面 handler 强制非空（禁 BestEffort）。
+                properties:
+                  cpuLimit:
+                    type: string
+                  cpuRequest:
+                    type: string
+                  memLimit:
+                    type: string
+                  memRequest:
+                    type: string
+                type: object
               schedule:
                 type: string
               service:

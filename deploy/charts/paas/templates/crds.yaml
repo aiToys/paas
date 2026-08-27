@@ -1,5 +1,139 @@
 {{- if .Values.crds.install }}
-# Workload / DataService CRD（controller-gen 生成，幂等 apply）。源：config/crds/。
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: workloads.core.aitoys.github.com
+spec:
+  group: core.aitoys.github.com
+  names:
+    kind: Workload
+    listKind: WorkloadList
+    plural: workloads
+    singular: workload
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Workload 是平台工作负载的 K8s 期望状态声明。
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: WorkloadSpec 是工作负载期望状态（控制面下发，reconciler 据此落 K8s 资源）。
+            properties:
+              appId:
+                type: string
+              command:
+                type: string
+              containerPort:
+                description: |-
+                  ContainerPort 是 Pod 监听端口；为 0 时 reconciler 取 Port。建 Service 时映射 Port→ContainerPort，
+                  并据此给容器声明 containerPort + readiness probe（TCP，零侵入）。
+                format: int32
+                minimum: 1
+                type: integer
+              domain:
+                description: |-
+                  Domain 是工作负载对外暴露的域名（service 类型且非空时，reconciler 自动建 networkingv1.Ingress，
+                  host=Domain，path / -> 本工作负载 Service:Port）。空则不建 Ingress（仅集群内 DNS 可达）。
+                  ingressClassName 取 reconciler.IngressClass（env PAAS_INGRESS_CLASS，默认 hermes）。
+                type: string
+              envId:
+                type: string
+              gpu:
+                description: GPURequest 是 GPU 资源请求（显存核算 + 反亲和）。
+                properties:
+                  count:
+                    description: Count 是请求的 GPU 卡数（映射 nvidia.com/gpu resource）。
+                    type: integer
+                  memoryMB:
+                    description: MemoryMB 是请求显存 MB（显存核算参考；本期以 Count 为准，细粒度留后续）。
+                    type: integer
+                type: object
+              image:
+                type: string
+              imageRef:
+                type: string
+              laneId:
+                type: string
+              name:
+                type: string
+              port:
+                description: Port 是 Service 对外暴露端口（service 类型且 >0 时 reconciler 才建
+                  K8s Service）。
+                format: int32
+                minimum: 1
+                type: integer
+              replicas:
+                format: int32
+                type: integer
+              resources:
+                description: |-
+                  Resources 是容器资源规格（CPU/内存 requests/limits，K8s Quantity 字符串）。
+                  空字段跳过映射（BestEffort）；生产环境由控制面 handler 强制非空（禁 BestEffort）。
+                properties:
+                  cpuLimit:
+                    type: string
+                  cpuRequest:
+                    type: string
+                  memLimit:
+                    type: string
+                  memRequest:
+                    type: string
+                type: object
+              schedule:
+                type: string
+              service:
+                type: string
+              tenantId:
+                type: string
+              type:
+                type: string
+            required:
+            - appId
+            - envId
+            - image
+            - name
+            - tenantId
+            - type
+            type: object
+          status:
+            description: WorkloadStatus 是 reconcile 后的实际状态（reconciler 回写）。
+            properties:
+              ready:
+                format: int32
+                type: integer
+              status:
+                type: string
+            required:
+            - ready
+            - status
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+
 ---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition

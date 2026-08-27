@@ -40,6 +40,18 @@ type WorkloadSpec struct {
 	// host=Domain，path / -> 本工作负载 Service:Port）。空则不建 Ingress（仅集群内 DNS 可达）。
 	// ingressClassName 取 reconciler.IngressClass（env PAAS_INGRESS_CLASS，默认 hermes）。
 	Domain string `json:"domain,omitempty"`
+	// Resources 是容器资源规格（CPU/内存 requests/limits，K8s Quantity 字符串）。
+	// 空字段跳过映射（BestEffort）；生产环境由控制面 handler 强制非空（禁 BestEffort）。
+	Resources ResourceSpec `json:"resources,omitempty"`
+}
+
+// ResourceSpec 是容器资源规格（K8s Quantity 字符串，如 "500m"/"2"/"512Mi"/"1Gi"）。
+// 与 internal/workload.ResourceSpec / application.ResourceTemplate 同构。
+type ResourceSpec struct {
+	CPURequest string `json:"cpuRequest,omitempty"`
+	CPULimit   string `json:"cpuLimit,omitempty"`
+	MemRequest string `json:"memRequest,omitempty"`
+	MemLimit   string `json:"memLimit,omitempty"`
 }
 
 // WorkloadStatus 是 reconcile 后的实际状态（reconciler 回写）。

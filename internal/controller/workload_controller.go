@@ -164,7 +164,7 @@ func prometheusAnnotations(w *v1alpha1.Workload) map[string]string {
 		"prometheus.io/path":   "/metrics",
 	}
 }
-func podSpec(w *v1alpha1.Workload) corev1.PodSpec {
+func podSpec(w *v1alpha1.Workload) (corev1.PodSpec, error) {
 	container := corev1.Container{
 		Name:            "main",
 		Image:           w.Spec.Image,
@@ -201,6 +201,12 @@ func podSpec(w *v1alpha1.Workload) corev1.PodSpec {
 		}
 		container.Resources.Limits = container.Resources.Requests
 	}
+	// CPU/内存资源规格映射（非空字段进 Requests/Limits；空 = BestEffort 不设）。
+	// ParseQuantity 失败 fail-fast 返 err——调用方回写 phase=failed 不落 Deployment
+	//（控制面 Validate 已拦非法格式，这里兜底 CR 直写/存量脏数据场景）。
+	if err := applyResources(&container, w.Spec.Resources); err != nil {
+		return corev1.PodSpec{}, fmt.Errorf("资源规格非法: %w", err)
+	}
 	spec := corev1.PodSpec{
 		Containers: []corev1.Container{container},
 	}
@@ -215,7 +221,48 @@ func podSpec(w *v1alpha1.Workload) corev1.PodSpec {
 			},
 		}
 	}
-	return spec
+	return spec, nil
+}
+
+// applyResources 把 CRD ResourceSpec 映射到 container.Resources（非空字段）。
+// GPU 已设置的 Requests/Limits 与 CPU/内存叠加（map 写入合并）。
+func applyResources(c *corev1.Container, rs v1alpha1.ResourceSpec) error {
+	if c.Resources.Requests == nil {
+		c.Resources.Requests = corev1.ResourceList{}
+	}
+	if c.Resources.Limits == nil {
+		c.Resources.Limits = corev1.ResourceList{}
+	}
+	for field, v := range map[string]string{
+		"cpuRequest": rs.CPURequest, "cpuLimit": rs.CPULimit,
+		"memRequest": rs.MemRequest, "memLimit": rs.MemLimit,
+	} {
+		if v == "" {
+			continue
+		}
+		q, err := resource.ParseQuantity(v)
+		if err != nil {
+			return fmt.Errorf("%s=%q: %w", field, v, err)
+		}
+		switch field {
+		case "cpuRequest":
+			c.Resources.Requests[corev1.ResourceCPU] = q
+		case "cpuLimit":
+			c.Resources.Limits[corev1.ResourceCPU] = q
+		case "memRequest":
+			c.Resources.Requests[corev1.ResourceMemory] = q
+		case "memLimit":
+			c.Resources.Limits[corev1.ResourceMemory] = q
+		}
+	}
+	// 全空时归零（避免遗留空 map 序列化成 {} 之外的噪音）。
+	if len(c.Resources.Requests) == 0 {
+		c.Resources.Requests = nil
+	}
+	if len(c.Resources.Limits) == 0 {
+		c.Resources.Limits = nil
+	}
+	return nil
 }
 
 // Reconcile 期望→实际：取 CRD → 按 type 映射目标资源 → CreateOrUpdate → 回写 status。
@@ -247,9 +294,13 @@ func (r *WorkloadReconciler) applyDeployment(ctx context.Context, w *v1alpha1.Wo
 		if dep.CreationTimestamp.IsZero() {
 			dep.Spec.Selector = &metav1.LabelSelector{MatchLabels: labels}
 		}
+		pspec, perr := podSpec(w)
+		if perr != nil {
+			return perr // 资源规格非法：CreateOrUpdate mutate 返 err -> 外层回写 failed
+		}
 		dep.Spec.Template = corev1.PodTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: prometheusAnnotations(w)},
-			Spec:       podSpec(w),
+			Spec:       pspec,
 		}
 		c := &dep.Spec.Template.Spec.Containers[0]
 		// 应用配置注入：数据服务连接（DATABASE_URL 等）+ 模型 LLM 凭证（PAAS_LLM_*）。
@@ -405,9 +456,13 @@ func (r *WorkloadReconciler) applyJob(ctx context.Context, w *v1alpha1.Workload)
 		}
 		// Job 的 PodTemplate 创建后不可变：仅创建时设置；更新期改 image 需删旧建新（本期不处理）。
 		if job.CreationTimestamp.IsZero() {
+			pspec, perr := podSpec(w)
+			if perr != nil {
+				return perr
+			}
 			job.Spec.Template = corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
-				Spec:       podSpec(w),
+				Spec:       pspec,
 			}
 			// Job/CronJob 的 Pod template 必须显式设 restartPolicy（仅 OnFailure/Never 合法，
 			// 默认 Always 会被 apiserver 拒绝 -> "Required value" 报错致 Job 永远创建失败）。
@@ -451,11 +506,15 @@ func (r *WorkloadReconciler) applyCronJob(ctx context.Context, w *v1alpha1.Workl
 		labels := labelsFor(w)
 		cj.SetLabels(labels)
 		cj.Spec.Schedule = w.Spec.Schedule
+		cspec, cperr := podSpec(w)
+		if cperr != nil {
+			return cperr
+		}
 		cj.Spec.JobTemplate = batchv1.JobTemplateSpec{
 			ObjectMeta: metav1.ObjectMeta{Labels: labels},
 			Spec: batchv1.JobSpec{Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
-				Spec:       podSpec(w),
+				Spec:       cspec,
 			}},
 		}
 		// 同 applyJob：CronJob 衍生的 Job Pod 必须显式 restartPolicy（Never），否则 apiserver 拒绝。

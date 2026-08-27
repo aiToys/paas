@@ -4,7 +4,12 @@
 // （期望状态 Replicas vs 就绪状态 Ready 分离）。
 package workload
 
-import "time"
+import (
+	"fmt"
+	"time"
+
+	"k8s.io/apimachinery/pkg/api/resource"
+)
 
 // 工作负载类型。
 const (
@@ -52,8 +57,37 @@ type Workload struct {
 	ContainerPort int `json:"containerPort,omitempty"` // Pod 监听端口；0 时取 Port
 	// Domain 是对外暴露域名（service 类型且非空时，reconciler 自动建 Ingress，host=Domain -> Service:Port）。
 	// 让平台用户经「工作负载 spec.domain」声明应用域名，无需手写 Ingress yaml。
-	Domain    string    `json:"domain,omitempty"`
-	CreatedAt time.Time `json:"createdAt"`
+	Domain string `json:"domain,omitempty"`
+	// Resources 是容器资源规格（CPU/内存 requests/limits，K8s Quantity 字符串如 "500m"/"1"/"512Mi"）。
+	// 空 = BestEffort（不设 requests/limits）；生产环境创建时 handler 强制要求非空（禁 BestEffort）。
+	Resources  ResourceSpec `json:"resources,omitempty"`
+	CreatedAt  time.Time    `json:"createdAt"`
+}
+
+// ResourceSpec 是工作负载容器资源规格（K8s Quantity 字符串）。
+// 与 CRD v1alpha1.ResourceSpec / application.ResourceTemplate 同构；
+// 空字符串表示该维度不设置（reconciler 跳过映射）。
+type ResourceSpec struct {
+	CPURequest string `json:"cpuRequest,omitempty"` // CPU 请求（如 "500m"）
+	CPULimit   string `json:"cpuLimit,omitempty"`   // CPU 上限（如 "2"）
+	MemRequest string `json:"memRequest,omitempty"` // 内存请求（如 "512Mi"）
+	MemLimit   string `json:"memLimit,omitempty"`   // 内存上限（如 "1Gi"）
+}
+
+// IsEmpty 判断资源规格是否全空（BestEffort）。
+func (r ResourceSpec) IsEmpty() bool {
+	return r.CPURequest == "" && r.CPULimit == "" && r.MemRequest == "" && r.MemLimit == ""
+}
+
+// ValidateQuantity 校验单个 Quantity 字符串是合法 K8s 资源量（如 500m/2/512Mi/1Gi）。
+func ValidateQuantity(field, s string) error {
+	if s == "" {
+		return nil // 空表示不设置，合法
+	}
+	if _, err := resource.ParseQuantity(s); err != nil {
+		return fmt.Errorf("资源规格 %s 非法（%q，合法示例 500m/2/512Mi/1Gi）: %w", field, s, err)
+	}
+	return nil
 }
 
 // LaneDefault 是基线泳道的标识。基线 = 环境内稳定默认部署（每应用每环境唯一）。
@@ -79,6 +113,17 @@ func (w Workload) Validate() error {
 	}
 	if w.Type == TypeCronJob && w.Schedule == "" {
 		return errInvalid("schedule")
+	}
+	// 资源规格 Quantity 格式校验（K8s ParseQuantity 同款语法；reconciler 侧同函数解析）
+	for field, v := range map[string]string{
+		"cpuRequest": w.Resources.CPURequest,
+		"cpuLimit":   w.Resources.CPULimit,
+		"memRequest": w.Resources.MemRequest,
+		"memLimit":   w.Resources.MemLimit,
+	} {
+		if err := ValidateQuantity(field, v); err != nil {
+			return err
+		}
 	}
 	return nil
 }
