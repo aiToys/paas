@@ -835,7 +835,24 @@ L3 收口（零改动染色/TTL 回收/拓扑可视化已先行落地），本�
 
 **部署侧修复（重要经验）**：① helm upgrade 对 chart templates/ 内已存在 CRD **不应用变更**——deploy-k8s.sh 显式 `kubectl apply -f config/crds/`；② 手动 helm 绕脚本必须先 `export NODE_IP`，否则 envsubst 写坏 `image.registry=":30050/paas"` 且 `--reuse-values` 持续继承坏值；③ STS 删 pod 不删 PVC（数据可恢复）。
 
-**留后续**：金丝雀并行验证式（canary 泳道 + 独立验证域名 + 确认放量/终止，spec 三刀之第二刀）、Weight 切流实现、蓝绿（借泳道底座）、HPA/PDB/PriorityClass。
+**留后续**：Weight 切流实现（D1 真实现→按比例金丝雀/蓝绿瞬时切换）、HPA/PDB/PriorityClass。
+
+### 金丝雀验证 stage（并行验证式，2026-08-28）
+
+spec 三刀之第二刀落地（`docs/superpowers/plans/2026-08-28-canary-stage.md`，7 任务 SDD）。**诚实边界**：这是并行验证式金丝雀（业界称 preview/buffered deploy），非按比例切流——真切流依赖生产流量权重（D1 留后续），UI 文案叫「金丝雀验证」不叫「灰度放量」。
+
+- **canary stage 类型**（pipeline 第 8 种 stage）：`execCanary` 部署新镜像到 `canary-<dns1035(runID)>` 并行泳道（1 副本，基线不动）→ `StageWaiting` 暂停（复用 approve 机制）。镜像经 `imageSource=priorBuild` 消费前序 deploy 的 Output.imageId（deploy stage 已回写 imageId 到 Output——canary 验证的就是刚部署的那个镜像）。
+- **决策端点** `POST /api/pipelineruns/{id}/stages/{idx}/canary` body `{"action":"promote"|"terminate"}`：**promote**=基线全量滚动（Deploy lane=default，空 resources 不覆盖基线规格）+ 删 canary + stage success 续推；**terminate**=仅删 canary，stage failed（基线零风险退出，无回滚需求）。守卫链：pipeline:write + appGuard release + **promote 且目标 prod 需 prod:write**（terminate 免——零风险退出路径不拦 developer，拦了留孤儿泳道更糟）。审计 `canary_promote`/`canary_terminate`。
+- **并发安全（CAS 认领）**：CanaryResume 两段锁——锁内校验 + stage 置 Running + decision 记 Input 持久化「认领」决策（并发相反决策第二方在副作用前被拒，杜绝「终止成功但基线已被放量」）；锁外执行副作用；终态落库前三检。认领后失败 fail 闭包回 Waiting（可再次决策）+ 日志落库。**Resume 拒绝 canary stage**（approve 端点无法绕过决策语义——防跳过放量 + 泄漏 canary workload）。Abort 补 canary waiting 清理。
+- **Releaser 扩展**：`DeployCanary`（adapter 内 lane=DNS1035 对齐 engine 侧口径、replicas=1、`PAAS_DOMAIN_SUFFIX` 非空时 SetDomain 独立验证 Ingress；**port=0 时 domain 返空**——多服务应用未显式 service/port 时 reconciler 不建 Service，FQDN 不可达，诚实返空防前端死链，用户可经 paramOverrides 显式 service+port 获得独立入口）+ `DeleteWorkload`（派生租户 ctx Delete + 配额 -1）。workload.Repository 加 `SetDomain`（memory+pg）。
+- **tpl-cd v2**（builtin 版本升级机制首次实战：Version 1→2 启动自动覆盖存量）：approve → deploy(prod) → **canary** → release → baseline。
+- **通知区分**：`RunStatusItem.StageType` + paused 分支 canary 文案「金丝雀验证中，等待确认」（与审批等待区分）。
+- **前端观察面板**（PipelineRunView）：canary waiting 时指标卡（CPU/内存/RPS/延迟 10s 轮询 workload 维度）+ 验证地址直链 + 可观测跳转 + 「确认放量/终止」按钮（放量二次确认）；stage 类型下拉加 canary。
+- **e2e（k8s 已验证）**：tpl-cd v2 自动升级 → approve → deploy prod 基线 → canary 并行泳道 Running（基线不动）→ 通知「金丝雀验证中」→ promote → 基线滚动（release 记录 lane=default 紧随 canary）→ run succeeded + canary workload 回收 + 审计落库；第二轮 terminate → 基线 digest 前后不变 ✓。
+- **e2e 暴露并修复**：① I2 生产 BestEffort fail-fast 未写 sr.Error 且 `return false`（stage 原因丢失掩盖护栏触发，k8s 首次真实拦截时暴露）；② observability queryCache singleflight `close(done)` 先于结果赋值（-race 暴露，等待者读 val/err 竞态）；③ canary port=0 死链（见上）。
+- **部署事故（2026-08-28）**：NODE_IP 误检 master 接口地址（121 vs worker 122）→ 全集群镜像 121 引用 14h（kb2 kubelet daemon 无 121 insecure 配置）→ core/postgres/9 数据服务 STS + core 的 `PAAS_REGISTRY`/`PAAS_IMAGE_REGISTRY` env 全部切回 122 恢复。教训：deploy-k8s.sh 的 NODE_IP 检测需过滤 master（已用 `!/master/` 但 master 接口有多地址时仍误检——集群 IP 变更时全量检查所有 STS/Deploy 镜像引用）。
+
+**留后续**：batches 参数消费（D1 切流实现后按比例分批放量）、蓝绿模板变体（canary params fullReplicas=true）、金丝雀观察期告警联动（观察面板嵌告警规则快查）。
 
 ### 流水线完善：模板 CRUD + 构建实时日志（2026-08-09）
 
@@ -1003,7 +1020,7 @@ console-user 导航采用**三层信息架构**（避免「资源」概念被滥
 | 模块 | 业界对标 | 基线能力清单 | 当前缺口 |
 |------|---------|------------|---------|
 | 工作负载部署 | K8s Deployment | resources requests/limits（QoS 非 BestEffort）、readiness/liveness probe、副本数、优先级 PriorityClass、PDB、HPA | requests/limits 已落地（2026-08-28，生产禁 BestEffort双入口）；HPA/PDB/优先级缺 |
-| 生产发布策略 | Argo Rollouts / Flagger | 滚动/金丝雀（按比例分批放量+指标分析+自动回滚）/蓝绿（并行环境+瞬时切流），发布观察窗口 | 仅 rolling；金丝雀降级为并行验证式归下切片（spec 2026-08-26 已定）；蓝绿可借泳道底座但缺生产流量权重层 |
+| 生产发布策略 | Argo Rollouts / Flagger | 滚动/金丝雀（按比例分批放量+指标分析+自动回滚）/蓝绿（并行环境+瞬时切流），发布观察窗口 | 并行验证式金丝雀已落地（2026-08-28，人工观察决策）；按比例切流缺（依赖流量权重）；蓝绿可借泳道底座 |
 | 泳道/流量隔离 | 阿里全链路灰度 MSE | 泳道一等实体（显式创建/常驻标记/手动关闭）、资源规格模板、入口流量按比例切泳道 | 实体已落地（2026-08-28，standard/permanent/Weight 留位）；入口流量按比例切泳道缺 |
 | 可观测 | Grafana/Pyroscope | RED/USE 指标、结构化日志、trace、告警通知通道、SLO 燃烧率 | 告警通知通道缺；SLO 缺（2026-08-23 审计已列） |
 | 秘钥管理 | Vault/KMS | 加密存储（envelope encryption）、轮转、过期、动态凭证 | 明文存储；轮转/过期缺（设计时已知） |
