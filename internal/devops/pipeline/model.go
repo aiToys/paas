@@ -62,7 +62,7 @@ const (
 	StagePromote  = "promote"
 	StageRelease  = "release" // 打版本号里程碑（git tag + Image.version），不部署
 	StageBaseline = "baseline"
-	StageCanary   = "canary"  // 金丝雀验证（并行验证式：canary 泳道部署 + 人工观察 + 确认放量/终止）
+	StageCanary   = "canary" // 金丝雀验证（并行验证式：canary 泳道部署 + 人工观察 + 确认放量/终止）
 )
 
 // ImageSource deploy stage 的镜像来源（CI/CD 解耦关键）。
