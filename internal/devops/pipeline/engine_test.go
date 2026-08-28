@@ -47,6 +47,9 @@ type fakeReleaser struct {
 	promoteErr error
 	versionIDs []string // SetVersion 收到的 releaseIDs（最后一次）
 	versionSet string   // SetVersion 收到的 version
+
+	deleted []string // DeleteWorkload 收到的 workloadID（canary 清理断言用）
+	deleteErr error  // DeleteWorkload 返回错误（可选）
 }
 
 func (f *fakeReleaser) CreateRelease(ctx context.Context, input devops.ReleaseInput) (devops.Release, error) {
@@ -98,6 +101,18 @@ func (f *fakeReleaser) Deploy(ctx context.Context, appID, envID, lane, service, 
 		domain = wlID + ".svc.cluster.local"
 	}
 	return devops.Release{ID: "rel-fake", WorkloadID: wlID}, domain, nil
+}
+
+// DeployCanary stub（T1 临时实现：转调既有 Deploy 记录逻辑，lane 由调用方构造传入；
+// T2 切换真实语义）。这里记录 lane 前缀供断言（execCanary 仍走 Deploy，本方法暂未被调用）。
+func (f *fakeReleaser) DeployCanary(ctx context.Context, appID, envID, service, serviceID, imageID string, resources DeployResources, sourceRunID string) (devops.Release, string, error) {
+	return f.Deploy(ctx, appID, envID, "canary-"+dns1035(sourceRunID), service, serviceID, imageID, 0, 0, resources, 1, sourceRunID)
+}
+
+// DeleteWorkload stub：记录到 deleted 切片（canary abort/终止清理断言用）。
+func (f *fakeReleaser) DeleteWorkload(ctx context.Context, workloadID string) error {
+	f.deleted = append(f.deleted, workloadID)
+	return f.deleteErr
 }
 
 // Publish stub（Task 5/6 集成测试覆盖真实语义；本 task 仅满足接口编译）。
@@ -242,6 +257,90 @@ func TestExecDeployPassesServiceID(t *testing.T) {
 	}
 	if rel.deploySvcID != "svc-abc" {
 		t.Errorf("Deploy 收到 serviceID=%q, want svc-abc（服务实体断链回归）", rel.deploySvcID)
+	}
+}
+
+// TestExecCanaryWaitsForConfirmation：canary stage 部署到 canary-<runID> 泳道（replicas=1，基线不动）
+// 后暂停等待人工决策——run Paused、stage Waiting、Output 含 canaryWorkloadId/canaryDomain。
+func TestExecCanaryWaitsForConfirmation(t *testing.T) {
+	s := NewMemoryStore()
+	r := seedPipeline(t, s, "p-canary", "app-canary", KindCI, []StageDef{
+		{Name: "金丝雀验证", Type: StageCanary, Params: map[string]any{
+			"envId": "env-test", "imageSource": ImageSelected, "imageId": "img-1",
+		}},
+	})
+
+	rel := &fakeReleaser{}
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: rel}
+	if err := eng.Advance(acmeCtxEngine(), r.ID); err != nil {
+		t.Fatalf("Advance 失败: %v", err)
+	}
+
+	run, _ := s.GetRun(acmeCtxEngine(), r.ID)
+	if run.Status != RunPaused {
+		t.Fatalf("期望 paused，got %s", run.Status)
+	}
+	sr := run.StageRuns[0]
+	if sr.Status != StageWaiting {
+		t.Fatalf("期望 stage waiting，got %s", sr.Status)
+	}
+	// Deploy 收到并行验证泳道 canary-<runID>
+	wantLane := "canary-" + r.ID
+	if rel.deployLane != wantLane {
+		t.Errorf("Deploy 收到 lane=%q, want %q", rel.deployLane, wantLane)
+	}
+	// 单副本验证（replicas=1）
+	if rel.deployReplicas != 1 {
+		t.Errorf("Deploy 收到 replicas=%d, want 1", rel.deployReplicas)
+	}
+	// Output 链：部署记录 + canary workload + 验证域名
+	if sr.Output[OutReleaseID] != "rel-fake" {
+		t.Errorf("Output.releaseId 期望 rel-fake，got %v", sr.Output[OutReleaseID])
+	}
+	if sr.Output[OutCanaryWorkloadID] != "wl-fake" {
+		t.Errorf("Output.canaryWorkloadId 期望 wl-fake，got %v", sr.Output[OutCanaryWorkloadID])
+	}
+	if sr.Output[OutCanaryDomain] == "" {
+		t.Error("Output.canaryDomain 不应为空")
+	}
+	// Input 固化（决策/终止清理消费）
+	if sr.Input["envId"] != "env-test" || sr.Input["imageId"] != "img-1" {
+		t.Errorf("Input 固化缺失: envId=%v imageId=%v", sr.Input["envId"], sr.Input["imageId"])
+	}
+	// 基线零调用：未见 default 泳道部署（fakeReleaser 只记录最后一次 Deploy，这里仅 canary 一次）
+	if rel.deleted != nil {
+		t.Errorf("canary 部署阶段不应删 workload，got %v", rel.deleted)
+	}
+}
+
+// TestExecCanaryMissingEnvId：canary 无 envId 参数且 Input 无（无前序 deploy）→ stage failed「缺 envId 参数」。
+func TestExecCanaryMissingEnvId(t *testing.T) {
+	s := NewMemoryStore()
+	r := seedPipeline(t, s, "p-canary-noenv", "app-canary-noenv", KindCI, []StageDef{
+		{Name: "金丝雀验证", Type: StageCanary, Params: map[string]any{
+			"imageSource": ImageSelected, "imageId": "img-1",
+		}},
+	})
+
+	rel := &fakeReleaser{}
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: rel}
+	if err := eng.Advance(acmeCtxEngine(), r.ID); err != nil {
+		t.Fatalf("Advance 失败: %v", err)
+	}
+
+	run, _ := s.GetRun(acmeCtxEngine(), r.ID)
+	if run.Status != RunFailed {
+		t.Fatalf("期望 failed，got %s", run.Status)
+	}
+	sr := run.StageRuns[0]
+	if sr.Status != StageFailed {
+		t.Fatalf("期望 stage failed，got %s", sr.Status)
+	}
+	if !strings.Contains(sr.Error, "缺 envId 参数") {
+		t.Errorf("stage.Error 应含「缺 envId 参数」，got %q", sr.Error)
+	}
+	if rel.deployLane != "" {
+		t.Errorf("缺 envId 不应触发 Deploy，got lane=%q", rel.deployLane)
 	}
 }
 

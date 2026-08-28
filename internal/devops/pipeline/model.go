@@ -62,6 +62,7 @@ const (
 	StagePromote  = "promote"
 	StageRelease  = "release" // 打版本号里程碑（git tag + Image.version），不部署
 	StageBaseline = "baseline"
+	StageCanary   = "canary"  // 金丝雀验证（并行验证式：canary 泳道部署 + 人工观察 + 确认放量/终止）
 )
 
 // ImageSource deploy stage 的镜像来源（CI/CD 解耦关键）。
@@ -183,6 +184,9 @@ const (
 	OutWorkloadDomain = "workloadDomain"
 	OutVersion        = "version"
 	OutMergeSHA       = "mergeSha"
+
+	OutCanaryWorkloadID = "canaryWorkloadId" // canary stage：并行验证 workload ID（promote/终止清理用）
+	OutCanaryDomain     = "canaryDomain"     // canary stage：验证域名（指标卡/直链）
 )
 
 // Validate Pipeline 基本校验（绑定模型：校验 TemplateID，不校验 Stages--运行时从模板解析）。
@@ -207,7 +211,7 @@ func (p Pipeline) Validate() error {
 
 func (s StageDef) validate() error {
 	switch s.Type {
-	case StageBuild, StageDeploy, StageTest, StageApprove, StagePromote, StageRelease, StageBaseline:
+	case StageBuild, StageDeploy, StageTest, StageApprove, StagePromote, StageRelease, StageBaseline, StageCanary:
 		// valid
 	default:
 		return ErrInvalidStageType

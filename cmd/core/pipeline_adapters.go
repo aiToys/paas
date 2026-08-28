@@ -254,6 +254,24 @@ func (r *releaseBridge) Publish(ctx context.Context, appID, imageID, version, co
 	return r.gitea.CreateTag(ctx, owner, repo, version, commit)
 }
 
+// DeployCanary 金丝雀并行验证部署（canary stage）：临时转调 Deploy，lane=canary-<sourceRunID>、
+// replicas=1（基线不动）。真实语义（lane 名 DNS 清洗对齐 + Domain 外部验证域名后缀 + 配额）归 T5 收口。
+func (r *releaseBridge) DeployCanary(ctx context.Context, appID, envID, service, serviceID, imageID string, resources pipeline.DeployResources, sourceRunID string) (devops.Release, string, error) {
+	lane := "canary-" + sourceRunID
+	return r.Deploy(ctx, appID, envID, lane, service, serviceID, imageID, 0, 0, resources, 1, sourceRunID)
+}
+
+// DeleteWorkload 删除 workload（canary 终止/abort 清理并行验证负载）。临时实现：跨租户场景由
+// engine 传入的 ctx 不带租户，Get 取归属租户派生 ctx 再 Delete；配额回收 T5 收口。
+func (r *releaseBridge) DeleteWorkload(ctx context.Context, workloadID string) error {
+	wl, err := r.workloads.Get(ctx, workloadID)
+	if err != nil {
+		return err
+	}
+	tctx := tenant.WithTenant(context.WithoutCancel(ctx), wl.TenantID)
+	return r.workloads.Delete(tctx, workloadID)
+}
+
 var _ pipeline.Releaser = (*releaseBridge)(nil)
 
 // giteaBridge 桥接 pipeline.GiteaMerger -> gitea.Client + devops CodeRepo（解析 internal repo owner/name）。

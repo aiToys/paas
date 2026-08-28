@@ -17,6 +17,7 @@ import (
 	"log"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -53,6 +54,12 @@ type Releaser interface {
 	// Publish 打版本号里程碑：Image.Version 回填 + git tag（commit 非空且仓库为 internal 时）。
 	// 不部署（部署是 deploy stage 的事）。返回 tagSha（未打 tag 时为空串）。
 	Publish(ctx context.Context, appID, imageID, version, commit string) (tagSha string, err error)
+	// DeployCanary 金丝雀并行验证部署（canary stage）：部署 imageID 到 canary-<sourceRunID> 并行泳道
+	// （replicas=1，基线不动），返回部署记录 + 验证域名（Domain 可选外部验证域名，空则集群 FQDN）。
+	// adapter 责任：lane=canary-<sanitized(sourceRunID)>；PAAS_DOMAIN_SUFFIX 非空时域名为 <wl-name>.<suffix>。
+	DeployCanary(ctx context.Context, appID, envID, service, serviceID, imageID string, resources DeployResources, sourceRunID string) (deployment devops.Release, domain string, err error)
+	// DeleteWorkload 删除 workload（canary 终止/abort 清理并行验证负载），adapter 负责配额 -1。
+	DeleteWorkload(ctx context.Context, workloadID string) error
 }
 
 // DeployResources 是 deploy stage 的容器资源规格（K8s Quantity 字符串）。
@@ -183,6 +190,19 @@ func (e *Engine) Abort(ctx context.Context, runID string) error {
 			run.StageRuns[i].FinishedAt = time.Now()
 		}
 	}
+	// canary waiting 期 abort：清理并行验证 workload（基线从未被动过，无需回滚）。
+	// best-effort：删除失败仅日志（GC 对 canary-<runID> 裸泳道 TTL 兜底回收）。
+	if e.Releases != nil {
+		for i := range run.StageRuns {
+			if run.StageRuns[i].Type == StageCanary && run.StageRuns[i].Status == StageAborted {
+				if wlID, _ := run.StageRuns[i].Output[OutCanaryWorkloadID].(string); wlID != "" {
+					if err := e.Releases.DeleteWorkload(ctx, wlID); err != nil {
+						log.Printf("canary abort 清理失败 wl=%s: %v（GC 兜底）", wlID, err)
+					}
+				}
+			}
+		}
+	}
 	if _, err := e.Runs.UpdateRun(ctx, run); err != nil {
 		return err
 	}
@@ -293,6 +313,8 @@ func (e *Engine) execStage(ctx context.Context, run *PipelineRun, stage StageDef
 		return e.execPromote(ctx, run, stage, sr)
 	case StageBaseline:
 		return e.execBaseline(ctx, run, stage, sr)
+	case StageCanary:
+		return e.execCanary(ctx, run, stage, sr)
 	}
 	err := fmt.Errorf("未知 stage 类型 %s", stage.Type)
 	sr.Error = err.Error()
@@ -522,6 +544,105 @@ func (e *Engine) execTest(ctx context.Context, run *PipelineRun, stage StageDef,
 }
 
 // execApprove 审批 stage：暂停 run 等外部 Resume（通过）或 Abort（拒绝，Task 12）。
+// execCanary 金丝雀验证 stage（并行验证式，spec D3=A）：部署新镜像到 canary-<runID> 并行泳道
+// （1 副本，不动基线）→ StageWaiting 暂停等人工「确认放量/终止」。
+// 诚实边界：这是 preview 式并行验证，非按比例切流——真切流依赖生产流量权重（D1 留后续）。
+// batches/observationMins 参数保留前向兼容（本实现不消费）。
+func (e *Engine) execCanary(ctx context.Context, run *PipelineRun, stage StageDef, sr *StageRun) (bool, error) {
+	imageID, err := e.resolveImage(ctx, stage, *run)
+	if err != nil {
+		sr.Error = err.Error()
+		return true, err
+	}
+	envID := strOr(stage.Params, "envId", "")
+	if envID == "" {
+		// 未显式指定时沿用前序 deploy 的 envId（canary 通常紧跟 deploy stage 验证其产物）
+		envID = strFromInput(sr.Input, "envId")
+		if envID == "" {
+			err := fmt.Errorf("canary stage 缺 envId 参数")
+			sr.Error = err.Error()
+			return true, err
+		}
+	}
+	service := strOr(stage.Params, "service", "")
+	serviceID := strOr(stage.Params, "serviceId", "")
+	lane := "canary-" + dns1035(run.ID) // 并行验证泳道，随 run 命名（Abort/GC 兜底回收）
+	// 资源规格：三级来源复用 deploy 同款解析（canary 与基线同规格验证才有意义）
+	res := parseDeployResources(stage.Params)
+	if res.IsEmpty() && e.AppResourceLookup != nil {
+		if tpl, err := e.AppResourceLookup.Template(ctx, run.AppID); err == nil {
+			res = tpl
+		}
+	}
+	// 泳道实体懒建（与 deploy 同语义：Lane 实体是泳道管理/TTL 回收真源）。
+	if e.LaneEnsurer != nil {
+		if err := e.LaneEnsurer.Ensure(ctx, envID, lane); err != nil {
+			err := fmt.Errorf("泳道实体创建失败 %s: %w", lane, err)
+			sr.Error = err.Error()
+			return true, err
+		}
+	}
+	logf(sr, "金丝雀验证：部署 %s 到并行泳道 %s（基线不动）", imageID, lane)
+	deployment, domain, err := e.Releases.Deploy(ctx, run.AppID, envID, lane, service, serviceID, imageID, 0, 0, res, 1, run.ID)
+	if err != nil {
+		sr.Error = err.Error()
+		return true, err
+	}
+	logf(sr, "等待金丝雀 Workload %s 就绪", deployment.WorkloadID)
+	if err := e.Releases.PollWorkloadReady(ctx, deployment.WorkloadID); err != nil {
+		sr.Error = err.Error()
+		return true, err
+	}
+	logf(sr, "金丝雀就绪，验证地址 %s —— 观察指标/日志后「确认放量」或「终止」", domain)
+	if sr.Input == nil {
+		sr.Input = map[string]any{}
+	}
+	sr.Input["imageId"] = imageID
+	sr.Input["envId"] = envID
+	sr.Input["service"] = service
+	sr.Input["serviceId"] = serviceID
+	sr.Output = map[string]any{
+		OutReleaseID:        deployment.ID,
+		OutCanaryWorkloadID: deployment.WorkloadID,
+		OutCanaryDomain:     domain,
+	}
+	sr.Status = StageWaiting
+	return false, nil
+}
+
+// dns1035 清洗为 K8s Service 名合法字符（DNS-1035：小写字母数字与 -，首字母，≤63）。
+// 复制自 internal/devops model.go 同名函数（pipeline 不 import workload/devops store 侧，
+// 依赖倒置约束——10 行纯函数本体复制）。
+func dns1035(name string) string {
+	var b []byte
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
+			b = append(b, byte(r))
+		case r >= 'A' && r <= 'Z':
+			b = append(b, byte(r-'A'+'a'))
+		default:
+			b = append(b, '-')
+		}
+	}
+	if len(b) > 63 {
+		b = b[:63]
+	}
+	out := strings.Trim(string(b), "-")
+	if out != "" && (out[0] < 'a' || out[0] > 'z') {
+		out = "n" + out
+	}
+	return out
+}
+
+// strFromInput 取 StageRun.Input map 的 string 值（类型断言失败返空串）。
+func strFromInput(input map[string]any, key string) string {
+	if v, ok := input[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
 func (e *Engine) execApprove(ctx context.Context, run *PipelineRun, stage StageDef, sr *StageRun) (bool, error) {
 	message := strOr(stage.Params, "message", "等待审批")
 	logf(sr, "等待审批：%s", message)
