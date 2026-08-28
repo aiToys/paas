@@ -13,6 +13,7 @@ export const STAGE_TYPES = [
   { label: 'approve（人工审批门禁）', value: 'approve' },
   { label: 'release（打版本里程碑）', value: 'release' },
   { label: 'promote（提升到下一阶序环境）', value: 'promote' },
+  { label: 'canary（金丝雀并行验证）', value: 'canary' },
   { label: 'baseline（合并主干）', value: 'baseline' },
 ]
 

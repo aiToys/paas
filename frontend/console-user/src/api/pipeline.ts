@@ -3,7 +3,7 @@
 import { fetchJSON, fetchAuth } from '@/api'
 
 // ---------- 枚举常量 ----------
-export type StageType = 'build' | 'deploy' | 'test' | 'approve' | 'release' | 'promote' | 'baseline'
+export type StageType = 'build' | 'deploy' | 'test' | 'approve' | 'release' | 'promote' | 'baseline' | 'canary'
 export type ImageSource = 'priorBuild' | 'selected' | 'latestReady'
 export type TestMode = 'smoke' | 'manual'
 export type RunStatus = 'running' | 'paused' | 'succeeded' | 'failed' | 'aborted'
@@ -186,6 +186,19 @@ async function abortRun(runId: string): Promise<void> {
   }
 }
 
+// canaryDecision 金丝雀验证决策（canary stage waiting 时）：promote=确认放量（基线全量滚动），
+// terminate=终止（仅删 canary 并行负载，基线零风险退出）。
+async function canaryDecision(runId: string, stageIdx: number, action: 'promote' | 'terminate'): Promise<void> {
+  const resp = await fetchAuth(`/api/pipelineruns/${runId}/stages/${stageIdx}/canary`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action }),
+  })
+  if (!resp.ok) {
+    const json = await resp.json().catch(() => ({}))
+    throw new Error(json.error || (action === 'promote' ? '放量失败' : '终止失败'))
+  }
+}
+
 // 重试失败 run（从失败 stage 重新推进，调试闭环）
 async function retryRun(runId: string): Promise<void> {
   const resp = await fetchAuth(`/api/pipelineruns/${runId}/retry`, { method: 'POST' })
@@ -198,4 +211,5 @@ async function retryRun(runId: string): Promise<void> {
 export {
   listPipelines, getPipeline, createPipeline, updatePipeline, deletePipeline,
   listTemplates, triggerRun, getRun, listRuns, approveStage, abortRun, retryRun, getBuildRun,
+  canaryDecision,
 }

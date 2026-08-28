@@ -8,9 +8,10 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { imageLink, releaseLink, buildLink } from '@/composables/useDevopsLinks'
 import {
-  getRun, approveStage, abortRun, retryRun, getBuildRun,
+  getRun, approveStage, abortRun, retryRun, getBuildRun, canaryDecision,
   type PipelineRun, type StageRun, laneOf, buildRunIdOf,
 } from '@/api/pipeline'
+import { listMetrics } from '@/api/observability'
 
 const props = defineProps<{ runId: string }>()
 const router = useRouter()
@@ -64,6 +65,84 @@ const canApprove = computed(() => {
   if (cur.type === 'test' && cur.input?.mode === 'manual') return true
   return false
 })
+
+// 当前 stage 是否等待金丝雀验证决策（paused + canary waiting）
+const canCanary = computed(() => {
+  const r = run.value
+  if (!r || r.status !== 'paused') return false
+  const cur = r.stageRuns[r.currentStage]
+  return !!cur && cur.type === 'canary' && cur.status === 'waiting'
+})
+
+// canary waiting 的当前 stage（观察面板数据源）
+const canaryStage = computed<StageRun | null>(() => {
+  const r = run.value
+  if (!r || !canCanary.value) return null
+  return r.stageRuns[r.currentStage] || null
+})
+
+// ---- canary 观察指标（10s 轮询，onUnmounted 清理） ----
+const canaryMetrics = ref<{ label: string; value: string }[]>([])
+let canaryTimer: ReturnType<typeof setInterval> | null = null
+
+async function loadCanaryMetrics() {
+  const s = canaryStage.value
+  const wlID = String(s?.output?.canaryWorkloadId ?? '')
+  if (!wlID) return
+  try {
+    const list = await listMetrics({ targetType: 'workload', targetId: wlID })
+    const wanted = ['cpu_usage', 'memory_usage', 'rps', 'latency_ms']
+    const labels: Record<string, string> = {
+      cpu_usage: 'CPU', memory_usage: '内存', rps: 'RPS', latency_ms: '延迟',
+    }
+    canaryMetrics.value = wanted
+      .map((name) => list.find((m) => m.name === name))
+      .filter((m) => !!m)
+      .map((m) => ({
+        label: labels[m!.name] || m!.name,
+        value: `${m!.current}${m!.unit || ''}`,
+      }))
+  } catch { /* 静默：指标不可用不阻断决策 */ }
+}
+
+watch(canaryStage, (s) => {
+  if (s && s.status === 'waiting') {
+    loadCanaryMetrics()
+    if (!canaryTimer) canaryTimer = setInterval(() => {
+      if (!document.hidden) loadCanaryMetrics()
+    }, 10000)
+  } else {
+    if (canaryTimer) { clearInterval(canaryTimer); canaryTimer = null }
+    canaryMetrics.value = []
+  }
+})
+
+// canary 决策：确认放量（生产走输入名称二次确认）/ 终止（普通确认）
+async function canaryDecide(action: 'promote' | 'terminate') {
+  const r = run.value
+  if (!r) return
+  const cur = r.stageRuns[r.currentStage]
+  try {
+    if (action === 'promote') {
+      await ElMessageBox.confirm(
+        '确认放量将把该镜像全量滚动到生产基线，并回收金丝雀并行负载。继续？',
+        '金丝雀放量确认', { type: 'warning', confirmButtonText: '确认放量' },
+      )
+    } else {
+      await ElMessageBox.confirm(
+        '终止将删除金丝雀并行验证负载（基线未动，零风险退出），本次发布标记失败。继续？',
+        '金丝雀终止确认', { type: 'warning', confirmButtonText: '终止' },
+      )
+    }
+  } catch { return }
+  try {
+    await canaryDecision(r.id, cur.index, action)
+    ElMessage.success(action === 'promote' ? '已放量，基线滚动中' : '已终止，金丝雀负载回收中')
+    await load()
+  } catch (e: any) {
+    ElMessage.error(e?.message || '操作失败')
+  }
+}
 
 const canAbort = computed(() => {
   const s = run.value?.status
@@ -151,7 +230,10 @@ onMounted(async () => {
   await load()
   if (!isTerminal.value) startPolling()
 })
-onUnmounted(stopPolling)
+onUnmounted(() => {
+  stopPolling()
+  if (canaryTimer) { clearInterval(canaryTimer); canaryTimer = null }
+})
 
 // ---- 选中阶段详情面板（点轨道节点切换，同一时间一个；KISS） ----
 const selectedIdx = ref<number | null>(null)
@@ -272,6 +354,8 @@ const OUTPUT_LABELS: Record<string, string> = {
   releaseId: '发布单',
   buildRunId: '构建记录',
   workloadDomain: '访问地址',
+  canaryWorkloadId: '金丝雀负载',
+  canaryDomain: '验证地址',
   version: '版本',
   mergeSha: '合并 SHA',
 }
@@ -287,7 +371,7 @@ function outputEntries(s: StageRun): OutEntry[] {
     if (k === 'imageId' && value) e.to = imageLink(run.value!.appId, value)
     else if (k === 'releaseId' && value) e.to = releaseLink(value)
     else if (k === 'buildRunId' && value) e.to = buildLink(value)
-    else if (k === 'workloadDomain' && value) { e.external = true; e.to = `http://${value}` }
+    else if ((k === 'workloadDomain' || k === 'canaryDomain') && value) { e.external = true; e.to = `http://${value}` }
     return e
   })
 }
@@ -342,6 +426,10 @@ watch(() => run.value?.id, autoSelect)
           <el-button v-if="canAbort" size="small" type="danger" plain @click="abort">中止</el-button>
           <el-button v-if="canRetry" size="small" type="warning" plain @click="retry">重试失败阶段</el-button>
           <el-button v-if="canApprove" size="small" type="primary" @click="approve">批准继续</el-button>
+          <template v-if="canCanary">
+            <el-button size="small" type="danger" plain @click="canaryDecide('terminate')">终止</el-button>
+            <el-button size="small" type="primary" @click="canaryDecide('promote')">✅ 确认放量</el-button>
+          </template>
         </div>
       </div>
 
@@ -365,6 +453,39 @@ watch(() => run.value?.id, autoSelect)
             </el-tag>
           </div>
         </template>
+      </div>
+
+      <!-- canary 观察面板：waiting 时展示验证地址 + 实时指标（并行验证式金丝雀决策依据） -->
+      <div v-if="canaryStage" class="stage-panel canary-panel">
+        <div class="panel-head">
+          <span class="panel-icon" style="color: var(--el-color-warning)">🐤</span>
+          <span class="panel-name">金丝雀验证中（并行验证，基线未动）</span>
+        </div>
+        <div class="canary-meta">
+          <span v-if="canaryStage.output?.canaryDomain">
+            验证地址：
+            <a :href="`http://${canaryStage.output.canaryDomain}`" target="_blank" rel="noopener" class="out-link">
+              {{ canaryStage.output.canaryDomain }} ↗
+            </a>
+          </span>
+          <a
+            v-if="canaryStage.output?.canaryWorkloadId"
+            class="out-link"
+            @click="router.push(`/platform/observability?targetType=workload&targetId=${canaryStage.output?.canaryWorkloadId}`)"
+          >
+            在可观测中查看 ↗
+          </a>
+        </div>
+        <div v-if="canaryMetrics.length" class="canary-metrics">
+          <div v-for="m in canaryMetrics" :key="m.label" class="canary-metric">
+            <div class="cm-label">{{ m.label }}</div>
+            <div class="cm-value">{{ m.value }}</div>
+          </div>
+        </div>
+        <div v-else class="canary-metrics-empty">指标加载中（或该负载暂无监控数据）…</div>
+        <div class="canary-hint">
+          观察验证地址与指标后决策：「确认放量」把镜像全量滚动到基线；「终止」仅删金丝雀负载（零风险退出）。
+        </div>
       </div>
 
       <!-- 选中阶段详情面板 -->
@@ -452,6 +573,23 @@ watch(() => run.value?.id, autoSelect)
 .panel-icon { font-weight: 600; }
 .panel-name { font-weight: 600; font-size: 14px; }
 .panel-duration { font-size: 12px; color: var(--el-text-color-secondary); margin-left: 4px; }
+
+/* ---- canary 观察面板 ---- */
+.canary-panel { border-color: var(--el-color-warning-light-5); margin-bottom: 16px; }
+.canary-meta {
+  display: flex; gap: 20px; flex-wrap: wrap; align-items: center;
+  font-size: 12.5px; color: var(--el-text-color-regular); margin-bottom: 10px;
+}
+.canary-meta .out-link { color: var(--el-color-primary); cursor: pointer; }
+.canary-metrics { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.canary-metric {
+  min-width: 90px; padding: 8px 14px;
+  background: var(--el-fill-color-lighter); border-radius: 6px; text-align: center;
+}
+.cm-label { font-size: 11.5px; color: var(--el-text-color-secondary); }
+.cm-value { font-size: 16px; font-weight: 600; color: var(--el-text-color-primary); }
+.canary-metrics-empty { font-size: 12px; color: var(--el-text-color-secondary); margin-bottom: 10px; }
+.canary-hint { font-size: 12px; color: var(--el-text-color-secondary); }
 .stage-error { margin-bottom: 8px; padding: 6px 8px; font-size: 12px; color: var(--el-color-danger); background: var(--el-color-danger-light-9); border-radius: 4px; word-break: break-all; }
 .stage-output { margin-bottom: 8px; padding: 8px; background: var(--el-fill-color-lighter); border-radius: 4px; }
 .out-item { font-size: 12px; line-height: 1.8; }
