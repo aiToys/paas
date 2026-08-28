@@ -804,9 +804,10 @@ func (e *Engine) Resume(ctx context.Context, runID string, stageIdx int) error {
 //   - promote=false 终止：仅删 canary 负载，stage Failed（Error=金丝雀验证终止（人工））+ run Failed。
 //     基线从未被动过，零风险退出，无需回滚。
 //
-// 锁语义与 Resume 同源：e.mu 串行化「校验 paused + 决策」防并发双决策；部署/删除可能耗时
-// （PollWorkloadReady 类），锁外执行，完成后重读 run 双检（paused + current stage 未变）。
-// sr 是锁内读的 StageRun 值副本，logf 修改副本后回写 run.StageRuns[idx].Log。
+// 并发安全（审查 I1 修复）：两段锁——第一段锁内校验 + 以 stage 中间态（Running + decision 参数）
+// CAS「认领」决策并 UpdateRun 持久化（并发相反决策只有一方认领成功，另一方 ErrNotPaused）；
+// 第二段锁外执行副作用（部署/删除可能耗时），完成后锁内按认领结果落终态。认领失败方在副作用
+// 之前即被拒，杜绝「终止成功但基线已被另一并发放量改动」的语义矛盾。
 func (e *Engine) CanaryResume(ctx context.Context, runID string, stageIdx int, promote bool) error {
 	e.mu.Lock()
 	run, err := e.Runs.GetRun(ctx, runID)
@@ -833,17 +834,47 @@ func (e *Engine) CanaryResume(ctx context.Context, runID string, stageIdx int, p
 	service, _ := sr.Input["service"].(string)
 	serviceID, _ := sr.Input["serviceId"].(string)
 	appID := run.AppID
+	// 认领决策：stage 置 Running（非终态占住 current stage），decision 记入 Input——
+	// 并发相反决策重入时 sr.Status!=Waiting 直接被拒（副作用前拦截）。
+	sr.Status = StageRunning
+	sr.Input["decision"] = map[string]bool{"promote": promote}
+	logf(&sr, "决策认领：%s", map[bool]string{true: "确认放量", false: "终止"}[promote])
+	run.StageRuns[stageIdx] = sr
+	if _, err := e.Runs.UpdateRun(ctx, run); err != nil {
+		e.mu.Unlock()
+		return err
+	}
 	e.mu.Unlock() // 部署/删除可能耗时，锁外执行
+
+	fail := func(err error) error {
+		// 认领后失败：stage 回 Waiting（可再次决策），日志增量落库防丢失（审查 M2）。
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		if r, gerr := e.Runs.GetRun(ctx, runID); gerr == nil && r.Status == RunPaused && stageIdx == r.CurrentStage && r.StageRuns[stageIdx].Status == StageRunning {
+			sr.Log += "失败: " + err.Error() + "\n"
+			r.StageRuns[stageIdx].Status = StageWaiting
+			r.StageRuns[stageIdx].Log = sr.Log
+			_, _ = e.Runs.UpdateRun(ctx, r)
+		}
+		return err
+	}
 
 	if promote {
 		// 确认放量 = 经典全量滚动：新镜像 Deploy 到基线泳道（lane=default），
 		// 空 DeployResources 意为沿用基线 Workload 既有规格不覆盖；成功后删 canary 并行负载。
-		logf(&sr, "确认放量：基线全量滚动 %s（env=%s lane=default）", imageID, envID)
 		if _, _, err := e.Releases.Deploy(ctx, appID, envID, LaneDefault, service, serviceID, imageID, 0, 0, DeployResources{}, 0, runID); err != nil {
-			return fmt.Errorf("基线放量失败: %w", err)
+			return fail(fmt.Errorf("基线放量失败: %w", err))
 		}
-	} else {
-		logf(&sr, "终止金丝雀：基线未动，零风险退出")
+		logf(&sr, "基线放量完成")
+	}
+	if wlID != "" {
+		if err := e.Releases.DeleteWorkload(ctx, wlID); err != nil {
+			// 清理失败不阻断决策（放量已生效/终止语义不变），GC 对 canary-<runID> 裸泳道 TTL 兜底回收
+			log.Printf("canary workload 清理失败 wl=%s: %v（GC 兜底）", wlID, err) //nolint:gosec // wlID 平台生成
+			logf(&sr, "canary 清理失败（GC 兜底）: %v", err)
+		} else {
+			logf(&sr, "canary workload %s 已回收", wlID)
+		}
 	}
 	if wlID != "" {
 		if err := e.Releases.DeleteWorkload(ctx, wlID); err != nil {
@@ -856,8 +887,8 @@ func (e *Engine) CanaryResume(ctx context.Context, runID string, stageIdx int, p
 	}
 
 	e.mu.Lock()
-	run, err = e.Runs.GetRun(ctx, runID) // 重读双检（锁外期间状态可能被 Abort 等改变）
-	if err != nil || run.Status != RunPaused || stageIdx != run.CurrentStage {
+	run, err = e.Runs.GetRun(ctx, runID) // 重读（锁外期间可能被 Abort 改变；认领已挡并发决策）
+	if err != nil || run.Status != RunPaused || stageIdx != run.CurrentStage || run.StageRuns[stageIdx].Status != StageRunning {
 		e.mu.Unlock()
 		if err != nil {
 			return err

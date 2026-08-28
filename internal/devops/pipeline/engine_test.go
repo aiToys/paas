@@ -112,10 +112,10 @@ func (f *fakeReleaser) Deploy(ctx context.Context, appID, envID, lane, service, 
 	f.deployLane = lane
 	f.deployImageID = imageID
 	f.deployPort = port
-	f.mu.Unlock()
 	f.deploySvcID = serviceID
 	f.deployResources = resources
 	f.deployReplicas = replicas
+	f.mu.Unlock()
 	if f.deployErr != nil {
 		return devops.Release{}, "", f.deployErr
 	}
@@ -480,6 +480,62 @@ func TestCanaryAbortCleansWorkload(t *testing.T) {
 	}
 	if run.StageRuns[0].Status != StageAborted {
 		t.Errorf("canary stage 期望 aborted，got %s", run.StageRuns[0].Status)
+	}
+}
+
+// TestCanaryConcurrentDecisionSingleWinner：并发相反决策（promote×terminate）只有一方生效——
+// 认领 CAS（stage Waiting→Running 锁内持久化）在副作用之前拦截第二方（审查 I1 回归）。
+func TestCanaryConcurrentDecisionSingleWinner(t *testing.T) {
+	s, runID, rel, eng := canaryWaitingRun(t)
+
+	errCh := make(chan error, 2)
+	go func() { errCh <- eng.CanaryResume(acmeCtxEngine(), runID, 0, true) }()
+	go func() { errCh <- eng.CanaryResume(acmeCtxEngine(), runID, 0, false) }()
+
+	promoteWon := false
+	wins := 0
+	for i := 0; i < 2; i++ {
+		if err := <-errCh; err == nil {
+			wins++
+		}
+	}
+	if wins != 1 {
+		t.Fatalf("并发相反决策应恰一方成功，got %d（errors 见 goroutine）", wins)
+	}
+	run, _ := s.GetRun(acmeCtxEngine(), runID)
+	// 胜者是谁由调度决定，但终态必须与胜者决策一致且副作用一致
+	if run.Status == RunRunning || run.Status == RunSucceeded {
+		promoteWon = true
+	}
+	if run.Status != RunRunning && run.Status != RunSucceeded && run.Status != RunFailed {
+		t.Fatalf("终态异常: %s", run.Status)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		run, _ = s.GetRun(acmeCtxEngine(), runID)
+		if run.Status == RunSucceeded || run.Status == RunFailed {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if promoteWon {
+		if run.Status != RunSucceeded {
+			t.Fatalf("放量胜出期望 succeeded，got %s", run.Status)
+		}
+		if lane := rel.lastLane(); lane != LaneDefault {
+			t.Errorf("放量胜出应触发基线 Deploy lane=default，got %q", lane)
+		}
+	} else {
+		if run.Status != RunFailed {
+			t.Fatalf("终止胜出期望 failed，got %s", run.Status)
+		}
+		if lane := rel.lastLane(); lane != "" && lane != "canary-"+dns1035(runID) {
+			t.Errorf("终止胜出不应触发基线 Deploy（lane=%q）", lane)
+		}
+	}
+	// canary workload 恰删一次（两决策均会删，败者在副作用前被拒不应删）
+	if del := rel.deletedList(); len(del) != 1 {
+		t.Errorf("canary workload 应恰删一次，got %v", del)
 	}
 }
 
