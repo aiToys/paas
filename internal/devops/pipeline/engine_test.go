@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,6 +39,7 @@ type fakeReleaser struct {
 	domain    string // Deploy/WorkloadDomain 返回（空则默认 wl-{id}.svc.cluster.local)
 
 	deployLane      string          // Deploy 收到的 lane（断言用）
+	deployImageID   string          // Deploy 收到的 imageID（canary 放量断言用）
 	deployPort      int             // Deploy 收到的 port（断言用）
 	deploySvcID     string          // Deploy 收到的 serviceID（断言用，服务模型 Phase 1 透传）
 	deployResources DeployResources // Deploy 收到的 resources（断言用，资源规格注入）
@@ -48,8 +50,27 @@ type fakeReleaser struct {
 	versionIDs []string // SetVersion 收到的 releaseIDs（最后一次）
 	versionSet string   // SetVersion 收到的 version
 
-	deleted []string // DeleteWorkload 收到的 workloadID（canary 清理断言用）
-	deleteErr error  // DeleteWorkload 返回错误（可选）
+	deleted   []string // DeleteWorkload 收到的 workloadID（canary 清理断言用）
+	deleteErr error    // DeleteWorkload 返回错误（可选）
+
+	mu sync.Mutex // 守护 deploy*/deleted 记录：CanaryResume 后 Start 异步 advance 并发写，测试读需同步
+}
+
+// lastLane/lastImage/deletedList 同步读断言字段（防 -race 数据竞争：异步 advance 并发写）。
+func (f *fakeReleaser) lastLane() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.deployLane
+}
+func (f *fakeReleaser) lastImage() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.deployImageID
+}
+func (f *fakeReleaser) deletedList() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.deleted...)
 }
 
 func (f *fakeReleaser) CreateRelease(ctx context.Context, input devops.ReleaseInput) (devops.Release, error) {
@@ -87,8 +108,11 @@ func (f *fakeReleaser) SetVersion(ctx context.Context, releaseIDs []string, vers
 
 // Deploy stub：返有效部署记录（rel-fake/wl-fake）+ 尊重 domain 字段，供 execDeploy 链路测试可控。
 func (f *fakeReleaser) Deploy(ctx context.Context, appID, envID, lane, service, serviceID, imageID string, port, containerPort int, resources DeployResources, replicas int, sourceRunID string) (devops.Release, string, error) {
+	f.mu.Lock()
 	f.deployLane = lane
+	f.deployImageID = imageID
 	f.deployPort = port
+	f.mu.Unlock()
 	f.deploySvcID = serviceID
 	f.deployResources = resources
 	f.deployReplicas = replicas
@@ -103,15 +127,17 @@ func (f *fakeReleaser) Deploy(ctx context.Context, appID, envID, lane, service, 
 	return devops.Release{ID: "rel-fake", WorkloadID: wlID}, domain, nil
 }
 
-// DeployCanary stub（T1 临时实现：转调既有 Deploy 记录逻辑，lane 由调用方构造传入；
-// T2 切换真实语义）。这里记录 lane 前缀供断言（execCanary 仍走 Deploy，本方法暂未被调用）。
+// DeployCanary stub：转调 Deploy 记录链路，lane 按真实语义派生 canary-<dns1035(sourceRunID)>、
+// 单副本，供 execCanary/CanaryResume 断言（deployLane/deployReplicas 记录最后一次部署调用）。
 func (f *fakeReleaser) DeployCanary(ctx context.Context, appID, envID, service, serviceID, imageID string, resources DeployResources, sourceRunID string) (devops.Release, string, error) {
 	return f.Deploy(ctx, appID, envID, "canary-"+dns1035(sourceRunID), service, serviceID, imageID, 0, 0, resources, 1, sourceRunID)
 }
 
 // DeleteWorkload stub：记录到 deleted 切片（canary abort/终止清理断言用）。
 func (f *fakeReleaser) DeleteWorkload(ctx context.Context, workloadID string) error {
+	f.mu.Lock()
 	f.deleted = append(f.deleted, workloadID)
+	f.mu.Unlock()
 	return f.deleteErr
 }
 
@@ -341,6 +367,119 @@ func TestExecCanaryMissingEnvId(t *testing.T) {
 	}
 	if rel.deployLane != "" {
 		t.Errorf("缺 envId 不应触发 Deploy，got lane=%q", rel.deployLane)
+	}
+}
+
+// canaryWaitingRun 辅助：Advance 到 canary stage StageWaiting，返回 store/runID/releaser/engine。
+func canaryWaitingRun(t *testing.T) (*memoryStore, string, *fakeReleaser, *Engine) {
+	t.Helper()
+	s := NewMemoryStore()
+	r := seedPipeline(t, s, "p-canary", "app-canary", KindCI, []StageDef{
+		{Name: "金丝雀验证", Type: StageCanary, Params: map[string]any{
+			"envId": "env-test", "imageSource": ImageSelected, "imageId": "img-1",
+		}},
+		{Name: "部署", Type: StageDeploy, Params: map[string]any{
+			"envId": "env-test", "imageSource": ImageSelected, "imageId": "img-1",
+		}},
+	})
+	rel := &fakeReleaser{}
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: rel}
+	if err := eng.Advance(acmeCtxEngine(), r.ID); err != nil {
+		t.Fatalf("Advance 失败: %v", err)
+	}
+	run, _ := s.GetRun(acmeCtxEngine(), r.ID)
+	if run.Status != RunPaused || run.StageRuns[0].Status != StageWaiting {
+		t.Fatalf("期望 paused/waiting，got run=%s stage=%s", run.Status, run.StageRuns[0].Status)
+	}
+	return s, r.ID, rel, eng
+}
+
+// TestCanaryPromoteRollsBaselineAndCleans：确认放量 → 基线全量滚动（lane=default 同 imageId）
+// + 删 canary workload + stage Success + run 续推后续 stage。
+func TestCanaryPromoteRollsBaselineAndCleans(t *testing.T) {
+	s, runID, rel, eng := canaryWaitingRun(t)
+
+	if err := eng.CanaryResume(acmeCtxEngine(), runID, 0, true); err != nil {
+		t.Fatalf("CanaryResume(promote): %v", err)
+	}
+	// 基线放量：lane=default + 同一镜像
+	if lane := rel.lastLane(); lane != LaneDefault {
+		t.Errorf("放量 Deploy lane=%q, want %q", lane, LaneDefault)
+	}
+	if img := rel.lastImage(); img != "img-1" {
+		t.Errorf("放量 Deploy imageId=%q, want img-1（与 canary 验证镜像一致）", img)
+	}
+	// canary 负载回收
+	if del := rel.deletedList(); len(del) != 1 || del[0] != "wl-fake" {
+		t.Errorf("DeleteWorkload 期望 [wl-fake]，got %v", del)
+	}
+	// run 续推：异步推进到后续 deploy stage 完成
+	var run PipelineRun
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		run, _ = s.GetRun(acmeCtxEngine(), runID)
+		if run.Status == RunSucceeded || run.Status == RunFailed {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if run.Status != RunSucceeded {
+		t.Fatalf("放量后期望 succeeded，got %s", run.Status)
+	}
+	if run.StageRuns[0].Status != StageSuccess {
+		t.Errorf("canary stage 期望 success，got %s", run.StageRuns[0].Status)
+	}
+	if run.CurrentStage != 2 {
+		t.Errorf("CurrentStage 期望 2，got %d", run.CurrentStage)
+	}
+}
+
+// TestCanaryTerminateKeepsBaseline：终止 → 仅删 canary workload，基线 Deploy 未调，run Failed。
+func TestCanaryTerminateKeepsBaseline(t *testing.T) {
+	s, runID, rel, eng := canaryWaitingRun(t)
+
+	if err := eng.CanaryResume(acmeCtxEngine(), runID, 0, false); err != nil {
+		t.Fatalf("CanaryResume(terminate): %v", err)
+	}
+	if del := rel.deletedList(); len(del) != 1 || del[0] != "wl-fake" {
+		t.Errorf("DeleteWorkload 期望 [wl-fake]，got %v", del)
+	}
+	if lane := rel.lastLane(); lane != "" && lane != "canary-"+dns1035(runID) {
+		// Advance 期 DeployCanary 记录了 canary-<runID>；终止决策不得再触发基线部署
+		t.Errorf("终止不应触发基线 Deploy（lane=%q）", lane)
+	}
+	run, _ := s.GetRun(acmeCtxEngine(), runID)
+	if run.Status != RunFailed {
+		t.Fatalf("终止后期望 failed，got %s", run.Status)
+	}
+	sr := run.StageRuns[0]
+	if sr.Status != StageFailed {
+		t.Errorf("canary stage 期望 failed，got %s", sr.Status)
+	}
+	if !strings.Contains(sr.Error, "终止") {
+		t.Errorf("stage.Error 应含「终止」，got %q", sr.Error)
+	}
+	if run.FinishedAt.IsZero() {
+		t.Error("run.FinishedAt 应已设置")
+	}
+}
+
+// TestCanaryAbortCleansWorkload：canary waiting 期 Abort → DeleteWorkload 调 + run Aborted。
+func TestCanaryAbortCleansWorkload(t *testing.T) {
+	s, runID, rel, eng := canaryWaitingRun(t)
+
+	if err := eng.Abort(acmeCtxEngine(), runID); err != nil {
+		t.Fatalf("Abort: %v", err)
+	}
+	if del := rel.deletedList(); len(del) != 1 || del[0] != "wl-fake" {
+		t.Errorf("Abort 应清理 canary workload，got %v", del)
+	}
+	run, _ := s.GetRun(acmeCtxEngine(), runID)
+	if run.Status != RunAborted {
+		t.Fatalf("期望 aborted，got %s", run.Status)
+	}
+	if run.StageRuns[0].Status != StageAborted {
+		t.Errorf("canary stage 期望 aborted，got %s", run.StageRuns[0].Status)
 	}
 }
 

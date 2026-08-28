@@ -582,7 +582,10 @@ func (e *Engine) execCanary(ctx context.Context, run *PipelineRun, stage StageDe
 		}
 	}
 	logf(sr, "金丝雀验证：部署 %s 到并行泳道 %s（基线不动）", imageID, lane)
-	deployment, domain, err := e.Releases.Deploy(ctx, run.AppID, envID, lane, service, serviceID, imageID, 0, 0, res, 1, run.ID)
+	// canary 部署经 DeployCanary（adapter 负责泳道构造/单副本/验证域名），port/cport 不透传
+	// ——复用既有基线 Workload 时端口属其既有配置，新建时 adapter 按 Deploy 单服务规则自动解析。
+	// lane 变量仍用于 LaneEnsurer 懒建与日志展示（引擎侧泳道名与 adapter 内部派生一致：canary-<dns1035(runID)>）。
+	deployment, domain, err := e.Releases.DeployCanary(ctx, run.AppID, envID, service, serviceID, imageID, res, run.ID)
 	if err != nil {
 		sr.Error = err.Error()
 		return true, err
@@ -793,6 +796,97 @@ func (e *Engine) Resume(ctx context.Context, runID string, stageIdx int) error {
 	}
 	e.Start(ctx, runID)
 	return nil
+}
+
+// CanaryResume 金丝雀验证决策（canary stage StageWaiting 期人工调用）：
+//   - promote=true 确认放量：新镜像全量滚动到基线泳道（lane=default，空 DeployResources 不覆盖基线
+//     既有资源规格），成功后删 canary 并行负载，stage Success + run 续推后续 stage；
+//   - promote=false 终止：仅删 canary 负载，stage Failed（Error=金丝雀验证终止（人工））+ run Failed。
+//     基线从未被动过，零风险退出，无需回滚。
+//
+// 锁语义与 Resume 同源：e.mu 串行化「校验 paused + 决策」防并发双决策；部署/删除可能耗时
+// （PollWorkloadReady 类），锁外执行，完成后重读 run 双检（paused + current stage 未变）。
+// sr 是锁内读的 StageRun 值副本，logf 修改副本后回写 run.StageRuns[idx].Log。
+func (e *Engine) CanaryResume(ctx context.Context, runID string, stageIdx int, promote bool) error {
+	e.mu.Lock()
+	run, err := e.Runs.GetRun(ctx, runID)
+	if err != nil {
+		e.mu.Unlock()
+		return err
+	}
+	if run.Status != RunPaused {
+		e.mu.Unlock()
+		return ErrNotPaused
+	}
+	if stageIdx != run.CurrentStage {
+		e.mu.Unlock()
+		return ErrStageNotCurrent
+	}
+	sr := run.StageRuns[stageIdx]
+	if sr.Type != StageCanary || sr.Status != StageWaiting {
+		e.mu.Unlock()
+		return fmt.Errorf("stage %d 不是等待中的金丝雀验证", stageIdx)
+	}
+	wlID, _ := sr.Output[OutCanaryWorkloadID].(string)
+	imageID, _ := sr.Input["imageId"].(string)
+	envID, _ := sr.Input["envId"].(string)
+	service, _ := sr.Input["service"].(string)
+	serviceID, _ := sr.Input["serviceId"].(string)
+	appID := run.AppID
+	e.mu.Unlock() // 部署/删除可能耗时，锁外执行
+
+	if promote {
+		// 确认放量 = 经典全量滚动：新镜像 Deploy 到基线泳道（lane=default），
+		// 空 DeployResources 意为沿用基线 Workload 既有规格不覆盖；成功后删 canary 并行负载。
+		logf(&sr, "确认放量：基线全量滚动 %s（env=%s lane=default）", imageID, envID)
+		if _, _, err := e.Releases.Deploy(ctx, appID, envID, LaneDefault, service, serviceID, imageID, 0, 0, DeployResources{}, 0, runID); err != nil {
+			return fmt.Errorf("基线放量失败: %w", err)
+		}
+	} else {
+		logf(&sr, "终止金丝雀：基线未动，零风险退出")
+	}
+	if wlID != "" {
+		if err := e.Releases.DeleteWorkload(ctx, wlID); err != nil {
+			// 清理失败不阻断决策（放量已生效/终止语义不变），GC 对 canary-<runID> 裸泳道 TTL 兜底回收
+			log.Printf("canary workload 清理失败 wl=%s: %v（GC 兜底）", wlID, err) //nolint:gosec // wlID 平台生成
+			logf(&sr, "canary 清理失败（GC 兜底）: %v", err)
+		} else {
+			logf(&sr, "canary workload %s 已回收", wlID)
+		}
+	}
+
+	e.mu.Lock()
+	run, err = e.Runs.GetRun(ctx, runID) // 重读双检（锁外期间状态可能被 Abort 等改变）
+	if err != nil || run.Status != RunPaused || stageIdx != run.CurrentStage {
+		e.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		return ErrNotPaused
+	}
+	if promote {
+		run.StageRuns[stageIdx].Status = StageSuccess
+		run.StageRuns[stageIdx].Log = sr.Log
+		run.StageRuns[stageIdx].FinishedAt = time.Now()
+		run.CurrentStage++
+		run.Status = RunRunning
+		_, err = e.Runs.UpdateRun(ctx, run)
+		e.mu.Unlock()
+		if err != nil {
+			return err
+		}
+		e.Start(ctx, runID)
+		return nil
+	}
+	run.StageRuns[stageIdx].Status = StageFailed
+	run.StageRuns[stageIdx].Log = sr.Log
+	run.StageRuns[stageIdx].FinishedAt = time.Now()
+	run.StageRuns[stageIdx].Error = "金丝雀验证终止（人工）"
+	run.Status = RunFailed
+	run.FinishedAt = time.Now()
+	_, err = e.Runs.UpdateRun(ctx, run)
+	e.mu.Unlock()
+	return err
 }
 
 // pollHTTP GET 轮询 url 到 2xx 或超时，用于 smoke 探活。
