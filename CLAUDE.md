@@ -817,6 +817,26 @@ internal/dataservice/  领域(DataService + 6 Kind 常量 + KindMeta 表单元�
 - **e2e 验证**：`go test ./...` 全绿 + 三套 `pnpm build` 过 + k8s 部署，`/api/workloads` 返回 `laneId:"default"`（L1 字段生效）+ governance lane filter 200 + livez 200。
 - **留后续（L3）**：全链路 mesh（Istio/zeus sidecar 自动染色，应用零改动）、EndpointSlice + lane label selector（方案 B）、泳道自动回收（baseline 触发/闲置 TTL）、拓扑可视化（feature 泳道 + default 基线流量动画）、LaneMiddleware lane 合法性白名单校验、跨集群泳道。
 
+### 泳道实体化 + 资源规格建模（2026-08-28）
+
+L3 收口（零改动染色/TTL 回收/拓扑可视化已先行落地），本切片补齐用户指出的两大完备性缺口：**泳道从隐式分支名升为一等实体** + **工作负载资源规格端到端**。设计 `docs/superpowers/specs/2026-08-26-lane-entity-and-deploy-policy-design.md`，计划 `docs/superpowers/plans/2026-08-26-lane-entity-and-resources.md`（7 任务 SDD）。四决策：D1 weight 留位不实现切流 / D2 应用级默认 + stage 覆盖 / D3 金丝雀降级为并行验证式归下切片 / D4 三刀切片。
+
+**Lane 一等实体**（`internal/lane/` + migration 0035）：
+- `Lane{ID/TenantID/EnvID/Name(DNS-1035)/Mode/Status/Weight(留位恒0)/ExternalLink/Description}`；`Mode=standard`（闲置 TTL 可回收）/ `permanent`（火车常驻，GC 永不回收）；`Status=active|closed`。三种生命周期：显式实体 / EnsureByName 懒建 / 裸分支兜底（GC 只回收有实体的）。
+- REST `/api/lanes`（governance:read/write + 生产 prod:write）：CRUD + DELETE=标记 closed + **同步回收该泳道全部工作负载**（`ReclaimLane` 依赖倒置桥接 workload.LaneGC，防关闭与 GC 两处删除逻辑漂移）；关闭前置校验「有进行中 run（branch==name 非终态）409」。**终审 C1：生产泳道 DELETE/PUT 均 require prod:write**——级联回收生产资源比「生产建」更危险，必须对称护栏。
+- LaneGC 联动：Sweep 回收完泳道全组 MarkClosed（分组 key 含 tenant 防跨租户互扣；MarkClosed ctx 必须派生租户——store 无租户 ctx 拒查会静默失效）。permanent 跳过。
+- lane 解析优先级：deploy stage 显式 lane > EnsureByName 懒建实体 > 分支名（pipeline 不 import lane，`LaneEnsurer` 依赖倒置）。
+
+**资源规格端到端**（标准基线「生产禁 BestEffort」落地）：
+- `workload.ResourceSpec` 四字段（cpuRequest/memRequest/cpuLimit/memLimit，K8s Quantity）→ CRD `spec.resources` → reconciler `podSpec applyResources` → Pod requests/limits（e2e 验证 15s 内落地 200m/256Mi）。
+- 三级来源：deploy stage params `resources` > `Application.ResourceTemplate`（`PUT /api/applications/{id}/resource-template`）> 空。**生产禁 BestEffort 双入口**：workload handler 直建 400 + pipeline execDeploy fail-fast（EnvType 明确解析 prod 才拦，nil 跳过——防破坏存量测试）。
+- 联调泳道副本降级（engine 单一真源）：非 default lane 且非 prod，未显式 replicas 置 1（不沿用 svcDef，防逃逸）。
+- 前端：应用详情配置 tab「资源规格默认值」表单 + PipelineDesigner deploy stage `resources`/`replicas` 覆盖。
+
+**部署侧修复（重要经验）**：① helm upgrade 对 chart templates/ 内已存在 CRD **不应用变更**——deploy-k8s.sh 显式 `kubectl apply -f config/crds/`；② 手动 helm 绕脚本必须先 `export NODE_IP`，否则 envsubst 写坏 `image.registry=":30050/paas"` 且 `--reuse-values` 持续继承坏值；③ STS 删 pod 不删 PVC（数据可恢复）。
+
+**留后续**：金丝雀并行验证式（canary 泳道 + 独立验证域名 + 确认放量/终止，spec 三刀之第二刀）、Weight 切流实现、蓝绿（借泳道底座）、HPA/PDB/PriorityClass。
+
 ### 流水线完善：模板 CRUD + 构建实时日志（2026-08-09）
 
 承接 L1+L2（流水线 deploy/release 解耦 + 泳道联调），补两个用户反馈的产品 gap：①构建中看不到实时日志（仅终态全量）；②模板无法在 UI 配置（只能平台预置 builtin）。设计见 `docs/superpowers/specs/2026-08-09-pipeline-template-crud-and-stream-logs-design.md`，计划 `docs/superpowers/plans/2026-08-09-pipeline-template-crud-and-stream-logs.md`。
@@ -982,9 +1002,9 @@ console-user 导航采用**三层信息架构**（避免「资源」概念被滥
 
 | 模块 | 业界对标 | 基线能力清单 | 当前缺口 |
 |------|---------|------------|---------|
-| 工作负载部署 | K8s Deployment | resources requests/limits（QoS 非 BestEffort）、readiness/liveness probe、副本数、优先级 PriorityClass、PDB、HPA | requests/limits 缺（BestEffort 有驱逐风险）；HPA/PDB/优先级缺 |
-| 生产发布策略 | Argo Rollouts / Flagger | 滚动/金丝雀（按比例分批放量+指标分析+自动回滚）/蓝绿（并行环境+瞬时切流），发布观察窗口 | 仅 rolling；金丝雀指标分析缺；蓝绿可借泳道底座但缺生产流量权重层 |
-| 泳道/流量隔离 | 阿里全链路灰度 MSE | 泳道一等实体（显式创建/常驻标记/手动关闭）、资源规格模板、入口流量按比例切泳道 | 泳道无实体（lane=分支名隐式）；生产流量权重缺 |
+| 工作负载部署 | K8s Deployment | resources requests/limits（QoS 非 BestEffort）、readiness/liveness probe、副本数、优先级 PriorityClass、PDB、HPA | requests/limits 已落地（2026-08-28，生产禁 BestEffort双入口）；HPA/PDB/优先级缺 |
+| 生产发布策略 | Argo Rollouts / Flagger | 滚动/金丝雀（按比例分批放量+指标分析+自动回滚）/蓝绿（并行环境+瞬时切流），发布观察窗口 | 仅 rolling；金丝雀降级为并行验证式归下切片（spec 2026-08-26 已定）；蓝绿可借泳道底座但缺生产流量权重层 |
+| 泳道/流量隔离 | 阿里全链路灰度 MSE | 泳道一等实体（显式创建/常驻标记/手动关闭）、资源规格模板、入口流量按比例切泳道 | 实体已落地（2026-08-28，standard/permanent/Weight 留位）；入口流量按比例切泳道缺 |
 | 可观测 | Grafana/Pyroscope | RED/USE 指标、结构化日志、trace、告警通知通道、SLO 燃烧率 | 告警通知通道缺；SLO 缺（2026-08-23 审计已列） |
 | 秘钥管理 | Vault/KMS | 加密存储（envelope encryption）、轮转、过期、动态凭证 | 明文存储；轮转/过期缺（设计时已知） |
 
