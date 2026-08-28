@@ -408,7 +408,10 @@ func (e *Engine) execDeploy(ctx context.Context, run *PipelineRun, stage StageDe
 	// 生产装配必注入 EnvType（cmd/core pipeline_adapters）。
 	if e.EnvType != nil {
 		if et, err := e.EnvType(ctx, envID); err == nil && et == "prod" && res.IsEmpty() {
-			return false, fmt.Errorf("生产环境部署必须有资源规格（cpuRequest/memRequest 至少一项）：请在流水线 deploy stage 配 resources，或在应用配置 tab 设置资源规格默认值")
+			// sr.Error 必须写（Advance error path 依赖它持久化原因给前端时间线）；
+			// return true（stage 终态非 paused）。
+			sr.Error = "生产环境部署必须有资源规格（cpuRequest/memRequest 至少一项）：请在流水线 deploy stage 配 resources，或在应用配置 tab 设置资源规格默认值"
+			return true, fmt.Errorf("%s", sr.Error)
 		}
 	}
 	// 联调泳道副本降级：非 default 泳道 + 非 prod 环境 + 显式 replicas>1 时截断为 1
