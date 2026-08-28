@@ -124,6 +124,11 @@ helm upgrade --install "$RELEASE" deploy/charts/paas \
   --set maas.airouterApiKey="${PAAS_AIROUTER_API_KEY:-}"
 rm -f "$VALUES_TMP"
 
+# CRD 在 chart templates/ 内，helm upgrade 对已存在的 CRD 不应用变更（CRD 升级缺口：
+# 2026-08-28 e2e 暴露——Task 3 加 resources 字段后集群 CRD 仍旧版，reconciler 静默丢字段）。
+# 显式 kubectl apply 保证 CRD schema 跟随 chart（apply 幂等，不删 CR 实例）。
+kubectl apply -f config/crds/ >/dev/null
+
 # image.tag 不变时 helm upgrade 不改 deployment spec，不触发 rollout ——
 # 会造成「部署成功但 Pod 跑旧镜像 digest」的假象。强制 rollout restart，
 # 配合 pullPolicy: Always 确保每次部署拉取最新 push 的 digest。
