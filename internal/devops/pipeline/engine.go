@@ -543,7 +543,6 @@ func (e *Engine) execTest(ctx context.Context, run *PipelineRun, stage StageDef,
 	return true, nil
 }
 
-// execApprove 审批 stage：暂停 run 等外部 Resume（通过）或 Abort（拒绝，Task 12）。
 // execCanary 金丝雀验证 stage（并行验证式，spec D3=A）：部署新镜像到 canary-<runID> 并行泳道
 // （1 副本，不动基线）→ StageWaiting 暂停等人工「确认放量/终止」。
 // 诚实边界：这是 preview 式并行验证，非按比例切流——真切流依赖生产流量权重（D1 留后续）。
@@ -643,6 +642,7 @@ func strFromInput(input map[string]any, key string) string {
 	return ""
 }
 
+// execApprove 审批 stage：暂停 run 等外部 Resume（通过）或 Abort（拒绝）。
 func (e *Engine) execApprove(ctx context.Context, run *PipelineRun, stage StageDef, sr *StageRun) (bool, error) {
 	message := strOr(stage.Params, "message", "等待审批")
 	logf(sr, "等待审批：%s", message)
