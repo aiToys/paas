@@ -25,5 +25,8 @@ type Repository interface {
 	// SetResources 覆盖容器资源规格（deploy 显式 resources 时更新既有 Workload）。
 	// 跨租户访问返回 not found（不泄漏）。
 	SetResources(ctx context.Context, id string, res ResourceSpec) error
+	// SetDomain 设置对外域名（canary 独立验证域名；空串允许清除）。空值仅在新建时透传，
+	// 既有 Workload 的域名变更走此方法。跨租户访问返回 not found（不泄漏）。
+	SetDomain(ctx context.Context, id, domain string) error
 	Delete(ctx context.Context, id string) error
 }

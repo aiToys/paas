@@ -613,6 +613,10 @@ func (e *Engine) execCanary(ctx context.Context, run *PipelineRun, stage StageDe
 	return false, nil
 }
 
+// DNS1035 导出 dns1035（cmd/core adapter 桥接 DeployCanary 时与 engine 侧泳道命名口径对齐——
+// 同一 run 两侧派生出的 lane 名必须一致，否则 Ensure/Abort/清理失配）。
+func DNS1035(name string) string { return dns1035(name) }
+
 // dns1035 清洗为 K8s Service 名合法字符（DNS-1035：小写字母数字与 -，首字母，≤63）。
 // 复制自 internal/devops model.go 同名函数（pipeline 不 import workload/devops store 侧，
 // 依赖倒置约束——10 行纯函数本体复制）。

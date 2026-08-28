@@ -153,11 +153,11 @@ func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, metrics
 	// （stores.Workload 已 ApplyRepo 装饰，Delete 投影删 CRD）。env PAAS_LANE_GC_INTERVAL=0 禁周期扫描
 	// （gc 仍构造——lane handler 关闭泳道时经 ReclaimLane 同步回收工作负载，复用同一删除逻辑）。
 	gc := &workload.LaneGC{
-		Repos:  stores.Workload,
-		Runs:   laneRunChecker{runs: stores.Pipeline},
-		EnvType:  stores.Environment.EnvType, // 与 workload handler 同源注入
-		Lanes:  laneStatusBridge{lanes: stores.Lane}, // permanent 常驻跳过 + 回收后 MarkClosed
-		TTL:    envDuration("PAAS_LANE_TTL", 72*time.Hour),
+		Repos:    stores.Workload,
+		Runs:     laneRunChecker{runs: stores.Pipeline},
+		EnvType:  stores.Environment.EnvType,           // 与 workload handler 同源注入
+		Lanes:    laneStatusBridge{lanes: stores.Lane}, // permanent 常驻跳过 + 回收后 MarkClosed
+		TTL:      envDuration("PAAS_LANE_TTL", 72*time.Hour),
 		MaxSweep: 20,
 		Quota: func(ctx context.Context, tenantID string) {
 			// 配额回退与 handler 删除路径同源（CheckAndInc -1，幂等）。
@@ -607,6 +607,10 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 			releases: stores.DevOpsReleases, images: stores.DevOpsImages,
 			workloads: stores.Workload, envs: stores.Environment,
 			gitea: giteaBridgeInst, status: statusReader, services: stores.Service,
+			quotaDec: func(ctx context.Context) error { // canary workload 清理后配额回收（与 wlQuotaFn 同源）
+				_, err := stores.Billing.CheckAndInc(ctx, billing.ResWorkloads, -1)
+				return err
+			},
 		},
 		Gitea: giteaBridgeInst,
 		// 泳道实体化：非 default 泳道 deploy 前懒建 Lane 实体（TTL 回收/泳道管理真源）。

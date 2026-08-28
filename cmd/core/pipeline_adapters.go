@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/aitoys/paas/internal/core/application"
@@ -102,9 +103,10 @@ type releaseBridge struct {
 	images    devops.ImageRepository
 	workloads workload.Repository
 	envs      environment.Repository
-	gitea     giteaTagger           // 可选，nil 时 Publish 跳过 git tag（仅回填 Image.Version）
-	status    workload.StatusReader // 可选，nil 时 PollWorkloadReady 透传 store 原 Ready（集群外降级）
-	services  service.Repository    // 可选，nil 时单服务自动解析降级（service/serviceID 均空保持向后兼容）
+	gitea     giteaTagger                     // 可选，nil 时 Publish 跳过 git tag（仅回填 Image.Version）
+	status    workload.StatusReader           // 可选，nil 时 PollWorkloadReady 透传 store 原 Ready（集群外降级）
+	services  service.Repository              // 可选，nil 时单服务自动解析降级（service/serviceID 均空保持向后兼容）
+	quotaDec  func(ctx context.Context) error // 可选，DeleteWorkload 后配额 -1（billing 工作负载数）
 }
 
 // CreateRelease 编排发布（取镜像 + 找/建基线 Workload + 更新镜像 + 回滚指针）。
@@ -254,22 +256,46 @@ func (r *releaseBridge) Publish(ctx context.Context, appID, imageID, version, co
 	return r.gitea.CreateTag(ctx, owner, repo, version, commit)
 }
 
-// DeployCanary 金丝雀并行验证部署（canary stage）：临时转调 Deploy，lane=canary-<sourceRunID>、
-// replicas=1（基线不动）。真实语义（lane 名 DNS 清洗对齐 + Domain 外部验证域名后缀 + 配额）归 T5 收口。
+// DeployCanary 金丝雀并行验证部署（canary stage）：lane=canary-<dns1035(runID)>（与 engine 侧
+// LaneEnsurer/Abort 期望的命名口径一致，DNS-1035 清洗对齐）、replicas=1（基线不动）。
+// PAAS_DOMAIN_SUFFIX 非空时给 canary Workload 设独立验证域名 <wl-name>.<suffix>
+// （reconciler applyIngress 建验证入口），空则集群 FQDN（WorkloadDomain 兜底拼接）。
 func (r *releaseBridge) DeployCanary(ctx context.Context, appID, envID, service, serviceID, imageID string, resources pipeline.DeployResources, sourceRunID string) (devops.Release, string, error) {
-	lane := "canary-" + sourceRunID
-	return r.Deploy(ctx, appID, envID, lane, service, serviceID, imageID, 0, 0, resources, 1, sourceRunID)
+	lane := "canary-" + pipeline.DNS1035(sourceRunID)
+	rel, domain, err := r.Deploy(ctx, appID, envID, lane, service, serviceID, imageID, 0, 0, resources, 1, sourceRunID)
+	if err != nil {
+		return rel, domain, err
+	}
+	// 可选外部验证域名：未配后缀则跳过（集群内 FQDN 已可验证）。写回失败不阻断（best-effort）。
+	if suffix := os.Getenv("PAAS_DOMAIN_SUFFIX"); suffix != "" && rel.WorkloadID != "" {
+		if wl, gerr := r.workloads.Get(ctx, rel.WorkloadID); gerr == nil {
+			name := wl.Name
+			if name == "" {
+				name = rel.WorkloadID
+			}
+			domain = fmt.Sprintf("%s.%s", name, suffix)
+			_ = r.workloads.SetDomain(ctx, rel.WorkloadID, domain)
+		}
+	}
+	return rel, domain, nil
 }
 
-// DeleteWorkload 删除 workload（canary 终止/abort 清理并行验证负载）。临时实现：跨租户场景由
-// engine 传入的 ctx 不带租户，Get 取归属租户派生 ctx 再 Delete；配额回收 T5 收口。
+// DeleteWorkload 删除 workload（canary 终止/abort 清理并行验证负载）：跨租户场景由
+// engine 传入的 ctx 不带租户，Get 取归属租户派生 ctx 再 Delete + 配额回收 -1（canary Deploy
+// 时 +1，终止/放量后不回收会泄漏配额）。
 func (r *releaseBridge) DeleteWorkload(ctx context.Context, workloadID string) error {
 	wl, err := r.workloads.Get(ctx, workloadID)
 	if err != nil {
 		return err
 	}
 	tctx := tenant.WithTenant(context.WithoutCancel(ctx), wl.TenantID)
-	return r.workloads.Delete(tctx, workloadID)
+	if err := r.workloads.Delete(tctx, workloadID); err != nil {
+		return err
+	}
+	if r.quotaDec != nil {
+		_ = r.quotaDec(tctx) // 配额 -1（best-effort：删除已生效，配额偏差由审计发现）
+	}
+	return nil
 }
 
 var _ pipeline.Releaser = (*releaseBridge)(nil)

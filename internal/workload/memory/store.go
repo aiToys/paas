@@ -245,6 +245,23 @@ func (s *Store) SetResources(ctx context.Context, id string, res workload.Resour
 	return nil
 }
 
+// SetDomain 设置对外域名（canary 独立验证域名；与 SetResources 同模式）。
+func (s *Store) SetDomain(ctx context.Context, id, domain string) error {
+	tid, err := tenant.IDOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w, hit := s.workloads[id]
+	if !hit || w.TenantID != tid {
+		return fmt.Errorf("工作负载不存在: %s", id)
+	}
+	w.Domain = domain
+	s.workloads[id] = w
+	return nil
+}
+
 func (s *Store) Delete(ctx context.Context, id string) error {
 	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
