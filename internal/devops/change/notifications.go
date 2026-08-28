@@ -56,11 +56,12 @@ type Notification struct {
 
 // RunStatusItem run 最小字段（RunLister 只暴露列表所需，避免 change→pipeline 全量依赖）。
 type RunStatusItem struct {
-	ID      string
-	AppID   string
-	Status  string // running|paused|succeeded|failed|aborted
-	Current string // 当前 stage 名
-	At      string // 创建时间 ISO（通知展示/排序用）
+	ID        string
+	AppID     string
+	Status    string // running|paused|succeeded|failed|aborted
+	Current   string // 当前 stage 名
+	StageType string // 当前 stage 类型（approve/test/canary...，区分等待语义：canary=金丝雀验证非审批）
+	At        string // 创建时间 ISO（通知展示/排序用）
 }
 
 // RunLister 通知聚合对 run 的最小依赖（cmd/core 桥接 pipeline ListRuns）。
@@ -145,9 +146,14 @@ func Notifications(ctx context.Context, repo Repository, runs RunLister, alerts 
 						TargetType: "run", TargetID: r.ID, At: r.At,
 					})
 				case "paused":
+					// 金丝雀验证等待与审批等待语义不同（观察指标后决策，非审批），文案区分引导正确动作。
+					title := fmt.Sprintf("流水线等待审批（%s）", r.Current)
+					if r.StageType == "canary" {
+						title = fmt.Sprintf("金丝雀验证中，等待确认（%s）", r.Current)
+					}
 					out = append(out, Notification{
 						ID: "run:" + r.ID + ":paused", Type: NotifRunPaused, Severity: "warning",
-						Title: fmt.Sprintf("流水线等待审批（%s）", r.Current), AppID: r.AppID,
+						Title: title, AppID: r.AppID,
 						TargetType: "run", TargetID: r.ID, At: r.At,
 					})
 				case "running":
@@ -173,15 +179,15 @@ func Notifications(ctx context.Context, repo Repository, runs RunLister, alerts 
 						sev = "error"
 					}
 					out = append(out, Notification{
-						ID:         "alert:" + a.RuleName + ":" + a.TargetType + ":" + a.TargetID + ":firing",
-						Type:       NotifAlertFiring, Severity: sev,
+						ID:   "alert:" + a.RuleName + ":" + a.TargetType + ":" + a.TargetID + ":firing",
+						Type: NotifAlertFiring, Severity: sev,
 						Title:      fmt.Sprintf("告警「%s」触发：%s %s=%s 超阈值（%s）", a.RuleName, a.TargetType, a.TargetID, a.MetricName, a.Status),
 						TargetType: "alert", TargetID: a.TargetType, At: a.At,
 					})
 				case "pending":
 					out = append(out, Notification{
-						ID:         "alert:" + a.RuleName + ":" + a.TargetType + ":" + a.TargetID + ":pending",
-						Type:       NotifAlertPending, Severity: "info",
+						ID:   "alert:" + a.RuleName + ":" + a.TargetType + ":" + a.TargetID + ":pending",
+						Type: NotifAlertPending, Severity: "info",
 						Title:      fmt.Sprintf("告警「%s」观察中：%s %s %s 接近阈值", a.RuleName, a.TargetType, a.TargetID, a.MetricName),
 						TargetType: "alert", TargetID: a.TargetType, At: a.At,
 					})

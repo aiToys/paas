@@ -136,10 +136,10 @@ func TestBuiltinTemplatesContent(t *testing.T) {
 	if cd.ID != "tpl-cd" || cd.Kind != KindCD || !cd.Builtin {
 		t.Fatalf("cd 模板元数据错: %+v", cd)
 	}
-	if len(cd.Stages) != 4 {
-		t.Fatalf("cd want 4 stages（approve/deploy/release/baseline），got %d", len(cd.Stages))
+	if len(cd.Stages) != 5 {
+		t.Fatalf("cd want 5 stages（approve/deploy/canary/release/baseline），got %d", len(cd.Stages))
 	}
-	wantCDTypes := []string{StageApprove, StageDeploy, StageRelease, StageBaseline}
+	wantCDTypes := []string{StageApprove, StageDeploy, StageCanary, StageRelease, StageBaseline}
 	for i, s := range cd.Stages {
 		if s.Type != wantCDTypes[i] {
 			t.Fatalf("cd stage %d want %s，got %s", i, wantCDTypes[i], s.Type)
@@ -152,9 +152,13 @@ func TestBuiltinTemplatesContent(t *testing.T) {
 	if ci.Stages[1].Params["imageSource"] != ImagePriorBuild {
 		t.Fatalf("ci deploy imageSource 期望 %s，got %v", ImagePriorBuild, ci.Stages[1].Params["imageSource"])
 	}
+	// canary 用 priorBuild 消费前序 deploy Output.imageId（v2 起 deploy 回写 imageId），验证同一镜像
+	if cd.Stages[2].Params["imageSource"] != ImagePriorBuild {
+		t.Fatalf("cd canary imageSource 期望 %s（消费 deploy 产物），got %v", ImagePriorBuild, cd.Stages[2].Params["imageSource"])
+	}
 	// cd baseline mainBranch="main"（上线后合并主干），ci 无 baseline（CI 不动主干）
-	if cd.Stages[3].Params["mainBranch"] != "main" {
-		t.Fatalf("cd baseline mainBranch 期望 main，got %v", cd.Stages[3].Params["mainBranch"])
+	if cd.Stages[4].Params["mainBranch"] != "main" {
+		t.Fatalf("cd baseline mainBranch 期望 main，got %v", cd.Stages[4].Params["mainBranch"])
 	}
 }
 

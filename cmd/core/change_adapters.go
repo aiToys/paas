@@ -118,12 +118,13 @@ func (b *runTriggerBridge) ListRunStatuses(ctx context.Context) ([]change.RunSta
 			return nil, err
 		}
 		for _, r := range runs {
-			cur := ""
+			cur, stype := "", ""
 			if r.CurrentStage >= 0 && r.CurrentStage < len(r.StageRuns) {
 				cur = r.StageRuns[r.CurrentStage].Name
+				stype = r.StageRuns[r.CurrentStage].Type
 			}
 			out = append(out, change.RunStatusItem{
-				ID: r.ID, AppID: r.AppID, Status: r.Status, Current: cur,
+				ID: r.ID, AppID: r.AppID, Status: r.Status, Current: cur, StageType: stype,
 				At: r.CreatedAt.Format(time.RFC3339),
 			})
 		}

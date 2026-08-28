@@ -2,6 +2,7 @@ package change
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,6 +84,27 @@ func TestNotifications(t *testing.T) {
 	}
 	if len(only) != 3 {
 		t.Fatalf("无 runLister 应 3 条，got %d", len(only))
+	}
+
+	// canary 等待与审批等待文案区分（金丝雀验证中，非「等待审批」）
+	canaryRuns := &fakeRunLister{items: []RunStatusItem{
+		{ID: "run-c", AppID: "app-1", Status: "paused", Current: "金丝雀验证", StageType: "canary"},
+	}}
+	cn, err := Notifications(ctx, store, canaryRuns, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundCanary := false
+	for _, n := range cn {
+		if n.TargetID == "run-c" {
+			foundCanary = true
+			if !strings.Contains(n.Title, "金丝雀验证中") {
+				t.Errorf("canary 等待通知文案应含「金丝雀验证中」，got %q", n.Title)
+			}
+		}
+	}
+	if !foundCanary {
+		t.Fatal("应含 canary 等待通知")
 	}
 
 	// 跨租户隔离：批次侧返空；run 侧租户过滤由 bridge 的 ListRuns ctx 保证

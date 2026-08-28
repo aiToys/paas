@@ -49,8 +49,8 @@ func BuiltinTemplates() []PipelineTemplate {
 			Name:        "上线发布流水线",
 			Kind:        KindCD,
 			Builtin:     true,
-			Version:     1, // 破坏性改动 +1（存量经 migration 0025 回填为 1）
-			Description: "正式上线：部署到生产基线 -> 打版本号 -> 合并主干",
+			Version:     2, // v2: 部署后加金丝雀验证 stage（并行验证式：观察后确认放量/终止；v1 经 builtin 版本升级机制自动覆盖）
+			Description: "正式上线：审批 -> 部署到生产基线 -> 金丝雀验证（并行观察，确认放量或零风险终止）-> 打版本号 -> 合并主干",
 			Stages: []StageDef{
 				{Name: "上线审批", Type: StageApprove, Params: map[string]any{
 					"message": "确认发布到生产环境",
@@ -60,6 +60,12 @@ func BuiltinTemplates() []PipelineTemplate {
 					"lane":        LaneDefault,        // 生产基线（无泳道）
 					"imageSource": ImageLatestReady,   // CD 消费 CI 产物（app 最新 ready Image）
 					"strategy":    "rolling",
+				}},
+				{Name: "金丝雀验证", Type: StageCanary, Params: map[string]any{
+					"envId":       "{{app.env.prod}}", // 与 deploy 同环境
+					"imageSource": ImagePriorBuild,    // 消费前序 deploy Output.imageId（deploy 已回写，canary 验证同一镜像）
+					// 并行验证式金丝雀（spec D3=A）：canary-<runID> 泳道 1 副本观察，验证地址见 stage 日志/前端面板；
+					// 「确认放量」= 基线滚动到同一镜像后删 canary；「终止」= 仅删 canary 零风险退出。
 				}},
 				{Name: "发布版本", Type: StageRelease, Params: map[string]any{
 					"versionStrategy": "auto-increment", // git tag + Image.version，不部署

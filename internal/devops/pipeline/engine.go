@@ -446,7 +446,8 @@ func (e *Engine) execDeploy(ctx context.Context, run *PipelineRun, stage StageDe
 		return true, err
 	}
 	logf(sr, "Workload 就绪，访问地址 %s", domain)
-	sr.Output = map[string]any{OutReleaseID: deployment.ID, OutWorkloadDomain: domain}
+	// imageId 也写 Output：后序 canary stage 经 imageSource=priorBuild 消费同一镜像（与 deploy 部署的完全一致）。
+	sr.Output = map[string]any{OutReleaseID: deployment.ID, OutWorkloadDomain: domain, OutImageID: imageID}
 	sr.Status = StageSuccess
 	sr.FinishedAt = time.Now()
 	return true, nil
