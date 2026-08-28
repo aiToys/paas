@@ -78,7 +78,9 @@ func (c *queryCache[T]) do(ctx context.Context, key string, fn func(context.Cont
 		}
 	}
 	c.mu.Unlock()
-	close(f.done)
+	// 先写结果再 close(done)：等待者在 <-f.done 返回后立即读 f.val/f.err，
+	// 写必须在 close 之前完成（channel close/close 之后的写不与读建立 happens-before 的反向保证）。
 	f.val, f.err = val, err
+	close(f.done)
 	return val, err
 }
