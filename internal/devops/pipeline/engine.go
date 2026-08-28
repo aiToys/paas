@@ -599,7 +599,12 @@ func (e *Engine) execCanary(ctx context.Context, run *PipelineRun, stage StageDe
 		sr.Error = err.Error()
 		return true, err
 	}
-	logf(sr, "金丝雀就绪，验证地址 %s —— 观察指标/日志后「确认放量」或「终止」", domain)
+	if domain != "" {
+		logf(sr, "金丝雀就绪，验证地址 %s —— 观察指标/日志后「确认放量」或「终止」", domain)
+	} else {
+		// 多服务应用未显式 service/port 时 canary 无独立 Service 入口——经基线服务验证，观察指标/日志决策
+		logf(sr, "金丝雀就绪（无独立验证入口：未指定 service/port，经基线 Service 验证或直接观察指标/日志）")
+	}
 	if sr.Input == nil {
 		sr.Input = map[string]any{}
 	}

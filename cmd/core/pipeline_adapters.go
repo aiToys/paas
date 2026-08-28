@@ -266,6 +266,12 @@ func (r *releaseBridge) DeployCanary(ctx context.Context, appID, envID, service,
 	if err != nil {
 		return rel, domain, err
 	}
+	// port=0（多服务应用未显式 service/port，reconciler 不建 Service）时验证地址不可达——
+	// 返空串防前端展示死链（k8s e2e 暴露：FQDN 无 Service 兜底）。用户可经 paramOverrides
+	// 显式 service+port 让 canary 获得独立 Service 入口（与 deploy stage 同款约定）。
+	if wl, gerr := r.workloads.Get(ctx, rel.WorkloadID); gerr == nil && wl.Port == 0 {
+		return rel, "", nil
+	}
 	// 可选外部验证域名：未配后缀则跳过（集群内 FQDN 已可验证）。写回失败不阻断（best-effort）。
 	if suffix := os.Getenv("PAAS_DOMAIN_SUFFIX"); suffix != "" && rel.WorkloadID != "" {
 		if wl, gerr := r.workloads.Get(ctx, rel.WorkloadID); gerr == nil {
