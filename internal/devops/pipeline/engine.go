@@ -785,6 +785,12 @@ func (e *Engine) Resume(ctx context.Context, runID string, stageIdx int) error {
 		e.mu.Unlock()
 		return ErrStageNotCurrent
 	}
+	// canary stage 决策只能走 CanaryResume（promote/terminate 有不同的副作用与终态语义）——
+	// 走 Resume 标 Success 会跳过基线放量且泄漏 canary workload（决策绕过后门，审查修复）。
+	if run.StageRuns[stageIdx].Type == StageCanary {
+		e.mu.Unlock()
+		return fmt.Errorf("金丝雀验证请走 canary 决策端点（confirm/terminate）")
+	}
 	run.StageRuns[stageIdx].Status = StageSuccess
 	run.StageRuns[stageIdx].FinishedAt = time.Now()
 	run.CurrentStage++

@@ -483,6 +483,24 @@ func TestCanaryAbortCleansWorkload(t *testing.T) {
 	}
 }
 
+// TestResumeRejectsCanaryStage：approve 端点的 Resume 对 canary stage 必须拒绝——
+// 决策只能走 CanaryResume，否则标 Success 绕过放量且泄漏 canary workload（审查修复回归）。
+func TestResumeRejectsCanaryStage(t *testing.T) {
+	_, runID, _, eng := canaryWaitingRun(t)
+
+	if err := eng.Resume(acmeCtxEngine(), runID, 0); err == nil {
+		t.Fatal("Resume 对 canary stage 应拒绝")
+	}
+	run, _ := s2Get(eng, runID)
+	if run.Status != RunPaused || run.StageRuns[0].Status != StageWaiting {
+		t.Errorf("拒绝后 run 应保持 paused/waiting，got run=%s stage=%s", run.Status, run.StageRuns[0].Status)
+	}
+}
+
+func s2Get(eng *Engine, runID string) (PipelineRun, error) {
+	return eng.Runs.GetRun(acmeCtxEngine(), runID)
+}
+
 // TestCanaryConcurrentDecisionSingleWinner：并发相反决策（promote×terminate）只有一方生效——
 // 认领 CAS（stage Waiting→Running 锁内持久化）在副作用之前拦截第二方（审查 I1 回归）。
 func TestCanaryConcurrentDecisionSingleWinner(t *testing.T) {
