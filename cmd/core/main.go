@@ -1307,6 +1307,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/admin/pipelineruns", apiroute.Tags("流水线"), apiroute.Summary("运行总览（管理员跨租户，?status=）"), apiroute.Perm("super_admin"), apiroute.WithResp([]pipeline.PipelineRun{}))
 	reg.Operation("GET", "/api/pipelineruns/{id}", apiroute.Tags("流水线"), apiroute.Summary("运行详情（含各 stage 状态/输入输出）"), apiroute.Perm("pipeline:read"), apiroute.WithResp(pipeline.PipelineRun{}))
 	reg.Operation("POST", "/api/pipelineruns/{id}/stages/{idx}/approve", apiroute.Tags("流水线"), apiroute.Summary("审批/人工确认通过（恢复 paused run）"), apiroute.Perm("pipeline:write"))
+	reg.Operation("POST", "/api/pipelineruns/{id}/stages/{idx}/canary", apiroute.Tags("流水线"), apiroute.Summary("金丝雀验证决策（promote 确认放量/terminate 终止）"), apiroute.Perm("pipeline:write"), apiroute.WithReqBody(struct {
+		Action string `json:"action"`
+	}{}))
 	reg.Operation("POST", "/api/pipelineruns/{id}/abort", apiroute.Tags("流水线"), apiroute.Summary("终止运行"), apiroute.Perm("pipeline:write"))
 	reg.Operation("POST", "/api/pipelineruns/{id}/retry", apiroute.Tags("流水线"), apiroute.Summary("重试失败运行（从失败阶段重新推进）"), apiroute.Perm("pipeline:write"))
 	// 变更管理（单变更 + 集成批次，trunk-based 编排）

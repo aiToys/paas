@@ -722,3 +722,173 @@ func TestPipelineWebhookTrigger(t *testing.T) {
 		t.Errorf("非 webhook pipeline 触发期望 400，got %d", rec.Code)
 	}
 }
+
+// seedCanaryRun 预建 canary stage Waiting 的 paused run（CanaryResume 前置态）。
+func seedCanaryRun(t *testing.T, s *memoryStore, name, appID, envID string) PipelineRun {
+	t.Helper()
+	return seedPipeline(t, s, name, appID, KindCI, []StageDef{
+		{Name: "金丝雀验证", Type: StageCanary, Params: map[string]any{
+			"envId": envID, "imageSource": ImageSelected, "imageId": "img-1",
+		}},
+	})
+}
+
+// waitCanaryWaiting 等 canary stage 部署完进入 Waiting（异步 Advance）。
+func waitCanaryWaiting(t *testing.T, s *memoryStore, ctx context.Context, runID string) PipelineRun {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		run, _ := s.GetRun(ctx, runID)
+		if run.Status == RunPaused && len(run.StageRuns) > 0 && run.StageRuns[0].Status == StageWaiting {
+			return run
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	run, _ := s.GetRun(ctx, runID)
+	t.Fatalf("canary 未进入 waiting：run=%s stage0=%s", run.Status, run.StageRuns[0].Status)
+	return run
+}
+
+// fakeAudit 记录审计调用（canary 决策审计断言用）。
+type fakeAudit struct{ actions []string }
+
+func (f *fakeAudit) Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error {
+	f.actions = append(f.actions, action)
+	return nil
+}
+
+// TestCanaryActionPromoteAndTerminate：canary waiting run 经端点 promote（放量基线+删 canary+续推）
+// / terminate（仅删 canary，基线零风险退出）；非法 action 400；非 waiting stage 引擎错误映射。
+func TestCanaryActionPromoteAndTerminate(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := acmeCtxEngine()
+
+	// --- promote：确认放量 -> stage success + run succeeded，canary workload 被删 ---
+	s1 := s
+	r1 := seedCanaryRun(t, s1, "p-canary-promote", "app-canary-p", "env-test")
+	aud1 := &fakeAudit{}
+	rel := &fakeReleaser{}
+	eng := &Engine{Pipelines: s1, Runs: s1, Builds: fakeBuilder{}, Releases: rel}
+	h := NewHandler(s1, s1, s1, eng, WithAudit(aud1))
+	h.Authorize = allowAll
+
+	go func() { _ = eng.Advance(ctx, r1.ID) }()
+	waitCanaryWaiting(t, s1, ctx, r1.ID)
+
+	req := acmeReq(http.MethodPost, "/api/pipelineruns/"+r1.ID+"/stages/0/canary", `{"action":"promote"}`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("canary promote 期望 200，got %d body %s", rec.Code, rec.Body.String())
+	}
+	run := waitRun(t, s1, ctx, r1.ID, RunSucceeded, 2*time.Second)
+	if run.Status != RunSucceeded {
+		t.Fatalf("promote 后期望 succeeded，got %s", run.Status)
+	}
+	rel.mu.Lock()
+	deleted := append([]string(nil), rel.deleted...)
+	rel.mu.Unlock()
+	if len(deleted) == 0 {
+		t.Error("promote 后应删 canary workload")
+	}
+	if len(aud1.actions) != 1 || aud1.actions[0] != "canary_promote" {
+		t.Errorf("审计期望 [canary_promote]，got %v", aud1.actions)
+	}
+
+	// --- terminate：仅删 canary，stage failed + run failed（基线零风险退出） ---
+	r2 := seedCanaryRun(t, s, "p-canary-term", "app-canary-t", "env-test")
+	aud2 := &fakeAudit{}
+	rel2 := &fakeReleaser{}
+	eng2 := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: rel2}
+	h2 := NewHandler(s, s, s, eng2, WithAudit(aud2))
+	h2.Authorize = allowAll
+
+	go func() { _ = eng2.Advance(ctx, r2.ID) }()
+	waitCanaryWaiting(t, s, ctx, r2.ID)
+
+	req = acmeReq(http.MethodPost, "/api/pipelineruns/"+r2.ID+"/stages/0/canary", `{"action":"terminate"}`)
+	rec = httptest.NewRecorder()
+	h2.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("canary terminate 期望 200，got %d body %s", rec.Code, rec.Body.String())
+	}
+	run = waitRun(t, s, ctx, r2.ID, RunFailed, 2*time.Second)
+	if run.Status != RunFailed {
+		t.Fatalf("terminate 后期望 failed，got %s", run.Status)
+	}
+	if len(aud2.actions) != 1 || aud2.actions[0] != "canary_terminate" {
+		t.Errorf("审计期望 [canary_terminate]，got %v", aud2.actions)
+	}
+
+	// --- 非法 action 400 ---
+	req = acmeReq(http.MethodPost, "/api/pipelineruns/"+r2.ID+"/stages/0/canary", `{"action":"noop"}`)
+	rec = httptest.NewRecorder()
+	h2.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("非法 action 期望 400，got %d", rec.Code)
+	}
+}
+
+// TestCanaryPromoteProdRequiresProdWrite：canary env=prod，developer（无 prod:write）promote 403；
+// admin（有 prod:write）promote 200。terminate 不需 prod:write（仅删 canary 负载）。
+func TestCanaryPromoteProdRequiresProdWrite(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := acmeCtxEngine()
+
+	newHarness := func(developer bool) (*Handler, *Engine, *fakeReleaser) {
+		rel := &fakeReleaser{}
+		eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: rel}
+		h := NewHandler(s, s, s, eng)
+		h.Authorize = func(r *http.Request, perm string) bool {
+			if perm == PermProdWrite {
+				return !developer
+			}
+			return true
+		}
+		h.envType = func(ctx context.Context, envID string) (string, error) {
+			if envID == "env-prod" {
+				return environment.TypeProd, nil
+			}
+			return "test", nil
+		}
+		return h, eng, rel
+	}
+
+	// developer promote -> 403，canary 仍在（未被认领消耗）
+	r1 := seedCanaryRun(t, s, "p-canary-dev", "app-canary-dev", "env-prod")
+	h1, eng1, _ := newHarness(true)
+	go func() { _ = eng1.Advance(ctx, r1.ID) }()
+	waitCanaryWaiting(t, s, ctx, r1.ID)
+
+	req := acmeReq(http.MethodPost, "/api/pipelineruns/"+r1.ID+"/stages/0/canary", `{"action":"promote"}`)
+	rec := httptest.NewRecorder()
+	h1.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("developer promote prod 期望 403，got %d body %s", rec.Code, rec.Body.String())
+	}
+
+	// terminate 无需 prod:write（零风险退出不应被拦） -> 200
+	req = acmeReq(http.MethodPost, "/api/pipelineruns/"+r1.ID+"/stages/0/canary", `{"action":"terminate"}`)
+	rec = httptest.NewRecorder()
+	h1.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("developer terminate 期望 200（terminate 不需 prod:write），got %d body %s", rec.Code, rec.Body.String())
+	}
+
+	// admin promote -> 200 + succeeded
+	r2 := seedCanaryRun(t, s, "p-canary-admin", "app-canary-admin", "env-prod")
+	h2, eng2, _ := newHarness(false)
+	go func() { _ = eng2.Advance(ctx, r2.ID) }()
+	waitCanaryWaiting(t, s, ctx, r2.ID)
+
+	req = acmeReq(http.MethodPost, "/api/pipelineruns/"+r2.ID+"/stages/0/canary", `{"action":"promote"}`)
+	rec = httptest.NewRecorder()
+	h2.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin promote prod 期望 200，got %d body %s", rec.Code, rec.Body.String())
+	}
+	run := waitRun(t, s, ctx, r2.ID, RunSucceeded, 2*time.Second)
+	if run.Status != RunSucceeded {
+		t.Fatalf("admin promote 后期望 succeeded，got %s", run.Status)
+	}
+}

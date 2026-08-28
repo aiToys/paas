@@ -549,6 +549,50 @@ func (h *Handler) serveRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// POST /{id}/stages/{idx}/canary 金丝雀验证决策（确认放量 promote / 终止 terminate）
+	if r.Method == http.MethodPost && len(parts) == 4 && parts[1] == "stages" && parts[3] == "canary" {
+		if !h.allow(w, r, PermPipelineWrite) {
+			return
+		}
+		if h.engine == nil {
+			httputil.WriteError(w, http.StatusServiceUnavailable, "engine not configured")
+			return
+		}
+		var in struct {
+			Action string `json:"action"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&in)
+		if in.Action != "promote" && in.Action != "terminate" {
+			httputil.WriteError(w, http.StatusBadRequest, "action 必须是 promote 或 terminate")
+			return
+		}
+		run, err := h.runs.GetRun(r.Context(), id)
+		if err != nil {
+			httputil.WriteServiceError(w, toHTTPStatus(err), err)
+			return
+		}
+		// 应用级权限：金丝雀放量是生产发布动作，受限应用需 release（app-maintainer+）。
+		if !h.allowApp(w, r, run.AppID, application.AppActionRelease) {
+			return
+		}
+		stageIdx := atoiSafe(parts[2])
+		// prod:write 护栏：promote 直接改生产基线 Workload 镜像（比 approve 更强的写操作）。
+		if in.Action == "promote" && h.envType != nil && stageIdx >= 0 && stageIdx < len(run.StageRuns) {
+			if envID, _ := run.StageRuns[stageIdx].Input["envId"].(string); envID != "" {
+				if etype, err := h.envType(r.Context(), envID); err == nil && etype == environment.TypeProd && !h.hasProdWrite(w, r) {
+					return
+				}
+			}
+		}
+		if err := h.engine.CanaryResume(r.Context(), id, stageIdx, in.Action == "promote"); err != nil {
+			httputil.WriteServiceError(w, toHTTPStatus(err), err)
+			return
+		}
+		h.recordAudit(r, "canary_"+in.Action, "pipeline_run", id, fmt.Sprintf("stage=%d", stageIdx))
+		httputil.WriteData(w, map[string]string{"resumed": id})
+		return
+	}
+
 	// POST /{id}/abort
 	if r.Method == http.MethodPost && len(parts) == 2 && parts[1] == "abort" {
 		if !h.allow(w, r, PermPipelineWrite) {
@@ -577,7 +621,7 @@ func (h *Handler) serveRuns(w http.ResponseWriter, r *http.Request) {
 			if run, err := h.runs.GetRun(r.Context(), id); err == nil {
 				action := application.AppActionWrite
 				for _, sr := range run.StageRuns {
-					if sr.Type == StageDeploy || sr.Type == StageRelease || sr.Type == StagePromote || sr.Type == StageApprove {
+					if sr.Type == StageDeploy || sr.Type == StageRelease || sr.Type == StagePromote || sr.Type == StageApprove || sr.Type == StageCanary {
 						action = application.AppActionRelease
 						break
 					}
@@ -659,7 +703,7 @@ func (h *Handler) triggerRun(w http.ResponseWriter, r *http.Request, appID, pid 
 	if h.appGuard != nil {
 		action := application.AppActionWrite
 		for _, st := range resolved {
-			if st.Type == StageDeploy || st.Type == StageRelease || st.Type == StagePromote || st.Type == StageApprove {
+			if st.Type == StageDeploy || st.Type == StageRelease || st.Type == StagePromote || st.Type == StageApprove || st.Type == StageCanary {
 				action = application.AppActionRelease
 				break
 			}
@@ -837,7 +881,7 @@ func validateDeployEnvs(stages []StageDef) string {
 	return ""
 }
 
-// allowProdFlow 扫描 deploy + promote stage 的目标环境，任一为 prod 要求 PermProdWrite。
+// allowProdFlow 扫描 deploy + promote + canary stage 的目标环境，任一为 prod 要求 PermProdWrite。
 //
 // deploy stage：直接取 params.envId 查类型。
 // promote stage：取前序最近 deploy stage 的 envId，经 promoteTargetType 算下一阶环境类型
@@ -868,6 +912,14 @@ func (h *Handler) targetsProd(ctx context.Context, stages []StageDef) bool {
 				return true // 已触 deploy 但无法解析类型，fail-closed
 			}
 			if etype, err := h.envType(ctx, lastDeployEnvID); err != nil || etype == environment.TypeProd {
+				return true
+			}
+		case StageCanary:
+			// canary 隐含对目标环境部署/放量，与 deploy 同判（fail-closed）。
+			if h.envType == nil {
+				continue
+			}
+			if etype, err := h.envType(ctx, strOr(s.Params, "envId", "")); err != nil || etype == environment.TypeProd {
 				return true
 			}
 		case StagePromote:
