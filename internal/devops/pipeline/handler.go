@@ -917,7 +917,7 @@ func (h *Handler) targetsProd(ctx context.Context, stages []StageDef) bool {
 		case StageCanary:
 			// canary 隐含对目标环境部署/放量，与 deploy 同判（fail-closed）。
 			if h.envType == nil {
-				continue
+				return true // 无法解析类型，保守按触 prod 处理（与 deploy case 同语义）
 			}
 			if etype, err := h.envType(ctx, strOr(s.Params, "envId", "")); err != nil || etype == environment.TypeProd {
 				return true
