@@ -137,9 +137,14 @@ function fmtTime(s?: string) {
       <div class="card">
         <h3 class="card-title">最近运行（run.Branch = 泳道名）</h3>
         <el-table :data="detail?.recentRuns ?? []" size="small">
-          <el-table-column prop="appId" label="应用" min-width="120">
+          <el-table-column label="运行" min-width="150">
             <template #default="{ row }">
               <router-link :to="`/devops/runs/${row.id}`" class="link">{{ row.id }}</router-link>
+            </template>
+          </el-table-column>
+          <el-table-column label="应用" min-width="120">
+            <template #default="{ row }">
+              <router-link :to="`/applications/${row.appId}`" class="link">{{ row.appId }}</router-link>
             </template>
           </el-table-column>
           <el-table-column prop="branch" label="分支" min-width="140" />

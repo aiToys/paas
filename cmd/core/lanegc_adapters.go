@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"time"
@@ -104,7 +105,11 @@ func (b laneStatusBridge) Mode(ctx context.Context, envID, name string) (string,
 func (b laneStatusBridge) MarkClosed(ctx context.Context, envID, name string) error {
 	ln, err := b.lanes.GetByName(ctx, envID, name)
 	if err != nil {
-		return nil // 无实体（纯遗留泳道）：无需标记
+		// 区分「无实体」（纯遗留泳道，无需标记返 nil）与「查询失败」（DB 错/无租户 ctx，上抛供 GC 日志——终审 I1①）。
+		if errors.Is(err, lane.ErrLaneNotFound) {
+			return nil
+		}
+		return err
 	}
 	if ln.Status == lane.StatusClosed {
 		return nil // 幂等

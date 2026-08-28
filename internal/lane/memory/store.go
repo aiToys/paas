@@ -125,8 +125,13 @@ func (s *Store) Update(ctx context.Context, id string, in lane.Lane) (lane.Lane,
 		}
 		next.Mode = in.Mode
 	}
-	next.Description = in.Description
-	next.ExternalLink = in.ExternalLink
+	// 可选展示字段非空才覆盖（与 mode 同语义，防 PUT Partial body 缺字段误清空——终审 M1）。
+	if in.Description != "" {
+		next.Description = in.Description
+	}
+	if in.ExternalLink != "" {
+		next.ExternalLink = in.ExternalLink
+	}
 	next.UpdatedAt = time.Now()
 	s.lanes[id] = next
 	return next, nil

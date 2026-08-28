@@ -1223,6 +1223,8 @@ func TestExecDeployLaneReplicaDowngrade(t *testing.T) {
 		s := NewMemoryStore()
 		params := map[string]any{
 			"envId": "env-test", "imageSource": ImageSelected, "imageId": "img-1", "replicas": 3,
+			// prod 用例过「生产禁 BestEffort」fail-fast（终审 I2）必须带资源规格
+			"resources": map[string]any{"cpuRequest": "100m", "memRequest": "128Mi"},
 		}
 		if lane != "" {
 			params["lane"] = lane
@@ -1256,5 +1258,29 @@ func TestExecDeployLaneReplicaDowngrade(t *testing.T) {
 	rel, _ = deploy(t, "", func(ctx context.Context, envID string) (string, error) { return "test", nil })
 	if rel.deployReplicas != 3 {
 		t.Errorf("default 泳道不应降级，got %d", rel.deployReplicas)
+	}
+}
+
+// 终审 I2 回归：生产环境 + resources 三级来源全空（stage 未配 + 无应用模板）→ deploy stage fail-fast，
+// 不允许流水线建出 BestEffort 生产工作负载（标准基线「生产禁 BestEffort」）。
+func TestExecDeployProdEmptyResourcesFails(t *testing.T) {
+	s := NewMemoryStore()
+	r := seedPipeline(t, s, "p-prod-res", "app-prod-res", KindCI, []StageDef{
+		{Name: "部署", Type: StageDeploy, Params: map[string]any{
+			"envId": "env-prod", "imageSource": ImageSelected, "imageId": "img-1",
+		}},
+	})
+	rel := &fakeReleaser{}
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: rel,
+		EnvType: func(ctx context.Context, envID string) (string, error) { return "prod", nil }}
+	if err := eng.Advance(acmeCtxEngine(), r.ID); err != nil {
+		t.Fatalf("Advance 失败: %v", err)
+	}
+	run, _ := s.GetRun(acmeCtxEngine(), r.ID)
+	if run.Status != RunFailed {
+		t.Fatalf("prod 空 resources 应 failed, got %s", run.Status)
+	}
+	if rel.deployReplicas != 0 || rel.deployResources != (DeployResources{}) {
+		t.Fatal("prod 空 resources 不应执行 Deploy")
 	}
 }

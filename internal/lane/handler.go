@@ -194,8 +194,12 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Create 以 ctx 租户为准忽略请求体；ID 由仓储生成。
+		// Status/Weight 服务端定值：Status 恒 active（closed 是生命周期终点不可直建）；
+		// Weight 留位恒 0（终审 I3：防请求体注入将来被切流实现消费的权重值）。
 		in.ID = ""
 		in.TenantID = ""
+		in.Status = StatusActive
+		in.Weight = 0
 		if in.Mode == "" {
 			in.Mode = ModeStandard
 		}
@@ -238,6 +242,11 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request) {
 			writeLaneError(w, err)
 			return
 		}
+		// 生产泳道改 mode（如 standard→permanent 使 GC 永久跳过）属生产写，需 prod:write
+		// （终审 C1：与 Create 对称，防 developer 改生产泳道属性）。
+		if !h.allowProd(w, r, cur.EnvID) {
+			return
+		}
 		// mode/description/externalLink 可改；归属环境不可改（不重验 prod——环境未变）。
 		var in Lane
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
@@ -258,6 +267,11 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request) {
 		cur, err := h.repo.Get(r.Context(), id)
 		if err != nil {
 			writeLaneError(w, err)
+			return
+		}
+		// 生产泳道关闭会级联回收生产工作负载（ReclaimLane 删 Deployment/Service），
+		// 属生产写需 prod:write（终审 C1：比「生产建泳道」更危险的操作必须有对称护栏）。
+		if !h.allowProd(w, r, cur.EnvID) {
 			return
 		}
 		// 幂等：已 closed 直接 200。

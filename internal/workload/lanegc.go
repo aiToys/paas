@@ -77,13 +77,13 @@ func (g *LaneGC) Sweep(ctx context.Context) int {
 	}
 	// LastActive 按 (app, lane) 去重缓存：同泳道多服务 Workload 不重复查（R4 N+1 修复）。
 	lastActiveCache := map[string]LaneActivity{}
-	// 泳道维度回收记录：key=(env,lane)，val=[该泳道本轮删除数, 删除后剩余数]。
+	// 泳道维度回收记录：key=(tenant,env,lane)，val=[该泳道本轮删除数, 删除后剩余数]。
 	// 全部删完才 MarkClosed（同泳道多服务部分删除时不提前关闭实体）。
 	laneRemaining := map[string]int{}
 	laneDeletedCnt := map[string]int{}
 	for _, w := range wls {
 		if w.LaneID != "" && w.LaneID != LaneDefault {
-			laneRemaining[w.EnvID+"/"+w.LaneID]++
+			laneRemaining[w.TenantID+"/"+w.EnvID+"/"+w.LaneID]++
 		}
 	}
 	deleted := 0
@@ -136,15 +136,17 @@ func (g *LaneGC) Sweep(ctx context.Context) int {
 		}
 		g.afterReclaim(wctx, w, now.Sub(idleSince).Round(time.Minute))
 		deleted++
-		lk := w.EnvID + "/" + w.LaneID
+		// key 含 tenant：多租户同 envID+laneName 不互扣（终审 I1②）。
+		lk := w.TenantID + "/" + w.EnvID + "/" + w.LaneID
 		laneDeletedCnt[lk]++
 		laneRemaining[lk]--
 	}
 	// 同泳道全部工作负载删除完才 MarkClosed（部分删除不提前关闭，剩余下轮删完再关）。
+	// ctx 需派生泳道租户——store 层强制 TenantOrErr，基础 ctx（无租户）会让 MarkClosed 静默失效（终审 I1①）。
 	for lk, n := range laneDeletedCnt {
 		if laneRemaining[lk] == 0 && n > 0 {
-			parts := strings.SplitN(lk, "/", 2)
-			g.markLaneClosed(ctx, parts[0], parts[1])
+			parts := strings.SplitN(lk, "/", 3)
+			g.markLaneClosed(tenant.WithTenant(ctx, parts[0]), parts[1], parts[2])
 		}
 	}
 	return deleted

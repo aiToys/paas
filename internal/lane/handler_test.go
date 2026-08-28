@@ -310,3 +310,36 @@ func TestHandlerCloseRunListerError(t *testing.T) {
 		t.Fatalf("RunLister 失败应 500 fail-closed，got %d", w.Code)
 	}
 }
+
+// 终审 C1 回归：DELETE 关闭（级联回收生产工作负载）与 PUT（改 mode）对生产泳道需 prod:write——
+// developer（governance:write 有、prod:write 无）不可操作生产泳道。
+func TestHandlerProdLaneDeletePutDenied(t *testing.T) {
+	// 共享 store：admin 建（有 prod:write），developer 操作（无 prod:write）
+	store := lanememory.NewStore()
+	admin := lane.NewHandler(store, lane.WithEnvResolver(envmemory.NewStore()))
+	admin.Authorize = func(r *http.Request, perm string) bool { return true }
+	body := validLane()
+	body["envId"] = "env-acme-prod-bj"
+	w := httptest.NewRecorder()
+	admin.ServeHTTP(w, req(acmeCtx(), "POST", "/api/lanes", body))
+	if w.Code != 201 {
+		t.Fatalf("admin 建生产泳道应 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var created struct{ ID string `json:"id"` }
+	decodeData(t, w.Body.Bytes(), &created)
+
+	dev := lane.NewHandler(store, lane.WithEnvResolver(envmemory.NewStore()))
+	dev.Authorize = func(r *http.Request, perm string) bool {
+		return perm != lane.PermProdWrite // developer：无 prod:write
+	}
+	w = httptest.NewRecorder()
+	dev.ServeHTTP(w, req(acmeCtx(), "DELETE", "/api/lanes/"+created.ID, nil))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("developer 关生产泳道应 403, got %d", w.Code)
+	}
+	w = httptest.NewRecorder()
+	dev.ServeHTTP(w, req(acmeCtx(), "PUT", "/api/lanes/"+created.ID, map[string]any{"mode": "permanent"}))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("developer 改生产泳道 mode 应 403, got %d", w.Code)
+	}
+}

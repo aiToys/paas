@@ -380,6 +380,15 @@ func (e *Engine) execDeploy(ctx context.Context, run *PipelineRun, stage StageDe
 			logf(sr, "应用资源模板读取失败（降级空）: %v", err)
 		}
 	}
+	// 标准基线「生产禁 BestEffort」：目标环境明确为 prod 且三级来源兜底仍空时 fail-fast
+	//（终审 I2：workload handler 直建路径有拒建护栏，流水线是更重要的生产入口，不能裸奔）。
+	// EnvType 未注入（测试/旧装配）跳过检查——与 allowProdFlow 的「nil 跳过」同语义，
+	// 生产装配必注入 EnvType（cmd/core pipeline_adapters）。
+	if e.EnvType != nil {
+		if et, err := e.EnvType(ctx, envID); err == nil && et == "prod" && res.IsEmpty() {
+			return false, fmt.Errorf("生产环境部署必须有资源规格（cpuRequest/memRequest 至少一项）：请在流水线 deploy stage 配 resources，或在应用配置 tab 设置资源规格默认值")
+		}
+	}
 	// 联调泳道副本降级：非 default 泳道 + 非 prod 环境 + 显式 replicas>1 时截断为 1
 	//（联调泳道只需验证功能，省资源；prod 环境不降级——灰度泳道按显式副本走）。
 	// EnvType nil 时保守按 prod 处理不降级（fail-closed，与 allowProdFlow 同源语义）。

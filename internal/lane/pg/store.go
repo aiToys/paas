@@ -147,9 +147,12 @@ func (s *Store) Update(ctx context.Context, id string, in lane.Lane) (lane.Lane,
 			return lane.Lane{}, errors.New("mode 非法（standard|permanent）")
 		}
 	}
+	// 可选展示字段非空才覆盖（与 mode 同语义，防 PUT Partial body 缺字段误清空——终审 M1）。
 	row := s.db.Pool().QueryRow(ctx, `UPDATE lanes
 		SET mode = CASE WHEN $3 = '' THEN mode ELSE $3 END,
-		    description = $4, external_link = $5, updated_at = now()
+		    description = CASE WHEN $4 = '' THEN description ELSE $4 END,
+		    external_link = CASE WHEN $5 = '' THEN external_link ELSE $5 END,
+		    updated_at = now()
 		WHERE id = $1 AND tenant_id = $2
 		RETURNING `+laneCols, id, tid, in.Mode, in.Description, in.ExternalLink)
 	return scanLane(row)

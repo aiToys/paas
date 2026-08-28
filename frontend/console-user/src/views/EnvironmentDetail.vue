@@ -78,19 +78,19 @@ function openLaneManager() {
   loadLanes()
 }
 
-// 列头点入泳道详情：优先实体（name 精确匹配），无实体时先懒建视图兜底——直接按名查列表。
+// 列头点入泳道详情：优先实体（name 精确匹配）；裸分支（无实体）懒建实体再进详情
+// （与 deploy EnsureByName 同语义）。无写权限（viewer）时创建会 403，降级提示。
 async function goLane(name: string) {
   await loadLanes()
   const hit = lanes.value.find((l) => l.name === name && l.status === 'active')
   if (hit) {
     router.push(`/lanes/${hit.id}`)
   } else {
-    // 裸分支泳道（无实体）：懒建实体再进详情（与 deploy EnsureByName 同语义）
     try {
       const created = await createLane({ envId: route.params.id as string, name, mode: 'standard' })
       router.push(`/lanes/${created.id}`)
     } catch (e) {
-      ElMessage.error((e as Error).message)
+      ElMessage.error(`该泳道尚未实体化，实体化失败（可能无写权限）：${(e as Error).message}`)
     }
   }
 }
