@@ -876,15 +876,6 @@ func (e *Engine) CanaryResume(ctx context.Context, runID string, stageIdx int, p
 			logf(&sr, "canary workload %s 已回收", wlID)
 		}
 	}
-	if wlID != "" {
-		if err := e.Releases.DeleteWorkload(ctx, wlID); err != nil {
-			// 清理失败不阻断决策（放量已生效/终止语义不变），GC 对 canary-<runID> 裸泳道 TTL 兜底回收
-			log.Printf("canary workload 清理失败 wl=%s: %v（GC 兜底）", wlID, err) //nolint:gosec // wlID 平台生成
-			logf(&sr, "canary 清理失败（GC 兜底）: %v", err)
-		} else {
-			logf(&sr, "canary workload %s 已回收", wlID)
-		}
-	}
 
 	e.mu.Lock()
 	run, err = e.Runs.GetRun(ctx, runID) // 重读（锁外期间可能被 Abort 改变；认领已挡并发决策）
