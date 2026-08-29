@@ -17,12 +17,13 @@ import (
 
 const engineCols = `id, kind, engine, label, description, mode, enabled, connection, ord`
 
-func scanEngine(r storagepg.RowScanner, e *dataservice.Engine) error {
+// scanEngine 读引擎行（Store 方法：cipher 非空时解密 connection 敏感字段）。
+func (s *Store) scanEngine(r storagepg.RowScanner, e *dataservice.Engine) error {
 	var connRaw []byte
 	if err := r.Scan(&e.ID, &e.Kind, &e.Engine, &e.Label, &e.Description, &e.Mode, &e.Enabled, &connRaw, &e.Order); err != nil {
 		return err
 	}
-	e.Connection = unmarshalSpec(connRaw)
+	e.Connection = decryptConnection(s.cipher, unmarshalSpec(connRaw))
 	return nil
 }
 
@@ -35,7 +36,7 @@ func (s *Store) ListEngines(ctx context.Context) ([]dataservice.Engine, error) {
 	out := make([]dataservice.Engine, 0)
 	for rows.Next() {
 		var e dataservice.Engine
-		if err = scanEngine(rows, &e); err != nil {
+		if err = s.scanEngine(rows, &e); err != nil {
 			return nil, err
 		}
 		out = append(out, e)
@@ -46,7 +47,7 @@ func (s *Store) ListEngines(ctx context.Context) ([]dataservice.Engine, error) {
 func (s *Store) GetEngine(ctx context.Context, id string) (dataservice.Engine, error) {
 	row := s.db.Pool().QueryRow(ctx, `SELECT `+engineCols+` FROM engines WHERE id=$1`, id)
 	var e dataservice.Engine
-	if err := scanEngine(row, &e); err != nil {
+	if err := s.scanEngine(row, &e); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return dataservice.Engine{}, fmt.Errorf("引擎不存在: %s", id)
 		}
@@ -59,7 +60,7 @@ func (s *Store) CreateEngine(ctx context.Context, e dataservice.Engine) (dataser
 	if err := e.Validate(); err != nil {
 		return dataservice.Engine{}, err
 	}
-	connBytes, err := marshalSpec(e.Connection)
+	connBytes, err := marshalSpec(encryptConnection(s.cipher, e.Connection))
 	if err != nil {
 		return dataservice.Engine{}, err
 	}
@@ -69,7 +70,7 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING `+engineCols,
 		e.ID, e.Kind, e.Engine, e.Label, e.Description, e.Mode, e.Enabled, connBytes, e.Order,
 	)
 	var saved dataservice.Engine
-	if err = scanEngine(row, &saved); err != nil {
+	if err = s.scanEngine(row, &saved); err != nil {
 		if storagepg.IsUniqueViolation(err) {
 			return dataservice.Engine{}, storagepg.FormatExists("引擎")
 		}
@@ -82,7 +83,7 @@ func (s *Store) UpdateEngine(ctx context.Context, e dataservice.Engine) (dataser
 	if err := e.Validate(); err != nil {
 		return dataservice.Engine{}, err
 	}
-	connBytes, err := json.Marshal(e.Connection)
+	connBytes, err := json.Marshal(encryptConnection(s.cipher, e.Connection))
 	if err != nil {
 		return dataservice.Engine{}, err
 	}
@@ -92,7 +93,7 @@ WHERE id=$9 RETURNING `+engineCols,
 		e.Kind, e.Engine, e.Label, e.Description, e.Mode, e.Enabled, connBytes, e.Order, e.ID,
 	)
 	var saved dataservice.Engine
-	if err = scanEngine(row, &saved); err != nil {
+	if err = s.scanEngine(row, &saved); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return dataservice.Engine{}, fmt.Errorf("引擎不存在: %s", e.ID)
 		}
