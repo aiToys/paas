@@ -14,6 +14,7 @@ import AppBuilds from './app-tabs/AppBuilds.vue'
 import AppImages from './app-tabs/AppImages.vue'
 import AppReleases from './app-tabs/AppReleases.vue'
 import AppConfigs from './app-tabs/AppConfigs.vue'
+import AppDynamicConfigs from './app-tabs/AppDynamicConfigs.vue'
 import AppGovernance from './app-tabs/AppGovernance.vue'
 import AppObservability from './app-tabs/AppObservability.vue'
 import AppUsage from './app-tabs/AppUsage.vue'
@@ -695,6 +696,7 @@ async function deleteApp() {
           </div>
         </div>
         <AppConfigs :app-id="app.id" />
+        <AppDynamicConfigs :app-id="app.id" />
       </div>
 
       <!-- 成员与权限（应用级权限：成员角色 + 受限模式开关） -->

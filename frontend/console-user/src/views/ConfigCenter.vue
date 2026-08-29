@@ -6,8 +6,9 @@
 import { onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { fetchAuth } from '@/api'
+import { fetchAuth, fetchJSON } from '@/api'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
+import AppDynamicConfigs from './app-tabs/AppDynamicConfigs.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -24,6 +25,19 @@ interface Published { published: boolean; version?: number; snapshot?: Record<st
 const namespaces = ref<Namespace[]>([])
 const services = ref<Service[]>([])
 const cur = ref<Namespace | null>(null)
+
+// 双视图：按应用（主路径，应用维度动态配置）/ 共享配置（ns 维度，既有逻辑原样保留）。
+const viewMode = ref<'app' | 'shared'>('app')
+const apps = ref<{ id: string; name: string }[]>([])
+const selectedAppId = ref('')
+
+async function loadApps() {
+  try {
+    apps.value = await fetchJSON<{ id: string; name: string }[]>('/api/applications')
+  } catch {
+    apps.value = []
+  }
+}
 const items = ref<ConfigItem[]>([])
 const publishes = ref<Publish[]>([])
 const published = ref<Published | null>(null)
@@ -225,7 +239,9 @@ async function rollback(p: Publish) {
 const snapshotEntries = (snap?: Record<string, string>) => (snap ? Object.entries(snap) : [])
 
 onMounted(async () => {
-  await Promise.all([loadServices(), load()])
+  // ?serviceId= 路由参数兼容（服务详情「关联配置」跳转）：进入时切共享视图
+  if (route.query.serviceId) viewMode.value = 'shared'
+  await Promise.all([loadServices(), load(), loadApps()])
 })
 watch(() => route.params.nsId, load)
 </script>
@@ -239,9 +255,37 @@ watch(() => route.params.nsId, load)
           <h2>配置中心</h2>
           <p class="sub">运行时动态配置 · 版本/发布/回滚 · 跨实例共享（区别于应用配置的静态注入）</p>
         </div>
-        <el-button type="primary" @click="createNamespace">+ 创建命名空间</el-button>
+        <div style="display: flex; align-items: center; gap: 12px">
+          <el-radio-group v-model="viewMode" size="small">
+            <el-radio-button value="app">按应用</el-radio-button>
+            <el-radio-button value="shared">共享配置</el-radio-button>
+          </el-radio-group>
+          <el-button v-if="viewMode === 'shared'" type="primary" @click="createNamespace">+ 创建命名空间</el-button>
+        </div>
       </div>
-      <el-table :data="namespaces" v-loading="loading" size="default" empty-text="暂无命名空间">
+
+      <!-- 按应用视图（主路径）：左侧应用列表 + 右侧应用维度动态配置 -->
+      <div v-if="viewMode === 'app'" class="app-view">
+        <aside class="app-list">
+          <div
+            v-for="a in apps" :key="a.id"
+            class="app-item" :class="{ active: selectedAppId === a.id }"
+            @click="selectedAppId = a.id"
+          >
+            <span class="mono">{{ a.id }}</span>
+            <span class="app-name">{{ a.name }}</span>
+          </div>
+          <div v-if="!apps.length" class="empty-line">暂无应用</div>
+        </aside>
+        <div class="app-panel">
+          <AppDynamicConfigs v-if="selectedAppId" :key="selectedAppId" :app-id="selectedAppId" />
+          <div v-else class="empty-line" style="padding: 48px 0; text-align: center">
+            从左侧选择一个应用，管理其动态配置。
+          </div>
+        </div>
+      </div>
+
+      <el-table v-else :data="namespaces" v-loading="loading" size="default" empty-text="暂无命名空间">
         <el-table-column label="命名空间" min-width="180">
           <template #default="{ row }">
             <a class="link" @click="openNamespace(row.id)">{{ row.name }}</a>
@@ -423,4 +467,16 @@ watch(() => route.params.nsId, load)
 .kv-val { color: var(--text); word-break: break-all; }
 .svc-link { color: var(--brand); cursor: pointer; font-weight: 500; }
 .svc-link:hover { text-decoration: underline; }
+.app-view { display: flex; gap: 20px; align-items: flex-start; }
+.app-list { width: 220px; flex-shrink: 0; display: flex; flex-direction: column; gap: 4px; }
+.app-item {
+  display: flex; flex-direction: column; gap: 2px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; font-size: 13px;
+}
+.app-item:hover { background: var(--surface-2, transparent); }
+.app-item.active { border-color: var(--brand); background: var(--surface-2, transparent); }
+.app-item .mono { font-size: 11px; color: var(--text-faint); }
+.app-name { font-weight: 600; }
+.app-panel { flex: 1; min-width: 0; }
+.empty-line { font-size: 12.5px; color: var(--text-faint); }
 </style>
