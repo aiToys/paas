@@ -19,6 +19,10 @@ type NamespaceStore interface {
 	DeleteNamespace(ctx context.Context, id string) error
 	// ListAllNamespaces 跨租户列出全部命名空间（admin 平台总览，不过滤 tenant，返回对象带 TenantID）。
 	ListAllNamespaces(ctx context.Context) ([]Namespace, error)
+	// EnsureByApp 懒建（或返回既有的）应用派生命名空间（scope=app，name=app-<appID>）。幂等。
+	EnsureByApp(ctx context.Context, appID string) (Namespace, error)
+	// FindAppNamespace 查应用派生命名空间（不创建）。无返回 false。
+	FindAppNamespace(ctx context.Context, appID string) (Namespace, bool, error)
 }
 
 // ItemStore 配置项仓储（draft）。

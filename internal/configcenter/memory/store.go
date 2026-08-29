@@ -95,6 +95,13 @@ func (s *Store) CreateNamespace(ctx context.Context, n configcenter.Namespace) (
 	if err := n.Validate(); err != nil {
 		return configcenter.Namespace{}, err
 	}
+	// scope 语义：AppID 非空 → 应用派生（Name 强制 app-<appID>，防伪造 shared 占名）；空 → 共享。
+	if n.AppID != "" {
+		n.Scope = configcenter.ScopeApp
+		n.Name = "app-" + n.AppID
+	} else {
+		n.Scope = configcenter.ScopeShared
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, ex := range s.namespaces {
@@ -134,6 +141,45 @@ func (s *Store) DeleteNamespace(ctx context.Context, id string) error {
 		}
 	}
 	return nil
+}
+
+// EnsureByApp 懒建（或返回既有的）应用派生命名空间（scope=app，name=app-<appID>）。幂等。
+func (s *Store) EnsureByApp(ctx context.Context, appID string) (configcenter.Namespace, error) {
+	tid, err := tenant.IDOrErr(ctx)
+	if err != nil {
+		return configcenter.Namespace{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, n := range s.namespaces {
+		if n.TenantID == tid && n.Scope == configcenter.ScopeApp && n.AppID == appID {
+			return n, nil
+		}
+	}
+	s.nsSeq++
+	n := configcenter.Namespace{
+		ID: fmt.Sprintf("ns-%d", s.nsSeq), TenantID: tid,
+		Name: "app-" + appID, Scope: configcenter.ScopeApp, AppID: appID,
+		UpdatedAt: time.Now(),
+	}
+	s.namespaces[n.ID] = n
+	return n, nil
+}
+
+// FindAppNamespace 查应用派生命名空间（不创建）。无返回 false。
+func (s *Store) FindAppNamespace(ctx context.Context, appID string) (configcenter.Namespace, bool, error) {
+	tid, err := tenant.IDOrErr(ctx)
+	if err != nil {
+		return configcenter.Namespace{}, false, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, n := range s.namespaces {
+		if n.TenantID == tid && n.Scope == configcenter.ScopeApp && n.AppID == appID {
+			return n, true, nil
+		}
+	}
+	return configcenter.Namespace{}, false, nil
 }
 
 // —— Item ——

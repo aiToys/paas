@@ -45,7 +45,7 @@ func NewStore(db *storagepg.DB) *Store { return &Store{db: db} }
 // 列常量与各 struct 字段顺序严格对齐（scan 列序必须一致）。
 // snapshot 列读取为 []byte，由 scanPublish 转 nil 安全的 map。
 const (
-	nsCols   = `id, tenant_id, name, service_id, "desc", updated_at`
+	nsCols   = `id, tenant_id, name, scope, app_id, service_id, "desc", updated_at`
 	itemCols = `id, tenant_id, namespace_id, key, value, type, updated_at`
 	pubCols  = `id, tenant_id, namespace_id, version, snapshot, status, created_at`
 )
@@ -79,7 +79,7 @@ func unmarshalSnapshot(raw []byte) map[string]string {
 // ---------- scan 辅助 ----------
 
 func scanNamespace(r storagepg.RowScanner, n *configcenter.Namespace) error {
-	return r.Scan(&n.ID, &n.TenantID, &n.Name, &n.ServiceID, &n.Desc, &n.UpdatedAt)
+	return r.Scan(&n.ID, &n.TenantID, &n.Name, &n.Scope, &n.AppID, &n.ServiceID, &n.Desc, &n.UpdatedAt)
 }
 
 func scanItem(r storagepg.RowScanner, it *configcenter.ConfigItem) error {
@@ -174,14 +174,21 @@ func (s *Store) CreateNamespace(ctx context.Context, n configcenter.Namespace) (
 	if err := n.Validate(); err != nil {
 		return configcenter.Namespace{}, err
 	}
+	// scope 语义：AppID 非空 → 应用派生（Name 强制 app-<appID>，防伪造 shared 占名）；空 → 共享。
+	if n.AppID != "" {
+		n.Scope = configcenter.ScopeApp
+		n.Name = "app-" + n.AppID
+	} else {
+		n.Scope = configcenter.ScopeShared
+	}
 	if n.ID == "" {
 		n.ID = newCCID("ns")
 	}
 	n.TenantID = tid
 	n.UpdatedAt = time.Now()
 	_, err = s.db.Pool().Exec(ctx,
-		`INSERT INTO cc_namespaces (`+nsCols+`) VALUES ($1,$2,$3,$4,$5,$6)`,
-		n.ID, n.TenantID, n.Name, n.ServiceID, n.Desc, n.UpdatedAt)
+		`INSERT INTO cc_namespaces (`+nsCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		n.ID, n.TenantID, n.Name, n.Scope, n.AppID, n.ServiceID, n.Desc, n.UpdatedAt)
 	if storagepg.IsUniqueViolation(err) {
 		return configcenter.Namespace{}, fmt.Errorf("命名空间已存在: %s", n.Name)
 	}
@@ -189,6 +196,55 @@ func (s *Store) CreateNamespace(ctx context.Context, n configcenter.Namespace) (
 		return configcenter.Namespace{}, err
 	}
 	return n, nil
+}
+
+// EnsureByApp 懒建（或返回既有的）应用派生命名空间（scope=app，name=app-<appID>）。幂等。
+// 先查后插；并发竞态由 UNIQUE (tenant_id, name) 兜底——CreateNamespace 唯一冲突时
+// 回查既有的 app ns 返回（幂等兜底）。
+func (s *Store) EnsureByApp(ctx context.Context, appID string) (configcenter.Namespace, error) {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return configcenter.Namespace{}, err
+	}
+	row := s.db.Pool().QueryRow(ctx,
+		`SELECT `+nsCols+` FROM cc_namespaces WHERE tenant_id=$1 AND scope='app' AND app_id=$2`, tid, appID)
+	var n configcenter.Namespace
+	if err := scanNamespace(row, &n); err == nil {
+		return n, nil
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		return configcenter.Namespace{}, err
+	}
+	created, err := s.CreateNamespace(ctx, configcenter.Namespace{
+		Name: "app-" + appID, Scope: configcenter.ScopeApp, AppID: appID,
+	})
+	if storagepg.IsUniqueViolation(err) {
+		// 并发 Ensure：另一请求已建，回查返回（幂等兜底）。
+		row := s.db.Pool().QueryRow(ctx,
+			`SELECT `+nsCols+` FROM cc_namespaces WHERE tenant_id=$1 AND scope='app' AND app_id=$2`, tid, appID)
+		var existing configcenter.Namespace
+		if err := scanNamespace(row, &existing); err == nil {
+			return existing, nil
+		}
+	}
+	return created, err
+}
+
+// FindAppNamespace 查应用派生命名空间（不创建）。无返回 false。
+func (s *Store) FindAppNamespace(ctx context.Context, appID string) (configcenter.Namespace, bool, error) {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return configcenter.Namespace{}, false, err
+	}
+	row := s.db.Pool().QueryRow(ctx,
+		`SELECT `+nsCols+` FROM cc_namespaces WHERE tenant_id=$1 AND scope='app' AND app_id=$2`, tid, appID)
+	var n configcenter.Namespace
+	if err := scanNamespace(row, &n); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return configcenter.Namespace{}, false, nil
+		}
+		return configcenter.Namespace{}, false, err
+	}
+	return n, true, nil
 }
 
 // DeleteNamespace 删除命名空间 + 级联清 items + publishes（事务保证原子）。

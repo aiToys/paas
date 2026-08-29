@@ -166,3 +166,49 @@ func TestMissingTenant(t *testing.T) {
 		t.Fatal("缺失租户上下文应拒绝")
 	}
 }
+
+func TestEnsureByAppIdempotent(t *testing.T) {
+	s := NewStore()
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	n1, err := s.EnsureByApp(ctx, "app-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n1.Scope != configcenter.ScopeApp || n1.AppID != "app-1" || n1.Name != "app-app-1" {
+		t.Fatalf("scope/appID/name 错误: %+v", n1)
+	}
+	n2, err := s.EnsureByApp(ctx, "app-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n2.ID != n1.ID {
+		t.Fatalf("幂等失败: %s vs %s", n1.ID, n2.ID)
+	}
+	// 跨租户隔离：t-globex 看不到 t-acme 的 ns，各自独立
+	ctxB := tenant.WithTenant(context.Background(), "t-globex")
+	n3, err := s.EnsureByApp(ctxB, "app-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n3.ID == n1.ID {
+		t.Fatal("跨租户泄漏：两租户拿到同一 ns")
+	}
+}
+
+func TestFindAppNamespace(t *testing.T) {
+	s := NewStore()
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	if _, ok, _ := s.FindAppNamespace(ctx, "app-1"); ok {
+		t.Fatal("未创建时不应找到")
+	}
+	s.EnsureByApp(ctx, "app-1")
+	ns, ok, err := s.FindAppNamespace(ctx, "app-1")
+	if err != nil || !ok || ns.AppID != "app-1" {
+		t.Fatalf("创建后应找到: ok=%v err=%v", ok, err)
+	}
+	// 手工 shared ns 不被 FindAppNamespace 命中
+	s.CreateNamespace(ctx, configcenter.Namespace{Name: "manual-ns"})
+	if _, ok, _ := s.FindAppNamespace(ctx, "app-1"); !ok {
+		t.Fatal("app ns 仍应找到（shared 不干扰）")
+	}
+}

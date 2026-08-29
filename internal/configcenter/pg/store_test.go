@@ -650,3 +650,21 @@ func TestNamespaceServiceIDRoundTrip(t *testing.T) {
 // 编译期断言：pgx.ErrNoRows 用于错误映射（避免误删 import）。
 var _ = errors.Is
 var _ = pgx.ErrNoRows
+
+func TestEnsureByAppRoundTrip(t *testing.T) {
+	db := newTestDB(t)
+	s := NewStore(db)
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	n1, err := s.EnsureByApp(ctx, "app-e2e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n2, _ := s.EnsureByApp(ctx, "app-e2e")
+	if n1.ID != n2.ID {
+		t.Fatal("幂等失败")
+	}
+	got, ok, _ := s.FindAppNamespace(ctx, "app-e2e")
+	if !ok || got.Scope != configcenter.ScopeApp || got.AppID != "app-e2e" {
+		t.Fatalf("FindAppNamespace 错误: %+v ok=%v", got, ok)
+	}
+}

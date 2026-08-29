@@ -306,6 +306,8 @@ CREATE TABLE IF NOT EXISTS cc_namespaces (
     id         TEXT PRIMARY KEY,
     tenant_id  TEXT NOT NULL,
     name       TEXT NOT NULL,
+    scope      TEXT NOT NULL DEFAULT 'shared',  -- app（应用派生，EnsureByApp 懒建）| shared（跨应用共享）
+    app_id     TEXT NOT NULL DEFAULT '',         -- scope=app 时归属应用
     service_id TEXT NOT NULL DEFAULT '',    -- 关联 governance Service（空=不关联，双向显示用）
     "desc"     TEXT NOT NULL DEFAULT '',
     updated_at TIMESTAMPTZ NOT NULL,
