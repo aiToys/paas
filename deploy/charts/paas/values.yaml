@@ -99,6 +99,13 @@ auth:
   cookieSecure: false
   prod: false
 
+# 敏感数据静态加密（spec 2026-08-29）：security.Secret / appconfig secret /
+# dataservice Connection 在 PG 中 AES-256-GCM 加密存储。
+#   - secretMasterKey：64 位 hex（openssl rand -hex 32 生成）。生产必填（PAAS_PROD=true
+#     未设时拒启）；空 = 明文模式（dev）。
+security:
+  secretMasterKey: ""
+
 # core Deployment 配置。
 # hostNetwork：true 时 core Pod 用节点网络（dev 集群访问外部 registry 用），生产保持 false。
 core:

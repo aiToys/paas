@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"github.com/aitoys/paas/internal/ai/skill"
 	"github.com/aitoys/paas/internal/ai/tool"
 	"github.com/aitoys/paas/internal/apiroute"
+	"github.com/aitoys/paas/internal/crypto"
 	"github.com/aitoys/paas/internal/appconfig"
 	"github.com/aitoys/paas/internal/backup"
 	"github.com/aitoys/paas/internal/billing"
@@ -101,8 +103,20 @@ func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, metrics
 	if managerCancel != nil {
 		defer managerCancel()
 	}
+	// 敏感数据静态加密 master key（spec 2026-08-29）：未设 = 明文模式（dev）；
+	// 生产必须设置（DB 泄漏面防护）。与 JWT secret 同款治理。
+	secCipher, err := crypto.NewFromEnv("PAAS_SECRET_MASTER_KEY")
+	if err != nil {
+		return fmt.Errorf("PAAS_SECRET_MASTER_KEY 非法（须 64 位 hex，openssl rand -hex 32 生成）: %w", err)
+	}
+	if secCipher == nil {
+		if os.Getenv("PAAS_PROD") == "true" {
+			return errors.New("生产模式必须设置 PAAS_SECRET_MASTER_KEY（openssl rand -hex 32 生成）")
+		}
+		log.Println("WARNING: 未配置 PAAS_SECRET_MASTER_KEY，敏感数据（密钥/应用凭证/数据服务连接）明文存储")
+	}
 	// 选择持久化后端并 seed（PAAS_DB_URL 非空走 PG，否则内存）。
-	stores, closeDB, err := buildAllStores(ctx, appliers)
+	stores, closeDB, err := buildAllStores(ctx, appliers, secCipher)
 	if err != nil {
 		return err
 	}

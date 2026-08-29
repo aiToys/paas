@@ -47,6 +47,7 @@ import (
 	ccmemory "github.com/aitoys/paas/internal/configcenter/memory"
 	ccpg "github.com/aitoys/paas/internal/configcenter/pg"
 	"github.com/aitoys/paas/internal/controller"
+	"github.com/aitoys/paas/internal/crypto"
 	"github.com/aitoys/paas/internal/core/application"
 	appmemory "github.com/aitoys/paas/internal/core/application/memory"
 	applicationpg "github.com/aitoys/paas/internal/core/application/pg"
@@ -142,7 +143,10 @@ type Stores struct {
 //
 // 横切依赖：devops store 依赖 workload.Repository（Release 编排找/建/更新 Workload），
 // 两路径下注入的 workload store 与 wlHandler 共享同一实例（用量/编排真源唯一）。
-func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(), error) {
+// secCipher 为敏感数据静态加密 cipher（spec 2026-08-29）：非 nil 时 security/appconfig
+// 用装饰器包装（dataservice PG 路径经 dspg.WithCipher 直达 seed 与写路径；内存路径
+// dataservice 不包装——内存非泄漏面）。
+func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto.Cipher) (*Stores, func(), error) {
 	devopsPipeline := newDevOpsPipeline(appliers) // PAAS_DEVOPS_BUILDER 选 k8s/process/mock
 	nsResolver := envNamespaceResolver{}          // 数据服务连接 FQDN 用，按租户派生 ns
 	if dsn := os.Getenv("PAAS_DB_URL"); dsn != "" {
@@ -183,7 +187,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		}
 		ccRepo := ccpg.NewStore(db)
 		billingRepo := billingpg.NewStore(db)
-		secRepo := secpg.NewStore(db)
+		secRepo := secpg.NewStore(db, secpg.WithCipher(secCipher)) // seed 直连 SQL 路径加密（Task 3）
 		maasRepo := mapg.NewStore(db)
 		kbRepo := kbpg.NewStore(db)
 		toolRepo := toolpg.NewStore(db)
@@ -198,6 +202,17 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		pipelineStore := pipeline.NewPGStore(db.Pool())
 		changeRepo := changepg.NewStore(db)
 		laneRepo := lanepg.NewStore(db)
+
+		// 静态加密装饰（spec 2026-08-29）：security/appconfig 写路径加密 + 消费点解密。
+		// 放在 seed 之后（seedPGAllIfEmpty 收具体 *pg.Store 类型，加密由 secpg.WithCipher /
+		// dspg.WithCipher 在 seed 内部完成）；dataservice 已在构造处经 dspg.WithCipher 注入。
+		// cipher nil = 明文模式全直通。
+		var secRepoI security.Repository = secRepo
+		var appcfgRepoI appconfig.Repository = appcfgRepo
+		if secCipher != nil {
+			secRepoI = security.NewEncryptedRepo(secRepo, secCipher)
+			appcfgRepoI = appconfig.NewEncryptedRepo(appcfgRepo, secCipher)
+		}
 
 		seedPGAllIfEmpty(ctx, idb, appRepo, envRepo, appcfgRepo, rawDs, rawWl,
 			devopsRepo, govRepo, ccRepo, billingRepo, secRepo)
@@ -223,7 +238,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 			Application:    appRepo,
 			AppMembers:     applicationpg.NewMemberStore(db),
 			Environment:    envRepo,
-			AppConfig:      appcfgRepo,
+			AppConfig:      appcfgRepoI, // 装饰后实例（明文模式=原始 store）
 			DataService:    dsRepo,
 			Engine:         rawDs, // PG ds store 同实现 EngineRepository（平台级，无 ApplyRepo 装饰）
 			Workload:       wlRepo,
@@ -234,7 +249,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 			Governance:     govRepoWithApply,
 			ConfigCenter:   ccRepo,
 			Billing:        billingRepo,
-			Security:       secRepo,
+			Security:       secRepoI, // 装饰后实例（明文模式=原始 store）
 			Messaging:      msgRepo,
 			Backup:         bkRepo,
 			MaaS:           maasRepo,
@@ -297,7 +312,16 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 	pipelineStore := pipeline.NewMemoryStore()
 	changeRepo := change.NewMemoryStore()
 	laneRepo := lanememory.NewStore()
+	// 静态加密装饰（与 PG 路径同款）：security/appconfig 包装；dataservice 内存不包装
+	//（内存非泄漏面）。seedMaasCatalog 在上方已消费原始 secRepo，此处包装仅影响
+	// Stores 聚合（下游 handler/injector 全拿包装后实例）。
 	svcRepo := svcRepo0
+	var secRepoI security.Repository = secRepo
+	var appcfgRepoI appconfig.Repository = appcfgRepo
+	if secCipher != nil {
+		secRepoI = security.NewEncryptedRepo(secRepo, secCipher)
+		appcfgRepoI = appconfig.NewEncryptedRepo(appcfgRepo, secCipher)
+	}
 	// 存量回填：为无 ServiceID 的既有工作负载幂等建 Service 实体（两路径同源，失败不阻断启动）。
 	backfillTenantIDs(ctx, idb, svcRepo, wlRepo)
 	// 平台预置流水线模板（全租户共享，不门控 demo seed，生产也需预置）
@@ -311,7 +335,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		Application:    appRepo,
 		AppMembers:     appmemory.NewMemberStore(),
 		Environment:    envRepo,
-		AppConfig:      appcfgRepo,
+		AppConfig:      appcfgRepoI, // 装饰后实例（明文模式=原始 store）
 		DataService:    dsRepo,
 		Engine:         dsRaw, // 内存 ds store 同实现 EngineRepository（NewStore 已 seed DefaultEngines）
 		Workload:       wlRepo,
@@ -322,7 +346,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers) (*Stores, func(),
 		Governance:     govRepoWithApply,
 		ConfigCenter:   ccRepo,
 		Billing:        billingRepo,
-		Security:       secRepo,
+		Security:       secRepoI, // 装饰后实例（明文模式=原始 store）
 		Messaging:      msgRepo,
 		Backup:         bkRepo,
 		MaaS:           maasRepo,

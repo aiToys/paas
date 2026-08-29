@@ -53,6 +53,13 @@ spec:
                   name: {{ include "paas.fullname" . }}-secret
                   key: PAAS_JWT_SECRET
             {{- end }}
+            {{- if .Values.security.secretMasterKey }}
+            - name: PAAS_SECRET_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "paas.fullname" . }}-secret
+                  key: PAAS_SECRET_MASTER_KEY
+            {{- end }}
             # K8s 数据面（in-cluster）：ctrl.GetConfigOrDie() 自动用 ServiceAccount token，
             # 无需 PAAS_KUBECONFIG。落地 namespace = release namespace；metrics server 禁用避端口冲突。
             - name: PAAS_K8S_NAMESPACE
