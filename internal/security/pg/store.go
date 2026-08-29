@@ -7,6 +7,8 @@ package pg
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -137,6 +139,13 @@ func (s *Store) GetSecret(ctx context.Context, id string) (security.Secret, erro
 // platform 级 tenant_id 写 NULL（全租户共享）。唯一冲突（两个 partial unique index 之一）
 // → 与内存同款「已存在」消息。
 func (s *Store) CreateSecret(ctx context.Context, sec security.Secret) (security.Secret, error) {
+	// ID 为空时生成（请求体不传 id）：否则空串作主键，第二条无 id 请求撞 '' 主键
+	// 被误映射为「密钥名已存在」（k8s e2e 暴露：残留 id='' 脏行令全部创建失败）。
+	if sec.ID == "" {
+		b := make([]byte, 8)
+		_, _ = rand.Read(b)
+		sec.ID = "sec-" + hex.EncodeToString(b)
+	}
 	tid, err := storagepg.TenantOrErr(ctx)
 	if err != nil {
 		return security.Secret{}, err
