@@ -1,8 +1,10 @@
 package configcenter
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/aitoys/paas/internal/httputil"
@@ -14,6 +16,12 @@ const (
 	PermConfigCenterRead  = "governance:read"
 	PermConfigCenterWrite = "governance:write"
 )
+
+// AppLookup 按应用名查应用 ID（依赖倒置，避免 configcenter→application import）。
+// 实现按 ctx tenant 过滤；跨租户/不存在返 ""（统一 not found 不泄漏）。
+type AppLookup interface {
+	AppIDByName(ctx context.Context, appName string) (string, error)
+}
 
 // Handler 暴露配置中心 REST API。
 //
@@ -34,6 +42,7 @@ type Handler struct {
 	repo          Repository
 	Authorize     func(r *http.Request, perm string) bool
 	serviceLookup ServiceLookup // 可选，CreateNamespace 时校验 ServiceID 归属（防悬挂引用）
+	appLookup     AppLookup    // 可选，按应用名发现端点（/api/configcenter/apps/{name}/published）
 }
 
 // NewHandler 创建配置中心 handler。
@@ -45,6 +54,13 @@ func NewHandler(repo Repository) *Handler {
 // 非空时 CreateNamespace 的 ServiceID 需存在且属本租户，防悬挂引用脏数据。
 func (h *Handler) WithServiceLookup(sl ServiceLookup) *Handler {
 	h.serviceLookup = sl
+	return h
+}
+
+// WithAppLookup 注入应用名→ID 解析器（依赖倒置）。
+// 非空时启用按应用名发现端点 GET /api/configcenter/apps/{appName}/published。
+func (h *Handler) WithAppLookup(al AppLookup) *Handler {
+	h.appLookup = al
 	return h
 }
 
@@ -66,6 +82,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveNamespaceItem(w, r)
 	case strings.HasPrefix(path, "/api/configcenter/publishes/"):
 		h.servePublishAction(w, r)
+	case strings.HasPrefix(path, "/api/configcenter/apps/"):
+		h.serveAppPublished(w, r)
 	default:
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
@@ -307,6 +325,68 @@ func (h *Handler) servePublished(w http.ResponseWriter, r *http.Request, nsID st
 		"version":   active.Version,
 		"snapshot":  active.Snapshot,
 		"publishId": active.ID,
+	})
+}
+
+// serveAppPublished GET /api/configcenter/apps/{appName}/published 按应用名发现（active 快照）。
+// 与 ns 维度发现同契约（{published,version,snapshot}），不含 publishId——应用维度以应用为锚，
+// 客户端无需感知派生 ns 的 publish 记录 ID。未知应用名/未发布统一 {"published":false} 不泄漏。
+func (h *Handler) serveAppPublished(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.allow(w, r, PermConfigCenterRead) {
+		return
+	}
+	if h.appLookup == nil {
+		httputil.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	// 路径形态 apps/{appName}/published：首段=应用名（URL 解码），末段必须为 published。
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/configcenter/apps/"), "/")
+	parts := strings.Split(rest, "/")
+	if len(parts) != 2 || parts[1] != "published" || parts[0] == "" {
+		httputil.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	appName, err := url.PathUnescape(parts[0])
+	if err != nil || appName == "" {
+		httputil.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	appID, err := h.appLookup.AppIDByName(r.Context(), appName)
+	if err != nil {
+		httputil.WriteInternalError(w, err)
+		return
+	}
+	if appID == "" {
+		httputil.WriteJSON(w, http.StatusOK, map[string]interface{}{"published": false})
+		return
+	}
+	ns, ok, err := h.repo.FindAppNamespace(r.Context(), appID)
+	if err != nil {
+		httputil.WriteInternalError(w, err)
+		return
+	}
+	if !ok {
+		httputil.WriteJSON(w, http.StatusOK, map[string]interface{}{"published": false})
+		return
+	}
+	active, ok, err := h.repo.ActivePublish(r.Context(), ns.ID)
+	if err != nil {
+		httputil.WriteInternalError(w, err)
+		return
+	}
+	if !ok {
+		httputil.WriteJSON(w, http.StatusOK, map[string]interface{}{"published": false})
+		return
+	}
+	// 发现协议：与 ns 维度 servePublished 同款 {published,version,snapshot} shape（客户端直取）。
+	httputil.WriteJSON(w, http.StatusOK, map[string]interface{}{
+		"published": true,
+		"version":   active.Version,
+		"snapshot":  active.Snapshot,
 	})
 }
 

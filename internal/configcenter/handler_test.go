@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/aitoys/paas/internal/configcenter"
@@ -259,5 +260,44 @@ func TestCreateNamespaceRejectsDanglingServiceID(t *testing.T) {
 	}))
 	if w.Code != http.StatusCreated {
 		t.Fatalf("无 serviceID 应 201，got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// fakeAppLookup 固定映射的应用名→ID 解析器（测试桩）。
+type fakeAppLookup struct{ m map[string]string }
+
+func (f fakeAppLookup) AppIDByName(ctx context.Context, name string) (string, error) {
+	return f.m[name], nil
+}
+
+// TestAppPublishedByName 按应用名发现端点：有发布返快照，未知应用名 {"published":false} 不泄漏。
+func TestAppPublishedByName(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	h.WithAppLookup(fakeAppLookup{m: map[string]string{"shop": "app-1"}})
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	// 经应用维度先发布
+	ns, err := repo.EnsureByApp(ctx, "app-1")
+	if err != nil {
+		t.Fatalf("EnsureByApp: %v", err)
+	}
+	if _, err := repo.UpsertItem(ctx, configcenter.ConfigItem{NamespaceID: ns.ID, Key: "topk", Value: "3", Type: "text"}); err != nil {
+		t.Fatalf("UpsertItem: %v", err)
+	}
+	if _, err := repo.CreatePublish(ctx, ns.ID); err != nil {
+		t.Fatalf("CreatePublish: %v", err)
+	}
+	// 按名发现
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req(ctx, "GET", "/api/configcenter/apps/shop/published", nil))
+	if w.Code != 200 || !strings.Contains(w.Body.String(), "topk") {
+		t.Fatalf("按名发现失败: %d %s", w.Code, w.Body.String())
+	}
+	// 未知应用名：{"published":false}（不泄漏存在性）
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req(ctx, "GET", "/api/configcenter/apps/nope/published", nil))
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"published":false`) {
+		t.Fatalf("未知应用: %d %s", w.Code, w.Body.String())
 	}
 }

@@ -758,6 +758,8 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	ccHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 	// 注入 governance Service 存在性校验（CreateNamespace 的 ServiceID 归属校验，防悬挂引用）。
 	ccHandler.WithServiceLookup(ccServiceLookup{gov: stores.Governance})
+	// 注入应用名→ID 解析（按应用名发现端点 GET /api/configcenter/apps/{name}/published）。
+	ccHandler.WithAppLookup(ccAppLookup{apps: stores.Application})
 
 	// 应用维度动态配置（scope=app 主路径，挂 composite dynamic-configs 分发）：
 	// 权限 application:read/write（应用资产归应用权限域）+ AppGuard 受限应用 enforcement + publish 审计。
@@ -986,6 +988,8 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	mux.Handle("/api/configcenter/namespaces/", auth(ccHandler))
 	mux.Handle("/api/configcenter/publishes", auth(ccHandler))
 	mux.Handle("/api/configcenter/publishes/", auth(ccHandler))
+	// 按应用名发现（应用维度动态配置客户端入口）
+	mux.Handle("/api/configcenter/apps/", auth(ccHandler))
 	// 可观测（指标 + 告警）
 	mux.Handle("/api/observability/metrics", auth(obsHandler))
 	mux.Handle("/api/observability/alert-rules", auth(obsHandler))
@@ -1399,6 +1403,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/configcenter/namespaces/{id}/published", apiroute.Tags("配置中心"), apiroute.Summary("当前生效配置（客户端发现）"), apiroute.Perm("governance:read"), apiroute.WithResp(configcenter.Publish{}))
 	reg.Operation("GET", "/api/configcenter/publishes", apiroute.Tags("配置中心"), apiroute.Summary("发布历史"), apiroute.Perm("governance:read"), apiroute.WithResp([]configcenter.Publish{}))
 	reg.Operation("POST", "/api/configcenter/publishes/{id}/rollback", apiroute.Tags("配置中心"), apiroute.Summary("回滚到历史版本"), apiroute.Perm("governance:write"), apiroute.WithResp(configcenter.Publish{}))
+	reg.Operation("GET", "/api/configcenter/apps/{appName}/published", apiroute.Tags("配置中心"), apiroute.Summary("按应用名发现当前生效动态配置（客户端发现）"), apiroute.Perm("governance:read"), apiroute.WithResp(configcenter.Publish{}))
 	// 配置中心（应用维度，scope=app，composite 内部派发）
 	reg.Operation("GET", "/api/applications/{id}/dynamic-configs", apiroute.Tags("配置中心"), apiroute.Summary("应用动态配置项（draft，自动派生命名空间）"), apiroute.Perm("application:read"), apiroute.WithResp([]configcenter.ConfigItem{}))
 	reg.Operation("POST", "/api/applications/{id}/dynamic-configs", apiroute.Tags("配置中心"), apiroute.Summary("应用动态配置 upsert"), apiroute.Perm("application:write"), apiroute.WithReqBody(configcenter.ConfigItem{}), apiroute.WithResp(configcenter.ConfigItem{}))
@@ -1775,4 +1780,24 @@ type ccServiceLookup struct {
 func (a ccServiceLookup) ServiceExists(ctx context.Context, serviceID string) (bool, error) {
 	_, err := a.gov.GetService(ctx, serviceID)
 	return err == nil, nil
+}
+
+// ccAppLookup 桥接 application.Repository → configcenter.AppLookup（依赖倒置）。
+// application 仓储无按名查方法，List 遍历匹配（List 按 ctx tenant 强制过滤，
+// 跨租户/不存在返 "" → 发现端点统一 {"published":false} 不泄漏）。
+type ccAppLookup struct {
+	apps application.Repository
+}
+
+func (l ccAppLookup) AppIDByName(ctx context.Context, name string) (string, error) {
+	list, err := l.apps.List(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, a := range list {
+		if a.Name == name {
+			return a.ID, nil
+		}
+	}
+	return "", nil
 }
