@@ -85,3 +85,8 @@ kb:
   minioAccessKey: "paas-kb"
   minioSecretKey: "paas-kb-minio-dev"
 
+
+# 敏感数据静态加密（spec 2026-08-29）：AES-256-GCM envelope，密文 enc:v1: 前缀。
+# 生产必填（PAAS_PROD 拒启兜底）；dev overlay 固定 key 便于密文路径验证，存量明文自动兼容。
+security:
+  secretMasterKey: "e2c4cda30173dbd5f6ee005bc924abe8b5f5b5da7d698aa7673cf24e82fd5078"
