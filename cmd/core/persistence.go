@@ -164,7 +164,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto
 		appRepo := applicationpg.NewStore(db)
 		envRepo := envpg.NewStore(db)
 		appcfgRepo := appcfgpg.NewStore(db)
-		rawDs := dspg.NewStore(db, dspg.WithNamespaceResolver(nsResolver))
+		rawDs := dspg.NewStore(db, dspg.WithNamespaceResolver(nsResolver), dspg.WithCipher(secCipher)) // Connection 敏感字段持久层加密（Task 3 B 方案）
 		var dsRepo dataservice.Repository = rawDs
 		if appliers.dataservice != nil {
 			dsRepo = dataservice.NewApplyRepo(dsRepo, appliers.dataservice) // K8s 启用：dataservice 写投影 CRD
