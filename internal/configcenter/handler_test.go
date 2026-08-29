@@ -263,6 +263,109 @@ func TestCreateNamespaceRejectsDanglingServiceID(t *testing.T) {
 	}
 }
 
+// TestHandlerAppScopeWriteDeniedViaNsDim 锁住 F1 修复：应用派生 ns（scope=app）经 ns 维度
+// 写操作（POST items / publish / DELETE ns / item 删除 / rollback）一律 403——防绕过
+// AppGuard + application 权限域；读操作（GET）放行；不存在的 ns 保持 404 不泄漏。
+func TestHandlerAppScopeWriteDeniedViaNsDim(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	ctx := acmeCtx()
+
+	// 经应用维度建 app-scope ns + 一个 item
+	appH := configcenter.NewAppHandler(repo)
+	appH.Authorize = h.Authorize
+	w := httptest.NewRecorder()
+	rq := httptest.NewRequest("POST", "/api/applications/app-1/dynamic-configs", strings.NewReader(`{"key":"k","value":"v"}`)).WithContext(ctx)
+	appH.ServeHTTP(w, rq)
+	if w.Code != 201 {
+		t.Fatalf("app upsert: %d %s", w.Code, w.Body.String())
+	}
+	ns, ok, err := repo.FindAppNamespace(ctx, "app-1")
+	if err != nil || !ok {
+		t.Fatalf("FindAppNamespace: %v ok=%v", err, ok)
+	}
+
+	// POST items → 403
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req(ctx, "POST", "/api/configcenter/namespaces/"+ns.ID+"/items", configcenter.ConfigItem{Key: "x", Value: "1"}))
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "应用派生配置请经应用详情操作") {
+		t.Fatalf("ns 维度 POST items 应 403: %d %s", w.Code, w.Body.String())
+	}
+	// POST publish → 403
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req(ctx, "POST", "/api/configcenter/namespaces/"+ns.ID+"/publish", nil))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("ns 维度 publish 应 403: %d", w.Code)
+	}
+	// DELETE ns → 403
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req(ctx, "DELETE", "/api/configcenter/namespaces/"+ns.ID, nil))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("ns 维度 DELETE ns 应 403: %d", w.Code)
+	}
+	// DELETE item → 403（先经 app 维度建一项拿 itemID）
+	w = httptest.NewRecorder()
+	rq = httptest.NewRequest("POST", "/api/applications/app-1/dynamic-configs", strings.NewReader(`{"key":"del","value":"v"}`)).WithContext(ctx)
+	appH.ServeHTTP(w, rq)
+	items, _ := repo.ListItems(ctx, ns.ID)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req(ctx, "DELETE", "/api/configcenter/namespaces/"+ns.ID+"/items/"+items[0].ID, nil))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("ns 维度 DELETE item 应 403: %d", w.Code)
+	}
+
+	// rollback：app ns 的 publish pid 经 ns 维度回滚 → 403
+	if _, err := repo.CreatePublish(ctx, ns.ID); err != nil {
+		t.Fatalf("CreatePublish: %v", err)
+	}
+	pubs, _ := repo.ListPublishes(ctx, ns.ID)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req(ctx, "POST", "/api/configcenter/publishes/"+pubs[0].ID+"/rollback", nil))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("ns 维度回滚 app 发布应 403: %d", w.Code)
+	}
+
+	// 读操作放行（GET ns/items/published/publishes 200）
+	for _, p := range []string{"/api/configcenter/namespaces/" + ns.ID, "/api/configcenter/namespaces/" + ns.ID + "/items", "/api/configcenter/namespaces/" + ns.ID + "/published"} {
+		w = httptest.NewRecorder()
+		h.ServeHTTP(w, req(ctx, "GET", p, nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("读应放行 %s: %d", p, w.Code)
+		}
+	}
+	// 不存在的 ns 写操作 → 404 不泄漏
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req(ctx, "POST", "/api/configcenter/namespaces/ns-nope/items", configcenter.ConfigItem{Key: "x", Value: "1"}))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("不存在 ns 应 404: %d", w.Code)
+	}
+}
+
+// TestEnsureByAppNameConflict409 锁住 M4 修复：手工共享 ns 占名 app-<appID> 后，
+// 应用维度写路径懒建失败映射 409 + 引导改名文案。
+func TestEnsureByAppNameConflict409(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewAppHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	ctx := acmeCtx()
+	// 手工建共享 ns 占名
+	nsh := configcenter.NewHandler(repo)
+	nsh.Authorize = h.Authorize
+	w := httptest.NewRecorder()
+	nsh.ServeHTTP(w, req(ctx, "POST", "/api/configcenter/namespaces", configcenter.Namespace{Name: "app-app-9"}))
+	if w.Code != 201 {
+		t.Fatalf("占名 ns 应 201: %d %s", w.Code, w.Body.String())
+	}
+	// 应用维度写路径 → 409
+	rq := httptest.NewRequest("POST", "/api/applications/app-9/dynamic-configs", strings.NewReader(`{"key":"k","value":"v"}`)).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, rq)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "命名空间名被占用") {
+		t.Fatalf("占名应 409: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 // fakeAppLookup 固定映射的应用名→ID 解析器（测试桩）。
 type fakeAppLookup struct{ m map[string]string }
 

@@ -40,6 +40,6 @@ export const fetchAppPublishes = (appId: string) =>
 export const fetchAppPublished = (appId: string) =>
   fetchAuth(`/api/applications/${appId}/dynamic-configs/published`).then(r => unwrap<ConfigPublished>(r))
 
-// 回滚走既有 ns 维度端点（路径不含 nsID，publishId 全局唯一）
-export const rollbackPublish = (publishId: string) =>
-  fetchAuth(`/api/configcenter/publishes/${publishId}/rollback`, { method: 'POST' }).then(r => unwrap<unknown>(r))
+// 回滚走应用维度端点（后端校验 pid 属本应用派生 ns，防跨应用回滚；权限域 application:write + AppGuard）
+export const rollbackAppPublish = (appId: string, publishId: string) =>
+  fetchAuth(`/api/applications/${appId}/dynamic-configs/rollback/${publishId}`, { method: 'POST' }).then(r => unwrap<unknown>(r))

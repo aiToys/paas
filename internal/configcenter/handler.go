@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/aitoys/paas/internal/httputil"
@@ -135,6 +134,23 @@ func (h *Handler) serveNamespaceCollection(w http.ResponseWriter, r *http.Reques
 	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 }
 
+// appScopeWriteDenied 校验 ns 维度写操作目标不是应用派生命名空间（scope=app）。
+// 应用派生 ns 归应用权限域（application:write + AppGuard），ns 维度写入会绕过该护栏，
+// 故写操作（删 ns/建改 item/publish）命中 scope=app 一律 403；ns 不存在保持 404 不泄漏。
+// 读操作（GET）放行（应用详情页与共享视图均可读）。
+func (h *Handler) appScopeWriteDenied(w http.ResponseWriter, r *http.Request, nsID string) bool {
+	n, err := h.repo.GetNamespace(r.Context(), nsID)
+	if err != nil {
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
+		return true
+	}
+	if n.Scope == ScopeApp {
+		httputil.WriteError(w, http.StatusForbidden, "应用派生配置请经应用详情操作")
+		return true
+	}
+	return false
+}
+
 // serveNamespaceItem 处理 namespaces/{id}[/{sub}[/{iid}]]。
 func (h *Handler) serveNamespaceItem(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/configcenter/namespaces/")
@@ -189,6 +205,9 @@ func (h *Handler) serveNamespaceGetDelete(w http.ResponseWriter, r *http.Request
 		if !h.allow(w, r, PermConfigCenterWrite) {
 			return
 		}
+		if h.appScopeWriteDenied(w, r, nsID) {
+			return
+		}
 		if err := h.repo.DeleteNamespace(r.Context(), nsID); err != nil {
 			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
@@ -217,6 +236,9 @@ func (h *Handler) serveItemCollection(w http.ResponseWriter, r *http.Request, ns
 		if !h.allow(w, r, PermConfigCenterWrite) {
 			return
 		}
+		if h.appScopeWriteDenied(w, r, nsID) {
+			return
+		}
 		var item ConfigItem
 		if err := json.NewDecoder(r.Body).Decode(&item); err != nil {
 			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
@@ -240,6 +262,9 @@ func (h *Handler) serveItemDelete(w http.ResponseWriter, r *http.Request, nsID, 
 		return
 	}
 	if !h.allow(w, r, PermConfigCenterWrite) {
+		return
+	}
+	if h.appScopeWriteDenied(w, r, nsID) {
 		return
 	}
 	// 校验 item 归属该 namespace，防止 DELETE /nsA/items/{item-of-nsB} 跨 ns 越权删除。
@@ -273,6 +298,9 @@ func (h *Handler) servePublish(w http.ResponseWriter, r *http.Request, nsID stri
 		return
 	}
 	if !h.allow(w, r, PermConfigCenterWrite) {
+		return
+	}
+	if h.appScopeWriteDenied(w, r, nsID) {
 		return
 	}
 	pub, err := h.repo.CreatePublish(r.Context(), nsID)
@@ -343,18 +371,15 @@ func (h *Handler) serveAppPublished(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
-	// 路径形态 apps/{appName}/published：首段=应用名（URL 解码），末段必须为 published。
+	// 路径形态 apps/{appName}/published：首段=应用名（r.URL.Path 已解码，勿再 PathUnescape 双重解码），
+	// 末段必须为 published。
 	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/configcenter/apps/"), "/")
 	parts := strings.Split(rest, "/")
 	if len(parts) != 2 || parts[1] != "published" || parts[0] == "" {
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
-	appName, err := url.PathUnescape(parts[0])
-	if err != nil || appName == "" {
-		httputil.WriteError(w, http.StatusNotFound, "not found")
-		return
-	}
+	appName := parts[0]
 	appID, err := h.appLookup.AppIDByName(r.Context(), appName)
 	if err != nil {
 		httputil.WriteInternalError(w, err)
@@ -405,7 +430,17 @@ func (h *Handler) servePublishAction(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 		return
 	}
-	rb, err := h.repo.RollbackPublish(r.Context(), parts[0])
+	pid := parts[0]
+	// 应用派生 ns 的回滚归应用权限域：先经 publish 反查 ns，scope=app 拒绝（防绕过 AppGuard）。
+	nsID, err := h.repo.PublishNamespaceID(r.Context(), pid)
+	if err != nil {
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
+		return
+	}
+	if h.appScopeWriteDenied(w, r, nsID) {
+		return
+	}
+	rb, err := h.repo.RollbackPublish(r.Context(), pid)
 	if err != nil {
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return

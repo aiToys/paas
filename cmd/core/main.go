@@ -1411,6 +1411,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("POST", "/api/applications/{id}/dynamic-configs/publish", apiroute.Tags("配置中心"), apiroute.Summary("发布应用动态配置版本"), apiroute.Perm("application:write"), apiroute.WithResp(configcenter.Publish{}))
 	reg.Operation("GET", "/api/applications/{id}/dynamic-configs/publishes", apiroute.Tags("配置中心"), apiroute.Summary("应用动态配置发布历史"), apiroute.Perm("application:read"), apiroute.WithResp([]configcenter.Publish{}))
 	reg.Operation("GET", "/api/applications/{id}/dynamic-configs/published", apiroute.Tags("配置中心"), apiroute.Summary("应用当前生效动态配置（客户端发现）"), apiroute.Perm("application:read"), apiroute.WithResp(configcenter.Publish{}))
+	reg.Operation("POST", "/api/applications/{id}/dynamic-configs/rollback/{pid}", apiroute.Tags("配置中心"), apiroute.Summary("应用动态配置回滚（校验发布属本应用派生命名空间）"), apiroute.Perm("application:write"), apiroute.WithResp(configcenter.Publish{}))
 	// 可观测
 	reg.Operation("GET", "/api/observability/metrics", apiroute.Tags("可观测"), apiroute.Summary("指标时序（惰性补点）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.MetricSeries{}))
 	reg.Operation("GET", "/api/observability/alert-rules", apiroute.Tags("可观测"), apiroute.Summary("告警规则列表"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.AlertRule{}))

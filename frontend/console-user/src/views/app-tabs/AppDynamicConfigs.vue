@@ -9,7 +9,7 @@ import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import {
   fetchAppDynamicConfigs, upsertAppDynamicConfig, deleteAppDynamicConfig,
-  publishAppDynamicConfigs, fetchAppPublishes, fetchAppPublished, rollbackPublish,
+  publishAppDynamicConfigs, fetchAppPublishes, fetchAppPublished, rollbackAppPublish,
   type DynamicConfigItem, type ConfigPublish, type ConfigPublished,
 } from '@/api/configcenter'
 
@@ -124,7 +124,7 @@ async function rollback(p: ConfigPublish) {
   const ok = await confirmDangerous({ action: '回滚到', target: `v${p.version}`, requireNameConfirm: isProd() })
   if (!ok) return
   try {
-    await rollbackPublish(p.id)
+    await rollbackAppPublish(props.appId, p.id)
     ElMessage.success(`已回滚到 v${p.version}`)
     load()
   } catch (e) {

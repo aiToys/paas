@@ -155,6 +155,10 @@ func (s *Store) EnsureByApp(ctx context.Context, appID string) (configcenter.Nam
 		if n.TenantID == tid && n.Scope == configcenter.ScopeApp && n.AppID == appID {
 			return n, nil
 		}
+		// 名字冲突：手工共享 ns 占了 app-<appID> 名（handler 映射 409 引导改名，不静默另建同名 ns）。
+		if n.TenantID == tid && n.Name == "app-"+appID {
+			return configcenter.Namespace{}, fmt.Errorf("命名空间已存在: %s", n.Name)
+		}
 	}
 	s.nsSeq++
 	n := configcenter.Namespace{

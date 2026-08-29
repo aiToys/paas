@@ -13,7 +13,7 @@ import AppDynamicConfigs from './app-tabs/AppDynamicConfigs.vue'
 const route = useRoute()
 const router = useRouter()
 
-interface Namespace { id: string; name: string; serviceId?: string; desc?: string; updatedAt: string }
+interface Namespace { id: string; name: string; scope?: string; serviceId?: string; desc?: string; updatedAt: string }
 interface Service { id: string; name: string }
 interface ConfigItem { id: string; namespaceId: string; key: string; value: string; type: string; updatedAt: string }
 interface Publish {
@@ -63,7 +63,9 @@ function isDetail() {
 
 async function loadNamespaces() {
   const resp = await fetchAuth('/api/configcenter/namespaces')
-  if (resp.ok) namespaces.value = (await resp.json()).data ?? []
+  if (resp.ok)
+    // 共享视图只展示手工命名空间：scope=app 的应用派生 ns 归应用详情「动态配置」区块管理（写路径后端已 403 拒绝）。
+    namespaces.value = ((await resp.json()).data ?? []).filter((n: Namespace) => n.scope !== 'app')
 }
 
 // 服务列表（关联服务下拉用，governance 租户内全部服务）。

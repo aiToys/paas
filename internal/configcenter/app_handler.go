@@ -20,6 +20,7 @@ import (
 //	POST   /api/applications/{id}/dynamic-configs/publish    发布
 //	GET    /api/applications/{id}/dynamic-configs/publishes  发布历史
 //	GET    /api/applications/{id}/dynamic-configs/published  当前生效
+//	POST   /api/applications/{id}/dynamic-configs/rollback/{pid}  回滚（校验 pid 属本应用派生 ns）
 //
 // 权限 application:read/write（应用资产归应用权限域）；受限应用写需 AppGuard write 动作。
 type AppHandler struct {
@@ -91,12 +92,15 @@ func (h *AppHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.servePublished(w, r, appID)
 	case len(sub) == 2 && sub[0] == "items":
 		h.serveItemDelete(w, r, appID, sub[1])
+	case len(sub) == 2 && sub[0] == "rollback":
+		h.serveRollback(w, r, appID, sub[1])
 	default:
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
 }
 
-// serveCollection GET 列 draft 项（自动 EnsureByApp）/ POST upsert 项。
+// serveCollection GET 列 draft 项（只读，FindAppNamespace 不懒建，无 ns 返空列表）/
+// POST upsert 项（写路径才 EnsureByApp 懒建）。
 func (h *AppHandler) serveCollection(w http.ResponseWriter, r *http.Request, appID string) {
 	switch r.Method {
 	case http.MethodGet:
@@ -111,18 +115,26 @@ func (h *AppHandler) serveCollection(w http.ResponseWriter, r *http.Request, app
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	ns, err := h.repo.EnsureByApp(r.Context(), appID)
-	if err != nil {
-		httputil.WriteInternalError(w, err)
-		return
-	}
 	if r.Method == http.MethodGet {
+		ns, ok, err := h.repo.FindAppNamespace(r.Context(), appID)
+		if err != nil {
+			httputil.WriteInternalError(w, err)
+			return
+		}
+		if !ok {
+			httputil.WriteData(w, []ConfigItem{})
+			return
+		}
 		list, err := h.repo.ListItems(r.Context(), ns.ID)
 		if err != nil {
 			httputil.WriteInternalError(w, err)
 			return
 		}
 		httputil.WriteData(w, list)
+		return
+	}
+	ns, err := h.ensureAppNS(w, r, appID)
+	if err != nil {
 		return
 	}
 	var item ConfigItem
@@ -139,6 +151,23 @@ func (h *AppHandler) serveCollection(w http.ResponseWriter, r *http.Request, app
 	httputil.WriteDataCreated(w, saved)
 }
 
+// ensureAppNS 写路径懒建应用派生 ns（EnsureByApp）。名字冲突（手工共享 ns 占了 app-<id> 名）
+// 映射 409 引导改名；其余错误 500 脱敏。失败时响应已写出，返回零值 + non-nil err 终止调用方。
+func (h *AppHandler) ensureAppNS(w http.ResponseWriter, r *http.Request, appID string) (Namespace, error) {
+	ns, err := h.repo.EnsureByApp(r.Context(), appID)
+	if err == nil {
+		return ns, nil
+	}
+	// memory/pg 两实现的名字冲突均为领域文本「命名空间已存在: <name>」（非 sentinel）。
+	if strings.Contains(err.Error(), "命名空间已存在") {
+		httputil.WriteError(w, http.StatusConflict,
+			fmt.Sprintf("命名空间名被占用：app-%s（手工共享命名空间占用，请改名）", appID))
+		return Namespace{}, err
+	}
+	httputil.WriteInternalError(w, err)
+	return Namespace{}, err
+}
+
 // serveItemDelete DELETE /dynamic-configs/items/{itemId}（校验 item 归属该应用 ns，防跨 ns 越权删）。
 func (h *AppHandler) serveItemDelete(w http.ResponseWriter, r *http.Request, appID, itemID string) {
 	if r.Method != http.MethodDelete {
@@ -148,9 +177,8 @@ func (h *AppHandler) serveItemDelete(w http.ResponseWriter, r *http.Request, app
 	if !h.allowWrite(w, r, appID) {
 		return
 	}
-	ns, err := h.repo.EnsureByApp(r.Context(), appID)
+	ns, err := h.ensureAppNS(w, r, appID)
 	if err != nil {
-		httputil.WriteInternalError(w, err)
 		return
 	}
 	items, err := h.repo.ListItems(r.Context(), ns.ID)
@@ -185,9 +213,8 @@ func (h *AppHandler) servePublish(w http.ResponseWriter, r *http.Request, appID 
 	if !h.allowWrite(w, r, appID) {
 		return
 	}
-	ns, err := h.repo.EnsureByApp(r.Context(), appID)
+	ns, err := h.ensureAppNS(w, r, appID)
 	if err != nil {
-		httputil.WriteInternalError(w, err)
 		return
 	}
 	pub, err := h.repo.CreatePublish(r.Context(), ns.ID)
@@ -261,7 +288,42 @@ func (h *AppHandler) servePublished(w http.ResponseWriter, r *http.Request, appI
 	})
 }
 
-// recordAudit 记审计（best-effort，失败仅日志不阻断主流程）。actor 由 handler 层无法感知，Detail 里补充上下文。
+// serveRollback POST /dynamic-configs/rollback/{pid} 应用维度回滚。
+// 权限域与 publish 对称（application:write + AppGuard write）；经 PublishNamespaceID 校验
+// pid 所属 ns 是本应用派生 ns（防跨应用回滚他人发布）；成功记审计 configcenter_rollback。
+func (h *AppHandler) serveRollback(w http.ResponseWriter, r *http.Request, appID, publishID string) {
+	if r.Method != http.MethodPost {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.allowWrite(w, r, appID) {
+		return
+	}
+	ns, err := h.ensureAppNS(w, r, appID)
+	if err != nil {
+		return
+	}
+	pubNSID, err := h.repo.PublishNamespaceID(r.Context(), publishID)
+	if err != nil {
+		// 跨应用/跨租户/不存在的 pid 统一 404 不泄漏存在性。
+		httputil.WriteError(w, http.StatusNotFound, "发布不存在: "+publishID)
+		return
+	}
+	if pubNSID != ns.ID {
+		httputil.WriteError(w, http.StatusNotFound, "发布不存在: "+publishID)
+		return
+	}
+	rb, err := h.repo.RollbackPublish(r.Context(), publishID)
+	if err != nil {
+		httputil.WriteServiceError(w, http.StatusBadRequest, err)
+		return
+	}
+	h.recordAudit(r.Context(), ns.TenantID, "configcenter_rollback", appID, fmt.Sprintf("version=%d,publishId=%s", rb.Version, rb.ID))
+	httputil.WriteData(w, rb)
+}
+
+// recordAudit 记审计（best-effort，失败仅日志不阻断主流程）。
+// actor 由 cmd/core 桥接时经 gateway.UserIDFrom(ctx) 取（AuditFunc 只收基本类型，handler 不感知身份）。
 func (h *AppHandler) recordAudit(ctx context.Context, tenantID, action, resourceID, detail string) {
 	if h.Audit == nil {
 		return
