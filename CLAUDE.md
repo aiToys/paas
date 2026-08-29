@@ -417,7 +417,7 @@ console-user 弃用 localStorage 明文 API Key 裸奔模式，改走密码登�
 - **第 6 轮（I8/I9 错误响应脱敏）**：`httputil.WriteServiceError(w, status, err)` 特征分流--底层英文技术错误（pgx/SQLSTATE/dial tcp/`*.svc.cluster.local`/duplicate key 等 `internalErrorMarkers`）-> 500 脱敏（`WriteInternalError`），业务中文消息 -> 按传入 status 返回。全局替换散落 `WriteError(w, 500, err.Error())`，防 pgx 错误细节泄漏 build:read 权限者。
 - **第 7 轮（数据一致性 + I1 PG 侧）**：① I2 devops PG CreateRelease/RollbackRelease 补偿事务用 `context.WithoutCancel(ctx)` + log 失败（不阻断主流程）。② I3 application Delete 成功后 QuotaCheck(-1) 回滚配额。③ I4 identity DeleteTenant 单事务 + `SELECT ... FOR UPDATE` 行锁防并发。④ I5 devops `SweepInterrupted(ctx)` 启动恢复（pending/running build_runs -> failed，防进程退出后构建卡 running）。⑤ I1 PG 侧 CreateRelease `pg_advisory_xact_lock(hashtext(app|env))` 串行化同 (app,env) 发布。
 - **第 8 轮（I1 memory 侧对齐 + 前端死代码清理）**：① I1 memory 侧 CreateRelease 把 step2（List->UpdateImage）+ step3（存 release）包进 `s.mu` 临界区（与 PG advisory lock 语义对齐；跨 store 嵌套 devops.mu -> workload.mu 单向无死锁；`-race` + 全量 devops 测试验证通过）。② **前端基座演示死代码清理**（开源打磨）：删 6 个 vue-admin 遗留演示模块（`modules/system/{dept,dict,permission,menu,log,notice}`）+ 关联组件（`DeptSelector`/`DictTag`）+ composable（`useDict`）+ mock handler（dept/dict/permission/menu-manage/log/notice）+ 死常量（DICT/DEPT/PERMISSION/MENU/NOTICE/LOG 共 10 个）+ `MODULE_STATUS_MAP`（仅 permission List 用）；`NoticeInfo` 类型迁移到 `app/stores/notice`（保留 notice UI 壳 Header 铃铛 + dashboard 横幅，数据已短路为空）；`mock/handlers/menu.ts` 重写为基座最小演示（home + 访问控制 user/role）。i18n 零 dept/dict 文案（无需动）。vue-tsc + vite build 双通过。②b **i18n 死 key 命名空间清理**：删 `dept/permission/menu/crud/dict/log` 6 个死 key 命名空间（zh-CN + en-US 共 12 块，对应模块已删全无引用，Serena regex 跨文件批量删，vue-tsc 验证通过）；`notice` 命名空间保留（NoticeCenter 壳在用）。③ **后端资源泄漏 + 前端代码质量双路审计完成，无严重新发现**：后端关键点（`observability/real/http.go` defer Body.Close、`maas/{openai_compatible,mock,echo}` goroutine `select <-ctx.Done()` 断连退出 + defer close/body close、devops runBuild baseCtx 进程退出 cancel）全部正确处理，印证第 3 轮验证；前端 5 个轮询文件（App/Observability/DevOps/DataServiceDetail/AppBuilds）`setInterval` 均 `onUnmounted clearInterval` 清理，无 v-html/innerHTML、无 localStorage/sessionStorage 残留（已迁 cookie）、无 pinia persist、无 document.cookie 直接操作。
-- **留后续**：I4 parseDigest 信任 Pod 日志、I5/I6 各 client CheckRedirect 纵深、I13/I14 refresh rotation + logout 撤销（jti 黑名单，架构级）、I16 限流多副本 Redis、告警通知通道、Tempo span 详情、Vendor 改 BaseURL/凭证后存量通道自动同步。
+- **留后续**：I4 parseDigest 信任 Pod 日志、I5/I6 各 client CheckRedirect 纵深、I13/I14 refresh rotation + logout 撤销（jti 黑名单，架构级）、I16 限流多副本 Redis、Tempo span 详情、Vendor 改 BaseURL/凭证后存量通道自动同步。
 
 ### 深度检测第 9 轮（资源泄漏 + 性能 + 死锁，2026-08-04）
 
@@ -718,7 +718,7 @@ internal/observability/  领域(MetricSeries 惰性时序 + AlertRule + Alert �
 - console-user「平台能力 → 可观测」`/platform/observability`：应用下拉 + 4 指标卡（CPU/内存/RPS/延迟，当前值 + CSS sparkline 趋势，10s 轮询）+ 告警规则列表（增删）+ 当前告警（severity 着色）。
 - **接真实后端（env 开关）**：`internal/observability/real`（MetricsStore/LogsStore/TracesStore 纯 net/http 适配 Prometheus/Loki/Jaeger HTTP API）+ `internal/observability/compose`（聚合 Repository）+ 细粒度 reader 接口（`MetricsReader`/`LogsReader`/`TracesReader`/`RuleStore`）。`cmd/core.buildObservabilityStore` 按三 env 开关切换：`PAAS_PROM_URL`/`PAAS_LOKI_URL`/`PAAS_JAEGER_URL` 非空接真实后端，空则该支柱保持 memory 惰性 mock（三支柱独立可混用）；alert rules 始终 memory，`ListAlerts` 基于 metrics reader 即时评估（real 模式取真实 Prometheus 当前值）。后端不可达降级返空 + 日志（不 5xx/panic）。未配 URL 行为与现状完全一致。metric/label 命名约定（`paas_cpu_usage` 等）查询端落地。
 - **应用侧 OTel 埋点（P2-3，采集端闭环）**：`internal/observability/tracing` 初始化全局 TracerProvider（OTLP/HTTP exporter，`PAAS_OTEL_ENDPOINT` env 开关，空=noop 行为不变），mux 经 `otelhttp` 中间件包装自动建 span（探针/契约/文档端点过滤避免噪音），W3C traceparent 透传播。控制面自身链路可被 `/api/observability/traces`（接 Jaeger）观测，端到端可观测闭环（采集→存储→展示）。引入 go.opentelemetry.io/otel + sdk + otlptracehttp + contrib/otelhttp（Apache 2.0）。
-- **留后续**：告警通知通道（webhook/Slack）/状态机/大盘、Collector 采集管道编排、长期存储降采样、Jaeger badger 本地存储 + PVC（持久化 trace）。
+- **留后续**：Collector 采集管道编排、长期存储降采样、Jaeger badger 本地存储 + PVC（持久化 trace）。（告警通知通道/状态机已落地——后台评估引擎 + webhook 出站 + 通知并入，00ce2ff）
 - **trace 后端用 Jaeger all-in-one（替 Tempo，2026-08-11）**：Tempo single-binary 把 ingester+querier+compactor 塞一个进程，512Mi OOM、2Gi 才稳（OOMKilled 循环重启丢 trace）；Jaeger all-in-one 是天生单体（Go），in-memory 存储 ~256Mi 长期稳定，CNCF 毕业。**core 推送端零改动**（OTLP/HTTP 4318，Jaeger 原生接收），查询端 `real/traces.go` 适配 Jaeger v1 JSON（`/api/traces?service=X&start=&end=&limit=` 一次返完整 span 树含 processes，无需 Tempo 那样二次 enrich）。错误判定走 Jaeger `error=true` tag + http 5xx；`gen_ai.*` 属性全透传。
 - **K8s 真实后端部署（observability namespace，三支柱真实化）**：dev 集群装真实后端栈，core 经 env 接通后即从惰性 mock 切真实。部署清单 `deploy/observability/`（社区 helm chart + values + ingress）：
   - **组件**：`prometheus-community/prometheus`（Prometheus + node-exporter，关 alertmanager/kube-state-metrics）+ `grafana/loki-stack`（Loki + Promtail）+ `deploy/observability/jaeger.yaml`（Jaeger all-in-one 原生 Deployment，in-memory 存储，非 helm chart——轻量单体无需 chart）+ `grafana/grafana`（预配 Prom/Loki/Jaeger 三数据源）。
@@ -747,13 +747,26 @@ internal/security/  领域(Secret secret|certificate + AuditLog) + Repository(Se
 ```
 
 - `internal/security/`：`Secret{Name(租户内唯一)/Type(secret|certificate)/Value}` + `AuditLog{Actor/Action/ResourceType/ResourceID/Detail/At}`；`SecretMask="••••••"` + `Masked()`。
-- **Secret 安全**：后端明文存储，`List/Get/Create` 返回均掩码（与 appconfig 一致，不泄漏长度/内容）。真实加密存储（KMS/Vault）留后续。
+- **Secret 安全**：`List/Get/Create` 返回均掩码（与 appconfig 一致，不泄漏长度/内容）。**静态加密已落地**（2026-08-29，见下「敏感数据静态加密」横切章）。轮转/过期/KMS 留后续。
 - **审计自动记录**：handler 层在 Create/Delete Secret 成功后自动 `RecordAudit`，`Actor` 由 `UserIDFrom`（复用 `gateway.UserIDFrom`）从身份 ctx 取。审计只增不删（合规）。
 - Repository 单 Store（`ListSecrets/GetSecret/CreateSecret/DeleteSecret` + `ListAuditLogs/RecordAudit`），全方法租户强制过滤；审计按时间倒序，支持 resourceType/action 过滤。
 - REST：`GET/POST /secrets`、`DELETE /secrets/{id}`（记审计）、`GET /audit-logs?resourceType=&action=`。
 - 权限：`security:read/write`（admin/dev 读写，viewer 只读）；不接 prod:write（租户级资产，不按物理环境隔离）。
 - console-user「平台能力 → 安全」`/platform/security`：密钥/证书表（掩码）+ 审计日志表（actor/动作/资源/详情，动作过滤）+ 创建弹窗（删除走 `useDangerConfirm` 输入名称确认）。
-- 切片**不做**：IAM 细粒度策略（已有 RBAC）、网络防火墙（依赖数据面）、密钥轮转/过期、证书签发（ACME）、真实加密存储——均留后续。
+- 切片**不做**：IAM 细粒度策略（已有 RBAC）、网络防火墙（依赖数据面）、密钥轮转/过期、证书签发（ACME）——均留后续。
+
+### 敏感数据静态加密（横切，2026-08-29）
+
+留后续复审裁决的最后一笔 A 类基线缺口（基线表·秘钥管理「明文存储」）。三处敏感数据 at-rest 加密，DB 泄漏（备份落盘/注入面/误配只读账号）不再等于凭证全泄。spec `docs/superpowers/specs/2026-08-29-secret-encryption-design.md`：
+
+- **`internal/crypto` 单一真源**：AES-256-GCM（Go 标准库零依赖），密文格式 `enc:v1:<base64(nonce+ct+tag)>`（版本位留升级路）；**`Decrypt` 无前缀原样返回**——存量明文数据零迁移兼容，升级部署后旧数据照常可读，新写入逐步密文化。nil Cipher = 明文兼容模式（Encrypt/Decrypt 透传）。
+- **master key 治理**（与 PAAS_JWT_SECRET 同款）：env `PAAS_SECRET_MASTER_KEY`（64 位 hex，`openssl rand -hex 32`）；`PAAS_PROD=true` 未设/非法**拒绝启动**；dev 未设明文模式 + 启动 WARNING。helm `security.secretMasterKey`（values → Secret → secretKeyRef，不进 Deployment 明文 env）。
+- **两种切入方式（按模块威胁模型分治）**：
+  - **security/appconfig：装配层装饰器**（`security.NewEncryptedRepo` / `appconfig.NewEncryptedRepo`，buildAllStores 内包装）：写路径加密 / 明文消费点（Resolve、ListPlain 供 reconciler 注入）解密；List/Get 掩码直通。appconfig **掩码回写保护**：Upsert 收到 `••••••`（前端编辑不回填值）时用库中原值按存储形态回写（不重加密防 nonce 抖动），顺带修了「掩码覆盖真实凭证」既有 bug。
+  - **dataservice：PG 持久层加密**（`dspg.WithCipher`，装饰器方案被审查否决）：managed 模式凭证由 store 内部 `FillConnection` 生成（handler 清空 Connection 传入），store 外装饰器无值可加密、后包则密文被 FillConnection 重建进 uri。加密下沉 store 持久层（FillConnection 之后 marshal 之前 + Scan 后解密），按 `dataservice.MaskKeys` 字段级（password/secretKey/token/api_key/master_key/uri），host/port/user/database 明文保留（排障可读）。applier/reconciler/BindingInjector 天然拿明文（CRD/K8s Secret 本就需明文）。memory 路径不加密（进程内存非 at-rest 泄漏面）。`engines` 表 connection（external-shared 第三方凭证）同款接缝覆盖。
+  - **security PG seed**（直连 SQL 绕过装饰器）：`secpg.WithCipher` 在 seedAll/ensurePlatformSecrets INSERT 前加密，fail-fast（宁可不 seed 不明文落库）。
+- **e2e 教训**：Task 4 装配曾漏传 `dspg.WithCipher`（实现者+审查者双漏检，dataservice 落库仍明文）——**装配类改动必须 e2e 断言落库形态**（SELECT 看 enc:v1 前缀），diff 审查看不出「该传未传」。
+- **撤 key 降级语义（运维须知）**：加密部署后撤掉 master key 重启 → cipher=nil 对 `enc:v1:` 前缀值原样透传，airouter 等凭证以密文字面量发上游（推理 401）——加密→明文降级无自动告警，换 key/撤 key 需同步评估存量数据。
 
 
 
@@ -1022,8 +1035,8 @@ console-user 导航采用**三层信息架构**（避免「资源」概念被滥
 | 工作负载部署 | K8s Deployment | resources requests/limits（QoS 非 BestEffort）、readiness/liveness probe、副本数、优先级 PriorityClass、PDB、HPA | requests/limits 已落地（2026-08-28，生产禁 BestEffort双入口）；HPA/PDB/优先级缺 |
 | 生产发布策略 | Argo Rollouts / Flagger | 滚动/金丝雀（按比例分批放量+指标分析+自动回滚）/蓝绿（并行环境+瞬时切流），发布观察窗口 | 并行验证式金丝雀已落地（2026-08-28，人工观察决策）；按比例切流缺（依赖流量权重）；蓝绿可借泳道底座 |
 | 泳道/流量隔离 | 阿里全链路灰度 MSE | 泳道一等实体（显式创建/常驻标记/手动关闭）、资源规格模板、入口流量按比例切泳道 | 实体已落地（2026-08-28，standard/permanent/Weight 留位）；入口流量按比例切泳道缺 |
-| 可观测 | Grafana/Pyroscope | RED/USE 指标、结构化日志、trace、告警通知通道、SLO 燃烧率 | 告警通知通道缺；SLO 缺（2026-08-23 审计已列） |
-| 秘钥管理 | Vault/KMS | 加密存储（envelope encryption）、轮转、过期、动态凭证 | 明文存储；轮转/过期缺（设计时已知） |
+| 可观测 | Grafana/Pyroscope | RED/USE 指标、结构化日志、trace、告警通知通道、SLO 燃烧率 | 告警通知已落地（后台评估引擎+webhook 出站+通知并入，00ce2ff）；SLO 缺（2026-08-23 审计已列） |
+| 秘钥管理 | Vault/KMS | 加密存储（envelope encryption）、轮转、过期、动态凭证 | 静态加密已落地（2026-08-29 AES-GCM envelope）；轮转/过期缺 |
 
 **工作负载资源规格最低标准**（新增 Workload 能力时必须满足）：
 - 生产环境 Pod 必须有 CPU/内存 requests+limits（不得 BestEffort）；联调泳道可放宽（副本 1 + 无 limits 可接受，但需文档说明取舍）。
