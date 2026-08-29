@@ -61,7 +61,11 @@ type LaneGC struct {
 // Delete/EnvType/审计均按 Workload.TenantID 派生租户 ctx——store 层强制租户过滤，
 // 无租户 ctx 会全部报错致 GC 静默失效（R1-R5 审计 Critical 修复）。
 func (g *LaneGC) Sweep(ctx context.Context) int {
-	now := g.Now()
+	nowFn := g.Now
+	if nowFn == nil {
+		nowFn = time.Now // nil 兜底：装配漏注入时不再 SIGSEGV（k8s 生产暴露，31 次重启根因）
+	}
+	now := nowFn()
 	ttl := g.TTL
 	if ttl <= 0 {
 		ttl = 72 * time.Hour

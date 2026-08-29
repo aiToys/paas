@@ -173,6 +173,7 @@ func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, metrics
 		Lanes:    laneStatusBridge{lanes: stores.Lane}, // permanent 常驻跳过 + 回收后 MarkClosed
 		TTL:      envDuration("PAAS_LANE_TTL", 72*time.Hour),
 		MaxSweep: 20,
+		Now:      time.Now, // 生产 panic 修复：Sweep 首行 g.Now()，nil func 直接 SIGSEGV（k8s 暴露）
 		Quota: func(ctx context.Context, tenantID string) {
 			// 配额回退与 handler 删除路径同源（CheckAndInc -1，幂等）。
 			if _, err := stores.Billing.CheckAndInc(ctx, billing.ResWorkloads, -1); err != nil {
