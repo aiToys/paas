@@ -12,10 +12,11 @@ const SecretMask = "••••••" //nolint:gosec // G101 误报：固定�
 // DefaultNamespace 是未注入 NamespaceResolver 时的兜底 K8s namespace（BuildConnection/FillConnection 用）。
 const DefaultNamespace = "paas"
 
-// maskKeys 是连接信息中需要掩码的 key。
+// MaskKeys 是连接信息中敏感字段集合（掩码/静态加密共用同一真源）。
 // password/secretKey/token/api_key/master_key 是凭证；uri 含 user:password@ 整串掩码（list/detail 不泄漏连接串明文）。
 // endpoint（http://host:port，无凭证）/host/port/user/database/accessKey 不掩码。
-var maskKeys = map[string]bool{
+// 导出供 pg 持久层（加密下沉 store 后）按同集合做字段级加解密，防两处集合漂移。
+var MaskKeys = map[string]bool{
 	"password":   true,
 	"secretKey":  true,
 	"token":      true,
@@ -162,7 +163,7 @@ func BuildConnection(name, kind, engine, namespace string, spec, credentials map
 func MaskConnection(conn map[string]string) map[string]string {
 	out := make(map[string]string, len(conn))
 	for k, v := range conn {
-		if maskKeys[k] {
+		if MaskKeys[k] {
 			out[k] = SecretMask
 		} else {
 			out[k] = v

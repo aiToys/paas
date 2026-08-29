@@ -16,6 +16,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/aitoys/paas/internal/crypto"
 	"github.com/aitoys/paas/internal/dataservice"
 	storagepg "github.com/aitoys/paas/internal/storage/pg"
 	"github.com/aitoys/paas/pkg/tenant"
@@ -25,7 +26,10 @@ import (
 type Store struct {
 	db         *storagepg.DB
 	nsResolver dataservice.NamespaceResolver
-	seq        atomic.Int64 // ID 生成 seq，避免纳秒精度撞主键（与内存 ds-%d-%d 同款）
+	// cipher Connection 静态加密（持久层接缝：FillConnection 后加密落库 / Scan 后解密）。
+	// nil = 明文模式（dev 未配 master key），行为与历史一致。
+	cipher *crypto.Cipher
+	seq    atomic.Int64 // ID 生成 seq，避免纳秒精度撞主键（与内存 ds-%d-%d 同款）
 }
 
 // Option 配置 Store。
@@ -35,6 +39,11 @@ type Option func(*Store)
 // 未注入兜底 dataservice.DefaultNamespace。
 func WithNamespaceResolver(r dataservice.NamespaceResolver) Option {
 	return func(s *Store) { s.nsResolver = r }
+}
+
+// WithCipher 注入 Connection 静态加密 cipher（nil = 明文模式）。
+func WithCipher(c *crypto.Cipher) Option {
+	return func(s *Store) { s.cipher = c }
 }
 
 // NewStore 创建 dataservice PG 仓储。db 必须已完成迁移。
@@ -94,14 +103,14 @@ func unmarshalSpec(raw []byte) map[string]string {
 
 // scanDS 通过 storagepg.RowScanner 抽象 QueryRow 与 Row 两种 Scan 来源。
 // spec/connection 列读出为 []byte，经 unmarshalSpec 转 nil 安全的 map。
-func scanDS(r storagepg.RowScanner, d *dataservice.DataService) error {
+func (s *Store) scanDS(r storagepg.RowScanner, d *dataservice.DataService) error {
 	var specRaw, connRaw []byte
 	var replicas sql.NullInt32
 	if err := r.Scan(&d.ID, &d.TenantID, &d.Kind, &d.Name, &specRaw, &connRaw, &d.Status, &d.Source, &d.EngineID, &d.EnvID, &d.AppID, &d.CreatedAt, &d.UpdatedAt, &replicas, &d.CPU, &d.Memory, &d.StorageGB, &d.Image); err != nil {
 		return err
 	}
 	d.Spec = unmarshalSpec(specRaw)
-	d.Connection = unmarshalSpec(connRaw)
+	d.Connection = decryptConnection(s.cipher, unmarshalSpec(connRaw))
 	if replicas.Valid {
 		rv := int(replicas.Int32)
 		d.Replicas = &rv
@@ -134,7 +143,7 @@ func (s *Store) queryAll(ctx context.Context, whereArgs []any, kind string, orde
 	out := make([]dataservice.DataService, 0)
 	for rows.Next() {
 		var d dataservice.DataService
-		if err = scanDS(rows, &d); err != nil {
+		if err = s.scanDS(rows, &d); err != nil {
 			return nil, err
 		}
 		out = append(out, d)
@@ -166,7 +175,7 @@ func (s *Store) Get(ctx context.Context, id string) (dataservice.DataService, er
 	row := s.db.Pool().QueryRow(ctx,
 		`SELECT `+dsCols+` FROM data_services WHERE id=$1 AND tenant_id=$2`, id, tid)
 	var d dataservice.DataService
-	if err = scanDS(row, &d); err != nil {
+	if err = s.scanDS(row, &d); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return dataservice.DataService{}, fmt.Errorf("数据服务不存在: %s", id)
 		}
@@ -181,7 +190,7 @@ func (s *Store) GetAny(ctx context.Context, id string) (dataservice.DataService,
 	row := s.db.Pool().QueryRow(ctx,
 		`SELECT `+dsCols+` FROM data_services WHERE id=$1`, id)
 	var d dataservice.DataService
-	if err := scanDS(row, &d); err != nil {
+	if err := s.scanDS(row, &d); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return dataservice.DataService{}, fmt.Errorf("数据服务不存在: %s", id)
 		}
@@ -222,6 +231,8 @@ func (s *Store) Create(ctx context.Context, d dataservice.DataService) (dataserv
 	if !dataservice.IsExternal(d.Source) {
 		d.FillConnection(s.namespace(d.TenantID))
 	}
+	// 加密必须在 FillConnection 之后（装饰器路线的时序缺口：managed 模式凭证在 store 内生成）。
+	d.Connection = encryptConnection(s.cipher, d.Connection)
 	specBytes, err := marshalSpec(d.Spec)
 	if err != nil {
 		return dataservice.DataService{}, err
@@ -238,7 +249,7 @@ RETURNING `+dsCols,
 		d.Replicas, d.CPU, d.Memory, d.StorageGB, d.Image,
 	)
 	var saved dataservice.DataService
-	if err = scanDS(row, &saved); err != nil {
+	if err = s.scanDS(row, &saved); err != nil {
 		if storagepg.IsUniqueViolation(err) {
 			return dataservice.DataService{}, storagepg.FormatExists("数据服务")
 		}
@@ -297,6 +308,8 @@ func (s *Store) Update(ctx context.Context, d dataservice.DataService) (dataserv
 	if ex.Connection != nil && !dataservice.IsExternal(ex.Source) {
 		ex.FillConnection(s.namespace(ex.TenantID))
 	}
+	// FillConnection 之后加密落库（同 Create 接缝顺序）。
+	ex.Connection = encryptConnection(s.cipher, ex.Connection)
 	// 合并后复校验，防止 PUT 用空 spec 清空 Create 时强制的必填字段。
 	if err := ex.Validate(); err != nil {
 		return dataservice.DataService{}, err
@@ -315,7 +328,7 @@ WHERE id=$10 AND tenant_id=$11 RETURNING `+dsCols,
 		ex.Status, specBytes, connBytes, ex.Replicas, ex.CPU, ex.Memory, ex.StorageGB, ex.Image, ex.UpdatedAt, d.ID, tid,
 	)
 	var saved dataservice.DataService
-	if err = scanDS(row, &saved); err != nil {
+	if err = s.scanDS(row, &saved); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return dataservice.DataService{}, fmt.Errorf("数据服务不存在: %s", d.ID)
 		}
