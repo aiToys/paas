@@ -5,16 +5,18 @@ import (
 	"log"
 
 	"github.com/aitoys/paas/internal/appconfig"
+	"github.com/aitoys/paas/internal/configcenter"
 	"github.com/aitoys/paas/internal/core/application"
 	"github.com/aitoys/paas/internal/workload"
 )
 
-// appCascadeDeleter 桥接 application.CascadeDeleter：删应用前清理关联的工作负载 + 应用配置。
+// appCascadeDeleter 桥接 application.CascadeDeleter：删应用前清理关联的工作负载 + 应用配置 + 应用维度动态配置。
 // admin + 租户侧共用（best-effort，失败记日志不阻断删除）。
 // devops 历史记录（仓库/构建/镜像/发布）保留作历史归档，不随应用删除。
 type appCascadeDeleter struct {
 	wl      workload.Repository
 	cfg     appconfig.Repository
+	cc      configcenter.Repository                    // 应用派生命名空间（scope=app）级联删（best-effort）
 	members application.MemberRepository               // 级联清应用成员（best-effort；PG 侧 CASCADE 已兜底）
 	wlQuota func(ctx context.Context, delta int) error // 工作负载删除成功后回收配额（best-effort）
 }
@@ -48,6 +50,14 @@ func (c appCascadeDeleter) CascadeDelete(ctx context.Context, appID string) erro
 	if c.members != nil {
 		if err := c.members.RemoveAppMembers(ctx, appID); err != nil {
 			log.Printf("级联删应用成员失败（best-effort）: app=%s: %v", appID, err) //nolint:gosec // G706 误报
+		}
+	}
+	// 级联删应用派生命名空间（scope=app 动态配置；PG 侧无 FK 关联应用，必须显式删）。
+	if c.cc != nil {
+		if ns, ok, err := c.cc.FindAppNamespace(ctx, appID); err == nil && ok {
+			if err := c.cc.DeleteNamespace(ctx, ns.ID); err != nil {
+				log.Printf("级联删应用动态配置失败（best-effort）: app=%s: %v", appID, err) //nolint:gosec // G706 误报
+			}
 		}
 	}
 	return nil

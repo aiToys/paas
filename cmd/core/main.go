@@ -551,6 +551,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	appHandler.CascadeDelete = appCascadeDeleter{
 		wl:      stores.Workload,
 		cfg:     stores.AppConfig,
+		cc:      stores.ConfigCenter,
 		members: stores.AppMembers,
 		wlQuota: wlQuotaFn,
 	}.CascadeDelete
@@ -758,6 +759,15 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// 注入 governance Service 存在性校验（CreateNamespace 的 ServiceID 归属校验，防悬挂引用）。
 	ccHandler.WithServiceLookup(ccServiceLookup{gov: stores.Governance})
 
+	// 应用维度动态配置（scope=app 主路径，挂 composite dynamic-configs 分发）：
+	// 权限 application:read/write（应用资产归应用权限域）+ AppGuard 受限应用 enforcement + publish 审计。
+	ccAppHandler := configcenter.NewAppHandler(stores.ConfigCenter)
+	ccAppHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+	ccAppHandler.WithGuard(appGuard)
+	ccAppHandler.WithAudit(func(ctx context.Context, tenantID, action, resourceID, detail string) {
+		_ = (&identityAuditAdapter{store: stores.Security}).Record(ctx, tenantID, gateway.UserIDFrom(ctx), action, "namespace", resourceID, detail)
+	})
+
 	// 可观测（指标监控 + 告警规则，平台能力横切）。
 	// 惰性时序模拟采集，即时评估告警；不接 prod:write，独立于物理环境。
 	// obsRepo/engine 已在 serveHTTP 开头构造（单实例，通知桥接同源）。
@@ -855,7 +865,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 			_, err := stores.Billing.CheckAndInc(ctx, billing.ResApplications, delta)
 			return err
 		}),
-		application.WithAdminCascade(appCascadeDeleter{wl: stores.Workload, cfg: stores.AppConfig, wlQuota: wlQuotaFn}),
+		application.WithAdminCascade(appCascadeDeleter{wl: stores.Workload, cfg: stores.AppConfig, cc: stores.ConfigCenter, wlQuota: wlQuotaFn}),
 		application.WithAdminAudit(&identityAuditAdapter{store: stores.Security}),
 		application.WithAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
 	)
@@ -915,6 +925,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 					return
 				case "members":
 					memberHandler.ServeHTTP(w, r)
+					return
+				case "dynamic-configs":
+					ccAppHandler.ServeHTTP(w, r)
 					return
 				}
 			}
@@ -1386,6 +1399,13 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/configcenter/namespaces/{id}/published", apiroute.Tags("配置中心"), apiroute.Summary("当前生效配置（客户端发现）"), apiroute.Perm("governance:read"), apiroute.WithResp(configcenter.Publish{}))
 	reg.Operation("GET", "/api/configcenter/publishes", apiroute.Tags("配置中心"), apiroute.Summary("发布历史"), apiroute.Perm("governance:read"), apiroute.WithResp([]configcenter.Publish{}))
 	reg.Operation("POST", "/api/configcenter/publishes/{id}/rollback", apiroute.Tags("配置中心"), apiroute.Summary("回滚到历史版本"), apiroute.Perm("governance:write"), apiroute.WithResp(configcenter.Publish{}))
+	// 配置中心（应用维度，scope=app，composite 内部派发）
+	reg.Operation("GET", "/api/applications/{id}/dynamic-configs", apiroute.Tags("配置中心"), apiroute.Summary("应用动态配置项（draft，自动派生命名空间）"), apiroute.Perm("application:read"), apiroute.WithResp([]configcenter.ConfigItem{}))
+	reg.Operation("POST", "/api/applications/{id}/dynamic-configs", apiroute.Tags("配置中心"), apiroute.Summary("应用动态配置 upsert"), apiroute.Perm("application:write"), apiroute.WithReqBody(configcenter.ConfigItem{}), apiroute.WithResp(configcenter.ConfigItem{}))
+	reg.Operation("DELETE", "/api/applications/{id}/dynamic-configs/items/{itemId}", apiroute.Tags("配置中心"), apiroute.Summary("删除应用动态配置项"), apiroute.Perm("application:write"))
+	reg.Operation("POST", "/api/applications/{id}/dynamic-configs/publish", apiroute.Tags("配置中心"), apiroute.Summary("发布应用动态配置版本"), apiroute.Perm("application:write"), apiroute.WithResp(configcenter.Publish{}))
+	reg.Operation("GET", "/api/applications/{id}/dynamic-configs/publishes", apiroute.Tags("配置中心"), apiroute.Summary("应用动态配置发布历史"), apiroute.Perm("application:read"), apiroute.WithResp([]configcenter.Publish{}))
+	reg.Operation("GET", "/api/applications/{id}/dynamic-configs/published", apiroute.Tags("配置中心"), apiroute.Summary("应用当前生效动态配置（客户端发现）"), apiroute.Perm("application:read"), apiroute.WithResp(configcenter.Publish{}))
 	// 可观测
 	reg.Operation("GET", "/api/observability/metrics", apiroute.Tags("可观测"), apiroute.Summary("指标时序（惰性补点）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.MetricSeries{}))
 	reg.Operation("GET", "/api/observability/alert-rules", apiroute.Tags("可观测"), apiroute.Summary("告警规则列表"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.AlertRule{}))
