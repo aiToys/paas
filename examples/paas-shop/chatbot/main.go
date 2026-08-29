@@ -35,6 +35,7 @@ var (
 	store        historyStore
 	httpClient   = observ.NewClient()
 	streamClient = observ.NewStreamingClient() // 调平台 gateway 用（agent 长 reasoning 超 10s）
+	dyn          *dynConfig                    // 动态配置（配置中心按应用名发现，60s 热更新）
 )
 
 // chatMsg 是对话历史的一条消息（OpenAI role/content 形态）。
@@ -173,7 +174,11 @@ func main() {
 	if store == nil {
 		store = newMemHistory()
 	}
-	slog.Info("chatbot 服务就绪", "gateway", gatewayURL, "agentModel", agentModel, "memory", memoryMode)
+	// 动态配置：按应用名发现拉取已发布快照，60s 轮询热更新（失败降级默认值不阻塞主流程）
+	dyn = newDynConfig()
+	go dyn.Start(context.Background())
+	slog.Info("chatbot 服务就绪", "gateway", gatewayURL, "agentModel", agentModel, "memory", memoryMode,
+		"configApp", dyn.appName, "welcome", dyn.Welcome(), "topk", dyn.TopK())
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthz)
@@ -215,7 +220,10 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 	// 历史 + 本轮 user 消息（system 人设在历史首条，Append 时保证）
 	hist := store.Load(r.Context(), req.UserID)
 	if len(hist) == 0 || hist[0].Role != "system" {
-		hist = append([]chatMsg{{"system", "你是 PaasShop 智能客服，友好专业。只回答商品、订单、售后相关问题。回答简洁。"}}, hist...)
+		// 动态配置注入：欢迎语（welcome_message）+ 推荐条数（recommend_topk）
+		system := fmt.Sprintf("你是 PaasShop 智能客服，友好专业。只回答商品、订单、售后相关问题。回答简洁。开场请用一句欢迎语：「%s」。推荐商品时最多给 %d 个。",
+			dyn.Welcome(), dyn.TopK())
+		hist = append([]chatMsg{{"system", system}}, hist...)
 	}
 	msgs := append(hist, chatMsg{"user", req.Message})
 
