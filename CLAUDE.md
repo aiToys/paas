@@ -679,9 +679,15 @@ internal/governance/  领域(Service http|grpc + Instance healthy|unhealthy + La
 - **熔断器（治理四件套之熔断）**：`CircuitBreaker{Name(租户内唯一),ServiceID,Strategy(error_rate|slow_call),Threshold(0-100),MinRequests,WindowSecs,Enabled}` + 即时评估 `EvaluateBreaker(b, now)`（FNV-1a+时间桶确定性生成窗口统计，三态 closed/open/half-open，无 goroutine，与 metrics/logs/traces 惰性模式同构）。State 非持久化——handler 返回前即时填充；样本不足（Requests<MinRequests）不熔断。逻辑配置复用 `governance:read/write`，不接 prod:write。REST：`GET/POST /api/breakers?serviceId=`、`PUT/DELETE /api/breakers/{id}`。真实流量采集（Sidecar/SDK 上报滑动窗口）留后续。
 - 切片**不接真实数据面**（进程内 mock）；泳道路由（Instance.LaneID 预留）归后续治理子切片。
 
-### 配置中心（治理四件套：运行时动态配置）
+### 配置中心（治理四件套：运行时动态配置，应用维度主路径）
 
-版本化动态配置，**与 appconfig（工作负载级、静态、重启注入）正交**：跨实例共享、版本/发布/回滚、客户端按版本发现。独立于物理环境（namespace 逻辑隔离），不接 `EnvTypeResolver`，复用 `governance:read/write` 权限：
+版本化动态配置，**与 appconfig（工作负载级、静态、重启注入）正交**：跨实例共享、版本/发布/回滚、客户端按版本发现。独立于物理环境（namespace 逻辑隔离），不接 `EnvTypeResolver`。**应用维度改造（2026-08-29，spec `docs/superpowers/specs/2026-08-29-configcenter-app-centric-design.md`）**：Namespace 双 scope——`app`（应用派生，`EnsureByApp(ctx, appID)` 懒建，name=`app-<appID>`，用户零 namespace 心智）/`shared`（跨应用共享，治理方手工建，现行为保留；存量迁移为 shared）。应用维度端点权限 `application:read/write` + AppGuard `write` 动作；shared 端点维持 `governance:read/write`：
+
+- **应用维度 REST**（`internal/configcenter/app_handler.go`，挂 application composite `dynamic-configs` 分发）：`GET/POST /api/applications/{id}/dynamic-configs`（列表自动懒建/upsert）+ `DELETE .../items/{itemId}`（归属校验防跨 ns 越权）+ `POST .../publish`（记审计 `configcenter_publish`）+ `GET .../publishes|published`（只读走 FindAppNamespace 不懒建）。删应用级联清 app ns（appCascadeDeleter `cc` 字段）。
+- **按应用名发现**（数据面主入口）：`GET /api/configcenter/apps/{appName}/published`（`AppLookup` 依赖倒置桥接 application.List 按名匹配，租户过滤）；响应裸 JSON `{published,version,snapshot}`（不含 publishId）；未知应用/无 ns/无 active 三路统一 `{"published":false}` 不泄漏。
+- **前端**：应用详情「配置」tab 加「动态配置」子区（`app-tabs/AppDynamicConfigs.vue`：draft KV + 发布/回滚 useDangerConfirm + 当前生效 + 版本历史）；ConfigCenter 页双视图（默认「按应用」/「共享配置」保留 ns CRUD，`?serviceId=` 兼容）。
+- **dogfooding**：paas-shop chatbot 接入（examples `chatbot/dynconfig.go`）——启动拉取 + 60s 轮询按名发现，version 比对原子替换（RWMutex），消费 `welcome_message`/`recommend_topk`，失败静默降级默认值不 panic。e2e 已验证：upsert→publish→按名发现→跨租户不泄漏→chatbot 热更新。
+- 留后续：EnsureByApp 不校验 app 存在性（孤儿 ns，仿 ServiceLookup 可补）、回滚审计、AppIDByName O(N) 优化、shared 应用侧引用（Nacos common.yml 模式）、长连接 watch、灰度下发。
 
 ```
 internal/configcenter/  领域(Namespace + ConfigItem draft + Publish 不可变快照) + Repository(三仓储带前缀方法) + 内存 seed
