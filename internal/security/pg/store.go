@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/aitoys/paas/internal/crypto"
 	"github.com/aitoys/paas/internal/security"
 	secmemory "github.com/aitoys/paas/internal/security/memory"
 	storagepg "github.com/aitoys/paas/internal/storage/pg"
@@ -21,10 +22,28 @@ import (
 // Store 是 security.Repository 的 PostgreSQL 实现（SecretStore + AuditStore 单 Store）。
 type Store struct {
 	db *storagepg.DB
+	// cipher 静态加密 cipher，仅 seed 路径用（seed 直连 SQL 绕过装饰器）；
+	// nil = 明文模式（dev 未配 master key）。
+	cipher *crypto.Cipher
+}
+
+// StoreOption 是 Store 可选项。
+type StoreOption func(*Store)
+
+// WithCipher 注入静态加密 cipher（seed 路径 INSERT 前加密 Value）。
+// nil = 明文模式，行为与历史一致。
+func WithCipher(c *crypto.Cipher) StoreOption {
+	return func(s *Store) { s.cipher = c }
 }
 
 // NewStore 创建 security PG 仓储。db 必须已完成迁移。
-func NewStore(db *storagepg.DB) *Store { return &Store{db: db} }
+func NewStore(db *storagepg.DB, opts ...StoreOption) *Store {
+	s := &Store{db: db}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
+}
 
 // secCols 与 model.Secret 字段顺序对齐（scan 列顺序必须一致）。
 // desc 是 PG 保留字，需双引号。
@@ -320,11 +339,17 @@ func (s *Store) seedAll(ctx context.Context) error {
 		} else {
 			tenantArg = sec.TenantID
 		}
+		// seed 直连 SQL 绕过装饰器，落库前加密；加密失败则整个 seed 失败
+		// （宁可不 seed 也不明文落库）。nil cipher 透传明文（dev 模式）。
+		val, err := s.cipher.Encrypt(sec.Value)
+		if err != nil {
+			return fmt.Errorf("seed 密钥 %s 加密失败: %w", sec.ID, err)
+		}
 		if _, err := s.db.Pool().Exec(ctx,
 			`INSERT INTO secrets (id, tenant_id, name, type, scope, value, "desc", updated_at)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 			 ON CONFLICT (id) DO NOTHING`,
-			sec.ID, tenantArg, sec.Name, sec.Type, sec.Scope, sec.Value, sec.Desc, sec.UpdatedAt); err != nil {
+			sec.ID, tenantArg, sec.Name, sec.Type, sec.Scope, val, sec.Desc, sec.UpdatedAt); err != nil {
 			return err
 		}
 	}
@@ -348,11 +373,16 @@ func (s *Store) ensurePlatformSecrets(ctx context.Context) error {
 		if sec.Scope != security.ScopePlatform {
 			continue
 		}
+		// seed 直连 SQL 绕过装饰器，落库前加密（同 seedAll 语义：失败宁缺毋明文）。
+		val, err := s.cipher.Encrypt(sec.Value)
+		if err != nil {
+			return fmt.Errorf("平台密钥 %s 加密失败: %w", sec.ID, err)
+		}
 		if _, err := s.db.Pool().Exec(ctx,
 			`INSERT INTO secrets (id, tenant_id, name, type, scope, value, "desc", updated_at)
 			 VALUES ($1,NULL,$2,$3,$4,$5,$6,$7)
 			 ON CONFLICT (id) DO NOTHING`,
-			sec.ID, sec.Name, sec.Type, sec.Scope, sec.Value, sec.Desc, sec.UpdatedAt); err != nil {
+			sec.ID, sec.Name, sec.Type, sec.Scope, val, sec.Desc, sec.UpdatedAt); err != nil {
 			return err
 		}
 	}
