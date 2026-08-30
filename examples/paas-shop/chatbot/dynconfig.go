@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"strconv"
 	"sync"
@@ -30,18 +31,21 @@ const (
 	fetchTimout = 5 * time.Second
 )
 
-// dynConfig 是配置中心的进程内只读视图（version 比对 + 原子替换）。
+// dynConfig 是配置中心的进程内只读视图（version+overrideHash 双比对 + 原子替换）。
 type dynConfig struct {
 	coreURL string // 平台 core 地址（PAAS_CORE_URL）
 	appName string // 应用名（PAAS_CONFIG_APP）
 	apiKey  string
+	envID   string // 配置环境（PAAS_CONFIG_ENV，空 = 基线）
+	laneID  string // 泳道（PAAS_LANE_ID，部署注入；default/空 = 基线）
 
 	client   *http.Client
 	interval time.Duration // 轮询间隔（测试可注入缩短）
 
-	mu      sync.RWMutex
-	cfg     map[string]string // 最近一次已发布快照（未发布/未拉到为空 map）
-	version int
+	mu           sync.RWMutex
+	cfg          map[string]string // 最近一次已发布快照（未发布/未拉到为空 map）
+	version      int
+	overrideHash string
 	// 告警限频：仅成功->失败转变时打一次 Warn，恢复后重置
 	failing bool
 }
@@ -60,6 +64,8 @@ func newDynConfig() *dynConfig {
 		coreURL: coreURL,
 		appName: appName,
 		apiKey:  apiKey,
+		envID:   os.Getenv("PAAS_CONFIG_ENV"),
+		laneID:  os.Getenv("PAAS_LANE_ID"),
 		client:  &http.Client{Timeout: fetchTimout},
 		cfg:     map[string]string{},
 	}
@@ -67,14 +73,31 @@ func newDynConfig() *dynConfig {
 
 // publishedResp 对齐平台端点裸 JSON 契约。
 type publishedResp struct {
-	Published bool              `json:"published"`
-	Version   int               `json:"version"`
-	Snapshot  map[string]string `json:"snapshot"`
+	Published    bool              `json:"published"`
+	Version      int               `json:"version"`
+	Snapshot     map[string]string `json:"snapshot"`
+	OverrideHash string            `json:"overrideHash"` // lane 覆盖集指纹（无覆盖时空）
 }
 
 // refresh 拉取一次已发布快照：version 变化才原子替换；失败/未发布保持旧值。
 func (d *dynConfig) refresh(ctx context.Context) {
+	// 泳道发现：lane 取部署注入 PAAS_LANE_ID（非 default 才带 query；染色是请求路径语义，
+	// 配置是部署路径语义，不混用——spec 决策）。
+	lane := d.laneID
+	if lane == "default" {
+		lane = ""
+	}
 	url := fmt.Sprintf("%s/api/configcenter/apps/%s/published", d.coreURL, d.appName)
+	if d.envID != "" || lane != "" {
+		q := neturl.Values{}
+		if d.envID != "" {
+			q.Set("env", d.envID)
+		}
+		if lane != "" {
+			q.Set("lane", lane)
+		}
+		url += "?" + q.Encode()
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		d.warnOnce("构建请求失败", err)
@@ -99,32 +122,36 @@ func (d *dynConfig) refresh(ctx context.Context) {
 	}
 	if !pr.Published {
 		// 未发布：回默认值（空 map，Get 走 default）
-		d.swap(pr.Version, map[string]string{})
+		d.swap(pr.Version, pr.OverrideHash, map[string]string{})
 		d.ok()
 		return
 	}
+	// version + overrideHash 双比对：纯 lane 覆盖变化不改 version（服务端 merge），
+	// 客户端任一指纹变化即热替换——漏掉 hash 会吃掉泳道覆盖的即时生效。
 	d.mu.RLock()
-	same := pr.Version == d.version
+	same := pr.Version == d.version && pr.OverrideHash == d.overrideHash
 	d.mu.RUnlock()
 	if same {
 		d.ok()
-		return // version 未变，跳过替换
+		return // 指纹未变，跳过替换
 	}
 	snap := pr.Snapshot
 	if snap == nil {
 		snap = map[string]string{}
 	}
-	d.swap(pr.Version, snap)
+	d.swap(pr.Version, pr.OverrideHash, snap)
 	d.ok()
-	slog.Info("动态配置已更新", "app", d.appName, "version", pr.Version, "keys", len(snap))
+	slog.Info("动态配置已更新", "app", d.appName, "version", pr.Version,
+		"overrideHash", pr.OverrideHash, "keys", len(snap))
 }
 
 // swap 原子替换快照（RWMutex 保护，读侧无锁竞争）。
-func (d *dynConfig) swap(version int, snap map[string]string) {
+func (d *dynConfig) swap(version int, overrideHash string, snap map[string]string) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.cfg = snap
 	d.version = version
+	d.overrideHash = overrideHash
 }
 
 // warnOnce 连续失败只告警一次，恢复成功后重置（不刷屏）。

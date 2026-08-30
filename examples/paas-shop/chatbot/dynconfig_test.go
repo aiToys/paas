@@ -185,3 +185,54 @@ func TestDynConfigStartPolls(t *testing.T) {
 		t.Fatal("ctx 取消后 Start 未退出")
 	}
 }
+
+// env/lane 注入后：发现 URL 带 ?env=&lane=（泳道配置 merge 链路）。
+func TestDynConfigDiscoveryURLCarriesEnvLane(t *testing.T) {
+	f := newFakeServer(t)
+	var gotURL atomic.Value
+	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURL.Store(r.URL.String())
+		f.requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"published":true,"version":1,"snapshot":{}}`))
+	})
+	d := newTestConfig(f.srv.URL)
+	d.envID = "env-t"
+	d.laneID = "feature-x"
+	d.refresh(context.Background())
+	u, _ := gotURL.Load().(string)
+	if u != "/api/configcenter/apps/chatbot/published?env=env-t&lane=feature-x" {
+		t.Fatalf("发现 URL = %q, want env/lane query", u)
+	}
+}
+
+// overrideHash 变化（version 不变）也热替换——lane 覆盖即时生效的关键。
+func TestDynConfigHotSwapOnOverrideHashChange(t *testing.T) {
+	f := newFakeServer(t)
+	f.payload.Store(`{"published":true,"version":1,"snapshot":{"recommend_topk":"3"}}`)
+	d := newTestConfig(f.srv.URL)
+	d.refresh(context.Background())
+	if got := d.TopK(); got != 3 {
+		t.Fatalf("TopK = %d, want 3", got)
+	}
+
+	// lane 覆盖生效：version 不变、snapshot merge 后变化、overrideHash 出现
+	f.payload.Store(`{"published":true,"version":1,"snapshot":{"recommend_topk":"5"},"overrideHash":"ab12cd34"}`)
+	d.refresh(context.Background())
+	if got := d.TopK(); got != 5 {
+		t.Fatalf("overrideHash 变化后 TopK = %d, want 5（lane 覆盖未热替换）", got)
+	}
+
+	// 同 version 同 hash：不重复替换（幂等）
+	d.refresh(context.Background())
+	if got := d.TopK(); got != 5 {
+		t.Fatalf("幂等拉取后 TopK = %d, want 5", got)
+	}
+
+	// 覆盖消失（回收泳道）：hash 回空，回落基线
+	f.payload.Store(`{"published":true,"version":1,"snapshot":{"recommend_topk":"3"}}`)
+	d.refresh(context.Background())
+	if got := d.TopK(); got != 3 {
+		t.Fatalf("覆盖消失后 TopK = %d, want 3（回落基线）", got)
+	}
+}

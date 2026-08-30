@@ -315,6 +315,7 @@ func (r *WorkloadReconciler) applyDeployment(ctx context.Context, w *v1alpha1.Wo
 				corev1.EnvVar{Name: "PAAS_DP_ENDPOINT", Value: r.dpEndpoint()},
 				corev1.EnvVar{Name: "PAAS_DP_TOKEN", Value: r.DPToken},
 				corev1.EnvVar{Name: "PAAS_TENANT_ID", Value: w.Spec.TenantID},
+				corev1.EnvVar{Name: "PAAS_CONFIG_ENV", Value: w.Spec.EnvID}, // 配置中心按环境发现（dynconfig 客户端约定）
 			)
 		}
 		// OTel trace 推送 endpoint（service/cronjob Pod 自动建 tracer 推 Jaeger）。
