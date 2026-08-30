@@ -227,9 +227,11 @@ func (g *LaneGC) ReclaimLane(ctx context.Context, tenantID, envID, laneName stri
 		g.afterReclaim(wctx, w, 0)
 		deleted++
 	}
+	// 关闭即回收：覆盖清理不与删除数耦合——permanent 泳道/已无 workload 的泳道关闭时
+	// deleted=0，但配置覆盖必须清（e2e 实测：否则发现端点仍返回已死泳道的覆盖值）。
+	g.cleanLaneOverrides(wctx, tenantID, envID, laneName)
 	if deleted > 0 {
 		g.markLaneClosed(wctx, envID, laneName)
-		g.cleanLaneOverrides(wctx, tenantID, envID, laneName)
 	}
 	return deleted, nil
 }

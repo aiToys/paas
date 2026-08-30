@@ -303,3 +303,22 @@ func TestReclaimLaneCleansOverrides(t *testing.T) {
 		t.Fatalf("ReclaimLane 应清覆盖, got %v", oc.cleaned)
 	}
 }
+
+// 空泳道（permanent 关闭/已无 workload）关闭：deleted=0 也必须清覆盖——
+// e2e 实测回归（train-stable permanent 泳道关闭后发现端点仍返回覆盖值）。
+func TestReclaimLaneEmptyLaneStillCleansOverrides(t *testing.T) {
+	repo := &gcFakeRepo{items: nil}
+	g := &LaneGC{
+		Repos:   &laneFilterRepo{gcFakeRepo: repo, lane: "train-stable"},
+		Runs:    gcFakeRuns{},
+		EnvType: func(context.Context, string) (string, error) { return "test", nil },
+	}
+	oc := &fakeOverrideCleaner{}
+	g.Cleaners = []LaneOverrideCleaner{oc}
+	if _, err := g.ReclaimLane(context.Background(), "t1", "e1", "train-stable"); err != nil {
+		t.Fatalf("ReclaimLane: %v", err)
+	}
+	if len(oc.cleaned) != 1 || oc.cleaned[0] != "t1/e1/train-stable" {
+		t.Fatalf("空泳道关闭也应清覆盖, got %v", oc.cleaned)
+	}
+}
