@@ -445,29 +445,30 @@ watch(() => route.params.nsId, load)
         </template>
       </el-dialog>
 
-      <!-- 创建命名空间（el-dialog 表单，替代原生 window.prompt：暗黑模式兼容 + 可填描述） -->
-      <el-dialog v-model="showNs" title="创建命名空间" width="460px">
-        <el-form label-width="80px">
-          <el-form-item label="名称">
-            <el-input v-model="nsForm.name" placeholder="租户内唯一" />
-          </el-form-item>
-          <el-form-item label="关联服务">
-            <el-select v-model="nsForm.serviceId" clearable placeholder="可选，关联 governance 服务" style="width: 100%">
-              <el-option v-for="s in services" :key="s.id" :label="s.name" :value="s.id" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="描述">
-            <el-input v-model="nsForm.desc" type="textarea" :rows="2" placeholder="可选" />
-          </el-form-item>
-        </el-form>
-        <template #footer>
-          <el-button @click="showNs = false">取消</el-button>
-          <el-button type="primary" :disabled="nsSubmitting" @click="submitNs">
-            {{ nsSubmitting ? '创建中…' : '创建' }}
-          </el-button>
-        </template>
-      </el-dialog>
     </template>
+
+    <!-- 创建命名空间（挂两视图之外：按钮在共享列表视图，弹窗错挂详情 v-else 分支时列表页不渲染 → 点击无反应） -->
+    <el-dialog v-model="showNs" title="创建命名空间" width="460px">
+      <el-form label-width="80px">
+        <el-form-item label="名称">
+          <el-input v-model="nsForm.name" placeholder="租户内唯一" />
+        </el-form-item>
+        <el-form-item label="关联服务">
+          <el-select v-model="nsForm.serviceId" clearable placeholder="可选，关联 governance 服务" style="width: 100%">
+            <el-option v-for="s in services" :key="s.id" :label="s.name" :value="s.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="描述">
+          <el-input v-model="nsForm.desc" type="textarea" :rows="2" placeholder="可选" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showNs = false">取消</el-button>
+        <el-button type="primary" :disabled="nsSubmitting" @click="submitNs">
+          {{ nsSubmitting ? '创建中…' : '创建' }}
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
