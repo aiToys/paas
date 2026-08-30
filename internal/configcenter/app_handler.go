@@ -390,7 +390,7 @@ func (h *AppHandler) serveRollback(w http.ResponseWriter, r *http.Request, appID
 
 // serveLaneOverrides 泳道覆盖三操作（挂 dynamic-configs/lane-overrides）：
 //
-//	GET    /dynamic-configs/lane-overrides?envId=&lane=  列覆盖（lane 空=该 env 全部泳道）
+//	GET    /dynamic-configs/lane-overrides?envId=&lane=  列覆盖（lane 必填，default 拒绝）
 //	POST   /dynamic-configs/lane-overrides?envId=&lane=  upsert 覆盖（即时生效，无版本链）
 //	DELETE /dynamic-configs/lane-overrides/{key}?envId=&lane=  删覆盖
 //

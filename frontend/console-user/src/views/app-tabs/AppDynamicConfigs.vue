@@ -193,6 +193,12 @@ async function submitOverride() {
     ElMessage.warning('请填写 Key 和 Value')
     return
   }
+  // 泳道覆盖即时生效，生产环境与其他 prod 写同强度二次确认。
+  const ok = await confirmDangerous({
+    action: '保存泳道覆盖', target: `${laneSel.value} / ${ovForm.value.key}`,
+    requireNameConfirm: envStore.isProd,
+  })
+  if (!ok) return
   ovSubmitting.value = true
   try {
     await upsertLaneOverride(props.appId, envId.value, laneSel.value, {
