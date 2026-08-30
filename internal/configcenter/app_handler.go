@@ -113,7 +113,12 @@ func (h *AppHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case len(sub) == 1 && sub[0] == "publishes":
 		h.servePublishHistory(w, r, appID, r.URL.Query().Get("envId"))
 	case len(sub) == 1 && sub[0] == "published":
-		h.servePublished(w, r, appID, r.URL.Query().Get("envId"), r.URL.Query().Get("lane"))
+		// envId 为主（与 dynamic-configs 全家一致）；env 为兼容别名（发现协议习惯，防调用方踩坑）。
+		envQ := r.URL.Query().Get("envId")
+		if envQ == "" {
+			envQ = r.URL.Query().Get("env")
+		}
+		h.servePublished(w, r, appID, envQ, r.URL.Query().Get("lane"))
 	case len(sub) == 2 && sub[0] == "items":
 		h.serveItemDelete(w, r, appID, r.URL.Query().Get("envId"), sub[1])
 	case len(sub) == 2 && sub[0] == "rollback":

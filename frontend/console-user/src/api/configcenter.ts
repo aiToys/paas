@@ -45,10 +45,12 @@ export const publishAppDynamicConfigs = (appId: string, envId?: string) =>
   fetchAuth(`/api/applications/${appId}/dynamic-configs/publish${qs(envId)}`, { method: 'POST' }).then(r => unwrap<ConfigPublish>(r))
 export const fetchAppPublishes = (appId: string, envId?: string) =>
   fetchAuth(`/api/applications/${appId}/dynamic-configs/publishes${qs(envId)}`).then(r => unwrap<ConfigPublish[]>(r))
-// 当前生效是裸 JSON {published,version,snapshot[,overrideHash]}（发现协议 shape），unwrap 兼容
+// 当前生效是裸 JSON {published,version,snapshot[,overrideHash]}（发现协议 shape），unwrap 兼容。
+// 注意：本端点 query 名为 envId（与 dynamic-configs 全家一致）；
+// 按应用名发现端点 /api/configcenter/apps/{name}/published 才是 env（发现协议约定）。
 export const fetchAppPublished = (appId: string, opts?: { envId?: string; lane?: string }) => {
   const p = new URLSearchParams()
-  if (opts?.envId) p.set('env', opts.envId)
+  if (opts?.envId) p.set('envId', opts.envId)
   if (opts?.lane) p.set('lane', opts.lane)
   const q = p.toString()
   return fetchAuth(`/api/applications/${appId}/dynamic-configs/published${q ? `?${q}` : ''}`).then(r => unwrap<ConfigPublished>(r))
