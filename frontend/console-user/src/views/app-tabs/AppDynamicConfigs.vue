@@ -1,19 +1,28 @@
 <script setup lang="ts">
-// 应用详情 - 动态配置（热更新）区块：应用维度动态配置（scope=app）。
+// 应用详情 - 动态配置（热更新）区块：应用维度动态配置（scope=app，按环境隔离）。
 // 与上方 AppConfigs（工作负载级静态 env/Secret，重启注入）正交：本区块是
 // 版本化动态配置——draft 编辑 → 发布出不可变快照 → 客户端按版本发现 → 可回滚。
-// 发布/回滚走普通确认（配置中心独立于物理环境，与 ConfigCenter.vue 语义对齐，
-// 不随顶栏 env scope 漂移确认强度）。
-import { onMounted, ref, watch } from 'vue'
+// 环境维度：全部请求带顶栏 scope envId（与 AppConfigs 同款交互），同应用 test/prod
+// 各一份独立配置/版本/闸门；发布目标 prod 走 confirmDangerous 生产档。
+// 泳道覆盖子区：key 级差异集，即时生效（无版本链），随泳道回收消失。
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
+import { useEnvStore } from '@/stores/env'
+import { listLanes } from '@/api/lane'
 import {
   fetchAppDynamicConfigs, upsertAppDynamicConfig, deleteAppDynamicConfig,
   publishAppDynamicConfigs, fetchAppPublishes, fetchAppPublished, rollbackAppPublish,
-  type DynamicConfigItem, type ConfigPublish, type ConfigPublished,
+  fetchLaneOverrides, upsertLaneOverride, deleteLaneOverride,
+  type DynamicConfigItem, type ConfigPublish, type ConfigPublished, type LaneOverride,
 } from '@/api/configcenter'
 
 const props = defineProps<{ appId: string }>()
+
+const envStore = useEnvStore()
+const envId = computed(() => envStore.currentEnvId)
+const envName = computed(() => envStore.currentEnv?.name ?? '')
+const hasEnv = computed(() => !!envId.value)
 
 const items = ref<DynamicConfigItem[]>([])
 const publishes = ref<ConfigPublish[]>([])
@@ -27,6 +36,16 @@ const showEdit = ref(false)
 const submitting = ref(false)
 const form = ref<{ id: string; key: string; value: string; type: string }>({ id: '', key: '', value: '', type: 'text' })
 
+// ---- 泳道覆盖子区状态 ----
+const lanes = ref<{ name: string; mode: string }[]>([])
+const laneSel = ref('')
+const overrides = ref<LaneOverride[]>([])
+const laneLoading = ref(false)
+const ovRemoving = ref('')
+const showOvEdit = ref(false)
+const ovSubmitting = ref(false)
+const ovForm = ref<{ key: string; value: string }>({ key: '', value: '' })
+
 const types = [
   { value: 'text', label: 'Text' },
   { value: 'json', label: 'JSON' },
@@ -36,12 +55,13 @@ const types = [
 const snapshotEntries = (snap?: Record<string, string>) => (snap ? Object.entries(snap) : [])
 
 async function load() {
+  if (!hasEnv.value) return
   loading.value = true
   try {
     const [its, pubs, pub] = await Promise.all([
-      fetchAppDynamicConfigs(props.appId),
-      fetchAppPublishes(props.appId),
-      fetchAppPublished(props.appId).catch(() => null),
+      fetchAppDynamicConfigs(props.appId, envId.value),
+      fetchAppPublishes(props.appId, envId.value),
+      fetchAppPublished(props.appId, { envId: envId.value }).catch(() => null),
     ])
     items.value = its ?? []
     publishes.value = pubs ?? []
@@ -52,6 +72,29 @@ async function load() {
     loading.value = false
   }
 }
+
+async function loadLanes() {
+  if (!hasEnv.value) { lanes.value = []; return }
+  try {
+    lanes.value = (await listLanes(envId.value) ?? [])
+      .filter(l => l.status === 'active')
+      .map(l => ({ name: l.name, mode: l.mode }))
+  } catch { lanes.value = [] }
+}
+
+async function loadOverrides() {
+  if (!laneSel.value) { overrides.value = []; return }
+  laneLoading.value = true
+  try {
+    overrides.value = (await fetchLaneOverrides(props.appId, envId.value, laneSel.value)) ?? []
+  } catch (e) {
+    ElMessage.error('加载泳道覆盖失败：' + (e as Error).message)
+  } finally {
+    laneLoading.value = false
+  }
+}
+
+watch(laneSel, loadOverrides)
 
 function openAdd() {
   form.value = { id: '', key: '', value: '', type: 'text' }
@@ -74,7 +117,7 @@ async function submit() {
       key: form.value.key.trim(),
       value: form.value.value,
       type: form.value.type,
-    })
+    }, envId.value)
     ElMessage.success('已保存，发布后生效')
     showEdit.value = false
     load()
@@ -89,12 +132,12 @@ async function remove(row: DynamicConfigItem) {
   const ok = await confirmDangerous({
     action: '删除动态配置项',
     target: row.key,
-    requireNameConfirm: false,
+    requireNameConfirm: envStore.isProd,
   })
   if (!ok) return
   removing.value = row.id
   try {
-    await deleteAppDynamicConfig(props.appId, row.id)
+    await deleteAppDynamicConfig(props.appId, row.id, envId.value)
     ElMessage.success('已删除，发布后生效')
     load()
   } catch (e) {
@@ -107,13 +150,13 @@ async function remove(row: DynamicConfigItem) {
 async function publish() {
   const ok = await confirmDangerous({
     action: '发布动态配置',
-    target: props.appId,
-    requireNameConfirm: false,
+    target: envName.value || props.appId,
+    requireNameConfirm: envStore.isProd,
   })
   if (!ok) return
   publishing.value = true
   try {
-    const pub = await publishAppDynamicConfigs(props.appId)
+    const pub = await publishAppDynamicConfigs(props.appId, envId.value)
     ElMessage.success(`已发布 v${pub.version}`)
     load()
   } catch (e) {
@@ -124,11 +167,11 @@ async function publish() {
 }
 
 async function rollback(p: ConfigPublish) {
-  const ok = await confirmDangerous({ action: '回滚到', target: `v${p.version}`, requireNameConfirm: false })
+  const ok = await confirmDangerous({ action: '回滚到', target: `v${p.version}`, requireNameConfirm: envStore.isProd })
   if (!ok) return
   rollingBack.value = p.id
   try {
-    await rollbackAppPublish(props.appId, p.id)
+    await rollbackAppPublish(props.appId, p.id, envId.value)
     ElMessage.success(`已回滚到 v${p.version}`)
     load()
   } catch (e) {
@@ -138,16 +181,72 @@ async function rollback(p: ConfigPublish) {
   }
 }
 
-onMounted(load)
-watch(() => props.appId, load)
+// ---- 泳道覆盖操作（即时生效，无「发布」步骤） ----
+
+function openOvAdd() {
+  ovForm.value = { key: '', value: '' }
+  showOvEdit.value = true
+}
+
+async function submitOverride() {
+  if (!ovForm.value.key.trim() || !ovForm.value.value) {
+    ElMessage.warning('请填写 Key 和 Value')
+    return
+  }
+  ovSubmitting.value = true
+  try {
+    await upsertLaneOverride(props.appId, envId.value, laneSel.value, {
+      key: ovForm.value.key.trim(),
+      value: ovForm.value.value,
+    })
+    ElMessage.success('覆盖已生效（即时生效，无需发布）')
+    showOvEdit.value = false
+    loadOverrides()
+  } catch (e) {
+    ElMessage.error((e as Error).message || '保存失败')
+  } finally {
+    ovSubmitting.value = false
+  }
+}
+
+async function removeOverride(row: LaneOverride) {
+  const ok = await confirmDangerous({
+    action: '删除泳道覆盖',
+    target: row.key,
+    requireNameConfirm: envStore.isProd,
+  })
+  if (!ok) return
+  ovRemoving.value = row.key
+  try {
+    await deleteLaneOverride(props.appId, envId.value, laneSel.value, row.key)
+    loadOverrides()
+  } catch (e) {
+    ElMessage.error((e as Error).message || '删除失败')
+  } finally {
+    ovRemoving.value = ''
+  }
+}
+
+function init() {
+  load()
+  loadLanes()
+  laneSel.value = ''
+  overrides.value = []
+}
+
+onMounted(init)
+watch(() => props.appId, init)
+watch(envId, init)
 </script>
 
 <template>
   <div class="dyn-block" v-loading="loading">
+    <div v-if="!hasEnv" class="env-hint">请先在顶栏选择环境，动态配置按环境独立（test/prod 各一份）。</div>
+    <template v-else>
     <div class="block-head">
       <div>
         <span class="block-title">动态配置（热更新）</span>
-        <span class="block-hint">运行时热更新（无需重启）· 添加配置后发布生效</span>
+        <span class="block-hint">环境：{{ envName }}（按环境独立）· 添加配置后发布生效</span>
       </div>
       <div>
         <!-- 生效版本 tag 内联到标题行：当前生效即发布历史 active 那条，不单独设展示区 -->
@@ -207,7 +306,39 @@ watch(() => props.appId, load)
       </el-table>
     </section>
 
-    <!-- 编辑弹窗 -->
+    <!-- 泳道覆盖（key 级差异集，即时生效，随泳道回收消失） -->
+    <section class="cfg-group">
+      <div class="group-title">
+        泳道覆盖
+        <span class="lane-hint">即时生效（无需发布）· 随泳道回收消失 · 服务端 merge 到基线快照上</span>
+      </div>
+      <div class="lane-bar">
+        <el-select v-model="laneSel" placeholder="选择泳道" size="small" style="width: 240px" clearable>
+          <el-option v-for="l in lanes" :key="l.name" :value="l.name" :label="l.name + (l.mode === 'permanent' ? '（常驻）' : '')" />
+        </el-select>
+        <el-button size="small" type="primary" :disabled="!laneSel" @click="openOvAdd">+ 新增覆盖</el-button>
+      </div>
+      <el-table v-if="laneSel" v-loading="laneLoading" :data="overrides" size="small"
+        empty-text="该泳道暂无覆盖；覆盖后带该泳道发现的客户端立即拿到差异值，基线不变。">
+        <el-table-column prop="key" label="Key" min-width="180">
+          <template #default="{ row }"><span class="mono">{{ row.key }}</span></template>
+        </el-table-column>
+        <el-table-column prop="value" label="覆盖值" min-width="220" show-overflow-tooltip>
+          <template #default="{ row }"><span class="mono">{{ row.value }}</span></template>
+        </el-table-column>
+        <el-table-column label="更新时间" width="170">
+          <template #default="{ row }">{{ new Date(row.updatedAt).toLocaleString() }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="90">
+          <template #default="{ row }">
+            <el-button text type="danger" size="small" :loading="ovRemoving === row.key" @click="removeOverride(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </section>
+    </template>
+
+    <!-- 编辑弹窗（基线 draft） -->
     <el-dialog v-model="showEdit" :title="form.id ? '编辑动态配置' : '新增动态配置'" width="500px">
       <el-form label-width="70px">
         <el-form-item label="Key">
@@ -229,6 +360,25 @@ watch(() => props.appId, load)
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- 泳道覆盖弹窗 -->
+    <el-dialog v-model="showOvEdit" title="新增泳道覆盖" width="500px">
+      <div class="ov-hint">覆盖即时生效：带泳道 <code>{{ laneSel }}</code> 发现的客户端立即拿到该值；其余实例不受影响。</div>
+      <el-form label-width="70px">
+        <el-form-item label="Key">
+          <el-input v-model="ovForm.key" placeholder="如 recommend_topk" />
+        </el-form-item>
+        <el-form-item label="覆盖值">
+          <el-input v-model="ovForm.value" type="textarea" :rows="3" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showOvEdit = false">取消</el-button>
+        <el-button type="primary" :disabled="ovSubmitting" @click="submitOverride">
+          {{ ovSubmitting ? '保存中…' : '保存并生效' }}
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -243,11 +393,11 @@ watch(() => props.appId, load)
   font-size: 13px; font-weight: 600; color: var(--text-dim); margin-bottom: 8px;
 }
 .group-cnt { font-size: 11px; color: var(--text-faint); padding: 1px 7px; background: var(--surface-2, transparent); border-radius: 8px; }
+.lane-hint { font-size: 11.5px; font-weight: 400; color: var(--text-faint); }
+.lane-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.env-hint { font-size: 13px; color: var(--text-faint); padding: 20px 0; }
 .ver-tag { padding: 2px 8px; background: var(--success-soft); color: var(--success); border-radius: 4px; font-size: 12px; }
 .none { font-size: 12px; color: var(--text-faint); font-weight: 400; }
-.kv-list { display: flex; flex-direction: column; gap: 6px; padding: 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
-.kv-row { display: flex; gap: 16px; font-size: 13px; }
-.kv-key { color: var(--brand); min-width: 200px; }
-.kv-val { color: var(--text); word-break: break-all; }
-.empty-line { font-size: 12.5px; color: var(--text-faint); }
+.ov-hint { font-size: 12.5px; color: var(--text-dim); margin-bottom: 12px; }
+.mono { font-family: var(--font-mono, monospace); }
 </style>

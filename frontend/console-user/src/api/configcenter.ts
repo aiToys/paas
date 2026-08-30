@@ -15,6 +15,12 @@ export interface ConfigPublish {
 export interface ConfigPublished {
   published: boolean; version?: number
   snapshot?: Record<string, string>; publishId?: string
+  overrideHash?: string // lane 覆盖集指纹（无覆盖时省略；version 或 overrideHash 任一变化即热替换）
+}
+// LaneOverride 泳道配置覆盖（无版本链，即时生效，随泳道回收消失）
+export interface LaneOverride {
+  id: string; appId: string; envId: string; laneId: string
+  key: string; value: string; updatedAt: string
 }
 
 const unwrap = async <T>(resp: Response): Promise<T> => {
@@ -25,21 +31,41 @@ const unwrap = async <T>(resp: Response): Promise<T> => {
 
 // ---------- 应用维度动态配置（scope=app，主路径） ----------
 
-// 列 draft 项（GET 列表同时触发后端 EnsureByApp 懒建，发布历史/当前生效用只读端点）
-export const fetchAppDynamicConfigs = (appId: string) =>
-  fetchAuth(`/api/applications/${appId}/dynamic-configs`).then(r => unwrap<DynamicConfigItem[]>(r))
-export const upsertAppDynamicConfig = (appId: string, body: { key: string; value: string; type?: string }) =>
-  fetchAuth(`/api/applications/${appId}/dynamic-configs`, { method: 'POST', body: JSON.stringify(body) }).then(r => unwrap<DynamicConfigItem>(r))
-export const deleteAppDynamicConfig = (appId: string, itemId: string) =>
-  fetchAuth(`/api/applications/${appId}/dynamic-configs/items/${itemId}`, { method: 'DELETE' }).then(r => unwrap<unknown>(r))
-export const publishAppDynamicConfigs = (appId: string) =>
-  fetchAuth(`/api/applications/${appId}/dynamic-configs/publish`, { method: 'POST' }).then(r => unwrap<ConfigPublish>(r))
-export const fetchAppPublishes = (appId: string) =>
-  fetchAuth(`/api/applications/${appId}/dynamic-configs/publishes`).then(r => unwrap<ConfigPublish[]>(r))
-// 当前生效是裸 JSON {published,version,snapshot,publishId}（发现协议 shape），unwrap 兼容
-export const fetchAppPublished = (appId: string) =>
-  fetchAuth(`/api/applications/${appId}/dynamic-configs/published`).then(r => unwrap<ConfigPublished>(r))
+// envId query 串（envId 空 = 基线 ns，向后兼容）
+const qs = (envId?: string) => (envId ? `?envId=${encodeURIComponent(envId)}` : '')
+
+// 列 draft 项（GET 列表同时触发后端 EnsureByAppEnv 懒建，发布历史/当前生效用只读端点）
+export const fetchAppDynamicConfigs = (appId: string, envId?: string) =>
+  fetchAuth(`/api/applications/${appId}/dynamic-configs${qs(envId)}`).then(r => unwrap<DynamicConfigItem[]>(r))
+export const upsertAppDynamicConfig = (appId: string, body: { key: string; value: string; type?: string }, envId?: string) =>
+  fetchAuth(`/api/applications/${appId}/dynamic-configs${qs(envId)}`, { method: 'POST', body: JSON.stringify(body) }).then(r => unwrap<DynamicConfigItem>(r))
+export const deleteAppDynamicConfig = (appId: string, itemId: string, envId?: string) =>
+  fetchAuth(`/api/applications/${appId}/dynamic-configs/items/${itemId}${qs(envId)}`, { method: 'DELETE' }).then(r => unwrap<unknown>(r))
+export const publishAppDynamicConfigs = (appId: string, envId?: string) =>
+  fetchAuth(`/api/applications/${appId}/dynamic-configs/publish${qs(envId)}`, { method: 'POST' }).then(r => unwrap<ConfigPublish>(r))
+export const fetchAppPublishes = (appId: string, envId?: string) =>
+  fetchAuth(`/api/applications/${appId}/dynamic-configs/publishes${qs(envId)}`).then(r => unwrap<ConfigPublish[]>(r))
+// 当前生效是裸 JSON {published,version,snapshot[,overrideHash]}（发现协议 shape），unwrap 兼容
+export const fetchAppPublished = (appId: string, opts?: { envId?: string; lane?: string }) => {
+  const p = new URLSearchParams()
+  if (opts?.envId) p.set('env', opts.envId)
+  if (opts?.lane) p.set('lane', opts.lane)
+  const q = p.toString()
+  return fetchAuth(`/api/applications/${appId}/dynamic-configs/published${q ? `?${q}` : ''}`).then(r => unwrap<ConfigPublished>(r))
+}
 
 // 回滚走应用维度端点（后端校验 pid 属本应用派生 ns，防跨应用回滚；权限域 application:write + AppGuard）
-export const rollbackAppPublish = (appId: string, publishId: string) =>
-  fetchAuth(`/api/applications/${appId}/dynamic-configs/rollback/${publishId}`, { method: 'POST' }).then(r => unwrap<unknown>(r))
+export const rollbackAppPublish = (appId: string, publishId: string, envId?: string) =>
+  fetchAuth(`/api/applications/${appId}/dynamic-configs/rollback/${publishId}${qs(envId)}`, { method: 'POST' }).then(r => unwrap<unknown>(r))
+
+// ---------- 泳道覆盖（lane-overrides，即时生效随泳道回收消失） ----------
+// lane 必填（后端 400 兜底）；写权限 application:write + 生产闸门（prod env 需 prod:write）
+export const fetchLaneOverrides = (appId: string, envId: string, lane: string) =>
+  fetchAuth(`/api/applications/${appId}/dynamic-configs/lane-overrides?envId=${encodeURIComponent(envId)}&lane=${encodeURIComponent(lane)}`)
+    .then(r => unwrap<LaneOverride[]>(r))
+export const upsertLaneOverride = (appId: string, envId: string, lane: string, body: { key: string; value: string }) =>
+  fetchAuth(`/api/applications/${appId}/dynamic-configs/lane-overrides?envId=${encodeURIComponent(envId)}&lane=${encodeURIComponent(lane)}`, { method: 'POST', body: JSON.stringify(body) })
+    .then(r => unwrap<LaneOverride>(r))
+export const deleteLaneOverride = (appId: string, envId: string, lane: string, key: string) =>
+  fetchAuth(`/api/applications/${appId}/dynamic-configs/lane-overrides/${encodeURIComponent(key)}?envId=${encodeURIComponent(envId)}&lane=${encodeURIComponent(lane)}`, { method: 'DELETE' })
+    .then(r => unwrap<unknown>(r))
