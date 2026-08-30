@@ -17,7 +17,7 @@ import {
 } from '@/api/observability'
 import { listLanes } from '@/api/workload'
 import {
-  type Span, type Trace,
+  type Trace,
   buildSpanTree, flattenSpanTree, spanWidth, spanLeft, spanChips, errSpanCount,
   spanKindBadge, spanServiceLabel, spanLane, traceHasLane,
 } from '@/composables/useSpanTree'
@@ -448,8 +448,10 @@ usePolling(() => loadAll(true), 10000)
         <el-option label="最近 24h" value="24h" />
       </el-select>
       <!-- TraceID 直查（页头显著位置，Jaeger 式；回车查询并滚动定位链路区块） -->
-      <el-input v-model="traceIdQuery" placeholder="🔍 TraceID 直查" style="width: 240px; margin-left: auto" clearable
-        @keyup.enter="searchTraceById(true)" @clear="loadTraces">
+      <el-input
+v-model="traceIdQuery" placeholder="🔍 TraceID 直查" style="width: 240px; margin-left: auto" clearable
+        @keyup.enter="searchTraceById(true)" @clear="loadTraces"
+>
         <template #append>
           <el-button @click="searchTraceById(true)">查</el-button>
         </template>
@@ -581,8 +583,10 @@ usePolling(() => loadAll(true), 10000)
             <el-option label="警告" value="warn" />
             <el-option label="错误" value="error" />
           </el-select>
-          <el-select v-model="logLane" placeholder="泳道" size="small" style="width: 150px" clearable filterable allow-create
-            @change="loadLogs">
+          <el-select
+v-model="logLane" placeholder="泳道" size="small" style="width: 150px" clearable filterable allow-create
+            @change="loadLogs"
+>
             <el-option v-for="l in laneOptions" :key="l.laneId" :label="`${l.laneId}（${l.workloadCount}）`" :value="l.laneId" />
           </el-select>
           <el-input v-model="logQ" placeholder="关键字…" size="small" style="width: 160px" clearable @change="loadLogs" />
@@ -633,8 +637,10 @@ usePolling(() => loadAll(true), 10000)
           <el-button v-if="traceIdQuery.trim()" size="small" type="info" plain @click="traceIdQuery = ''; loadTraces()">清除直查</el-button>
         </div>
       </div>
-      <el-table :data="traces" size="small" row-key="id" empty-text="暂无链路"
-            :row-class-name="traceRowClass">
+      <el-table
+:data="traces" size="small" row-key="id" empty-text="暂无链路"
+            :row-class-name="traceRowClass"
+>
         <el-table-column type="expand">
           <template #default="{ row }">
             <div class="span-list">
@@ -645,9 +651,11 @@ usePolling(() => loadAll(true), 10000)
                 <span class="span-mono">{{ row.durationMs }}ms</span>
               </div>
               <div v-if="traceHasLane(row)" class="lane-legend">🛣 泳道标识——该 span 流量走了对应 feature 泳道；无标识 = default 基线</div>
-              <div v-for="node in spanRows(row)" :key="node.span.id"
+              <div
+v-for="node in spanRows(row)" :key="node.span.id"
                 class="span-card" :class="{ 'span-err': node.span.isError }"
-                :style="{ paddingLeft: 10 + node.depth * 18 + 'px' }">
+                :style="{ paddingLeft: 10 + node.depth * 18 + 'px' }"
+>
                 <div class="span-row">
                   <span class="span-bar" :style="{ width: spanWidth(node.span, row) + '%', left: spanLeft(node.span, row) + '%' }" />
                   <span v-if="node.depth > 0" class="span-tree-line" />
@@ -669,12 +677,14 @@ usePolling(() => loadAll(true), 10000)
                 <!-- 全部 OTel 属性（可折叠） -->
                 <details v-if="node.span.tags && Object.keys(node.span.tags).length" class="span-attrs">
                   <summary>全部属性 ({{ Object.keys(node.span.tags).length }})</summary>
-                  <table class="attr-table"><tbody>
+                  <table class="attr-table">
+<tbody>
                     <tr v-for="(v, k) in node.span.tags" :key="k">
                       <td class="mono ak">{{ k }}</td>
                       <td class="mono av">{{ v }}</td>
                     </tr>
-                  </tbody></table>
+                  </tbody>
+</table>
                 </details>
                 <!-- 异常信息 + 堆栈 -->
                 <div v-if="node.span.errorMessage || node.span.tags?.['exception.stacktrace']" class="span-exc">

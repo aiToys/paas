@@ -8,7 +8,7 @@ import { useRouter } from 'vue-router'
 import { fetchJSON } from '@/api'
 import { listPipelines, triggerRun, type Pipeline } from '@/api/pipeline'
 import { createService, deleteService, listServices, type ServiceEntity, type ServiceType } from '@/api/service'
-import { getWorkload, getWorkloadLogs, listWorkloads, type Workload, type WorkloadDetail } from '@/api/workload'
+import { getWorkload, getWorkloadLogs, type Workload, type WorkloadDetail } from '@/api/workload'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 
 const props = defineProps<{ appId: string }>()

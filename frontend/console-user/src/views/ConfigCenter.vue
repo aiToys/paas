@@ -401,7 +401,9 @@ watch(() => route.params.nsId, load)
                   text type="warning" size="small"
                   :loading="rollingBack === row.id"
                   @click="rollback(row)"
-                >回滚到此</el-button>
+                >
+回滚到此
+</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -430,8 +432,7 @@ watch(() => route.params.nsId, load)
           </el-button>
         </template>
       </el-dialog>
-
-    </template>
+</template>
 
     <!-- 创建命名空间（挂两视图之外：按钮在共享列表视图，弹窗错挂详情 v-else 分支时列表页不渲染 → 点击无反应） -->
     <el-dialog v-model="showNs" title="创建命名空间" width="460px">

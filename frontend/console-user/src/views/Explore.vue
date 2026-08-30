@@ -57,9 +57,9 @@ async function openDetail(it: MarketItem) {
 const preview = ref<{ label: string; value: string }[]>([])
 function buildPreview(it: MarketItem) {
   preview.value = []
-  const snap = it.snapshot as Record<string, any> | undefined
+  const snap = it.snapshot as Record<string, unknown> | undefined
   if (!snap) return
-  const fields: [string, string][] = [
+  const fields: [string, unknown][] = [
     ['指令内容', snap.instructions],
     ['模板', snap.template],
     ['工具类型', snap.type],
@@ -71,9 +71,9 @@ function buildPreview(it: MarketItem) {
   }
   // Agent 整包：组装结构
   if (it.entityType === 'agent' && snap.agent) {
-    const a = snap.agent as Record<string, any>
+    const a = snap.agent as Record<string, unknown>
     const parts: string[] = []
-    if (a.model) parts.push(`模型 ${a.model}`)
+    if (a.model) parts.push(`模型 ${String(a.model)}`)
     if (Array.isArray(snap.skills) && snap.skills.length) parts.push(`${snap.skills.length} 个 Skill`)
     if (snap.prompt) parts.push('Prompt 模板')
     if (Array.isArray(snap.tools) && snap.tools.length) parts.push(`${snap.tools.length} 个工具`)
@@ -127,14 +127,18 @@ onMounted(load)
           v-for="t in ENTITY_TYPES" :key="t.value"
           class="type-tab" :class="{ on: entityType === t.value }"
           @click="pickType(t.value)"
-        >{{ t.label }}</button>
+        >
+{{ t.label }}
+</button>
       </div>
       <div class="cat-row">
         <button
           v-for="c in CATEGORIES" :key="c.value"
           class="cat-pill" :class="{ on: category === c.value }"
           @click="pickCategory(c.value)"
-        >{{ c.label }}</button>
+        >
+{{ c.label }}
+</button>
         <input
           v-model="q" class="search" placeholder="搜索名称/说明…"
           @keyup.enter="load"

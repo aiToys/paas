@@ -3,7 +3,7 @@
 // 创建同 name 自动 version+1 且激活；可手动激活历史版本。
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchJSON, fetchAuth } from '@/api'
+import { fetchJSON, fetchAuth, respError } from '@/api'
 import { usePublish } from '@/composables/usePublish'
 
 interface Prompt {
@@ -56,7 +56,10 @@ async function submit() {
     ElMessage.warning('名称与模板必填')
     return
   }
-  const body: any = { name: f.name, template: f.template }
+  const body: { name: string; template: string; variables?: string[] } = {
+    name: f.name,
+    template: f.template,
+  }
   if (f.variables.trim()) {
     body.variables = f.variables.split(',').map((s) => s.trim()).filter(Boolean)
   }
@@ -66,8 +69,7 @@ async function submit() {
     body: JSON.stringify(body),
   })
   if (!resp.ok) {
-    const j = await resp.json().catch(() => ({}))
-    ElMessage.error('创建失败：' + ((j as any)?.error || resp.status))
+    ElMessage.error(await respError(resp, '创建失败：'))
     return
   }
   ElMessage.success('已创建（同 name 自动 version+1 且激活）')

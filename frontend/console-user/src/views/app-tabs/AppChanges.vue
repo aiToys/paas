@@ -9,6 +9,7 @@ import {
   listBatches, createBatch, getBatch, abandonBatch,
   addChangeToBatch, removeChangeFromBatch, integrateBatch, approveBatch, releaseBatch,
 } from '@/api/change'
+import { apiError } from '@/api'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import { usePolling } from '@/composables/usePolling'
 import { CHANGE_STATUS, BATCH_STATUS, statusOf } from '@/composables/useStatus'
@@ -27,8 +28,8 @@ async function load() {
     const [cs, bs] = await Promise.all([listChanges(props.appId), listBatches(props.appId)])
     changes.value = cs
     batches.value = bs
-  } catch (e: any) {
-    ElMessage.error(e.message || '加载变更失败')
+  } catch (e) {
+    ElMessage.error(apiError(e, '加载变更失败'))
   } finally {
     loading.value = false
   }
@@ -68,8 +69,8 @@ async function doCreate() {
       await navigator.clipboard.writeText(cmd)
       ElMessage.success('已复制')
     } catch { /* 用户直接关闭 */ }
-  } catch (e: any) {
-    ElMessage.error(e.message || '创建失败')
+  } catch (e) {
+    ElMessage.error(apiError(e, '创建失败'))
   } finally {
     creating.value = false
   }
@@ -81,8 +82,8 @@ async function abandon(c: Change) {
     await abandonChange(props.appId, c.id)
     ElMessage.success('已放弃')
     await load()
-  } catch (e: any) {
-    if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(apiError(e))
   }
 }
 
@@ -143,8 +144,8 @@ async function removeFromBatch(cid: string) {
     const b = await getBatch(props.appId, batch.value.id)
     await refreshBatch(b)
     await load()
-  } catch (e: any) {
-    ElMessage.error(e.message || '移出失败')
+  } catch (e) {
+    ElMessage.error(apiError(e, '移出失败'))
   }
 }
 
@@ -154,8 +155,8 @@ async function doIntegrate() {
     const b = await integrateBatch(props.appId, batch.value.id)
     await refreshBatch(b)
     ElMessage.success('已发起集成（合并 → 集成测试）')
-  } catch (e: any) {
-    ElMessage.error(e.message || '集成失败')
+  } catch (e) {
+    ElMessage.error(apiError(e, '集成失败'))
   }
 }
 
@@ -167,8 +168,8 @@ async function doApprove() {
     const b = await approveBatch(props.appId, batch.value.id)
     await refreshBatch(b)
     ElMessage.success('已批准，进入上线')
-  } catch (e: any) {
-    ElMessage.error(e.message || '批准失败')
+  } catch (e) {
+    ElMessage.error(apiError(e, '批准失败'))
   }
 }
 
@@ -178,8 +179,8 @@ async function doReleaseRetry() {
     const b = await releaseBatch(props.appId, batch.value.id)
     await refreshBatch(b)
     ElMessage.success('已重试上线')
-  } catch (e: any) {
-    ElMessage.error(e.message || '重试失败')
+  } catch (e) {
+    ElMessage.error(apiError(e, '重试失败'))
   }
 }
 
@@ -191,8 +192,8 @@ async function abandonB() {
     ElMessage.success('已放弃')
     drawerBid.value = null
     await load()
-  } catch (e: any) {
-    if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(apiError(e))
   }
 }
 
@@ -225,8 +226,8 @@ async function doCreateBatch() {
     ElMessage.success('批次已创建')
     await load()
     drawerBid.value = b.id
-  } catch (e: any) {
-    ElMessage.error(e.message || '创建批次失败')
+  } catch (e) {
+    ElMessage.error(apiError(e, '创建批次失败'))
   } finally {
     batchCreating.value = false
   }
@@ -388,8 +389,10 @@ const fmtTime = (t?: string) => (t ? new Date(t).toLocaleString() : '-')
     <!-- 批次详情抽屉 -->
     <el-drawer v-model="drawerBid" size="46%" :title="batch ? `集成批次：${batch.title}` : '集成批次'">
       <div v-if="batch" class="batch-detail">
-        <el-steps :active="stepActive" align-center finish-status="success"
-                  :process-status="stepError ? 'error' : 'process'">
+        <el-steps
+:active="stepActive" align-center finish-status="success"
+                  :process-status="stepError ? 'error' : 'process'"
+>
           <el-step title="收集中" />
           <el-step title="集成测试" />
           <el-step title="测试通过" />
@@ -426,12 +429,20 @@ const fmtTime = (t?: string) => (t ? new Date(t).toLocaleString() : '-')
         </div>
 
         <div class="detail-actions">
-          <el-button v-if="['collecting', 'conflict', 'failed'].includes(batch.status)"
-                     type="primary" @click="doIntegrate">集成（发车）</el-button>
+          <el-button
+v-if="['collecting', 'conflict', 'failed'].includes(batch.status)"
+                     type="primary" @click="doIntegrate"
+>
+集成（发车）
+</el-button>
           <el-button v-if="batch.status === 'tested'" type="danger" @click="doApprove">批准上线</el-button>
           <el-button v-if="batch.status === 'releasing'" type="warning" @click="doReleaseRetry">重试上线</el-button>
-          <el-button v-if="!['released', 'abandoned'].includes(batch.status)"
-                     text type="danger" @click="abandonB">放弃批次</el-button>
+          <el-button
+v-if="!['released', 'abandoned'].includes(batch.status)"
+                     text type="danger" @click="abandonB"
+>
+放弃批次
+</el-button>
         </div>
       </div>
     </el-drawer>

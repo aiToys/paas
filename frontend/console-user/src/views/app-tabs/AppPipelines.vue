@@ -5,19 +5,19 @@
 // ③ 待发布变更（下）：open 未入批变更，逐个「添加」进集成区
 // 批次 = 集成区（首次添加自动创建）；integrate = 提交发车（merge → CI 构建部署测试环境）。
 // 其余流水线管理（CD/自定义）折叠在底部「全部流水线」。
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   type Change, type IntegrationBatch,
   listChanges, createChange, abandonChange, listBatches, createBatch,
-  addChangeToBatch, removeChangeFromBatch, integrateBatch, abandonBatch,
+  addChangeToBatch, removeChangeFromBatch, abandonBatch,
 } from '@/api/change'
 import {
   type Pipeline, type PipelineTemplate, type StageDef, type PipelineRun,
   listPipelines, listTemplates, deletePipeline, triggerRun,
 } from '@/api/pipeline'
-import { fetchAuth } from '@/api'
+import { fetchAuth, apiError } from '@/api'
 import PipelineDesigner from './PipelineDesigner.vue'
 import { usePolling } from '@/composables/usePolling'
 import { CHANGE_STATUS, BATCH_STATUS, RUN_STATUS, statusOf } from '@/composables/useStatus'
@@ -57,8 +57,6 @@ const stagedChanges = computed(() => {
 const pendingChanges = computed(() =>
   changes.value.filter((c) => c.status === 'open' && (!activeBatch.value || c.batchId !== activeBatch.value.id)))
 
-// 集成区空 → 流水线不可运行（参考「需添加变更至集成区」）
-const canRun = computed(() => !!stagedChanges.value.length && !!ciPipeline.value && !busy.value)
 const batchRunning = computed(() => !!runningBatch.value)
 
 async function load() {
@@ -73,8 +71,8 @@ async function load() {
     pipelines.value = ps
     templates.value = ts
     await loadLatestRun()
-  } catch (e: any) {
-    ElMessage.error(e.message || '加载失败')
+  } catch (e) {
+    ElMessage.error(apiError(e, '加载失败'))
   } finally {
     loading.value = false
   }
@@ -111,8 +109,8 @@ async function addToStage(c: Change) {
     await addChangeToBatch(props.appId, b.id, c.id)
     ElMessage.success(`已添加「${c.title}」到集成区`)
     await load()
-  } catch (e: any) {
-    ElMessage.error(e.message || '添加失败')
+  } catch (e) {
+    ElMessage.error(apiError(e, '添加失败'))
   } finally {
     busy.value = false
   }
@@ -125,32 +123,8 @@ async function removeFromStage(cid: string) {
     await removeChangeFromBatch(props.appId, activeBatch.value.id, cid)
     ElMessage.success('已移出集成区')
     await load()
-  } catch (e: any) {
-    ElMessage.error(e.message || '移出失败')
-  } finally {
-    busy.value = false
-  }
-}
-
-// ---- 发车：集成（merge → CI 部署测试环境） ----
-async function runPipeline() {
-  const b = activeBatch.value
-  if (!b || !canRun.value) return
-  try {
-    await ElMessageBox.confirm(
-      `发车批次「${b.title}」？将按序合并 ${stagedChanges.value.length} 个变更到集成分支，并触发测试环境发布流水线。`,
-      '集成发车', { type: 'info' },
-    )
-  } catch { return }
-  busy.value = true
-  try {
-    const nb = await integrateBatch(props.appId, b.id)
-    ElMessage.success('已发车（合并 → 集成测试）')
-    if (nb.runId) router.push(`/devops/runs/${nb.runId}`)
-    await load()
-  } catch (e: any) {
-    ElMessage.error(e.message || '发车失败')
-    await load() // 冲突态回读
+  } catch (e) {
+    ElMessage.error(apiError(e, '移出失败'))
   } finally {
     busy.value = false
   }
@@ -187,8 +161,8 @@ async function doCreate() {
       await navigator.clipboard.writeText(cmd)
       ElMessage.success('已复制')
     } catch { /* 用户直接关闭 */ }
-  } catch (e: any) {
-    ElMessage.error(e.message || '创建失败')
+  } catch (e) {
+    ElMessage.error(apiError(e, '创建失败'))
   } finally {
     creating.value = false
   }
@@ -200,8 +174,8 @@ async function abandonC(c: Change) {
     await abandonChange(props.appId, c.id)
     ElMessage.success('已放弃')
     await load()
-  } catch (e: any) {
-    if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(apiError(e))
   }
 }
 
@@ -213,8 +187,8 @@ async function abandonStage() {
     await abandonBatch(props.appId, b.id)
     ElMessage.success('已放弃')
     await load()
-  } catch (e: any) {
-    if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(apiError(e))
   }
 }
 
@@ -229,8 +203,8 @@ async function remove(p: Pipeline) {
     await deletePipeline(props.appId, p.id)
     ElMessage.success('已删除')
     await load()
-  } catch (e: any) {
-    if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(apiError(e))
   }
 }
 
@@ -243,8 +217,8 @@ async function runCI(p: Pipeline) {
     const r = await triggerRun(props.appId, p.id, { branch: p.trigger?.branch || 'main' })
     ElMessage.success('已触发构建部署')
     router.push(`/devops/runs/${r.id}`)
-  } catch (e: any) {
-    ElMessage.error(e.message || '触发失败')
+  } catch (e) {
+    ElMessage.error(apiError(e, '触发失败'))
   }
 }
 function runManual(p: Pipeline) {
@@ -263,8 +237,8 @@ async function confirmCdRun() {
     })
     ElMessage.success('已触发运行')
     router.push(`/devops/runs/${r.id}`)
-  } catch (e: any) {
-    ElMessage.error(e.message || '触发失败')
+  } catch (e) {
+    ElMessage.error(apiError(e, '触发失败'))
   }
 }
 
@@ -278,9 +252,11 @@ const fmtTime = (t?: string) => (t ? new Date(t).toLocaleString() : '-')
       <div class="release-head">
         <div>
           <span class="release-title">构建部署</span>
-          <el-tag v-if="latestRun" size="small"
+          <el-tag
+v-if="latestRun" size="small"
                   :type="statusOf(RUN_STATUS, latestRun.status).type" class="run-tag"
-                  @click="latestRun && router.push(`/devops/runs/${latestRun.id}`)">
+                  @click="latestRun && router.push(`/devops/runs/${latestRun.id}`)"
+>
             {{ statusOf(RUN_STATUS, latestRun.status).label }}
           </el-tag>
         </div>
@@ -404,8 +380,7 @@ const fmtTime = (t?: string) => (t ? new Date(t).toLocaleString() : '-')
       </el-table>
       <div v-if="batchRunning" class="faint zone-note">*当前批次进行中，不能添加变更</div>
     </div>
-
-    </template><!-- /变更火车折叠 -->
+</template><!-- /变更火车折叠 -->
 
     <!-- 底部：全部流水线（CD + 自定义管理） -->
     <div class="all-pipes">

@@ -24,7 +24,6 @@ interface ConfigItem {
 
 const TYPE_ENV = 'env'
 const TYPE_SECRET = 'secret'
-const SECRET_MASK = '••••••'
 
 const items = ref<ConfigItem[]>([])
 const loading = ref(false)

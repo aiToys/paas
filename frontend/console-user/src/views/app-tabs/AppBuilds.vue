@@ -144,7 +144,9 @@ usePolling(() => load(true), 2000, {
             size="small"
             type="primary"
             @click="emit('pick', { id: row.imageId })"
-          >发布</el-button>
+          >
+发布
+</el-button>
           <el-button size="small" text type="primary" @click="router.push(buildLink(row.id))">详情</el-button>
         </template>
       </el-table-column>

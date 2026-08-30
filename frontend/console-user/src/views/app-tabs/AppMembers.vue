@@ -42,7 +42,7 @@ async function load() {
     members.value = ms
     users.value = us
     restricted.value = !!props.app.restricted
-  } catch (e) {
+  } catch {
     // 成员接口 404/403 不阻塞 tab（应用可能未开启受限）
     members.value = []
   } finally {
@@ -135,8 +135,10 @@ async function remove(m: Member) {
 
 <template>
   <div class="members">
-    <el-alert type="info" :closable="false" class="hint"
-      title="应用级权限：按应用维度控制成员可执行的动作（角色：所有者 > 维护者 > 开发者 > 只读）" />
+    <el-alert
+type="info" :closable="false" class="hint"
+      title="应用级权限：按应用维度控制成员可执行的动作（角色：所有者 > 维护者 > 开发者 > 只读）"
+/>
 
     <div class="bar">
       <div class="switch-line">

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import { fetchAuth, fetchJSON } from '@/api'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
@@ -552,8 +552,10 @@ async function deleteApp() {
         <section v-if="accessEntries.length" class="access-card">
           <div class="chart-title">访问入口</div>
           <div class="access-list">
-            <a v-for="e in accessEntries" :key="e.workload"
-               :href="'http://' + e.domain" target="_blank" rel="noopener" class="access-item">
+            <a
+v-for="e in accessEntries" :key="e.workload"
+               :href="'http://' + e.domain" target="_blank" rel="noopener" class="access-item"
+>
               <Icon name="link" :size="14" />
               <span class="access-domain mono">{{ e.domain }}</span>
               <span class="access-wl faint">{{ e.workload }}</span>

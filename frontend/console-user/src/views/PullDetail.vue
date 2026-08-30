@@ -99,8 +99,12 @@ onMounted(load)
       <span v-if="detail" class="title">{{ detail.pr.title }}</span>
       <el-tag v-if="detail" :type="stateType" size="small">{{ stateLabel }}</el-tag>
       <span class="grow"></span>
-      <el-button v-if="detail?.pr.state === 'open'" size="small" type="primary"
-        :loading="mergeBusy" @click="doMerge">合并</el-button>
+      <el-button
+v-if="detail?.pr.state === 'open'" size="small" type="primary"
+        :loading="mergeBusy" @click="doMerge"
+>
+合并
+</el-button>
     </header>
 
     <template v-if="detail">
@@ -111,8 +115,10 @@ onMounted(load)
         <div v-if="detail.pr.body" class="kv"><span>说明</span>{{ detail.pr.body }}</div>
       </div>
 
-      <el-alert v-if="detail.truncated" type="warning" :closable="false" show-icon
-        title="diff 过大已截断（>2MB），请到 Git 平台查看完整内容" class="truncate-tip" />
+      <el-alert
+v-if="detail.truncated" type="warning" :closable="false" show-icon
+        title="diff 过大已截断（>2MB），请到 Git 平台查看完整内容" class="truncate-tip"
+/>
 
       <!-- diff 渲染区 -->
       <div v-for="f in files" :key="f.path" class="diff-file">

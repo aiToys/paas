@@ -3,7 +3,7 @@
 // 租户私有；test/invoke 仅 mcp 类型（initialize + tools/list + tools/call）。
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchJSON, fetchAuth } from '@/api'
+import { fetchJSON, fetchAuth, respError } from '@/api'
 import { usePublish } from '@/composables/usePublish'
 
 interface Tool {
@@ -84,8 +84,7 @@ async function submit() {
     body: JSON.stringify(f),
   })
   if (!resp.ok) {
-    const j = await resp.json().catch(() => ({}))
-    ElMessage.error('保存失败：' + ((j as any)?.error || resp.status))
+    ElMessage.error(await respError(resp, '保存失败：'))
     return
   }
   ElMessage.success(editing.value ? '已更新' : '已创建')
@@ -118,10 +117,12 @@ async function testTool(t: Tool) {
   const resp = await fetchAuth(`/api/tools/${t.id}/test`, { method: 'POST' })
   const j = await resp.json().catch(() => ({}))
   if (!resp.ok) {
-    ElMessage.error('测试失败：' + ((j as any)?.error || resp.status))
+    ElMessage.error(await respError(resp, '测试失败：'))
     return
   }
-  const tools = (j as any)?.data?.tools ?? (j as any)?.tools ?? []
+  // 响应兼容 {data:{tools:[]}} 与裸 {tools:[]} 两种形态
+  const outer = j as { data?: { tools?: unknown[] }; tools?: unknown[] }
+  const tools = outer.data?.tools ?? outer.tools ?? []
   if (!Array.isArray(tools) || tools.length === 0) {
     ElMessage.info('连接成功，但未暴露工具')
     return

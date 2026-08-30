@@ -8,6 +8,7 @@ import {
   getPipeline, updatePipeline, listTemplates,
   type Pipeline, type StageDef, type PipelineTemplate,
 } from '@/api/pipeline'
+import { apiError } from '@/api'
 import { useEnvStore } from '@/stores/env'
 
 const props = defineProps<{ appId: string; pid: string }>()
@@ -41,8 +42,8 @@ async function load() {
     overrides.value = { ...(p.paramOverrides ?? {}) }
     triggerType.value = p.trigger?.type ?? 'manual'
     triggerBranch.value = p.trigger?.branch ?? ''
-  } catch (e: any) {
-    ElMessage.error(e?.message || '加载失败')
+  } catch (e) {
+    ElMessage.error(apiError(e, '加载失败'))
   }
 }
 
@@ -142,8 +143,8 @@ async function save() {
     pipeline.value = updated // 更新含 token（webhook 时展示 URL）
     ElMessage.success('已保存')
     emit('saved')
-  } catch (e: any) {
-    ElMessage.error(e?.message || '保存失败')
+  } catch (e) {
+    ElMessage.error(apiError(e, '保存失败'))
   } finally {
     saving.value = false
   }
@@ -207,42 +208,58 @@ onMounted(load)
       <div class="section-title">参数覆盖（可选）</div>
       <div v-for="d in deployStages" :key="d.i" class="override-item">
         <div class="override-label">阶段「{{ d.s.name }}」目标环境</div>
-        <el-select :model-value="getOverride(d.i, 'envId')" @update:model-value="(v: string) => setOverride(d.i, 'envId', v)"
-                   placeholder="默认（{{app.env.test}} 自动解析）" clearable style="width: 100%;">
+        <el-select
+:model-value="getOverride(d.i, 'envId')" @update:model-value="(v: string) => setOverride(d.i, 'envId', v)"
+                   placeholder="默认（{{app.env.test}} 自动解析）" clearable style="width: 100%;"
+>
           <el-option v-for="e in envStore.envs" :key="e.id" :value="e.id" :label="`${e.name} (${e.type})`" />
         </el-select>
         <div class="override-hint">留空 = 用模板默认占位符自动解析；选具体环境 = 覆盖。</div>
         <div class="override-label" style="margin-top: 12px;">阶段「{{ d.s.name }}」泳道（lane）</div>
-        <el-input :model-value="getOverride(d.i, 'lane')" @update:model-value="(v: string) => setOverride(d.i, 'lane', v)"
-                  placeholder="默认 {{run.branch}}（分支独立泳道联调）；生产填 default" clearable />
+        <el-input
+:model-value="getOverride(d.i, 'lane')" @update:model-value="(v: string) => setOverride(d.i, 'lane', v)"
+                  placeholder="默认 {{run.branch}}（分支独立泳道联调）；生产填 default" clearable
+/>
         <div class="override-hint">留空 = 用运行期分支名作 lane（测试泳道联调）；生产基线填 default。</div>
         <div class="override-label" style="margin-top: 12px;">阶段「{{ d.s.name }}」服务（service）</div>
-        <el-input :model-value="getOverride(d.i, 'service')" @update:model-value="(v: string) => setOverride(d.i, 'service', v)"
-                  placeholder="留空 = 单服务；多服务应用填服务名（如 product/recommend）" clearable />
+        <el-input
+:model-value="getOverride(d.i, 'service')" @update:model-value="(v: string) => setOverride(d.i, 'service', v)"
+                  placeholder="留空 = 单服务；多服务应用填服务名（如 product/recommend）" clearable
+/>
         <div class="override-hint">同 app 多服务场景区分各服务 Workload（与构建 buildArgs SERVICE 对齐）；留空 = 单服务。</div>
         <div class="override-label" style="margin-top: 12px;">阶段「{{ d.s.name }}」端口（port）</div>
-        <el-input :model-value="getOverride(d.i, 'port')" @update:model-value="(v: string) => setOverride(d.i, 'port', v)"
-                  placeholder="留空 = 不建 Service；新建 Workload 时驱动建 K8s Service（如 8081）" clearable />
+        <el-input
+:model-value="getOverride(d.i, 'port')" @update:model-value="(v: string) => setOverride(d.i, 'port', v)"
+                  placeholder="留空 = 不建 Service；新建 Workload 时驱动建 K8s Service（如 8081）" clearable
+/>
         <div class="override-hint">ContainerPort 缺省取 port；端口驱动 reconciler 建 Service 供 smoke 探活/服务发现。</div>
         <div class="override-label" style="margin-top: 12px;">阶段「{{ d.s.name }}」资源规格（resources）</div>
         <el-form inline>
           <el-form-item v-for="f in RES_FIELDS" :key="f.key" :label="f.label">
-            <el-input :model-value="getResField(d.i, f.key)" @update:model-value="(v: string) => setResField(d.i, f.key, v)"
-                      :placeholder="f.ph" style="width: 110px" />
+            <el-input
+:model-value="getResField(d.i, f.key)" @update:model-value="(v: string) => setResField(d.i, f.key, v)"
+                      :placeholder="f.ph" style="width: 110px"
+/>
           </el-form-item>
         </el-form>
         <div class="override-hint">留空 = 继承应用级资源规格默认值（配置 tab）；生产环境必须最终有规格（应用级或此处）。</div>
         <div class="override-label" style="margin-top: 12px;">阶段「{{ d.s.name }}」副本数（replicas）</div>
-        <el-input :model-value="getOverride(d.i, 'replicas')" @update:model-value="(v: string) => setOverride(d.i, 'replicas', v)"
-                  placeholder="留空 = 服务定义默认；联调泳道自动降为 1" clearable />
+        <el-input
+:model-value="getOverride(d.i, 'replicas')" @update:model-value="(v: string) => setOverride(d.i, 'replicas', v)"
+                  placeholder="留空 = 服务定义默认；联调泳道自动降为 1" clearable
+/>
       </div>
       <div v-for="b in buildStages" :key="b.i" class="override-item">
         <div class="override-label">阶段「{{ b.s.name }}」构建参数（buildArgs，如 SERVICE=product）</div>
         <div v-for="(row, idx) in getBuildArgs(b.i)" :key="idx" class="buildarg-row">
-          <el-input :model-value="row.k" @update:model-value="(v: string) => setBuildArg(b.i, idx, 'k', v)"
-                    placeholder="参数名（如 SERVICE）" style="width: 40%;" />
-          <el-input :model-value="row.v" @update:model-value="(v: string) => setBuildArg(b.i, idx, 'v', v)"
-                    placeholder="参数值（如 product）" style="width: 40%;" />
+          <el-input
+:model-value="row.k" @update:model-value="(v: string) => setBuildArg(b.i, idx, 'k', v)"
+                    placeholder="参数名（如 SERVICE）" style="width: 40%;"
+/>
+          <el-input
+:model-value="row.v" @update:model-value="(v: string) => setBuildArg(b.i, idx, 'v', v)"
+                    placeholder="参数值（如 product）" style="width: 40%;"
+/>
           <el-button text type="danger" @click="removeBuildArg(b.i, idx)">删</el-button>
         </div>
         <el-button text type="primary" @click="addBuildArg(b.i)">+ 添加参数</el-button>
@@ -250,27 +267,35 @@ onMounted(load)
       </div>
       <div v-for="t in testStages" :key="t.i" class="override-item">
         <div class="override-label">阶段「{{ t.s.name }}」测试模式</div>
-        <el-select :model-value="getOverride(t.i, 'mode')" @update:model-value="(v: string) => setOverride(t.i, 'mode', v)"
-                   placeholder="默认 smoke（HTTP 探活自动）" clearable style="width: 100%;">
+        <el-select
+:model-value="getOverride(t.i, 'mode')" @update:model-value="(v: string) => setOverride(t.i, 'mode', v)"
+                   placeholder="默认 smoke（HTTP 探活自动）" clearable style="width: 100%;"
+>
           <el-option value="smoke" label="smoke（HTTP 探活自动）" />
           <el-option value="manual" label="manual（人工确认暂停）" />
         </el-select>
         <div class="override-label" style="margin-top: 12px;" v-if="getOverride(t.i, 'mode') !== 'manual'">探活路径</div>
-        <el-input v-if="getOverride(t.i, 'mode') !== 'manual'"
+        <el-input
+v-if="getOverride(t.i, 'mode') !== 'manual'"
                   :model-value="getOverride(t.i, 'path')" @update:model-value="(v: string) => setOverride(t.i, 'path', v)"
-                  placeholder="默认 /livez（如应用用 /healthz 在此覆盖）" clearable />
+                  placeholder="默认 /livez（如应用用 /healthz 在此覆盖）" clearable
+/>
         <div class="override-hint">smoke 模式探活前序 deploy 的 domain + path 轮询 2xx；路径需与应用真实健康端点一致。</div>
       </div>
       <div v-for="a in approveStages" :key="a.i" class="override-item">
         <div class="override-label">阶段「{{ a.s.name }}」审批提示</div>
-        <el-input :model-value="getOverride(a.i, 'message')" @update:model-value="(v: string) => setOverride(a.i, 'message', v)"
-                  placeholder="默认「等待审批」（如：请确认生产发布）" clearable />
+        <el-input
+:model-value="getOverride(a.i, 'message')" @update:model-value="(v: string) => setOverride(a.i, 'message', v)"
+                  placeholder="默认「等待审批」（如：请确认生产发布）" clearable
+/>
         <div class="override-hint">审批门禁暂停时展示给确认者的提示文案。</div>
       </div>
       <div v-for="r in releaseStages" :key="r.i" class="override-item">
         <div class="override-label">阶段「{{ r.s.name }}」版本策略</div>
-        <el-select :model-value="getOverride(r.i, 'versionStrategy')" @update:model-value="(v: string) => setOverride(r.i, 'versionStrategy', v)"
-                   placeholder="默认 auto-increment（分支-runID）" clearable style="width: 100%;">
+        <el-select
+:model-value="getOverride(r.i, 'versionStrategy')" @update:model-value="(v: string) => setOverride(r.i, 'versionStrategy', v)"
+                   placeholder="默认 auto-increment（分支-runID）" clearable style="width: 100%;"
+>
           <el-option value="auto-increment" label="auto-increment（分支-runID 自动）" />
           <el-option value="manual" label="manual（触发时填的版本）" />
           <el-option value="tag" label="tag（commit 短 sha）" />

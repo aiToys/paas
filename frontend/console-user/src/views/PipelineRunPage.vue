@@ -10,7 +10,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import PipelineRunView from './app-tabs/PipelineRunView.vue'
 import { getRun, listRuns, listPipelines, type Pipeline, type PipelineRun } from '@/api/pipeline'
-import { fetchAuth } from '@/api'
+import { fetchAuth, apiError } from '@/api'
 
 const route = useRoute()
 const router = useRouter()
@@ -29,15 +29,6 @@ const activePid = ref('')
 const runs = ref<PipelineRun[]>([])
 const runsLoading = ref(false)
 
-const runStatusLabel = (s?: string): string => {
-  const m: Record<string, string> = { running: '运行中', paused: '待审批', succeeded: '成功', failed: '失败', aborted: '已中止' }
-  return m[s || ''] || s || '-'
-}
-const runStatusType = (s?: string): string => {
-  const m: Record<string, string> = { succeeded: 'success', failed: 'danger', aborted: 'info', running: 'warning', paused: 'warning' }
-  return m[s || ''] || 'info'
-}
-
 function shortCommit(c?: string): string { return c ? c.slice(0, 8) : '-' }
 function fmtTime(t?: string): string { return t ? new Date(t).toLocaleString() : '' }
 
@@ -53,8 +44,8 @@ async function loadRuns() {
   runsLoading.value = true
   try {
     runs.value = await listRuns({ appId: appId.value, pipelineId: activePid.value })
-  } catch (e: any) {
-    ElMessage.error(e?.message || '加载运行列表失败')
+  } catch (e) {
+    ElMessage.error(apiError(e, '加载运行列表失败'))
   } finally {
     runsLoading.value = false
   }
@@ -132,8 +123,10 @@ function goBack() {
 
     <!-- ② 运行列表（横向 chips，选中高亮）+ ③ 运行轨道 -->
     <div v-if="activePid" class="run-chips" v-loading="runsLoading">
-      <button v-for="r in runs" :key="r.id" class="run-chip" :class="{ active: r.id === runId }"
-        @click="router.replace(`/devops/runs/${r.id}`)">
+      <button
+v-for="r in runs" :key="r.id" class="run-chip" :class="{ active: r.id === runId }"
+        @click="router.replace(`/devops/runs/${r.id}`)"
+>
         <span class="chip-dot" :class="r.status" />
         <span class="chip-text">{{ r.branch }}@{{ shortCommit(r.commit) }}</span>
         <span v-if="r.version" class="chip-ver">{{ r.version }}</span>

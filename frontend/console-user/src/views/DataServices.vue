@@ -271,8 +271,10 @@ onMounted(load)
         </el-form-item>
         <!-- external-dedicated：用户填连接 URI -->
         <el-form-item v-if="selectedEngine?.mode === 'external-dedicated'" label="连接 URI">
-          <el-input v-model="form.connectionUri" type="textarea" :rows="2"
-            placeholder="如 postgresql://user:pass@host:5432/db" />
+          <el-input
+v-model="form.connectionUri" type="textarea" :rows="2"
+            placeholder="如 postgresql://user:pass@host:5432/db"
+/>
         </el-form-item>
       </el-form>
       <template #footer>

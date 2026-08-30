@@ -53,3 +53,21 @@ export async function fetchJSON<T>(path: string, opts?: RequestInit): Promise<T>
   }
   return json as T
 }
+
+// apiError 从 fetchJSON/fetchAuth 抛出的 unknown 错误中提取用户可读文案，
+// 供 catch 分支使用（替代散落各页面的 `catch (e: any) e.message` 反模式）。
+export function apiError(e: unknown, fallback = '请求失败'): string {
+  if (e instanceof Error && e.message) return e.message
+  return fallback
+}
+
+// respError 从非 2xx 的 Response 中提取后端 {error:msg} 文案，
+// 供手写 fetchAuth（需读原始 Response 的场景，如 SSE/流式）使用。
+export async function respError(resp: Response, prefix = ''): Promise<string> {
+  const j = await resp.json().catch(() => null)
+  const msg =
+    j && typeof j === 'object' && 'error' in j && typeof (j as { error: unknown }).error === 'string'
+      ? (j as { error: string }).error
+      : `HTTP ${resp.status}`
+  return prefix ? `${prefix}${msg}` : msg
+}

@@ -67,8 +67,10 @@ function shortDigest(d: string) {
       <span class="tab-title">镜像（构建产物）</span>
       <span class="tab-hint">digest 不可变真源，生产部署锁定</span>
     </div>
-    <el-table ref="tableRef" :data="images" v-loading="loading" size="small" row-key="id"
-      empty-text="尚无镜像，先在「构建」tab 触发构建">
+    <el-table
+ref="tableRef" :data="images" v-loading="loading" size="small" row-key="id"
+      empty-text="尚无镜像，先在「构建」tab 触发构建"
+>
       <el-table-column type="expand">
         <template #default="{ row }">
           <div class="expand-detail">

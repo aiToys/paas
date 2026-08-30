@@ -20,7 +20,7 @@ import { useRouter } from 'vue-router'
 import { fetchAuth } from '@/api'
 import { useUrlState } from '@/composables/useUrlState'
 import {
-  type Span, type Trace,
+  type Trace,
   buildSpanTree, flattenSpanTree, spanWidth, spanLeft, spanChips, errSpanCount,
   spanKindBadge, spanServiceLabel, spanLane, traceHasLane,
 } from '@/composables/useSpanTree'
@@ -297,13 +297,17 @@ watch(() => props.bindings, () => loadDeps(), { deep: true })
             <el-checkbox v-model="showShallowTraces" size="small" class="shallow-toggle">
               显示单 span 请求（轮询/探活）
             </el-checkbox>
-            <el-input v-model="traceIdQuery" placeholder="按 TraceID 直查" size="small" style="width: 200px; margin-left: 12px"
-              clearable @keyup.enter="searchTraceById" @clear="loadTraces">
+            <el-input
+v-model="traceIdQuery" placeholder="按 TraceID 直查" size="small" style="width: 200px; margin-left: 12px"
+              clearable @keyup.enter="searchTraceById" @clear="loadTraces"
+>
               <template #append><el-button @click="searchTraceById">查</el-button></template>
             </el-input>
           </div>
-          <el-table :data="visibleTraces" size="small" row-key="id" empty-text="暂无链路"
-            :row-class-name="traceRowClass">
+          <el-table
+:data="visibleTraces" size="small" row-key="id" empty-text="暂无链路"
+            :row-class-name="traceRowClass"
+>
             <el-table-column type="expand">
               <template #default="{ row }">
                 <div class="span-list">
@@ -314,9 +318,11 @@ watch(() => props.bindings, () => loadDeps(), { deep: true })
                     <span class="span-mono">{{ row.durationMs }}ms</span>
                   </div>
                   <div v-if="traceHasLane(row)" class="lane-legend">🛣 泳道标识——该 span 流量走了对应 feature 泳道；无标识 = default 基线</div>
-                  <div v-for="node in spanRows(row)" :key="node.span.id"
+                  <div
+v-for="node in spanRows(row)" :key="node.span.id"
                     class="span-card" :class="{ 'span-err': node.span.isError }"
-                    :style="{ paddingLeft: 10 + node.depth * 18 + 'px' }">
+                    :style="{ paddingLeft: 10 + node.depth * 18 + 'px' }"
+>
                     <div class="span-row">
                       <span class="span-bar" :style="{ width: spanWidth(node.span, row) + '%', left: spanLeft(node.span, row) + '%' }" />
                       <span v-if="node.depth > 0" class="span-tree-line" />
@@ -336,12 +342,14 @@ watch(() => props.bindings, () => loadDeps(), { deep: true })
                     </div>
                     <details v-if="node.span.tags && Object.keys(node.span.tags).length" class="span-attrs">
                       <summary>全部属性 ({{ Object.keys(node.span.tags).length }})</summary>
-                      <table class="attr-table"><tbody>
+                      <table class="attr-table">
+<tbody>
                         <tr v-for="(v, k) in node.span.tags" :key="k">
                           <td class="mono ak">{{ k }}</td>
                           <td class="mono av">{{ v }}</td>
                         </tr>
-                      </tbody></table>
+                      </tbody>
+</table>
                     </details>
                     <div v-if="node.span.errorMessage || node.span.tags?.['exception.stacktrace']" class="span-exc">
                       <div v-if="node.span.errorMessage" class="exc-msg">⚠ {{ node.span.errorMessage }}</div>

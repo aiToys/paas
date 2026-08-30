@@ -11,6 +11,7 @@ import {
   getRun, approveStage, abortRun, retryRun, getBuildRun, canaryDecision,
   type PipelineRun, type StageRun, laneOf, buildRunIdOf,
 } from '@/api/pipeline'
+import { apiError } from '@/api'
 import { listMetrics } from '@/api/observability'
 
 const props = defineProps<{ runId: string }>()
@@ -19,6 +20,7 @@ const router = useRouter()
 const run = ref<PipelineRun | null>(null)
 const loading = ref(false)
 let timer: ReturnType<typeof setInterval> | null = null
+let pollBusy = false
 
 const runStatusLabel = (s?: string): string => {
   const m: Record<string, string> = { running: '运行中', paused: '等待审批', succeeded: '成功', failed: '失败', aborted: '已中止' }
@@ -84,6 +86,7 @@ const canaryStage = computed<StageRun | null>(() => {
 // ---- canary 观察指标（10s 轮询，onUnmounted 清理） ----
 const canaryMetrics = ref<{ label: string; value: string }[]>([])
 let canaryTimer: ReturnType<typeof setInterval> | null = null
+let canaryBusy = false
 
 async function loadCanaryMetrics() {
   const s = canaryStage.value
@@ -109,7 +112,11 @@ watch(canaryStage, (s) => {
   if (s && s.status === 'waiting') {
     loadCanaryMetrics()
     if (!canaryTimer) canaryTimer = setInterval(() => {
-      if (!document.hidden) loadCanaryMetrics()
+      if (document.hidden || canaryBusy) return
+      canaryBusy = true
+      try {
+        void loadCanaryMetrics().finally(() => { canaryBusy = false })
+      } catch { canaryBusy = false }
     }, 10000)
   } else {
     if (canaryTimer) { clearInterval(canaryTimer); canaryTimer = null }
@@ -139,8 +146,8 @@ async function canaryDecide(action: 'promote' | 'terminate') {
     await canaryDecision(r.id, cur.index, action)
     ElMessage.success(action === 'promote' ? '已放量，基线滚动中' : '已终止，金丝雀负载回收中')
     await load()
-  } catch (e: any) {
-    ElMessage.error(e?.message || '操作失败')
+  } catch (e) {
+    ElMessage.error(apiError(e, '操作失败'))
   }
 }
 
@@ -155,8 +162,8 @@ async function load() {
   try {
     loading.value = true
     run.value = await getRun(props.runId)
-  } catch (e: any) {
-    ElMessage.error(e?.message || '加载运行失败')
+  } catch (e) {
+    ElMessage.error(apiError(e, '加载运行失败'))
   } finally {
     loading.value = false
   }
@@ -170,9 +177,9 @@ async function approve() {
     await approveStage(r.id, r.currentStage)
     ElMessage.success('已批准')
     await load()
-  } catch (e: any) {
+  } catch (e) {
     if (e === 'cancel') return
-    ElMessage.error(e?.message || '审批失败')
+    ElMessage.error(apiError(e, '审批失败'))
   }
 }
 
@@ -184,9 +191,9 @@ async function abort() {
     await abortRun(r.id)
     ElMessage.success('已中止')
     await load()
-  } catch (e: any) {
+  } catch (e) {
     if (e === 'cancel') return
-    ElMessage.error(e?.message || '中止失败')
+    ElMessage.error(apiError(e, '中止失败'))
   }
 }
 
@@ -197,20 +204,25 @@ async function retry() {
     await retryRun(r.id)
     ElMessage.success('已从失败阶段重试')
     await load()
-  } catch (e: any) {
-    ElMessage.error(e?.message || '重试失败')
+  } catch (e) {
+    ElMessage.error(apiError(e, '重试失败'))
   }
 }
 
 function startPolling() {
   stopPolling()
   timer = setInterval(async () => {
-    // 后台 tab 不请求（不可见跳过本次 tick，恢复可见立即拉一次补状态）
+    // 后台 tab 不请求（不可见跳过本次 tick，恢复可见立即拉一次补状态）；
+    // async tick 串行 await（防慢请求 5s 未返回堆叠）
     if (document.hidden) return
     if (isTerminal.value) { stopPolling(); return }
+    if (pollBusy) return
+    pollBusy = true
     try {
       run.value = await getRun(props.runId)
-    } catch { /* 静默重试 */ }
+    } catch { /* 静默重试 */ } finally {
+      pollBusy = false
+    }
   }, 5000)
 }
 function stopPolling() {
@@ -436,19 +448,27 @@ watch(() => run.value?.id, autoSelect)
       <!-- 横向阶段轨道：节点圆 + 连线（已完成实线着色 / 未到灰虚线） -->
       <div class="stage-rail">
         <template v-for="(s, i) in run.stageRuns" :key="s.index">
-          <div v-if="i > 0" class="rail-connector"
+          <div
+v-if="i > 0" class="rail-connector"
             :class="{ done: connectorDone(i) }"
-            :style="connectorDone(i) ? { background: connectorColor(i) } : {}" />
-          <div class="rail-node" :class="{ selected: selectedIdx === s.index, current: s.index === run.currentStage && !isTerminal }"
-            @click="toggleNode(s)">
-            <div class="node-circle" :style="{ borderColor: stageColorVar(s.status), color: stageColorVar(s.status) }"
-              :class="{ pulse: s.status === 'running' }">
+            :style="connectorDone(i) ? { background: connectorColor(i) } : {}"
+/>
+          <div
+class="rail-node" :class="{ selected: selectedIdx === s.index, current: s.index === run.currentStage && !isTerminal }"
+            @click="toggleNode(s)"
+>
+            <div
+class="node-circle" :style="{ borderColor: stageColorVar(s.status), color: stageColorVar(s.status) }"
+              :class="{ pulse: s.status === 'running' }"
+>
               {{ stageIcon(s.status) }}
             </div>
             <div class="node-name">{{ s.name }}</div>
             <div class="node-status">{{ stageStatusLabel(s) }}</div>
-            <el-tag v-if="laneOf(s) && laneOf(s) !== 'default'" size="small" type="warning" class="node-lane"
-              :title="`泳道 ${laneOf(s)}`">
+            <el-tag
+v-if="laneOf(s) && laneOf(s) !== 'default'" size="small" type="warning" class="node-lane"
+              :title="`泳道 ${laneOf(s)}`"
+>
               泳道 {{ laneOf(s) }}
             </el-tag>
           </div>

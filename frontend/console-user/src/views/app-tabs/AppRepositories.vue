@@ -70,13 +70,13 @@ function relTime(date: string): string {
 }
 
 // 展示 clone 命令（后端从 PAAS_GITEA_EXTERNAL_URL 运行时填充；凭证占位由用户替换）。
-async function showClone(row: any) {
+async function showClone(row: Repo & { cloneCommand?: string }) {
   try {
     await ElMessageBox.alert(row.cloneCommand, '本机克隆命令（替换 <用户名>:<密码> 为 Git 凭证）：', {
       confirmButtonText: '复制命令',
       distinguishCancelAndClose: true,
     })
-    await navigator.clipboard.writeText(row.cloneCommand)
+    await navigator.clipboard.writeText(row.cloneCommand || '')
     ElMessage.success('已复制')
   } catch { /* 直接关闭 */ }
 }

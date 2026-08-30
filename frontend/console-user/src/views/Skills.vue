@@ -5,7 +5,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchJSON, fetchAuth } from '@/api'
+import { fetchJSON, fetchAuth, respError } from '@/api'
 import { CATEGORIES, catLabel } from '@/api/marketplace'
 import { usePublish } from '@/composables/usePublish'
 
@@ -83,8 +83,7 @@ async function submit() {
     body: JSON.stringify(f),
   })
   if (!resp.ok) {
-    const j = await resp.json().catch(() => ({}))
-    ElMessage.error('保存失败：' + ((j as any)?.error || resp.status))
+    ElMessage.error(await respError(resp, '保存失败：'))
     return
   }
   ElMessage.success(editing.value ? '已更新' : '已创建')

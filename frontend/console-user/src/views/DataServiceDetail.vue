@@ -494,8 +494,10 @@ async function upgrade() {
       <div class="block-title">实例管理</div>
       <template v-if="isManaged">
         <div class="mgmt-row">
-          <el-button :type="ds.status === 'running' ? 'warning' : 'success'" size="small"
-            @click="lifecycle(ds.status === 'running' ? 'stop' : 'start')">
+          <el-button
+:type="ds.status === 'running' ? 'warning' : 'success'" size="small"
+            @click="lifecycle(ds.status === 'running' ? 'stop' : 'start')"
+>
             {{ ds.status === 'running' ? '停止' : '启动' }}
           </el-button>
           <el-button size="small" @click="lifecycle('restart')">重启</el-button>
@@ -524,9 +526,11 @@ async function upgrade() {
           <span class="mgmt-hint" v-if="ds.image">当前：{{ ds.image }}</span>
         </div>
       </template>
-      <el-alert v-else type="info" :closable="false"
+      <el-alert
+v-else type="info" :closable="false"
         title="外部实例（平台不托管运维）"
-        description="该实例为外部接入（共享集群 / 独占外部），启停 / 扩缩容 / 升级请在对应外部集群操作。平台仅做连接注入与管理。" />
+        description="该实例为外部接入（共享集群 / 独占外部），启停 / 扩缩容 / 升级请在对应外部集群操作。平台仅做连接注入与管理。"
+/>
     </section>
 
     <!-- 连接信息 -->

@@ -439,7 +439,9 @@ watch(() => envStore.currentEnvId, load)
               v-if="row.enabled"
               :type="(stateMeta[row.state]?.type) || 'info'"
               size="small"
-            >{{ stateMeta[row.state]?.label || row.state }}</el-tag>
+            >
+{{ stateMeta[row.state]?.label || row.state }}
+</el-tag>
             <el-tag v-else type="info" size="small">停用</el-tag>
           </template>
         </el-table-column>

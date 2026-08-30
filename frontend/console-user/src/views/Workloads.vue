@@ -469,8 +469,10 @@ onUnmounted(() => {
             </td>
             <td class="mono img">{{ w.image }}</td>
             <td v-if="activeType === 'service'">
-              <a v-if="w.domain" class="link domain-link" :href="`http://${w.domain}`" target="_blank" rel="noopener"
-                :title="w.domain">{{ w.domain.split('.')[0] }} ↗</a>
+              <a
+v-if="w.domain" class="link domain-link" :href="`http://${w.domain}`" target="_blank" rel="noopener"
+                :title="w.domain"
+>{{ w.domain.split('.')[0] }} ↗</a>
               <span v-else class="faint">—</span>
             </td>
             <td v-if="activeType === 'cronjob'" class="mono sched">{{ w.schedule }}</td>
@@ -512,8 +514,10 @@ onUnmounted(() => {
       </div>
       <el-form label-width="92px">
         <el-form-item label="归属应用" required>
-          <el-select v-model="createForm.appId" placeholder="选择应用" style="width: 100%"
-            @change="imageRef = ''; createForm.image = ''; loadImages(createForm.appId)">
+          <el-select
+v-model="createForm.appId" placeholder="选择应用" style="width: 100%"
+            @change="imageRef = ''; createForm.image = ''; loadImages(createForm.appId)"
+>
             <el-option v-for="a in apps" :key="a.id" :label="a.name" :value="a.id" />
           </el-select>
         </el-form-item>
@@ -521,16 +525,20 @@ onUnmounted(() => {
           <el-input v-model="createForm.name" placeholder="如 rec-svc" />
         </el-form-item>
         <el-form-item label="镜像" required>
-          <el-select v-if="imageOptions.length" v-model="imageRef" style="width: 100%"
-            placeholder="选择构建产物镜像">
+          <el-select
+v-if="imageOptions.length" v-model="imageRef" style="width: 100%"
+            placeholder="选择构建产物镜像"
+>
             <el-option v-for="i in imageOptions" :key="i.id" :value="i.id" :label="i.tag">
               <span class="mono">{{ i.tag }}</span>
               <span class="img-opt-hint">{{ i.status }}</span>
             </el-option>
             <el-option value="" label="自定义镜像…">自定义镜像…</el-option>
           </el-select>
-          <el-input v-if="!imageOptions.length || !imageRef" v-model="createForm.image"
-            :placeholder="imageOptions.length ? '自定义镜像，如 nginx:stable' : '暂无构建产物，输入镜像，如 nginx:stable'" />
+          <el-input
+v-if="!imageOptions.length || !imageRef" v-model="createForm.image"
+            :placeholder="imageOptions.length ? '自定义镜像，如 nginx:stable' : '暂无构建产物，输入镜像，如 nginx:stable'"
+/>
         </el-form-item>
         <el-form-item v-if="activeType === 'service'" label="副本数">
           <el-input-number v-model="createForm.replicas" :min="1" :max="20" />
@@ -561,7 +569,8 @@ onUnmounted(() => {
               <span class="k">副本</span>
               <span class="v mono">{{ detail.workload.ready }}/{{ detail.workload.replicas }}</span>
             </div>
-            <div class="info-row"><span class="k">状态</span>
+            <div class="info-row">
+<span class="k">状态</span>
               <span class="status" :class="statusOf(detail.workload.status).cls">{{ statusOf(detail.workload.status).label }}</span>
             </div>
           </div>

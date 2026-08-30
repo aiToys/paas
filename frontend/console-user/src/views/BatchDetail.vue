@@ -20,10 +20,12 @@
         <div class="row">
           <div class="kv"><span>标题</span><b>{{ batch.title }}</b></div>
           <div class="kv"><span>集成分支</span><code class="mono">{{ batch.branch }}</code></div>
-          <div class="kv"><span>应用</span>
+          <div class="kv">
+<span>应用</span>
             <a class="link" @click="router.push(`/applications/${batch.appId}`)">{{ batch.appId }}</a>
           </div>
-          <div v-if="batch.runId" class="kv"><span>关联运行</span>
+          <div v-if="batch.runId" class="kv">
+<span>关联运行</span>
             <a class="link" @click="router.push(`/devops/runs/${batch.runId}`)">{{ batch.runId }}</a>
           </div>
         </div>
@@ -77,6 +79,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { apiError } from '@/api'
 import { getBatch, listAllBatches, listAllChanges, integrateBatch, approveBatch, releaseBatch, abandonBatch, type IntegrationBatch, type Change } from '@/api/change'
 import { usePolling } from '@/composables/usePolling'
 import { BATCH_STATUS, statusOf } from '@/composables/useStatus'
@@ -119,8 +122,8 @@ async function load(silent = false) {
     // 批内变更（批次详情触发后端惰性状态推进，回读最新）
     const cs = await listAllChanges(b.appId)
     changes.value = cs.filter((c) => batch.value!.changeIds.includes(c.id))
-  } catch (e: any) {
-    if (!silent) ElMessage.error(e?.message || '加载失败')
+  } catch (e) {
+    if (!silent) ElMessage.error(apiError(e, '加载失败'))
   }
 }
 
@@ -138,8 +141,8 @@ async function doAction(kind: 'integrate' | 'approve' | 'release') {
     await fn(b.appId, b.id)
     ElMessage.success('操作成功')
     await load(true)
-  } catch (e: any) {
-    if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(apiError(e))
   }
 }
 
@@ -150,8 +153,8 @@ async function doAbandon() {
     await abandonBatch(batch.value.appId, batch.value.id)
     ElMessage.success('已放弃')
     goBack()
-  } catch (e: any) {
-    if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(apiError(e))
   }
 }
 

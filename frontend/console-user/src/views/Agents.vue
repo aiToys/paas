@@ -6,7 +6,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 const router = useRouter()
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchJSON, fetchAuth } from '@/api'
+import { fetchJSON, fetchAuth, respError } from '@/api'
 import Icon from '@/components/Icon.vue'
 import { usePublish } from '@/composables/usePublish'
 
@@ -130,8 +130,7 @@ async function submit() {
     body: JSON.stringify(f),
   })
   if (!resp.ok) {
-    const j = await resp.json().catch(() => ({}))
-    ElMessage.error('保存失败：' + ((j as any)?.error || resp.status))
+    ElMessage.error(await respError(resp, '保存失败：'))
     return
   }
   ElMessage.success(editing.value ? '已更新' : '已创建')
@@ -203,8 +202,7 @@ async function doRun() {
       }),
     })
     if (!resp.ok || !resp.body) {
-      const j = await resp.json().catch(() => ({}))
-      ElMessage.error('运行失败：' + ((j as any)?.error || resp.status))
+      ElMessage.error(await respError(resp, '运行失败：'))
       return
     }
     // 解析 SSE 流
@@ -279,8 +277,7 @@ async function addCase() {
     body: JSON.stringify({ ...c, agentId: evalAgent.value.id }),
   })
   if (!resp.ok) {
-    const j = await resp.json().catch(() => ({}))
-    ElMessage.error('创建失败：' + ((j as any)?.error || resp.status))
+    ElMessage.error(await respError(resp, '创建失败：'))
     return
   }
   newCase.value = { name: '', input: '', expected: '', matchType: 'contains' }
@@ -301,10 +298,10 @@ async function runEval() {
     const resp = await fetchAuth(`/api/agent-evals/run?agentId=${evalAgent.value.id}`, { method: 'POST' })
     const j = await resp.json().catch(() => ({}))
     if (!resp.ok) {
-      ElMessage.error('评估失败：' + ((j as any)?.error || resp.status))
+      ElMessage.error(await respError(resp, '评估失败：'))
       return
     }
-    evalResults.value = (j as any)?.data ?? j ?? []
+    evalResults.value = (j as { data?: EvalResult[] }).data ?? (j as unknown as EvalResult[])
   } finally {
     evalLoading.value = false
     loadEvalRuns()

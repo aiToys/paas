@@ -1,7 +1,7 @@
 // 发布到广场的通用交互（Skill/Tool/Prompt/Agent 四页复用）：
 // 无分类时 prompt 选分类 → 确认（明示快照语义 + Tool 凭证剔除）→ 调发布 API → 分类回写实体。
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchAuth } from '@/api'
+import { respError } from '@/api'
 import { publishToMarket, CATEGORIES } from '@/api/marketplace'
 
 export interface PublishableRow {
@@ -33,8 +33,7 @@ export function usePublish(entityType: 'skill' | 'tool' | 'prompt' | 'agent', re
     }
     const resp = await publishToMarket(entityType, row.id, category)
     if (!resp.ok) {
-      const j = await resp.json().catch(() => ({}))
-      ElMessage.error('发布失败：' + ((j as any)?.error || resp.status))
+      ElMessage.error(await respError(resp, '发布失败：'))
       return
     }
     if (row.category !== category) {

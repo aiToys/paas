@@ -120,7 +120,8 @@ function onKeydown(e: KeyboardEvent) {
 function onGlobalKeydown(e: KeyboardEvent) {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault()
-    visible.value ? close() : open()
+    if (visible.value) close()
+    else open()
   }
 }
 // 外部 v-model 打开时（顶栏点击）也走 open 初始化（拉数据/清词/聚焦）
@@ -138,16 +139,20 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onGlobalKeydown))
       <div class="cp-panel">
         <div class="cp-input-row">
           <span class="cp-search-icon">⌕</span>
-          <input ref="inputRef" v-model="q" class="cp-input" placeholder="搜索应用、环境或命令…"
-            @keydown="onKeydown" />
+          <input
+ref="inputRef" v-model="q" class="cp-input" placeholder="搜索应用、环境或命令…"
+            @keydown="onKeydown"
+/>
           <kbd class="cp-esc">ESC</kbd>
         </div>
         <div class="cp-list">
           <template v-for="g in filtered" :key="g.section">
             <div class="cp-section">{{ g.section }}</div>
-            <div v-for="it in g.items" :key="it.key" class="cp-item"
+            <div
+v-for="it in g.items" :key="it.key" class="cp-item"
               :class="{ sel: flat.indexOf(it) === sel }"
-              @mouseenter="sel = flat.indexOf(it)" @click="exec(it)">
+              @mouseenter="sel = flat.indexOf(it)" @click="exec(it)"
+>
               <span class="cp-item-label">{{ it.label }}</span>
               <span v-if="it.hint" class="cp-hint">{{ it.hint }}</span>
             </div>

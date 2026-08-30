@@ -18,9 +18,11 @@
         <div class="kv"><span>标题</span><b>{{ change.title }}</b></div>
         <div class="kv"><span>类型</span><el-tag size="small" :type="change.type === 'hotfix' ? 'danger' : 'primary'">{{ change.type }}</el-tag></div>
         <div class="kv"><span>分支</span><code class="mono">{{ change.branch }}</code><span class="dim">（基于 {{ change.baseBranch }}{{ change.branchCreated ? '，平台代建' : '' }}）</span></div>
-        <div class="kv"><span>克隆</span><code class="mono clone">{{ cloneCmd }}</code>
+        <div class="kv">
+<span>克隆</span><code class="mono clone">{{ cloneCmd }}</code>
           <el-button size="small" text @click="copyClone">复制</el-button>
-          <el-button size="small" text type="primary" @click="router.push(repoLink(change.appId, change.repoId))">浏览仓库 →</el-button></div>
+          <el-button size="small" text type="primary" @click="router.push(repoLink(change.appId, change.repoId))">浏览仓库 →</el-button>
+</div>
         <div v-if="commits.length" class="commits">
           <div class="sub">最近提交</div>
           <div v-for="c in commits" :key="c.sha" class="commit">
@@ -34,12 +36,14 @@
       <section class="card">
         <h3>② 集成批次</h3>
         <template v-if="batch">
-          <div class="kv"><span>批次</span>
+          <div class="kv">
+<span>批次</span>
             <a class="link" @click="router.push(`/devops/batches/${batch.id}`)">{{ batch.title }}</a>
             <el-tag size="small" :type="batchStatusType(batch.status)">{{ batchStatusLabel(batch.status) }}</el-tag>
           </div>
           <div class="kv"><span>集成分支</span><code class="mono">{{ batch.branch }}</code></div>
-          <div v-if="batch.runId" class="kv"><span>关联运行</span>
+          <div v-if="batch.runId" class="kv">
+<span>关联运行</span>
             <a class="link" @click="router.push(`/devops/runs/${batch.runId}`)">查看运行 →</a>
           </div>
           <div v-if="change.conflictWith" class="conflict">⚠️ 与变更 <code class="mono">{{ change.conflictWith }}</code> 冲突，解决冲突后重新集成</div>
@@ -56,7 +60,8 @@
           <el-step title="审批" :description="batch.status === 'releasing' || batch.status === 'released' ? '已批准' : '待审批'" />
           <el-step title="发布" :description="batch.status === 'released' ? '已上线' : '—'" />
         </el-steps>
-        <div v-if="batch?.releaseIds?.length" class="kv"><span>发布记录</span>
+        <div v-if="batch?.releaseIds?.length" class="kv">
+<span>发布记录</span>
           <a v-for="rid in batch.releaseIds" :key="rid" class="link mono" @click="router.push(`/devops/releases/${rid}`)">{{ rid }}</a>
         </div>
         <div v-if="!batch" class="dim">入批集成后在此展示测试与发布进度</div>
@@ -82,9 +87,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { getChange, abandonChange, getBatch, listAllBatches, listAllChanges, type Change, type IntegrationBatch } from '@/api/change'
-import { fetchAuth } from '@/api'
+import { fetchAuth, apiError } from '@/api'
 import { repoLink } from '@/composables/useDevopsLinks'
 import { CHANGE_STATUS, BATCH_STATUS, statusOf } from '@/composables/useStatus'
 import { confirmAbandon } from '@/composables/useAbandonConfirm'
@@ -134,16 +139,16 @@ async function abandon() {
     await abandonChange(change.value.appId, change.value.id)
     ElMessage.success('已放弃')
     router.push(`/applications/${change.value.appId}`)
-  } catch (e: any) {
-    if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(apiError(e))
   }
 }
 
 async function load() {
   try {
     await doLoad()
-  } catch (e: any) {
-    ElMessage.error(e?.message || '加载失败')
+  } catch (e) {
+    ElMessage.error(apiError(e, '加载失败'))
   }
 }
 

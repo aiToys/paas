@@ -324,8 +324,10 @@ watch(envId, init)
         </el-select>
         <el-button size="small" type="primary" :disabled="!laneSel" @click="openOvAdd">+ 新增覆盖</el-button>
       </div>
-      <el-table v-if="laneSel" v-loading="laneLoading" :data="overrides" size="small"
-        empty-text="该泳道暂无覆盖；覆盖后带该泳道发现的客户端立即拿到差异值，基线不变。">
+      <el-table
+v-if="laneSel" v-loading="laneLoading" :data="overrides" size="small"
+        empty-text="该泳道暂无覆盖；覆盖后带该泳道发现的客户端立即拿到差异值，基线不变。"
+>
         <el-table-column prop="key" label="Key" min-width="180">
           <template #default="{ row }"><span class="mono">{{ row.key }}</span></template>
         </el-table-column>

@@ -15,14 +15,16 @@
         <div class="grid">
           <div class="kv"><span>应用</span><a class="link" @click="router.push(`/applications/${release.appId}`)">{{ release.appId }}</a></div>
           <div class="kv"><span>环境</span><a class="link" @click="router.push(`/environments/${release.envId}`)">{{ release.envId }}</a></div>
-          <div class="kv"><span>镜像</span>
+          <div class="kv">
+<span>镜像</span>
             <a class="link mono" @click="router.push(imageLink(release.appId, release.imageId))">{{ release.imageId }}</a>
           </div>
           <div class="kv"><span>策略</span><span>{{ release.strategy }}</span></div>
           <div class="kv"><span>时间</span><span>{{ release.createdAt }}</span></div>
           <div class="kv"><span>操作人</span><span>{{ release.createdBy || '—' }}</span></div>
           <div v-if="release.previousImageId" class="kv"><span>回滚指针</span><code class="mono">{{ release.previousImageId }}</code></div>
-          <div v-if="release.sourceRunId" class="kv"><span>来源运行</span>
+          <div v-if="release.sourceRunId" class="kv">
+<span>来源运行</span>
             <a class="link mono" @click="router.push(`/devops/runs/${release.sourceRunId}`)">{{ release.sourceRunId }}</a>
           </div>
         </div>
@@ -36,7 +38,8 @@
         <h3>当前运行态</h3>
         <template v-if="workload">
           <div class="grid">
-            <div class="kv"><span>工作负载</span>
+            <div class="kv">
+<span>工作负载</span>
               <a class="link mono" @click="router.push(deployLink(release.appId))">{{ workload.id }}</a>
             </div>
             <div class="kv"><span>状态</span><el-tag size="small">{{ workload.status }}</el-tag></div>
@@ -56,7 +59,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchAuth } from '@/api'
+import { fetchAuth, apiError } from '@/api'
 import { imageLink, deployLink } from '@/composables/useDevopsLinks'
 
 interface ReleaseFull {
@@ -95,8 +98,8 @@ async function rollback() {
     if (!resp.ok) throw new Error(j.error || '回滚失败')
     ElMessage.success('已回滚')
     await load()
-  } catch (e: any) {
-    if (e !== 'cancel' && e?.message) ElMessage.error(e.message)
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(apiError(e))
   }
 }
 

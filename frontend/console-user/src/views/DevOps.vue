@@ -247,8 +247,10 @@ onMounted(async () => { await envStore.loadEnvs(); load() })
           </div>
           <div class="board-col pull">
             <div class="col-head">🔀 等评审（{{ boardPulls.length }}）</div>
-            <div v-for="p in boardPulls" :key="p.repoId + ':' + p.pr.number" class="board-item"
-              @click="router.push(`/devops/pulls/${p.repoId}/${p.pr.number}?appId=${p.appId}`)">
+            <div
+v-for="p in boardPulls" :key="p.repoId + ':' + p.pr.number" class="board-item"
+              @click="router.push(`/devops/pulls/${p.repoId}/${p.pr.number}?appId=${p.appId}`)"
+>
               <div class="item-title">#{{ p.pr.number }} {{ p.pr.title }}</div>
               <div class="item-meta">{{ appName(p.appId) }} · {{ p.pr.head }} → {{ p.pr.base }} · {{ p.pr.user }}</div>
             </div>
@@ -355,8 +357,12 @@ onMounted(async () => { await envStore.loadEnvs(); load() })
           </el-table-column>
           <el-table-column label="操作" width="90">
             <template #default="{ row }">
-              <el-button text type="primary" size="small"
-                @click="router.push(`/devops/pulls/${row.repoId}/${row.pr.number}?appId=${row.appId}`)">查看</el-button>
+              <el-button
+text type="primary" size="small"
+                @click="router.push(`/devops/pulls/${row.repoId}/${row.pr.number}?appId=${row.appId}`)"
+>
+查看
+</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -428,7 +434,9 @@ onMounted(async () => { await envStore.loadEnvs(); load() })
               <el-button
                 size="small" plain :disabled="busy || row.status === 'pending' || row.status === 'running'"
                 @click="rebuild(row)"
-              >重新构建</el-button>
+              >
+重新构建
+</el-button>
             </template>
           </el-table-column>
         </el-table>
@@ -494,7 +502,9 @@ onMounted(async () => { await envStore.loadEnvs(); load() })
                 v-if="row.status === 'succeeded' && row.previousImageId"
                 text type="warning" size="small" :disabled="busy"
                 @click="rollback(row)"
-              >回滚</el-button>
+              >
+回滚
+</el-button>
             </template>
           </el-table-column>
         </el-table>
