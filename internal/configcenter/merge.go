@@ -13,7 +13,7 @@ func fmtHexHash(h uint32) string {
 
 // MergeSnapshot 基线快照 + 泳道覆盖两层 merge（纯函数，可测）。
 // 覆盖项覆盖同 key 基线值、新 key 追加；base 不被修改（深拷隔离）。
-// 发现解析语义（store 层）：env 精确 → env='' 回退 → 无；lane 同规则取覆盖。
+// 发现解析语义（store 层）：env 精确 → env=” 回退 → 无；lane 同规则取覆盖。
 func MergeSnapshot(base map[string]string, overrides []LaneOverride) map[string]string {
 	out := make(map[string]string, len(base)+len(overrides))
 	for k, v := range base {
@@ -63,7 +63,7 @@ func OverrideHash(overrides []LaneOverride) string {
 // SharedLayer 发现 merge 的 shared 引用层（快照 + 来源标识，供指纹计算）。
 type SharedLayer struct {
 	NSID     string
-	Version  int    // shared ns 当前 active 版本（未发布 0，层贡献空集）
+	Version  int // shared ns 当前 active 版本（未发布 0，层贡献空集）
 	Snapshot map[string]string
 }
 

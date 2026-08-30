@@ -84,8 +84,8 @@ func (o LaneOverride) Validate() error {
 type NSRef struct {
 	ID         string    `json:"id"`
 	TenantID   string    `json:"tenantId,omitempty"` // ctx 写入，请求体忽略
-	AppNSID    string    `json:"appNsId"`           // 应用派生 ns（引用方；各 env 独立引用）
-	SharedNSID string    `json:"sharedNsId"`        // shared ns（被引用方）
+	AppNSID    string    `json:"appNsId"`            // 应用派生 ns（引用方；各 env 独立引用）
+	SharedNSID string    `json:"sharedNsId"`         // shared ns（被引用方）
 	CreatedAt  time.Time `json:"createdAt"`
 }
 

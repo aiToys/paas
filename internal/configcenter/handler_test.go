@@ -408,7 +408,7 @@ func TestAppPublishedByName(t *testing.T) {
 
 // stubAudit 收集审计落参（测试断言用）。
 type stubAudit struct {
-	mu     sync.Mutex
+	mu      sync.Mutex
 	records [][5]string // tenantID, action, resourceID, detail, _
 }
 

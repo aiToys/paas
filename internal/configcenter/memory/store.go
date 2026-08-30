@@ -149,12 +149,12 @@ func (s *Store) DeleteNamespace(ctx context.Context, id string) error {
 	return nil
 }
 
-// EnsureByApp 懒建（或返回既有的）应用派生命名空间（env='' 基线，兼容旧签名）。
+// EnsureByApp 懒建（或返回既有的）应用派生命名空间（env=” 基线，兼容旧签名）。
 func (s *Store) EnsureByApp(ctx context.Context, appID string) (configcenter.Namespace, error) {
 	return s.EnsureByAppEnv(ctx, appID, "")
 }
 
-// FindAppNamespace 查应用派生命名空间（env='' 基线，兼容旧签名）。无返回 false。
+// FindAppNamespace 查应用派生命名空间（env=” 基线，兼容旧签名）。无返回 false。
 func (s *Store) FindAppNamespace(ctx context.Context, appID string) (configcenter.Namespace, bool, error) {
 	return s.FindAppNamespaceEnv(ctx, appID, "")
 }
@@ -190,7 +190,7 @@ func (s *Store) EnsureByAppEnv(ctx context.Context, appID, envID string) (config
 }
 
 // FindAppNamespaceEnv 查 (app, env) 维度命名空间（不创建）。发现解析语义：
-// envID 非空时精确未命中回退 env='' 基线；envID 空仅精确匹配 env=''。
+// envID 非空时精确未命中回退 env=” 基线；envID 空仅精确匹配 env=”。
 func (s *Store) FindAppNamespaceEnv(ctx context.Context, appID, envID string) (configcenter.Namespace, bool, error) {
 	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
@@ -617,4 +617,49 @@ func (s *Store) ListNSRefUsers(ctx context.Context, sharedNSID string) ([]config
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	return out, nil
+}
+
+// ResetItemsToSnapshot 持锁把 ns 的 draft items 对齐到快照（回滚同步草稿）。
+// 单临界区消除部分重置与并发编辑交错；type 保留 draft 原值（快照不存 type）。
+func (s *Store) ResetItemsToSnapshot(ctx context.Context, namespaceID string, snapshot map[string]string) error {
+	tid, err := tenant.IDOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ns, ok := s.namespaces[namespaceID]
+	if !ok || ns.TenantID != tid {
+		return configcenter.ErrNamespaceNotFound
+	}
+	// 锁内重建：快照 key 补缺/改异（保留原 type），快照外 key 删除。
+	keep := make(map[string]configcenter.ConfigItem, len(snapshot))
+	for _, it := range s.items {
+		if it.NamespaceID != namespaceID {
+			continue
+		}
+		if val, inSnap := snapshot[it.Key]; inSnap {
+			it.Value = val
+			keep[it.Key] = it
+		} else {
+			delete(s.items, it.ID)
+		}
+	}
+	for key, val := range snapshot {
+		if _, ok := keep[key]; ok {
+			continue
+		}
+		s.itemSeq++
+		id := fmt.Sprintf("itm-%d-%d", time.Now().UnixNano(), s.itemSeq)
+		s.items[id] = configcenter.ConfigItem{
+			ID: id, TenantID: tid, NamespaceID: namespaceID,
+			Key: key, Value: val, Type: configcenter.TypeText, UpdatedAt: time.Now(),
+		}
+	}
+	// 写回保留项（值可能已更新）
+	for _, it := range keep {
+		it.UpdatedAt = time.Now()
+		s.items[it.ID] = it
+	}
+	return nil
 }

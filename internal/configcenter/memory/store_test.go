@@ -326,7 +326,7 @@ func TestEnsureByAppEnvCreatesPerEnv(t *testing.T) {
 }
 
 // TestFindAppNamespaceEnvFallback 锁住发现回退语义：env 精确命中优先；
-// 无 (app,env) ns 时回退 env='' 的存量 ns；envID 空仅精确匹配 env=''。
+// 无 (app,env) ns 时回退 env=” 的存量 ns；envID 空仅精确匹配 env=”。
 func TestFindAppNamespaceEnvFallback(t *testing.T) {
 	s := NewStore()
 	ctx := tenant.WithTenant(context.Background(), "t-acme")

@@ -48,9 +48,9 @@ func TestOverrideHash(t *testing.T) {
 // TestLaneOverrideValidate 基本校验（handler 写路径前置）：appID/laneID/key 非空。
 func TestLaneOverrideValidate(t *testing.T) {
 	cases := []LaneOverride{
-		{LaneID: "feat", Key: "k"},            // 缺 appID
-		{AppID: "a", Key: "k"},                // 缺 laneID
-		{AppID: "a", LaneID: "feat"},          // 缺 key
+		{LaneID: "feat", Key: "k"},             // 缺 appID
+		{AppID: "a", Key: "k"},                 // 缺 laneID
+		{AppID: "a", LaneID: "feat"},           // 缺 key
 		{AppID: "a", LaneID: "feat", Key: "k"}, // 合法
 	}
 	if cases[0].Validate() == nil || cases[1].Validate() == nil || cases[2].Validate() == nil {

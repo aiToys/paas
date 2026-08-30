@@ -26,6 +26,10 @@ type NSRefStore interface {
 	// ListNSRefUsers 反查 shared ns 的引用方（影响面展示：shared 发布时
 	// 告知发布者会被哪些应用消费）。返回引用列表（含 app_ns_id 供前端解析归属）。
 	ListNSRefUsers(ctx context.Context, sharedNSID string) ([]NSRef, error)
+	// ResetItemsToSnapshot 事务化把 ns 的 draft items 对齐到快照（多的删、缺的补、
+	// 不同的改；type 保留 draft 原值）。回滚同步草稿用——事务消除部分重置与
+	// 并发编辑交错（TOCTOU）。namespace 不存在返回 ErrNamespaceNotFound。
+	ResetItemsToSnapshot(ctx context.Context, namespaceID string, snapshot map[string]string) error
 }
 
 // NamespaceStore 命名空间仓储。

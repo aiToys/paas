@@ -204,12 +204,12 @@ func (s *Store) CreateNamespace(ctx context.Context, n configcenter.Namespace) (
 	return n, nil
 }
 
-// EnsureByApp 懒建（或返回既有的）应用派生命名空间（env='' 基线，兼容旧签名）。
+// EnsureByApp 懒建（或返回既有的）应用派生命名空间（env=” 基线，兼容旧签名）。
 func (s *Store) EnsureByApp(ctx context.Context, appID string) (configcenter.Namespace, error) {
 	return s.EnsureByAppEnv(ctx, appID, "")
 }
 
-// FindAppNamespace 查应用派生命名空间（env='' 基线，兼容旧签名）。无返回 false。
+// FindAppNamespace 查应用派生命名空间（env=” 基线，兼容旧签名）。无返回 false。
 func (s *Store) FindAppNamespace(ctx context.Context, appID string) (configcenter.Namespace, bool, error) {
 	return s.FindAppNamespaceEnv(ctx, appID, "")
 }
@@ -254,7 +254,7 @@ func (s *Store) EnsureByAppEnv(ctx context.Context, appID, envID string) (config
 }
 
 // FindAppNamespaceEnv 查 (app, env) 维度命名空间（不创建）。发现解析语义：
-// envID 非空时精确未命中回退 env='' 基线；envID 空仅精确匹配 env=''。
+// envID 非空时精确未命中回退 env=” 基线；envID 空仅精确匹配 env=”。
 func (s *Store) FindAppNamespaceEnv(ctx context.Context, appID, envID string) (configcenter.Namespace, bool, error) {
 	tid, err := storagepg.TenantOrErr(ctx)
 	if err != nil {
@@ -846,4 +846,79 @@ func (s *Store) queryNSRefs(ctx context.Context, q string, args ...any) ([]confi
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// ResetItemsToSnapshot 单事务把 ns 的 draft items 对齐到快照（回滚同步草稿）：
+// items 行 FOR UPDATE 消除并发编辑交错；快照 key 补缺/改异（保留原 type），快照外删除。
+func (s *Store) ResetItemsToSnapshot(ctx context.Context, namespaceID string, snapshot map[string]string) error {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.Pool().Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // 已提交或失败均无害
+
+	// ns 归属校验（FOR UPDATE 锁 ns 行，串行化同 ns 的并发 reset）。
+	var nsCheck int
+	if err = tx.QueryRow(ctx,
+		`SELECT 1 FROM cc_namespaces WHERE id=$1 AND tenant_id=$2 FOR UPDATE`, namespaceID, tid).Scan(&nsCheck); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: %s", configcenter.ErrNamespaceNotFound, namespaceID)
+		}
+		return err
+	}
+
+	// 现有 items（FOR UPDATE）：快照内更新值，快照外删除。
+	rows, err := tx.Query(ctx,
+		`SELECT id, key, value, type FROM cc_items WHERE tenant_id=$1 AND namespace_id=$2 FOR UPDATE`, tid, namespaceID)
+	if err != nil {
+		return err
+	}
+	type existingItem struct{ id, key, val, typ string }
+	existing := make([]existingItem, 0, 8)
+	for rows.Next() {
+		var it existingItem
+		if err = rows.Scan(&it.id, &it.key, &it.val, &it.typ); err != nil {
+			rows.Close()
+			return err
+		}
+		existing = append(existing, it)
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return err
+	}
+
+	seen := make(map[string]bool, len(snapshot))
+	for _, it := range existing {
+		if val, ok := snapshot[it.key]; ok {
+			seen[it.key] = true
+			if it.val == val {
+				continue
+			}
+			if _, err = tx.Exec(ctx,
+				`UPDATE cc_items SET value=$1, updated_at=now() WHERE id=$2`, val, it.id); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err = tx.Exec(ctx, `DELETE FROM cc_items WHERE id=$1`, it.id); err != nil {
+			return err
+		}
+	}
+	for key, val := range snapshot {
+		if seen[key] {
+			continue
+		}
+		if _, err = tx.Exec(ctx, `
+INSERT INTO cc_items (id, tenant_id, namespace_id, key, value, type, updated_at)
+VALUES ($1,$2,$3,$4,$5,'text',now()) ON CONFLICT DO NOTHING`,
+			newCCID("item"), tid, namespaceID, key, val); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }

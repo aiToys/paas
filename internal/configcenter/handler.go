@@ -480,22 +480,31 @@ func (h *Handler) serveAppPublished(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 发现协议：与 ns 维度 servePublished 同款 {published,version,snapshot} shape（客户端直取）。
-	body := map[string]interface{}{
-		"published": true,
-		"version":   active.Version,
-		"snapshot":  active.Snapshot,
+	// 三层 merge 与应用维度端点同款语义：shared 引用 → 基线 → lane 覆盖（此端点是
+	// 数据面客户端主通道——chatbot dynconfig 按应用名发现，漏 shared 层则共享配置到不了数据面）。
+	shared, err := sharedLayersRepo(r.Context(), h.repo, ns.ID)
+	if err != nil {
+		httputil.WriteInternalError(w, err)
+		return
 	}
-	// lane 非空且非 default：两层 merge + overrideHash 指纹（与应用维度端点同款语义）。
+	var ovs []LaneOverride
 	if lane := r.URL.Query().Get("lane"); lane != "" && lane != "default" {
-		ovs, err := listOverridesResolvedRepo(r.Context(), h.repo, appID, envID, lane)
+		ovs, err = listOverridesResolvedRepo(r.Context(), h.repo, appID, envID, lane)
 		if err != nil {
 			httputil.WriteInternalError(w, err)
 			return
 		}
-		if len(ovs) > 0 {
-			body["snapshot"] = MergeSnapshot(active.Snapshot, ovs)
-			body["overrideHash"] = OverrideHash(ovs)
-		}
+	}
+	body := map[string]interface{}{
+		"published": true,
+		"version":   active.Version,
+		"snapshot":  MergeSnapshot3(shared, active.Snapshot, ovs),
+	}
+	if len(ovs) > 0 {
+		body["overrideHash"] = OverrideHash(ovs)
+	}
+	if len(shared) > 0 {
+		body["sharedHash"] = SharedHash(shared)
 	}
 	httputil.WriteJSON(w, http.StatusOK, body)
 }

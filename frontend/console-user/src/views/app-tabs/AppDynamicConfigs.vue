@@ -74,6 +74,11 @@ interface DiffRow {
 }
 const diffRows = computed<DiffRow[]>(() => {
   const snap = published.value?.snapshot ?? {}
+  // published.snapshot 含 shared 引用并入的 key（三层 merge 结果），这些 key 的真源在
+  // shared ns——不参与「草稿 vs 生效」diff（否则被误显示为「发布后将移除」，且实际
+  // 发布也不会移除它们——发布快照只含 draft，shared 层独立存在）。悬挂引用
+  // （shared 已删）时其 key 已不在发现响应中，天然不进此分支。
+  const sharedKeys = new Set(Object.keys(published.value?.sharedSnapshot ?? {}))
   const rows: DiffRow[] = []
   const seen = new Set<string>()
   for (const it of items.value) {
@@ -85,9 +90,9 @@ const diffRows = computed<DiffRow[]>(() => {
       state: !(it.key in snap) ? 'added' : (eff !== it.value ? 'modified' : 'clean'),
     })
   }
-  // 生效有但 draft 已删的 key：提示「发布后将移除」
+  // 生效有但 draft 已删的 key：提示「发布后将移除」（shared 来源除外）
   for (const k of Object.keys(snap)) {
-    if (!seen.has(k)) rows.push({ key: k, type: 'text', effective: snap[k], draft: '', state: 'modified' })
+    if (!seen.has(k) && !sharedKeys.has(k)) rows.push({ key: k, type: 'text', effective: snap[k], draft: '', state: 'modified' })
   }
   return rows
 })

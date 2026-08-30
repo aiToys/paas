@@ -16,6 +16,8 @@ export interface ConfigPublished {
   published: boolean; version?: number
   snapshot?: Record<string, string>; publishId?: string
   overrideHash?: string // lane 覆盖集指纹（无覆盖时省略；version 或 overrideHash 任一变化即热替换）
+  sharedHash?: string    // shared 引用层指纹（无引用时省略；shared 重发布变化、应用 version 不变）
+  sharedSnapshot?: Record<string, string> // shared 层合并前快照（供前端 diff 排除 shared 来源 key）
 }
 // LaneOverride 泳道配置覆盖（无版本链，即时生效，随泳道回收消失）
 export interface LaneOverride {

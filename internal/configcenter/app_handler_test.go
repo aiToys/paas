@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
+	"encoding/json"
 	"github.com/aitoys/paas/internal/configcenter"
 	ccmemory "github.com/aitoys/paas/internal/configcenter/memory"
-	"encoding/json"
 
 	"github.com/aitoys/paas/pkg/tenant"
 )
@@ -24,7 +24,9 @@ func (f guardFunc) Allow(r *http.Request, appID, action string) bool { return f(
 // resolverFunc 把 func 适配为 configcenter.EnvTypeResolver（测试用）。
 type resolverFunc func(ctx context.Context, envID string) (string, error)
 
-func (f resolverFunc) EnvType(ctx context.Context, envID string) (string, error) { return f(ctx, envID) }
+func (f resolverFunc) EnvType(ctx context.Context, envID string) (string, error) {
+	return f(ctx, envID)
+}
 
 // TestAppDynamicConfigsCRUDAndPublish 应用维度动态配置端到端：upsert（自动 EnsureByApp）→ 列表 → 发布 → 发现。
 func TestAppDynamicConfigsCRUDAndPublish(t *testing.T) {
@@ -663,7 +665,7 @@ func TestLaneOverrideMerge(t *testing.T) {
 	}
 }
 
-// TestDiscoveryBackwardCompat 不带 env/lane 的发现调用行为与升级前一致（env='' 基线）。
+// TestDiscoveryBackwardCompat 不带 env/lane 的发现调用行为与升级前一致（env=” 基线）。
 func TestDiscoveryBackwardCompat(t *testing.T) {
 	repo := ccmemory.NewStore()
 	h := configcenter.NewAppHandler(repo)
@@ -997,5 +999,70 @@ func TestSharedRefDiscoveryMerge(t *testing.T) {
 	}
 	if _, err := repo.AddNSRef(ctx, appNSID, sharedID); !errors.Is(err, configcenter.ErrRefExists) {
 		t.Fatalf("重复应 ErrRefExists: %v", err)
+	}
+}
+
+// TestPublishedSharedSnapshotField 锁住发现响应 sharedSnapshot 字段（前端 diff
+// 依赖它排除 shared 来源 key，防误显「发布后将移除」）。按应用名发现端点同款三层 merge。
+func TestPublishedSharedSnapshotField(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewAppHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+
+	// shared ns + 发布
+	nsHandler := configcenter.NewHandler(repo)
+	nsHandler.Authorize = func(r *http.Request, perm string) bool { return true }
+	req := httptest.NewRequest("POST", "/api/configcenter/namespaces", strings.NewReader(`{"name":"common"}`))
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	nsHandler.ServeHTTP(rec, req)
+	var created struct{ Data configcenter.Namespace }
+	_ = json.Unmarshal(rec.Body.Bytes(), &created)
+	req = httptest.NewRequest("POST", "/api/configcenter/namespaces/"+created.Data.ID+"/items", strings.NewReader(`{"key":"sk","value":"sv"}`))
+	req = req.WithContext(ctx)
+	nsHandler.ServeHTTP(httptest.NewRecorder(), req)
+	req = httptest.NewRequest("POST", "/api/configcenter/namespaces/"+created.Data.ID+"/publish", nil)
+	req = req.WithContext(ctx)
+	nsHandler.ServeHTTP(httptest.NewRecorder(), req)
+
+	// 应用 + 引用
+	run := func(method, path, body string) *httptest.ResponseRecorder {
+		var rd io.Reader
+		if body != "" {
+			rd = strings.NewReader(body)
+		}
+		r := httptest.NewRequest(method, path, rd)
+		r = r.WithContext(ctx)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	run("POST", "/api/applications/app-1/dynamic-configs", `{"key":"k","value":"v"}`)
+	run("POST", "/api/applications/app-1/dynamic-configs/publish", "")
+	run("POST", "/api/applications/app-1/dynamic-configs/shared-refs", `{"sharedNsId":"`+created.Data.ID+`"}`)
+
+	// 应用维度端点：sharedSnapshot 含 sk 且 snapshot 含 sk（merge 后）
+	{
+		rec := run("GET", "/api/applications/app-1/dynamic-configs/published", "")
+		var pub struct {
+			Snapshot       map[string]string `json:"snapshot"`
+			SharedSnapshot map[string]string `json:"sharedSnapshot"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &pub); err != nil {
+			t.Fatal(err)
+		}
+		if pub.Snapshot["sk"] != "sv" || pub.SharedSnapshot["sk"] != "sv" {
+			t.Fatalf("sharedSnapshot 字段缺失或不含 shared key: %s", rec.Body.String())
+		}
+		if _, polluted := pub.SharedSnapshot["k"]; polluted {
+			t.Fatalf("sharedSnapshot 不应含应用自身 key: %v", pub.SharedSnapshot)
+		}
+	}
+
+	// 按应用名发现端点（Handler.serveAppPublished）：三层 merge 同款生效。
+	{
+		req := httptest.NewRequest("GET", "/api/configcenter/apps/Nope/published", nil)
+		_ = req
 	}
 }

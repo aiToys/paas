@@ -307,7 +307,7 @@ func (h *AppHandler) servePublishHistory(w http.ResponseWriter, r *http.Request,
 }
 
 // servePublished GET 当前生效（只读不懒建，无 ns/无 active 返 {"published":false}）。
-// 发现解析：env 精确 → env='' 回退 → 无（store 层 FindAppNamespaceEnv）；lane 同规则取覆盖，
+// 发现解析：env 精确 → env=” 回退 → 无（store 层 FindAppNamespaceEnv）；lane 同规则取覆盖，
 // 服务端三层 merge（shared 引用 → 基线快照 → 泳道覆盖），有覆盖/引用时附 overrideHash/sharedHash
 // 指纹（无则省略，向后兼容）。发现协议 shape：{published,version,snapshot,publishId[,overrideHash][,sharedHash]}。
 func (h *AppHandler) servePublished(w http.ResponseWriter, r *http.Request, appID, envID, lane string) {
@@ -337,7 +337,7 @@ func (h *AppHandler) servePublished(w http.ResponseWriter, r *http.Request, appI
 		return
 	}
 	// shared 引用层（引用挂在 ns 上，env 隔离天然生效；shared 未发布贡献空集）。
-	shared, err := h.sharedLayers(r.Context(), ns.ID)
+	shared, err := sharedLayersRepo(r.Context(), h.repo, ns.ID)
 	if err != nil {
 		httputil.WriteInternalError(w, err)
 		return
@@ -345,7 +345,7 @@ func (h *AppHandler) servePublished(w http.ResponseWriter, r *http.Request, appI
 	// lane 非空才取覆盖（同回退规则）。
 	var ovs []LaneOverride
 	if lane != "" {
-		ovs, err = h.listOverridesResolved(r.Context(), appID, envID, lane)
+		ovs, err = listOverridesResolvedRepo(r.Context(), h.repo, appID, envID, lane)
 		if err != nil {
 			httputil.WriteInternalError(w, err)
 			return
@@ -363,36 +363,47 @@ func (h *AppHandler) servePublished(w http.ResponseWriter, r *http.Request, appI
 	}
 	if len(shared) > 0 {
 		resp["sharedHash"] = SharedHash(shared)
+		// shared 层合并前快照（供前端 diff 排除 shared 来源 key，避免误显「发布后将移除」）
+		sharedSnap := map[string]string{}
+		for _, l := range shared {
+			for k, v := range l.Snapshot {
+				sharedSnap[k] = v
+			}
+		}
+		resp["sharedSnapshot"] = sharedSnap
 	}
 	httputil.WriteJSON(w, http.StatusOK, resp)
 }
 
 // sharedLayers 解析 ns 的 shared 引用层（引用顺序 = merge 铺垫顺序）。
 // shared ns 已删（引用悬挂）静默跳过——引用是弱关联，删 shared 不应打断应用发现。
-func (h *AppHandler) sharedLayers(ctx context.Context, appNSID string) ([]SharedLayer, error) {
-	refs, err := h.repo.ListNSRefs(ctx, appNSID)
+// sharedLayersRepo 解析 ns 的 shared 引用层（引用顺序 = merge 铺垫顺序），包级供
+// 应用维度（AppHandler.servePublished）与按应用名发现（Handler.serveAppPublished）复用。
+// shared ns 已删（引用悬挂）静默跳过——引用是弱关联，删 shared 不应打断应用发现；
+// ActivePublish 的 DB 错误记日志（与「未发布」区分——静默降级空集会造成配置漂移无观测）。
+func sharedLayersRepo(ctx context.Context, repo Repository, appNSID string) ([]SharedLayer, error) {
+	refs, err := repo.ListNSRefs(ctx, appNSID)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]SharedLayer, 0, len(refs))
 	for _, ref := range refs {
-		shared, err := h.repo.GetNamespace(ctx, ref.SharedNSID)
+		shared, err := repo.GetNamespace(ctx, ref.SharedNSID)
 		if err != nil {
 			continue // 已删/跨租户（GetNamespace 租户过滤）悬挂引用跳过
 		}
 		layer := SharedLayer{NSID: shared.ID}
-		if pub, ok, err := h.repo.ActivePublish(ctx, shared.ID); err == nil && ok {
+		pub, ok, err := repo.ActivePublish(ctx, shared.ID)
+		switch {
+		case err != nil:
+			log.Printf("configcenter sharedLayers: ActivePublish(%s) failed: %v", shared.ID, err)
+		case ok:
 			layer.Version = pub.Version
 			layer.Snapshot = pub.Snapshot
 		}
 		out = append(out, layer)
 	}
 	return out, nil
-}
-
-// listOverridesResolved 泳道覆盖解析：env 精确 → env='' 回退（与 ns 发现同规则）。
-func (h *AppHandler) listOverridesResolved(ctx context.Context, appID, envID, lane string) ([]LaneOverride, error) {
-	return listOverridesResolvedRepo(ctx, h.repo, appID, envID, lane)
 }
 
 // serveRollback POST /dynamic-configs/rollback/{pid} 应用维度回滚。
@@ -432,50 +443,14 @@ func (h *AppHandler) serveRollback(w http.ResponseWriter, r *http.Request, appID
 	}
 	// 回滚同步重置草稿为目标版本快照：draft 与 active 指针同时归位，
 	// 避免回滚后 draft（仍是旧版本发布时的值）与生效值错位——前端 diff 显示
-	// 「有待发布变更」的假差异（用户并未编辑任何东西）。失败语义：回滚已生效，
-	// 草稿重置失败仅日志提示可手动编辑对齐（不做事务回滚——active 指针切换是主操作）。
-	if err := h.resetItemsToSnapshot(r.Context(), ns.ID, rb.Snapshot); err != nil {
+	// 「有待发布变更」的假差异（用户并未编辑任何东西）。事务化（ResetItemsToSnapshot）
+	// 消除部分重置与并发编辑交错。失败语义：回滚已生效，草稿重置失败仅日志
+	// （active 指针切换是主操作，不做补偿回滚）。
+	if err := h.repo.ResetItemsToSnapshot(r.Context(), ns.ID, rb.Snapshot); err != nil {
 		log.Printf("configcenter rollback %s: reset draft items failed: %v", rb.ID, err)
 	}
 	h.recordAudit(r.Context(), ns.TenantID, "configcenter_rollback", appID, fmt.Sprintf("version=%d,publishId=%s,envId=%s", rb.Version, rb.ID, envID))
 	httputil.WriteData(w, rb)
-}
-
-// resetItemsToSnapshot 把 ns 的 draft items 逐 key 对齐到快照（多的删、缺的补、不同的改）。
-func (h *AppHandler) resetItemsToSnapshot(ctx context.Context, namespaceID string, snapshot map[string]string) error {
-	existing, err := h.repo.ListItems(ctx, namespaceID)
-	if err != nil {
-		return err
-	}
-	existingByKey := make(map[string]ConfigItem, len(existing))
-	for _, it := range existing {
-		existingByKey[it.Key] = it
-	}
-	// 快照中的 key：补缺 + 改异（type 保留 draft 原值，快照不存 type）
-	for key, val := range snapshot {
-		if cur, ok := existingByKey[key]; ok {
-			if cur.Value == val {
-				continue
-			}
-			cur.Value = val
-			if _, err := h.repo.UpsertItem(ctx, cur); err != nil {
-				return err
-			}
-			continue
-		}
-		if _, err := h.repo.UpsertItem(ctx, ConfigItem{NamespaceID: namespaceID, Key: key, Value: val}); err != nil {
-			return err
-		}
-	}
-	// draft 有但快照没有的 key：删（回滚目标版本里不存在）
-	for key, it := range existingByKey {
-		if _, ok := snapshot[key]; !ok {
-			if err := h.repo.DeleteItem(ctx, it.ID); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
 }
 
 // serveLaneOverrides 泳道覆盖三操作（挂 dynamic-configs/lane-overrides）：
@@ -500,7 +475,7 @@ func (h *AppHandler) serveLaneOverrides(w http.ResponseWriter, r *http.Request, 
 		if !h.allow(w, r, "application:read") {
 			return
 		}
-		ovs, err := h.listOverridesResolved(r.Context(), appID, envID, lane)
+		ovs, err := listOverridesResolvedRepo(r.Context(), h.repo, appID, envID, lane)
 		if err != nil {
 			httputil.WriteInternalError(w, err)
 			return
@@ -594,7 +569,9 @@ func (h *AppHandler) serveSharedRefs(w http.ResponseWriter, r *http.Request, app
 		if err != nil {
 			return
 		}
-		var body struct{ SharedNSID string `json:"sharedNsId"` }
+		var body struct {
+			SharedNSID string `json:"sharedNsId"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.SharedNSID == "" {
 			httputil.WriteError(w, http.StatusBadRequest, "invalid body: sharedNsId 必填")
 			return
