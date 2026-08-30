@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/aitoys/paas/internal/configcenter"
@@ -210,5 +211,78 @@ func TestFindAppNamespace(t *testing.T) {
 	s.CreateNamespace(ctx, configcenter.Namespace{Name: "manual-ns"})
 	if _, ok, _ := s.FindAppNamespace(ctx, "app-1"); !ok {
 		t.Fatal("app ns 仍应找到（shared 不干扰）")
+	}
+}
+
+// TestCreatePublishConcurrent 锁住 R5-I1/R7-F3：10 goroutine 并发对同一 ns 发布，
+// version 无重复、active 恰好 1 个（内存锁内原子；PG 由 partial unique index + tx 兜底）。
+func TestCreatePublishConcurrent(t *testing.T) {
+	s := NewStore()
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	nsID := mustCreateNs(t, s, ctx, "concurrent-ns")
+	mustUpsertItem(t, s, ctx, nsID, "k", "v")
+
+	const n = 10
+	var wg sync.WaitGroup
+	versions := make(chan int, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			pub, err := s.CreatePublish(ctx, nsID)
+			if err != nil {
+				t.Errorf("并发发布失败: %v", err)
+				return
+			}
+			versions <- pub.Version
+		}()
+	}
+	wg.Wait()
+	close(versions)
+
+	seen := map[int]bool{}
+	for v := range versions {
+		if seen[v] {
+			t.Fatalf("version 重复: %d", v)
+		}
+		seen[v] = true
+	}
+	if len(seen) != n {
+		t.Fatalf("应 %d 个不同 version, got %d", n, len(seen))
+	}
+	// active 恰 1 个
+	pubs, _ := s.ListPublishes(ctx, nsID)
+	activeCount := 0
+	for _, p := range pubs {
+		if p.Status == configcenter.StatusActive {
+			activeCount++
+		}
+	}
+	if activeCount != 1 {
+		t.Fatalf("active 应恰 1 个, got %d", activeCount)
+	}
+}
+
+// TestListAllNamespaces 锁住 R7-F4：跨租户列出全部命名空间（admin 总览），带 TenantID。
+func TestListAllNamespaces(t *testing.T) {
+	s := NewStore()
+	mustCreateNs(t, s, acmeCtx(), "acme-all")
+	mustCreateNs(t, s, globexCtx(), "globex-all")
+	list, err := s.ListAllNamespaces(context.Background())
+	if err != nil {
+		t.Fatalf("ListAllNamespaces: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("应 2 条（两租户各一）, got %d", len(list))
+	}
+	tids := map[string]bool{}
+	for _, n := range list {
+		if n.TenantID == "" {
+			t.Fatalf("ListAll 返回应带 TenantID: %+v", n)
+		}
+		tids[n.TenantID] = true
+	}
+	if !tids["t-acme"] || !tids["t-globex"] {
+		t.Fatalf("应覆盖两租户: %v", tids)
 	}
 }

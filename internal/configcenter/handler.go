@@ -3,10 +3,13 @@ package configcenter
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"github.com/aitoys/paas/internal/httputil"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // 粗粒度权限标识（复用 governance 切片已加入 BuiltinRoles 的权限）。
@@ -42,12 +45,16 @@ type Handler struct {
 	Authorize     func(r *http.Request, perm string) bool
 	serviceLookup ServiceLookup // 可选，CreateNamespace 时校验 ServiceID 归属（防悬挂引用）
 	appLookup     AppLookup    // 可选，按应用名发现端点（/api/configcenter/apps/{name}/published）
+	Audit         AuditFunc    // 可空：写操作审计（与 AppHandler.AuditFunc 同源桥接）
 }
 
 // NewHandler 创建配置中心 handler。
 func NewHandler(repo Repository) *Handler {
 	return &Handler{repo: repo}
 }
+
+// WithAudit 注入审计记录器（ns 维度写操作记 configcenter_* 审计）。
+func (h *Handler) WithAudit(fn AuditFunc) *Handler { h.Audit = fn; return h }
 
 // WithServiceLookup 注入 governance Service 存在性校验器（依赖倒置）。
 // 非空时 CreateNamespace 的 ServiceID 需存在且属本租户，防悬挂引用脏数据。
@@ -69,6 +76,62 @@ func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) boo
 	}
 	httputil.WriteError(w, http.StatusForbidden, "forbidden: missing "+perm)
 	return false
+}
+
+// itemBelongsToNS 校验 itemID 归属 namespaceID（防跨 ns 越权删改）。ns 维度与 app 维度
+// 两 handler 共用（DRY，单一真源）。
+func itemBelongsToNS(ctx context.Context, repo Repository, nsID, itemID string) (bool, error) {
+	items, err := repo.ListItems(ctx, nsID)
+	if err != nil {
+		return false, err
+	}
+	for _, it := range items {
+		if it.ID == itemID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// writePublishedJSON 写客户端发现协议响应（{published,version,snapshot[,publishId]} shape，
+// 客户端直取非 {data:T}）。withPID=false 用于按应用名发现（客户端不感知 ns publish ID）。
+func writePublishedJSON(w http.ResponseWriter, p Publish, withPID bool) {
+	body := map[string]interface{}{
+		"published": true,
+		"version":   p.Version,
+		"snapshot":  p.Snapshot,
+	}
+	if withPID {
+		body["publishId"] = p.ID
+	}
+	httputil.WriteJSON(w, http.StatusOK, body)
+}
+
+// writeUnpublishedJSON 写发现端点空态（未发布/未知应用统一此 shape，不泄漏存在性）。
+func writeUnpublishedJSON(w http.ResponseWriter) {
+	httputil.WriteJSON(w, http.StatusOK, map[string]interface{}{"published": false})
+}
+
+// writeNamespaceErr 按 sentinel 错误统一映射：名字冲突 → 409（引导改名），
+// 其余业务错误 → 400，底层技术错误由 WriteServiceError 内部脱敏为 500。
+func writeNamespaceErr(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrNamespaceNameTaken) {
+		httputil.WriteError(w, http.StatusConflict, err.Error())
+		return
+	}
+	httputil.WriteServiceError(w, http.StatusBadRequest, err)
+}
+
+// recordAudit 记审计（best-effort：Audit 未注入时跳过；tenantID 空时从 ctx 兜底，
+// 仍空由桥接层归 platform）。
+func (h *Handler) recordAudit(r *http.Request, tenantID, action, resourceID, detail string) {
+	if h.Audit == nil {
+		return
+	}
+	if tenantID == "" {
+		tenantID, _ = tenant.IDOrErr(r.Context())
+	}
+	h.Audit(r.Context(), tenantID, action, resourceID, detail)
 }
 
 // ServeHTTP 按路径分发。
@@ -125,9 +188,10 @@ func (h *Handler) serveNamespaceCollection(w http.ResponseWriter, r *http.Reques
 		}
 		saved, err := h.repo.CreateNamespace(r.Context(), n)
 		if err != nil {
-			httputil.WriteServiceError(w, http.StatusBadRequest, err)
+			writeNamespaceErr(w, err)
 			return
 		}
+		h.recordAudit(r, saved.TenantID, "configcenter_ns_create", saved.ID, "name="+saved.Name)
 		httputil.WriteDataCreated(w, saved)
 		return
 	}
@@ -212,6 +276,7 @@ func (h *Handler) serveNamespaceGetDelete(w http.ResponseWriter, r *http.Request
 			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
+		h.recordAudit(r, "", "configcenter_ns_delete", nsID, "")
 		httputil.WriteData(w, map[string]string{"deleted": nsID})
 		return
 	}
@@ -247,9 +312,10 @@ func (h *Handler) serveItemCollection(w http.ResponseWriter, r *http.Request, ns
 		item.NamespaceID = nsID
 		saved, err := h.repo.UpsertItem(r.Context(), item)
 		if err != nil {
-			httputil.WriteServiceError(w, http.StatusBadRequest, err)
+			writeNamespaceErr(w, err)
 			return
 		}
+		h.recordAudit(r, "", "configcenter_item_upsert", nsID, "item="+saved.ID+",key="+saved.Key)
 		httputil.WriteDataCreated(w, saved)
 		return
 	}
@@ -268,17 +334,10 @@ func (h *Handler) serveItemDelete(w http.ResponseWriter, r *http.Request, nsID, 
 		return
 	}
 	// 校验 item 归属该 namespace，防止 DELETE /nsA/items/{item-of-nsB} 跨 ns 越权删除。
-	items, err := h.repo.ListItems(r.Context(), nsID)
+	belongs, err := itemBelongsToNS(r.Context(), h.repo, nsID, itemID)
 	if err != nil {
 		httputil.WriteInternalError(w, err)
 		return
-	}
-	belongs := false
-	for _, it := range items {
-		if it.ID == itemID {
-			belongs = true
-			break
-		}
 	}
 	if !belongs {
 		httputil.WriteError(w, http.StatusNotFound, "配置项不存在: "+itemID)
@@ -288,6 +347,7 @@ func (h *Handler) serveItemDelete(w http.ResponseWriter, r *http.Request, nsID, 
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
+	h.recordAudit(r, "", "configcenter_item_delete", nsID, "item="+itemID)
 	httputil.WriteData(w, map[string]string{"deleted": itemID})
 }
 
@@ -305,9 +365,10 @@ func (h *Handler) servePublish(w http.ResponseWriter, r *http.Request, nsID stri
 	}
 	pub, err := h.repo.CreatePublish(r.Context(), nsID)
 	if err != nil {
-		httputil.WriteServiceError(w, http.StatusBadRequest, err)
+		writeNamespaceErr(w, err)
 		return
 	}
+	h.recordAudit(r, "", "configcenter_publish", nsID, fmt.Sprintf("version=%d,publishId=%s", pub.Version, pub.ID))
 	httputil.WriteDataCreated(w, pub)
 }
 
@@ -343,17 +404,12 @@ func (h *Handler) servePublished(w http.ResponseWriter, r *http.Request, nsID st
 		return
 	}
 	if !ok {
-		httputil.WriteJSON(w, http.StatusOK, map[string]interface{}{"published": false})
+		writeUnpublishedJSON(w)
 		return
 	}
 	// 发现协议：保持 {published,version,snapshot,publishId} shape（前端 published.value = await json() 直取），
 	// 仅经 httputil 统一编码（Content-Type 显式）。非标准 {data:T}，因属数据面客户端发现契约。
-	httputil.WriteJSON(w, http.StatusOK, map[string]interface{}{
-		"published": true,
-		"version":   active.Version,
-		"snapshot":  active.Snapshot,
-		"publishId": active.ID,
-	})
+	writePublishedJSON(w, active, true)
 }
 
 // serveAppPublished GET /api/configcenter/apps/{appName}/published 按应用名发现（active 快照）。
@@ -386,7 +442,7 @@ func (h *Handler) serveAppPublished(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if appID == "" {
-		httputil.WriteJSON(w, http.StatusOK, map[string]interface{}{"published": false})
+		writeUnpublishedJSON(w)
 		return
 	}
 	ns, ok, err := h.repo.FindAppNamespace(r.Context(), appID)
@@ -395,7 +451,7 @@ func (h *Handler) serveAppPublished(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
-		httputil.WriteJSON(w, http.StatusOK, map[string]interface{}{"published": false})
+		writeUnpublishedJSON(w)
 		return
 	}
 	active, ok, err := h.repo.ActivePublish(r.Context(), ns.ID)
@@ -404,15 +460,11 @@ func (h *Handler) serveAppPublished(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
-		httputil.WriteJSON(w, http.StatusOK, map[string]interface{}{"published": false})
+		writeUnpublishedJSON(w)
 		return
 	}
 	// 发现协议：与 ns 维度 servePublished 同款 {published,version,snapshot} shape（客户端直取）。
-	httputil.WriteJSON(w, http.StatusOK, map[string]interface{}{
-		"published": true,
-		"version":   active.Version,
-		"snapshot":  active.Snapshot,
-	})
+	writePublishedJSON(w, active, false)
 }
 
 // servePublishAction POST /api/configcenter/publishes/{pid}/rollback 回滚。
@@ -442,8 +494,13 @@ func (h *Handler) servePublishAction(w http.ResponseWriter, r *http.Request) {
 	}
 	rb, err := h.repo.RollbackPublish(r.Context(), pid)
 	if err != nil {
+		if errors.Is(err, ErrPublishAlreadyActive) {
+			httputil.WriteError(w, http.StatusConflict, err.Error())
+			return
+		}
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}
+	h.recordAudit(r, "", "configcenter_rollback", nsID, fmt.Sprintf("version=%d,publishId=%s", rb.Version, rb.ID))
 	httputil.WriteData(w, rb)
 }

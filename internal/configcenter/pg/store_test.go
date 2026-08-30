@@ -16,7 +16,7 @@
 //   - RollbackPublish 对已是 active 的发布拒绝
 //   - DeleteNamespace 级联清 items + publishes（事务原子）
 //   - 多租户隔离（缺失拒、跨租户 not found 不泄漏）
-//   - Count 方法（seed 判空用）
+//   - Namespace ServiceID 往返 + 按 serviceId 过滤
 
 package pg
 
@@ -149,8 +149,8 @@ func TestNamespaceCreateUniqueName(t *testing.T) {
 	ctx := acmeCtx()
 	createNamespace(t, s, ctx, "ns-a", "dup")
 	_, err := s.CreateNamespace(ctx, sampleNamespace("ns-b", "dup"))
-	if err == nil || !strings.Contains(err.Error(), "命名空间已存在") {
-		t.Fatalf("期望「命名空间已存在」, got %v", err)
+	if err == nil || !errors.Is(err, configcenter.ErrNamespaceNameTaken) {
+		t.Fatalf("期望 ErrNamespaceNameTaken, got %v", err)
 	}
 	// 跨租户同名应允许（UNIQUE 含 tenant_id）。
 	if _, err := s.CreateNamespace(globexCtx(), sampleNamespace("ns-g", "dup")); err != nil {
@@ -567,40 +567,6 @@ func TestMissingTenantRejected(t *testing.T) {
 	}
 	if _, err := s.PublishNamespaceID(ctx, "x"); err == nil {
 		t.Fatalf("PublishNamespaceID 缺失租户应拒")
-	}
-}
-
-// ---------- Count 方法（seed 判空用） ----------
-
-func TestCountMethods(t *testing.T) {
-	db := newTestDB(t)
-	s := NewStore(db)
-	ctx := acmeCtx()
-
-	// 空表。
-	if n, _ := s.NamespacesCount(ctx); n != 0 {
-		t.Fatalf("空表 NamespacesCount 应 0, got %d", n)
-	}
-	if n, _ := s.ItemsCount(ctx); n != 0 {
-		t.Fatalf("空表 ItemsCount 应 0, got %d", n)
-	}
-	if n, _ := s.PublishesCount(ctx); n != 0 {
-		t.Fatalf("空表 PublishesCount 应 0, got %d", n)
-	}
-
-	// 灌数据。
-	ns := createNamespace(t, s, ctx, "ns-cnt", "cnt-ns")
-	s.UpsertItem(ctx, sampleItem("ic", ns.ID, "k", "v"))
-	s.CreatePublish(ctx, ns.ID)
-
-	if n, _ := s.NamespacesCount(ctx); n != 1 {
-		t.Fatalf("NamespacesCount 应 1, got %d", n)
-	}
-	if n, _ := s.ItemsCount(ctx); n != 1 {
-		t.Fatalf("ItemsCount 应 1, got %d", n)
-	}
-	if n, _ := s.PublishesCount(ctx); n != 1 {
-		t.Fatalf("PublishesCount 应 1, got %d", n)
 	}
 }
 

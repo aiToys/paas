@@ -760,6 +760,10 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	ccHandler.WithServiceLookup(ccServiceLookup{gov: stores.Governance})
 	// 注入应用名→ID 解析（按应用名发现端点 GET /api/configcenter/apps/{name}/published）。
 	ccHandler.WithAppLookup(ccAppLookup{apps: stores.Application})
+	// 注入审计（ns 维度写操作：ns 建删/item 建改删/publish/rollback，10 轮审计补全）。
+	ccHandler.WithAudit(func(ctx context.Context, tenantID, action, resourceID, detail string) {
+		_ = (&identityAuditAdapter{store: stores.Security}).Record(ctx, tenantID, gateway.UserIDFrom(ctx), action, "namespace", resourceID, detail)
+	})
 
 	// 应用维度动态配置（scope=app 主路径，挂 composite dynamic-configs 分发）：
 	// 权限 application:read/write（应用资产归应用权限域）+ AppGuard 受限应用 enforcement + publish 审计。
@@ -986,7 +990,6 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// 配置中心（治理：动态配置 + 版本/发布/回滚）
 	mux.Handle("/api/configcenter/namespaces", auth(ccHandler))
 	mux.Handle("/api/configcenter/namespaces/", auth(ccHandler))
-	mux.Handle("/api/configcenter/publishes", auth(ccHandler))
 	mux.Handle("/api/configcenter/publishes/", auth(ccHandler))
 	// 按应用名发现（应用维度动态配置客户端入口）
 	mux.Handle("/api/configcenter/apps/", auth(ccHandler))
@@ -1400,8 +1403,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/configcenter/namespaces/{id}/items", apiroute.Tags("配置中心"), apiroute.Summary("配置项草稿"), apiroute.Perm("governance:read"), apiroute.WithResp([]configcenter.ConfigItem{}))
 	reg.Operation("POST", "/api/configcenter/namespaces/{id}/items", apiroute.Tags("配置中心"), apiroute.Summary("新增/更新配置项（draft）"), apiroute.Perm("governance:write"), apiroute.WithReqBody(configcenter.ConfigItem{}), apiroute.WithResp(configcenter.ConfigItem{}))
 	reg.Operation("POST", "/api/configcenter/namespaces/{id}/publish", apiroute.Tags("配置中心"), apiroute.Summary("发布配置版本"), apiroute.Perm("governance:write"), apiroute.WithResp(configcenter.Publish{}))
+	reg.Operation("GET", "/api/configcenter/namespaces/{id}/publishes", apiroute.Tags("配置中心"), apiroute.Summary("发布历史（按版本降序）"), apiroute.Perm("governance:read"), apiroute.WithResp([]configcenter.Publish{}))
+	reg.Operation("DELETE", "/api/configcenter/namespaces/{id}/items/{itemId}", apiroute.Tags("配置中心"), apiroute.Summary("删除配置项（draft）"), apiroute.Perm("governance:write"))
 	reg.Operation("GET", "/api/configcenter/namespaces/{id}/published", apiroute.Tags("配置中心"), apiroute.Summary("当前生效配置（客户端发现）"), apiroute.Perm("governance:read"), apiroute.WithResp(configcenter.Publish{}))
-	reg.Operation("GET", "/api/configcenter/publishes", apiroute.Tags("配置中心"), apiroute.Summary("发布历史"), apiroute.Perm("governance:read"), apiroute.WithResp([]configcenter.Publish{}))
 	reg.Operation("POST", "/api/configcenter/publishes/{id}/rollback", apiroute.Tags("配置中心"), apiroute.Summary("回滚到历史版本"), apiroute.Perm("governance:write"), apiroute.WithResp(configcenter.Publish{}))
 	reg.Operation("GET", "/api/configcenter/apps/{appName}/published", apiroute.Tags("配置中心"), apiroute.Summary("按应用名发现当前生效动态配置（客户端发现）"), apiroute.Perm("governance:read"), apiroute.WithResp(configcenter.Publish{}))
 	// 配置中心（应用维度，scope=app，composite 内部派发）

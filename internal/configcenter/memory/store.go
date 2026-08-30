@@ -82,7 +82,7 @@ func (s *Store) GetNamespace(ctx context.Context, id string) (configcenter.Names
 	defer s.mu.RUnlock()
 	n, ok := s.namespaces[id]
 	if !ok || n.TenantID != tid {
-		return configcenter.Namespace{}, fmt.Errorf("命名空间不存在: %s", id)
+		return configcenter.Namespace{}, fmt.Errorf("%w: %s", configcenter.ErrNamespaceNotFound, id)
 	}
 	return n, nil
 }
@@ -106,7 +106,7 @@ func (s *Store) CreateNamespace(ctx context.Context, n configcenter.Namespace) (
 	defer s.mu.Unlock()
 	for _, ex := range s.namespaces {
 		if ex.TenantID == tid && ex.Name == n.Name {
-			return configcenter.Namespace{}, fmt.Errorf("命名空间已存在: %s", n.Name)
+			return configcenter.Namespace{}, fmt.Errorf("%w: %s", configcenter.ErrNamespaceNameTaken, n.Name)
 		}
 	}
 	s.nsSeq++
@@ -126,7 +126,7 @@ func (s *Store) DeleteNamespace(ctx context.Context, id string) error {
 	defer s.mu.Unlock()
 	n, ok := s.namespaces[id]
 	if !ok || n.TenantID != tid {
-		return fmt.Errorf("命名空间不存在: %s", id)
+		return fmt.Errorf("%w: %s", configcenter.ErrNamespaceNotFound, id)
 	}
 	delete(s.namespaces, id)
 	// 级联清 item + publish
@@ -157,7 +157,7 @@ func (s *Store) EnsureByApp(ctx context.Context, appID string) (configcenter.Nam
 		}
 		// 名字冲突：手工共享 ns 占了 app-<appID> 名（handler 映射 409 引导改名，不静默另建同名 ns）。
 		if n.TenantID == tid && n.Name == "app-"+appID {
-			return configcenter.Namespace{}, fmt.Errorf("命名空间已存在: %s", n.Name)
+			return configcenter.Namespace{}, fmt.Errorf("%w: %s", configcenter.ErrNamespaceNameTaken, n.Name)
 		}
 	}
 	s.nsSeq++
@@ -215,10 +215,7 @@ func (s *Store) UpsertItem(ctx context.Context, item configcenter.ConfigItem) (c
 	if err != nil {
 		return configcenter.ConfigItem{}, err
 	}
-	// 校验 namespace 存在且属同租户
-	if _, err := s.GetNamespace(ctx, item.NamespaceID); err != nil {
-		return configcenter.ConfigItem{}, err
-	}
+	// namespace 存在性/归属由锁内复校验统一保证（不重复锁外预检）。
 	if err := item.Validate(); err != nil {
 		return configcenter.ConfigItem{}, err
 	}
@@ -227,9 +224,9 @@ func (s *Store) UpsertItem(ctx context.Context, item configcenter.ConfigItem) (c
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// 锁内复校验 namespace 存在且属本租户（防 GetNamespace 与 Lock 间 DeleteNamespace 级联清产生孤儿 item）
+	// 锁内校验 namespace 存在且属本租户（防校验与 Lock 间 DeleteNamespace 级联清产生孤儿 item）
 	if n, ok := s.namespaces[item.NamespaceID]; !ok || n.TenantID != tid {
-		return configcenter.ConfigItem{}, fmt.Errorf("命名空间不存在: %s", item.NamespaceID)
+		return configcenter.ConfigItem{}, fmt.Errorf("%w: %s", configcenter.ErrNamespaceNotFound, item.NamespaceID)
 	}
 	for id, ex := range s.items {
 		if ex.TenantID == tid && ex.NamespaceID == item.NamespaceID && ex.Key == item.Key {
@@ -257,7 +254,7 @@ func (s *Store) DeleteItem(ctx context.Context, id string) error {
 	defer s.mu.Unlock()
 	it, ok := s.items[id]
 	if !ok || it.TenantID != tid {
-		return fmt.Errorf("配置项不存在: %s", id)
+		return fmt.Errorf("%w: %s", configcenter.ErrItemNotFound, id)
 	}
 	delete(s.items, id)
 	return nil
@@ -305,14 +302,11 @@ func (s *Store) CreatePublish(ctx context.Context, namespaceID string) (configce
 	if err != nil {
 		return configcenter.Publish{}, err
 	}
-	if _, err := s.GetNamespace(ctx, namespaceID); err != nil {
-		return configcenter.Publish{}, err
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// 锁内复校验 namespace 存在且属本租户（防 GetNamespace 与 Lock 间 DeleteNamespace 级联清产生孤儿 publish）
+	// 锁内校验 namespace 存在且属本租户（防校验与 Lock 间 DeleteNamespace 级联清产生孤儿 publish）
 	if n, ok := s.namespaces[namespaceID]; !ok || n.TenantID != tid {
-		return configcenter.Publish{}, fmt.Errorf("命名空间不存在: %s", namespaceID)
+		return configcenter.Publish{}, fmt.Errorf("%w: %s", configcenter.ErrNamespaceNotFound, namespaceID)
 	}
 	// 计算下一个版本号（namespace 内最大 version + 1）
 	maxVersion := 0
@@ -358,10 +352,10 @@ func (s *Store) RollbackPublish(ctx context.Context, publishID string) (configce
 	defer s.mu.Unlock()
 	target, ok := s.publishes[publishID]
 	if !ok || target.TenantID != tid {
-		return configcenter.Publish{}, fmt.Errorf("发布不存在: %s", publishID)
+		return configcenter.Publish{}, fmt.Errorf("%w: %s", configcenter.ErrPublishNotFound, publishID)
 	}
 	if target.Status == configcenter.StatusActive {
-		return configcenter.Publish{}, fmt.Errorf("发布已是当前生效版本: v%d", target.Version)
+		return configcenter.Publish{}, fmt.Errorf("%w: v%d", configcenter.ErrPublishAlreadyActive, target.Version)
 	}
 	// 当前 active -> rolled-back；目标 -> active
 	for id, p := range s.publishes {
@@ -409,39 +403,7 @@ func (s *Store) PublishNamespaceID(ctx context.Context, publishID string) (strin
 	defer s.mu.RUnlock()
 	p, ok := s.publishes[publishID]
 	if !ok || p.TenantID != tid {
-		return "", fmt.Errorf("发布不存在: %s", publishID)
+		return "", fmt.Errorf("%w: %s", configcenter.ErrPublishNotFound, publishID)
 	}
 	return p.NamespaceID, nil
-}
-
-// SeedNamespaces 返回预置命名空间（PG/内存同一真源，DRY）。
-// 调用方按每条记录的 TenantID 自建 ctx 写入（PG Create 以 ctx 租户为准）。
-func SeedNamespaces() []configcenter.Namespace {
-	t := time.Now()
-	return []configcenter.Namespace{
-		{ID: "ns-acme-app", TenantID: "t-acme", Name: "acme-app", Desc: "Acme 应用公共配置", UpdatedAt: t},
-		{ID: "ns-globex-app", TenantID: "t-globex", Name: "globex-app", Desc: "Globex 应用公共配置", UpdatedAt: t},
-	}
-}
-
-// SeedItems 返回预置配置项（draft）。
-func SeedItems() []configcenter.ConfigItem {
-	t := time.Now()
-	return []configcenter.ConfigItem{
-		{ID: "item-acme-1", TenantID: "t-acme", NamespaceID: "ns-acme-app", Key: "feature.newui", Value: "on", Type: configcenter.TypeText, UpdatedAt: t},
-		{ID: "item-acme-2", TenantID: "t-acme", NamespaceID: "ns-acme-app", Key: "rate.limit", Value: "100", Type: configcenter.TypeText, UpdatedAt: t},
-		{ID: "item-globex-1", TenantID: "t-globex", NamespaceID: "ns-globex-app", Key: "model.temperature", Value: "0.7", Type: configcenter.TypeText, UpdatedAt: t},
-	}
-}
-
-// SeedPublishes 返回预置发布版本（active/rolled-back 状态保持，PG 路径由 CreatePublish 保证唯一 active）。
-func SeedPublishes() []configcenter.Publish {
-	t := time.Now()
-	return []configcenter.Publish{
-		{
-			ID: "pub-acme-1", TenantID: "t-acme", NamespaceID: "ns-acme-app", Version: 1,
-			Snapshot: map[string]string{"feature.newui": "off", "rate.limit": "50"},
-			Status:   configcenter.StatusActive, CreatedAt: t,
-		},
-	}
 }

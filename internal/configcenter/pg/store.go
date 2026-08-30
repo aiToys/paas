@@ -157,7 +157,7 @@ func (s *Store) GetNamespace(ctx context.Context, id string) (configcenter.Names
 	var n configcenter.Namespace
 	if err = scanNamespace(row, &n); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return configcenter.Namespace{}, fmt.Errorf("命名空间不存在: %s", id)
+			return configcenter.Namespace{}, fmt.Errorf("%w: %s", configcenter.ErrNamespaceNotFound, id)
 		}
 		return configcenter.Namespace{}, err
 	}
@@ -190,7 +190,7 @@ func (s *Store) CreateNamespace(ctx context.Context, n configcenter.Namespace) (
 		`INSERT INTO cc_namespaces (`+nsCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
 		n.ID, n.TenantID, n.Name, n.Scope, n.AppID, n.ServiceID, n.Desc, n.UpdatedAt)
 	if storagepg.IsUniqueViolation(err) {
-		return configcenter.Namespace{}, fmt.Errorf("命名空间已存在: %s", n.Name)
+		return configcenter.Namespace{}, fmt.Errorf("%w: %s", configcenter.ErrNamespaceNameTaken, n.Name)
 	}
 	if err != nil {
 		return configcenter.Namespace{}, err
@@ -266,7 +266,7 @@ func (s *Store) DeleteNamespace(ctx context.Context, id string) error {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("命名空间不存在: %s", id)
+		return fmt.Errorf("%w: %s", configcenter.ErrNamespaceNotFound, id)
 	}
 	// 级联清子表：namespace_id 已锁定到本租户的该 ns，带 tenant_id 更稳（防极端跨租户残留）。
 	if _, err = tx.Exec(ctx,
@@ -328,12 +328,12 @@ func (s *Store) UpsertItem(ctx context.Context, item configcenter.ConfigItem) (c
 	var nsTid string
 	if err = tx.QueryRow(ctx, `SELECT tenant_id FROM cc_namespaces WHERE id=$1 FOR UPDATE`, item.NamespaceID).Scan(&nsTid); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return configcenter.ConfigItem{}, fmt.Errorf("命名空间不存在: %s", item.NamespaceID)
+			return configcenter.ConfigItem{}, fmt.Errorf("%w: %s", configcenter.ErrNamespaceNotFound, item.NamespaceID)
 		}
 		return configcenter.ConfigItem{}, err
 	}
 	if nsTid != tid {
-		return configcenter.ConfigItem{}, fmt.Errorf("命名空间不存在: %s", item.NamespaceID)
+		return configcenter.ConfigItem{}, fmt.Errorf("%w: %s", configcenter.ErrNamespaceNotFound, item.NamespaceID)
 	}
 	if err := item.Validate(); err != nil {
 		return configcenter.ConfigItem{}, err
@@ -428,10 +428,7 @@ func (s *Store) CreatePublish(ctx context.Context, namespaceID string) (configce
 	if err != nil {
 		return configcenter.Publish{}, err
 	}
-	// 校验 namespace 存在且属本租户（与内存版同款语义）。
-	if _, err := s.GetNamespace(ctx, namespaceID); err != nil {
-		return configcenter.Publish{}, err
-	}
+	// namespace 存在性/归属由事务内 FOR UPDATE 复校验统一保证（不重复池上预检）。
 	tx, err := s.db.Pool().Begin(ctx)
 	if err != nil {
 		return configcenter.Publish{}, err
@@ -442,12 +439,12 @@ func (s *Store) CreatePublish(ctx context.Context, namespaceID string) (configce
 	var nsTid string
 	if err = tx.QueryRow(ctx, `SELECT tenant_id FROM cc_namespaces WHERE id=$1 FOR UPDATE`, namespaceID).Scan(&nsTid); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return configcenter.Publish{}, fmt.Errorf("命名空间不存在: %s", namespaceID)
+			return configcenter.Publish{}, fmt.Errorf("%w: %s", configcenter.ErrNamespaceNotFound, namespaceID)
 		}
 		return configcenter.Publish{}, err
 	}
 	if nsTid != tid {
-		return configcenter.Publish{}, fmt.Errorf("命名空间不存在: %s", namespaceID)
+		return configcenter.Publish{}, fmt.Errorf("%w: %s", configcenter.ErrNamespaceNotFound, namespaceID)
 	}
 
 	// 1) 下一版本号 = namespace 内 MAX(version)+1；无历史则 1。
@@ -477,7 +474,15 @@ func (s *Store) CreatePublish(ctx context.Context, namespaceID string) (configce
 		return configcenter.Publish{}, err
 	}
 
-	// 3) INSERT 新 active 行（先插后翻 status，避免索引与自身冲突）。
+	// 3) 旧 active → rolled-back（先翻后插：partial unique index uq_cc_publishes_ns_active
+	// 要求同 ns 仅一行 active，先 INSERT 会撞索引）。
+	if _, err = tx.Exec(ctx,
+		`UPDATE cc_publishes SET status=$1 WHERE namespace_id=$2 AND tenant_id=$3 AND status=$4`,
+		configcenter.StatusRolledBack, namespaceID, tid, configcenter.StatusActive); err != nil {
+		return configcenter.Publish{}, err
+	}
+
+	// 4) INSERT 新 active 行。
 	pub := configcenter.Publish{
 		ID:          newCCID("pub"),
 		TenantID:    tid,
@@ -494,13 +499,6 @@ func (s *Store) CreatePublish(ctx context.Context, namespaceID string) (configce
 	if _, err = tx.Exec(ctx,
 		`INSERT INTO cc_publishes (`+pubCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
 		pub.ID, pub.TenantID, pub.NamespaceID, pub.Version, snapBytes, pub.Status, pub.CreatedAt); err != nil {
-		return configcenter.Publish{}, err
-	}
-
-	// 4) 旧 active → rolled-back（排除刚插入的新行避免误翻）。
-	if _, err = tx.Exec(ctx,
-		`UPDATE cc_publishes SET status=$1 WHERE namespace_id=$2 AND tenant_id=$3 AND status=$4 AND id<>$5`,
-		configcenter.StatusRolledBack, namespaceID, tid, configcenter.StatusActive, pub.ID); err != nil {
 		return configcenter.Publish{}, err
 	}
 
@@ -527,15 +525,15 @@ func (s *Store) RollbackPublish(ctx context.Context, publishID string) (configce
 	// 1) 取目标行（带 tenant 校验）；同时拿 namespace_id 与 status。
 	var target configcenter.Publish
 	row := tx.QueryRow(ctx,
-		`SELECT `+pubCols+` FROM cc_publishes WHERE id=$1 AND tenant_id=$2`, publishID, tid)
+		`SELECT `+pubCols+` FROM cc_publishes WHERE id=$1 AND tenant_id=$2 FOR UPDATE`, publishID, tid)
 	if err = scanPublish(row, &target); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return configcenter.Publish{}, fmt.Errorf("发布不存在: %s", publishID)
+			return configcenter.Publish{}, fmt.Errorf("%w: %s", configcenter.ErrPublishNotFound, publishID)
 		}
 		return configcenter.Publish{}, err
 	}
 	if target.Status == configcenter.StatusActive {
-		return configcenter.Publish{}, fmt.Errorf("发布已是当前生效版本: v%d", target.Version)
+		return configcenter.Publish{}, fmt.Errorf("%w: v%d", configcenter.ErrPublishAlreadyActive, target.Version)
 	}
 
 	// 2) 当前 active → rolled-back（同 namespace，排除目标行；目标已非 active 故自然排除）。
@@ -592,29 +590,6 @@ func (s *Store) PublishNamespaceID(ctx context.Context, publishID string) (strin
 		return "", fmt.Errorf("发布不存在: %s", publishID)
 	}
 	return nsID, err
-}
-
-// ---------- Count 方法（供 PG seed 判空，表空才灌，幂等；不经租户过滤，仅启动期用） ----------
-
-// NamespacesCount 返回 cc_namespaces 全表行数。
-func (s *Store) NamespacesCount(ctx context.Context) (int, error) {
-	var n int
-	err := s.db.Pool().QueryRow(ctx, `SELECT COUNT(*) FROM cc_namespaces`).Scan(&n)
-	return n, err
-}
-
-// ItemsCount 返回 cc_items 全表行数。
-func (s *Store) ItemsCount(ctx context.Context) (int, error) {
-	var n int
-	err := s.db.Pool().QueryRow(ctx, `SELECT COUNT(*) FROM cc_items`).Scan(&n)
-	return n, err
-}
-
-// PublishesCount 返回 cc_publishes 全表行数。
-func (s *Store) PublishesCount(ctx context.Context) (int, error) {
-	var n int
-	err := s.db.Pool().QueryRow(ctx, `SELECT COUNT(*) FROM cc_publishes`).Scan(&n)
-	return n, err
 }
 
 // SeedIfEmpty no-op（去假数据）：不灌 mock 命名空间/配置/发布。用户经控制台配置真实配置中心。

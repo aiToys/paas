@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/aitoys/paas/internal/configcenter"
@@ -402,5 +403,169 @@ func TestAppPublishedByName(t *testing.T) {
 	h.ServeHTTP(w, req(ctx, "GET", "/api/configcenter/apps/nope/published", nil))
 	if w.Code != 200 || !strings.Contains(w.Body.String(), `"published":false`) {
 		t.Fatalf("未知应用: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// stubAudit 收集审计落参（测试断言用）。
+type stubAudit struct {
+	mu     sync.Mutex
+	records [][5]string // tenantID, action, resourceID, detail, _
+}
+
+func (s *stubAudit) record(ctx context.Context, tenantID, action, resourceID, detail string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.records = append(s.records, [5]string{tenantID, action, resourceID, detail, ""})
+}
+
+// TestHandlerNamespaceAudit 锁住 R1-I1 修复：ns 维度写操作全覆盖审计
+// （ns 建删 + item 建改删 + publish + rollback），落参断言 action/resourceID/detail。
+func TestHandlerNamespaceAudit(t *testing.T) {
+	repo := ccmemory.NewStore()
+	aud := &stubAudit{}
+	h := configcenter.NewHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	h.WithAudit(aud.record)
+	ctx := acmeCtx()
+
+	// 1) CreateNamespace 审计
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req(ctx, "POST", "/api/configcenter/namespaces", configcenter.Namespace{Name: "audit-ns"}))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create ns: %d %s", w.Code, w.Body.String())
+	}
+	var n configcenter.Namespace
+	decodeData(t, w.Body.Bytes(), &n)
+	// 2) UpsertItem 审计
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req(ctx, "POST", "/api/configcenter/namespaces/"+n.ID+"/items", configcenter.ConfigItem{Key: "k1", Value: "v1"}))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("upsert item: %d %s", w.Code, w.Body.String())
+	}
+	var it configcenter.ConfigItem
+	decodeData(t, w.Body.Bytes(), &it)
+	// 3) publish 审计（v1）
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req(ctx, "POST", "/api/configcenter/namespaces/"+n.ID+"/publish", nil))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("publish: %d %s", w.Code, w.Body.String())
+	}
+	// 再发布 v2（v1 转 rolled-back，供回滚）
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req(ctx, "POST", "/api/configcenter/namespaces/"+n.ID+"/publish", nil))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("publish v2: %d %s", w.Code, w.Body.String())
+	}
+	// 4) rollback 审计（回滚到 v1）
+	pubs, _ := repo.ListPublishes(ctx, n.ID)
+	var v1 string
+	for _, p := range pubs {
+		if p.Version == 1 {
+			v1 = p.ID
+		}
+	}
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req(ctx, "POST", "/api/configcenter/publishes/"+v1+"/rollback", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("rollback: %d %s", w.Code, w.Body.String())
+	}
+	// 5) item delete 审计
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req(ctx, "DELETE", "/api/configcenter/namespaces/"+n.ID+"/items/"+it.ID, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("delete item: %d %s", w.Code, w.Body.String())
+	}
+	// 6) ns delete 审计
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req(ctx, "DELETE", "/api/configcenter/namespaces/"+n.ID, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("delete ns: %d %s", w.Code, w.Body.String())
+	}
+
+	want := []string{
+		"configcenter_ns_create", "configcenter_item_upsert", "configcenter_publish",
+		"configcenter_publish", "configcenter_rollback", "configcenter_item_delete",
+		"configcenter_ns_delete",
+	}
+	aud.mu.Lock()
+	defer aud.mu.Unlock()
+	if len(aud.records) != len(want) {
+		t.Fatalf("审计应 %d 条, got %d: %v", len(want), len(aud.records), aud.records)
+	}
+	for i, wa := range want {
+		if aud.records[i][1] != wa {
+			t.Fatalf("审计[%d] action 应 %s, got %s", i, wa, aud.records[i][1])
+		}
+	}
+	if aud.records[0][0] != "t-acme" || aud.records[0][2] != n.ID {
+		t.Fatalf("ns_create 审计落参错误: %v", aud.records[0])
+	}
+	if !strings.Contains(aud.records[1][3], "key=k1") {
+		t.Fatalf("item_upsert 审计 detail 应含 key: %v", aud.records[1])
+	}
+}
+
+// TestHandlerNamespaceWriteForbidden 锁住 R7-F5：只读授权下 ns 维度全部写操作 403。
+func TestHandlerNamespaceWriteForbidden(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return perm == configcenter.PermConfigCenterRead }
+	ctx := acmeCtx()
+
+	// 建一个共享 ns（绕过 handler，直写 repo）作为删除/发布目标。
+	n, err := repo.CreateNamespace(ctx, configcenter.Namespace{Name: "ro-ns"})
+	if err != nil {
+		t.Fatalf("seed ns: %v", err)
+	}
+
+	writes := []struct {
+		method, path string
+		body         interface{}
+	}{
+		{"POST", "/api/configcenter/namespaces", configcenter.Namespace{Name: "x"}},
+		{"DELETE", "/api/configcenter/namespaces/" + n.ID, nil},
+		{"POST", "/api/configcenter/namespaces/" + n.ID + "/items", configcenter.ConfigItem{Key: "k", Value: "v"}},
+		{"DELETE", "/api/configcenter/namespaces/" + n.ID + "/items/item-x", nil},
+		{"POST", "/api/configcenter/namespaces/" + n.ID + "/publish", nil},
+		{"POST", "/api/configcenter/publishes/pub-x/rollback", nil},
+	}
+	for i, wr := range writes {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req(ctx, wr.method, wr.path, wr.body))
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("写操作[%d] %s %s 应 403, got %d", i, wr.method, wr.path, w.Code)
+		}
+	}
+	// 读放行
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req(ctx, "GET", "/api/configcenter/namespaces", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("读应放行: %d", w.Code)
+	}
+}
+
+// TestCreateNamespaceNameTaken409 锁住 R5-M3：ns 维度创建重名统一 409（原 400，
+// sentinel ErrNamespaceNameTaken 判定）。
+func TestCreateNamespaceNameTaken409(t *testing.T) {
+	h := newHandler()
+	ctx := acmeCtx()
+	createNsViaHTTP(t, h, ctx, "dup-ns")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req(ctx, "POST", "/api/configcenter/namespaces", configcenter.Namespace{Name: "dup-ns"}))
+	if w.Code != http.StatusConflict {
+		t.Fatalf("重名应 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestRollbackAlreadyActive409 锁住 R4-M3：回滚当前 active 版本映射 409（非 400）。
+func TestRollbackAlreadyActive409(t *testing.T) {
+	h := newHandler()
+	ctx := acmeCtx()
+	nsID := createNsViaHTTP(t, h, ctx, "rb-ns")
+	pub := publishViaHTTP(t, h, ctx, nsID)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req(ctx, "POST", "/api/configcenter/publishes/"+pub.ID+"/rollback", nil))
+	if w.Code != http.StatusConflict {
+		t.Fatalf("回滚 active 应 409, got %d: %s", w.Code, w.Body.String())
 	}
 }

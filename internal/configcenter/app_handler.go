@@ -3,6 +3,7 @@ package configcenter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -148,18 +149,19 @@ func (h *AppHandler) serveCollection(w http.ResponseWriter, r *http.Request, app
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}
+	h.recordAudit(r.Context(), ns.TenantID, "configcenter_item_upsert", appID, "item="+saved.ID+",key="+saved.Key)
 	httputil.WriteDataCreated(w, saved)
 }
 
-// ensureAppNS 写路径懒建应用派生 ns（EnsureByApp）。名字冲突（手工共享 ns 占了 app-<id> 名）
-// 映射 409 引导改名；其余错误 500 脱敏。失败时响应已写出，返回零值 + non-nil err 终止调用方。
+// ensureAppNS 写路径懒建应用派生 ns（EnsureByApp）。名字冲突（手工共享 ns 占了 app-<id> 名，
+// sentinel ErrNamespaceNameTaken）映射 409 引导改名；其余错误 500 脱敏。
+// 失败时响应已写出，返回零值 + non-nil err 终止调用方。
 func (h *AppHandler) ensureAppNS(w http.ResponseWriter, r *http.Request, appID string) (Namespace, error) {
 	ns, err := h.repo.EnsureByApp(r.Context(), appID)
 	if err == nil {
 		return ns, nil
 	}
-	// memory/pg 两实现的名字冲突均为领域文本「命名空间已存在: <name>」（非 sentinel）。
-	if strings.Contains(err.Error(), "命名空间已存在") {
+	if errors.Is(err, ErrNamespaceNameTaken) {
 		httputil.WriteError(w, http.StatusConflict,
 			fmt.Sprintf("命名空间名被占用：app-%s（手工共享命名空间占用，请改名）", appID))
 		return Namespace{}, err
@@ -168,7 +170,23 @@ func (h *AppHandler) ensureAppNS(w http.ResponseWriter, r *http.Request, appID s
 	return Namespace{}, err
 }
 
-// serveItemDelete DELETE /dynamic-configs/items/{itemId}（校验 item 归属该应用 ns，防跨 ns 越权删）。
+// findAppNS 只读路径查应用派生 ns（不懒建）。无 ns 返 404（rollback/itemDelete 等需既有
+// 资源的操作不再凭空建 ns）。失败时响应已写出。
+func (h *AppHandler) findAppNS(w http.ResponseWriter, r *http.Request, appID string) (Namespace, bool) {
+	ns, ok, err := h.repo.FindAppNamespace(r.Context(), appID)
+	if err != nil {
+		httputil.WriteInternalError(w, err)
+		return Namespace{}, false
+	}
+	if !ok {
+		httputil.WriteError(w, http.StatusNotFound, "应用动态配置不存在")
+		return Namespace{}, false
+	}
+	return ns, true
+}
+
+// serveItemDelete DELETE /dynamic-configs/items/{itemId}（校验 item 归属该应用 ns，防跨 ns 越权删；
+// 不懒建——无 ns 即无 item，404）。
 func (h *AppHandler) serveItemDelete(w http.ResponseWriter, r *http.Request, appID, itemID string) {
 	if r.Method != http.MethodDelete {
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -177,21 +195,14 @@ func (h *AppHandler) serveItemDelete(w http.ResponseWriter, r *http.Request, app
 	if !h.allowWrite(w, r, appID) {
 		return
 	}
-	ns, err := h.ensureAppNS(w, r, appID)
-	if err != nil {
+	ns, ok := h.findAppNS(w, r, appID)
+	if !ok {
 		return
 	}
-	items, err := h.repo.ListItems(r.Context(), ns.ID)
+	belongs, err := itemBelongsToNS(r.Context(), h.repo, ns.ID, itemID)
 	if err != nil {
 		httputil.WriteInternalError(w, err)
 		return
-	}
-	belongs := false
-	for _, it := range items {
-		if it.ID == itemID {
-			belongs = true
-			break
-		}
 	}
 	if !belongs {
 		httputil.WriteError(w, http.StatusNotFound, "配置项不存在: "+itemID)
@@ -201,6 +212,7 @@ func (h *AppHandler) serveItemDelete(w http.ResponseWriter, r *http.Request, app
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
+	h.recordAudit(r.Context(), ns.TenantID, "configcenter_item_delete", appID, "item="+itemID)
 	httputil.WriteData(w, map[string]string{"deleted": itemID})
 }
 
@@ -299,8 +311,9 @@ func (h *AppHandler) serveRollback(w http.ResponseWriter, r *http.Request, appID
 	if !h.allowWrite(w, r, appID) {
 		return
 	}
-	ns, err := h.ensureAppNS(w, r, appID)
-	if err != nil {
+	// 回滚不懒建：无派生 ns 即无发布历史，404（防只读意图产生写副作用）。
+	ns, ok := h.findAppNS(w, r, appID)
+	if !ok {
 		return
 	}
 	pubNSID, err := h.repo.PublishNamespaceID(r.Context(), publishID)
@@ -315,6 +328,10 @@ func (h *AppHandler) serveRollback(w http.ResponseWriter, r *http.Request, appID
 	}
 	rb, err := h.repo.RollbackPublish(r.Context(), publishID)
 	if err != nil {
+		if errors.Is(err, ErrPublishAlreadyActive) {
+			httputil.WriteError(w, http.StatusConflict, err.Error())
+			return
+		}
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}

@@ -10,6 +10,8 @@ import (
 
 	"github.com/aitoys/paas/internal/configcenter"
 	ccmemory "github.com/aitoys/paas/internal/configcenter/memory"
+	"encoding/json"
+
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
@@ -250,4 +252,181 @@ func mustNSID(t *testing.T, repo configcenter.Repository, ctx context.Context, a
 		t.Fatalf("FindAppNamespace: %v ok=%v", err, ok)
 	}
 	return ns.ID
+}
+
+// TestAppDynamicConfigsItemDelete 锁住 R7-F1：DELETE item 成功 + 审计 + 跨应用 item 404 + 405。
+func TestAppDynamicConfigsItemDelete(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewAppHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	var audited [5]string
+	h.WithAudit(func(ctx context.Context, tenantID, action, resourceID, detail string) {
+		audited = [5]string{"done", tenantID, action, resourceID, detail}
+	})
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+
+	run := func(method, path, body string) *httptest.ResponseRecorder {
+		var rd io.Reader
+		if body != "" {
+			rd = strings.NewReader(body)
+		}
+		req := httptest.NewRequest(method, path, rd)
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// 建项
+	if rec := run("POST", "/api/applications/app-1/dynamic-configs", `{"key":"dk","value":"dv"}`); rec.Code != 201 {
+		t.Fatalf("upsert: %d %s", rec.Code, rec.Body.String())
+	}
+	items, _ := repo.ListItems(ctx, mustNSID(t, repo, ctx, "app-1"))
+	itemID := items[0].ID
+
+	// 非 DELETE 方法 → 405
+	if rec := run("POST", "/api/applications/app-1/dynamic-configs/items/"+itemID, ""); rec.Code != 405 {
+		t.Fatalf("非 DELETE 应 405: %d", rec.Code)
+	}
+	// 跨应用 item（app-2 无任何项）→ 404
+	if rec := run("DELETE", "/api/applications/app-2/dynamic-configs/items/"+itemID, ""); rec.Code != 404 {
+		t.Fatalf("跨应用删 item 应 404: %d", rec.Code)
+	}
+	// 成功删除 + 审计
+	if rec := run("DELETE", "/api/applications/app-1/dynamic-configs/items/"+itemID, ""); rec.Code != 200 {
+		t.Fatalf("delete: %d %s", rec.Code, rec.Body.String())
+	}
+	if audited[0] != "done" || audited[2] != "configcenter_item_delete" || audited[3] != "app-1" {
+		t.Fatalf("删除审计未落: %v", audited)
+	}
+	// 再删 → 404（item 已不在）
+	if rec := run("DELETE", "/api/applications/app-1/dynamic-configs/items/"+itemID, ""); rec.Code != 404 {
+		t.Fatalf("重复删应 404: %d", rec.Code)
+	}
+}
+
+// TestAppDynamicConfigsPublishHistory 锁住 R7-F2：发布历史两版本降序 + 无 ns 空列表。
+func TestAppDynamicConfigsPublishHistory(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewAppHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+
+	run := func(path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", path, nil)
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// 无 ns → 空列表（不懒建）
+	if _, ok, _ := repo.FindAppNamespace(ctx, "app-1"); ok {
+		t.Fatal("前置：不应已有 ns")
+	}
+	rec := run("/api/applications/app-1/dynamic-configs/publishes")
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"data":[]`) {
+		t.Fatalf("无 ns 应空列表: %d %s", rec.Code, rec.Body.String())
+	}
+	if _, ok, _ := repo.FindAppNamespace(ctx, "app-1"); ok {
+		t.Fatal("publishes 不应懒建 ns")
+	}
+
+	// 建项发布两版
+	req := httptest.NewRequest("POST", "/api/applications/app-1/dynamic-configs", strings.NewReader(`{"key":"k","value":"v1"}`))
+	req = req.WithContext(ctx)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/applications/app-1/dynamic-configs/publish", nil).WithContext(ctx))
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/applications/app-1/dynamic-configs/publish", nil).WithContext(ctx))
+
+	rec = run("/api/applications/app-1/dynamic-configs/publishes")
+	if rec.Code != 200 {
+		t.Fatalf("publishes: %d", rec.Code)
+	}
+	var env struct {
+		Data []configcenter.Publish `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("解析: %v", err)
+	}
+	if len(env.Data) != 2 || env.Data[0].Version != 2 || env.Data[1].Version != 1 {
+		t.Fatalf("应两版本降序 [2,1], got %+v", env.Data)
+	}
+}
+
+// TestAppDynamicConfigsGuardAllowPath 锁住 R7-F6：Guard 桩 write 动作放行 → upsert 201。
+func TestAppDynamicConfigsGuardAllowPath(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewAppHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	h.WithGuard(guardFunc(func(r *http.Request, appID, action string) bool { return action == "write" }))
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	req := httptest.NewRequest("POST", "/api/applications/app-1/dynamic-configs", strings.NewReader(`{"key":"k","value":"v"}`))
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 201 {
+		t.Fatalf("Guard 放行应 201: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAppDynamicConfigsItemAudit 应用维度 item upsert/delete 审计落参（R1-I1 补全）。
+func TestAppDynamicConfigsItemAudit(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewAppHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	var actions []string
+	h.WithAudit(func(ctx context.Context, tenantID, action, resourceID, detail string) {
+		actions = append(actions, action+"|"+resourceID+"|"+detail)
+	})
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	run := func(method, path, body string) *httptest.ResponseRecorder {
+		var rd io.Reader
+		if body != "" {
+			rd = strings.NewReader(body)
+		}
+		req := httptest.NewRequest(method, path, rd)
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	rec := run("POST", "/api/applications/app-1/dynamic-configs", `{"key":"ak","value":"av"}`)
+	if rec.Code != 201 {
+		t.Fatalf("upsert: %d %s", rec.Code, rec.Body.String())
+	}
+	items, _ := repo.ListItems(ctx, mustNSID(t, repo, ctx, "app-1"))
+	run("DELETE", "/api/applications/app-1/dynamic-configs/items/"+items[0].ID, "")
+	if len(actions) != 2 ||
+		!strings.HasPrefix(actions[0], "configcenter_item_upsert|app-1|item=") ||
+		!strings.Contains(actions[0], "key=ak") ||
+		!strings.HasPrefix(actions[1], "configcenter_item_delete|app-1|item=") {
+		t.Fatalf("item 审计落参错误: %v", actions)
+	}
+}
+
+// TestAppDynamicConfigsRollbackNoLazyCreate 锁住 R5-M4/R8-M2：rollback/itemDelete 不懒建 ns
+// （无 ns 返 404，不再凭空创建派生命名空间）。
+func TestAppDynamicConfigsRollbackNoLazyCreate(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewAppHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+
+	run := func(method, path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, nil)
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := run("POST", "/api/applications/app-none/dynamic-configs/rollback/pub-x"); rec.Code != 404 {
+		t.Fatalf("无 ns rollback 应 404: %d", rec.Code)
+	}
+	if rec := run("DELETE", "/api/applications/app-none/dynamic-configs/items/item-x"); rec.Code != 404 {
+		t.Fatalf("无 ns itemDelete 应 404: %d", rec.Code)
+	}
+	if _, ok, _ := repo.FindAppNamespace(ctx, "app-none"); ok {
+		t.Fatal("rollback/itemDelete 不应懒建 ns")
+	}
 }
