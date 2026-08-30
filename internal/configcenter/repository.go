@@ -9,6 +9,7 @@ type Repository interface {
 	NamespaceStore
 	ItemStore
 	PublishStore
+	LaneOverrideStore
 }
 
 // NamespaceStore 命名空间仓储。
@@ -23,6 +24,24 @@ type NamespaceStore interface {
 	EnsureByApp(ctx context.Context, appID string) (Namespace, error)
 	// FindAppNamespace 查应用派生命名空间（不创建）。无返回 false。
 	FindAppNamespace(ctx context.Context, appID string) (Namespace, bool, error)
+	// EnsureByAppEnv 懒建（或返回既有的）(app, env) 维度应用派生命名空间。幂等。
+	// envID 空 = 全环境基线（name=app-<appID>，兼容存量）；非空 = name=app-<appID>-<envID>。
+	EnsureByAppEnv(ctx context.Context, appID, envID string) (Namespace, error)
+	// FindAppNamespaceEnv 查 (app, env) 维度命名空间（不创建）。发现解析语义：
+	// envID 非空时精确 (app,env) 未命中回退 env='' 基线 ns；envID 空仅精确匹配 env=''。
+	FindAppNamespaceEnv(ctx context.Context, appID, envID string) (Namespace, bool, error)
+}
+
+// LaneOverrideStore 泳道配置覆盖仓储（无版本链，upsert 即生效）。
+type LaneOverrideStore interface {
+	// UpsertLaneOverride 同 (tenant, app, env, lane, key) 覆盖更新，否则新增。
+	UpsertLaneOverride(ctx context.Context, o LaneOverride) (LaneOverride, error)
+	// DeleteLaneOverride 删除覆盖；不存在返回 ErrLaneOverrideNotFound。
+	DeleteLaneOverride(ctx context.Context, appID, envID, laneID, key string) error
+	// ListLaneOverrides 按 (app, env, lane) 过滤（lane 空=该 env 全部泳道），按 Key 升序。
+	ListLaneOverrides(ctx context.Context, appID, envID, laneID string) ([]LaneOverride, error)
+	// ListLaneOverridesForClean 泳道回收级联清理用：按 (env, lane) 跨 app 列出（tenant 从 ctx）。
+	ListLaneOverridesForClean(ctx context.Context, envID, laneID string) ([]LaneOverride, error)
 }
 
 // ItemStore 配置项仓储（draft）。

@@ -12,15 +12,17 @@ import (
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
-// Store 实现 configcenter.Repository（三仓储），单 Store 避免重名。
+// Store 实现 configcenter.Repository（仓储），单 Store 避免重名。
 type Store struct {
 	mu         sync.RWMutex
 	namespaces map[string]configcenter.Namespace
 	items      map[string]configcenter.ConfigItem
 	publishes  map[string]configcenter.Publish
+	overrides  map[string]configcenter.LaneOverride
 	nsSeq      int
 	itemSeq    int
 	pubSeq     int
+	ovSeq      int
 }
 
 // NewStore 创建仓储（空，不 seed mock 配置）。
@@ -30,6 +32,7 @@ func NewStore() *Store {
 		namespaces: map[string]configcenter.Namespace{},
 		items:      map[string]configcenter.ConfigItem{},
 		publishes:  map[string]configcenter.Publish{},
+		overrides:  map[string]configcenter.LaneOverride{},
 	}
 }
 
@@ -143,47 +146,75 @@ func (s *Store) DeleteNamespace(ctx context.Context, id string) error {
 	return nil
 }
 
-// EnsureByApp 懒建（或返回既有的）应用派生命名空间（scope=app，name=app-<appID>）。幂等。
+// EnsureByApp 懒建（或返回既有的）应用派生命名空间（env='' 基线，兼容旧签名）。
 func (s *Store) EnsureByApp(ctx context.Context, appID string) (configcenter.Namespace, error) {
+	return s.EnsureByAppEnv(ctx, appID, "")
+}
+
+// FindAppNamespace 查应用派生命名空间（env='' 基线，兼容旧签名）。无返回 false。
+func (s *Store) FindAppNamespace(ctx context.Context, appID string) (configcenter.Namespace, bool, error) {
+	return s.FindAppNamespaceEnv(ctx, appID, "")
+}
+
+// EnsureByAppEnv 懒建（或返回既有的）(app, env) 维度应用派生命名空间。幂等。
+// envID 空 = 全环境基线；非空 = 独立 ns（test/prod 配置互不可见）。
+// 名字冲突（手工 shared ns 抢占派生名）返回 ErrNamespaceNameTaken，不静默另建。
+func (s *Store) EnsureByAppEnv(ctx context.Context, appID, envID string) (configcenter.Namespace, error) {
 	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return configcenter.Namespace{}, err
 	}
+	name := configcenter.AppNSName(appID, envID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if n, ok := s.findAppNSLocked(tid, appID, envID); ok {
+		return n, nil
+	}
+	// 名字冲突：手工共享 ns 占了派生名（handler 映射 409 引导改名，不静默另建同名 ns）。
 	for _, n := range s.namespaces {
-		if n.TenantID == tid && n.Scope == configcenter.ScopeApp && n.AppID == appID {
-			return n, nil
-		}
-		// 名字冲突：手工共享 ns 占了 app-<appID> 名（handler 映射 409 引导改名，不静默另建同名 ns）。
-		if n.TenantID == tid && n.Name == "app-"+appID {
-			return configcenter.Namespace{}, fmt.Errorf("%w: %s", configcenter.ErrNamespaceNameTaken, n.Name)
+		if n.TenantID == tid && n.Name == name {
+			return configcenter.Namespace{}, fmt.Errorf("%w: %s", configcenter.ErrNamespaceNameTaken, name)
 		}
 	}
 	s.nsSeq++
 	n := configcenter.Namespace{
 		ID: fmt.Sprintf("ns-%d", s.nsSeq), TenantID: tid,
-		Name: "app-" + appID, Scope: configcenter.ScopeApp, AppID: appID,
+		Name: name, Scope: configcenter.ScopeApp, AppID: appID, EnvID: envID,
 		UpdatedAt: time.Now(),
 	}
 	s.namespaces[n.ID] = n
 	return n, nil
 }
 
-// FindAppNamespace 查应用派生命名空间（不创建）。无返回 false。
-func (s *Store) FindAppNamespace(ctx context.Context, appID string) (configcenter.Namespace, bool, error) {
+// FindAppNamespaceEnv 查 (app, env) 维度命名空间（不创建）。发现解析语义：
+// envID 非空时精确未命中回退 env='' 基线；envID 空仅精确匹配 env=''。
+func (s *Store) FindAppNamespaceEnv(ctx context.Context, appID, envID string) (configcenter.Namespace, bool, error) {
 	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
 		return configcenter.Namespace{}, false, err
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	for _, n := range s.namespaces {
-		if n.TenantID == tid && n.Scope == configcenter.ScopeApp && n.AppID == appID {
+	if n, ok := s.findAppNSLocked(tid, appID, envID); ok {
+		return n, true, nil
+	}
+	// 回退：env 精确未命中 → env='' 基线（envID 空不走此分支，已精确匹配过）。
+	if envID != "" {
+		if n, ok := s.findAppNSLocked(tid, appID, ""); ok {
 			return n, true, nil
 		}
 	}
 	return configcenter.Namespace{}, false, nil
+}
+
+// findAppNSLocked 按 (tenant, app, env) 精确查找应用派生 ns；须持锁。
+func (s *Store) findAppNSLocked(tid, appID, envID string) (configcenter.Namespace, bool) {
+	for _, n := range s.namespaces {
+		if n.TenantID == tid && n.Scope == configcenter.ScopeApp && n.AppID == appID && n.EnvID == envID {
+			return n, true
+		}
+	}
+	return configcenter.Namespace{}, false
 }
 
 // —— Item ——
@@ -406,4 +437,93 @@ func (s *Store) PublishNamespaceID(ctx context.Context, publishID string) (strin
 		return "", fmt.Errorf("%w: %s", configcenter.ErrPublishNotFound, publishID)
 	}
 	return p.NamespaceID, nil
+}
+
+// —— LaneOverride ——
+
+// UpsertLaneOverride 同 (tenant, app, env, lane, key) 覆盖更新，否则新增。
+func (s *Store) UpsertLaneOverride(ctx context.Context, o configcenter.LaneOverride) (configcenter.LaneOverride, error) {
+	tid, err := tenant.IDOrErr(ctx)
+	if err != nil {
+		return configcenter.LaneOverride{}, err
+	}
+	if err := o.Validate(); err != nil {
+		return configcenter.LaneOverride{}, err
+	}
+	o.TenantID = tid
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, ex := range s.overrides {
+		if ex.TenantID == tid && ex.AppID == o.AppID && ex.EnvID == o.EnvID &&
+			ex.LaneID == o.LaneID && ex.Key == o.Key {
+			ex.Value = o.Value
+			ex.UpdatedAt = time.Now()
+			s.overrides[id] = ex
+			return ex, nil
+		}
+	}
+	s.ovSeq++
+	o.ID = fmt.Sprintf("ovr-%d-%d", time.Now().UnixNano(), s.ovSeq)
+	o.UpdatedAt = time.Now()
+	s.overrides[o.ID] = o
+	return o, nil
+}
+
+// DeleteLaneOverride 删除覆盖；不存在返回 ErrLaneOverrideNotFound。
+func (s *Store) DeleteLaneOverride(ctx context.Context, appID, envID, laneID, key string) error {
+	tid, err := tenant.IDOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, ex := range s.overrides {
+		if ex.TenantID == tid && ex.AppID == appID && ex.EnvID == envID &&
+			ex.LaneID == laneID && ex.Key == key {
+			delete(s.overrides, id)
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %s", configcenter.ErrLaneOverrideNotFound, key)
+}
+
+// ListLaneOverrides 按 (app, env, lane) 过滤（lane 空=该 env 全部泳道），按 Key 升序。
+func (s *Store) ListLaneOverrides(ctx context.Context, appID, envID, laneID string) ([]configcenter.LaneOverride, error) {
+	tid, err := tenant.IDOrErr(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]configcenter.LaneOverride, 0)
+	for _, o := range s.overrides {
+		if o.TenantID != tid || o.AppID != appID || o.EnvID != envID {
+			continue
+		}
+		if laneID != "" && o.LaneID != laneID {
+			continue
+		}
+		out = append(out, o)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
+}
+
+// ListLaneOverridesForClean 泳道回收级联清理用：按 (env, lane) 跨 app 列出。
+func (s *Store) ListLaneOverridesForClean(ctx context.Context, envID, laneID string) ([]configcenter.LaneOverride, error) {
+	tid, err := tenant.IDOrErr(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]configcenter.LaneOverride, 0)
+	for _, o := range s.overrides {
+		if o.TenantID != tid || o.EnvID != envID || o.LaneID != laneID {
+			continue
+		}
+		out = append(out, o)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
 }

@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
@@ -284,5 +285,137 @@ func TestListAllNamespaces(t *testing.T) {
 	}
 	if !tids["t-acme"] || !tids["t-globex"] {
 		t.Fatalf("应覆盖两租户: %v", tids)
+	}
+}
+
+// TestEnsureByAppEnvCreatesPerEnv 锁住环境维度隔离：同一应用 test/prod 各懒建独立 ns，
+// envID 空 → app-<appID>（兼容旧名），非空 → app-<appID>-<envID>；幂等。
+func TestEnsureByAppEnvCreatesPerEnv(t *testing.T) {
+	s := NewStore()
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+
+	def, err := s.EnsureByAppEnv(ctx, "app-1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.Name != "app-app-1" || def.EnvID != "" {
+		t.Fatalf("env 空 ns 名应 app-<appID> 且 EnvID 空: %+v", def)
+	}
+	testNS, err := s.EnsureByAppEnv(ctx, "app-1", "env-acme-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prodNS, err := s.EnsureByAppEnv(ctx, "app-1", "env-acme-prod")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if testNS.ID == prodNS.ID || testNS.ID == def.ID {
+		t.Fatal("不同 env 应各自独立 ns")
+	}
+	if testNS.Name != "app-app-1-env-acme-test" || testNS.EnvID != "env-acme-test" {
+		t.Fatalf("env ns 名/EnvID 错误: %+v", testNS)
+	}
+	// 幂等
+	again, err := s.EnsureByAppEnv(ctx, "app-1", "env-acme-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.ID != testNS.ID {
+		t.Fatal("EnsureByAppEnv 幂等失败")
+	}
+}
+
+// TestFindAppNamespaceEnvFallback 锁住发现回退语义：env 精确命中优先；
+// 无 (app,env) ns 时回退 env='' 的存量 ns；envID 空仅精确匹配 env=''。
+func TestFindAppNamespaceEnvFallback(t *testing.T) {
+	s := NewStore()
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	// 仅存在 env='' 存量 ns。
+	base, err := s.EnsureByAppEnv(ctx, "app-1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 精确未命中 → 回退 env=''。
+	got, ok, err := s.FindAppNamespaceEnv(ctx, "app-1", "env-x")
+	if err != nil || !ok || got.ID != base.ID {
+		t.Fatalf("应回退到 env='' ns: ok=%v err=%v got=%+v", ok, err, got)
+	}
+	// 建 env 精确 ns 后，精确优先。
+	envNS, _ := s.EnsureByAppEnv(ctx, "app-1", "env-x")
+	got, ok, _ = s.FindAppNamespaceEnv(ctx, "app-1", "env-x")
+	if !ok || got.ID != envNS.ID {
+		t.Fatalf("env 精确应优先: got %+v", got)
+	}
+	// envID 空：仅精确 env=''。
+	got, ok, _ = s.FindAppNamespaceEnv(ctx, "app-1", "")
+	if !ok || got.ID != base.ID {
+		t.Fatalf("env 空应精确命中 env='' ns: got %+v", got)
+	}
+	// 跨租户不泄漏。
+	if _, ok, _ := s.FindAppNamespaceEnv(globexCtx(), "app-1", ""); ok {
+		t.Fatal("跨租户不应找到")
+	}
+}
+
+// TestLaneOverrideUpsertDeleteList 锁住泳道覆盖 upsert/delete/list 语义：
+// 同 (app,env,lane,key) 覆盖更新；list 按 (app,env,lane) 过滤且跨租户隔离。
+func TestLaneOverrideUpsertDeleteList(t *testing.T) {
+	s := NewStore()
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+
+	o1, err := s.UpsertLaneOverride(ctx, configcenter.LaneOverride{
+		AppID: "app-1", EnvID: "env-t", LaneID: "feat-x", Key: "rate.limit", Value: "100",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o1.TenantID != "t-acme" || o1.UpdatedAt.IsZero() {
+		t.Fatalf("TenantID/UpdatedAt 应由 store 填充: %+v", o1)
+	}
+	// 同 key 覆盖更新。
+	o2, err := s.UpsertLaneOverride(ctx, configcenter.LaneOverride{
+		AppID: "app-1", EnvID: "env-t", LaneID: "feat-x", Key: "rate.limit", Value: "200",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o2.ID != o1.ID || o2.Value != "200" {
+		t.Fatalf("upsert 应覆盖原行: %+v vs %+v", o2, o1)
+	}
+	// 另一 key + 另一 lane + 另一 env。
+	s.UpsertLaneOverride(ctx, configcenter.LaneOverride{AppID: "app-1", EnvID: "env-t", LaneID: "feat-x", Key: "k2", Value: "v"})
+	s.UpsertLaneOverride(ctx, configcenter.LaneOverride{AppID: "app-1", EnvID: "env-t", LaneID: "feat-y", Key: "k3", Value: "v"})
+	s.UpsertLaneOverride(ctx, configcenter.LaneOverride{AppID: "app-1", EnvID: "", LaneID: "feat-x", Key: "k4", Value: "v"})
+
+	list, err := s.ListLaneOverrides(ctx, "app-1", "env-t", "feat-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("(app-1,env-t,feat-x) 应 2 条, got %d", len(list))
+	}
+	// lane 空 = 全部泳道。
+	all, _ := s.ListLaneOverrides(ctx, "app-1", "env-t", "")
+	if len(all) != 3 {
+		t.Fatalf("(app-1,env-t) 全泳道应 3 条, got %d", len(all))
+	}
+	// 跨租户不泄漏。
+	if l, _ := s.ListLaneOverrides(globexCtx(), "app-1", "env-t", ""); len(l) != 0 {
+		t.Fatal("跨租户 list 应 0 条")
+	}
+	// delete。
+	if err := s.DeleteLaneOverride(ctx, "app-1", "env-t", "feat-x", "rate.limit"); err != nil {
+		t.Fatal(err)
+	}
+	if l, _ := s.ListLaneOverrides(ctx, "app-1", "env-t", "feat-x"); len(l) != 1 {
+		t.Fatalf("删除后应剩 1 条, got %d", len(l))
+	}
+	// 删不存在 → ErrLaneOverrideNotFound。
+	if err := s.DeleteLaneOverride(ctx, "app-1", "env-t", "feat-x", "nope"); !errors.Is(err, configcenter.ErrLaneOverrideNotFound) {
+		t.Fatalf("期望 ErrLaneOverrideNotFound, got %v", err)
+	}
+	// 校验：必填字段缺失拒绝。
+	if _, err := s.UpsertLaneOverride(ctx, configcenter.LaneOverride{EnvID: "e", LaneID: "l", Key: "k"}); err == nil {
+		t.Fatal("appID 缺失应拒绝")
 	}
 }

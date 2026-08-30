@@ -15,3 +15,6 @@ var (
 	// ErrPublishAlreadyActive 发布已是当前生效版本（回滚拒绝，handler 映射 409）。
 	ErrPublishAlreadyActive = errors.New("发布已是当前生效版本")
 )
+
+// ErrLaneOverrideNotFound 泳道配置覆盖不存在（删除不存在的 key 时返回）。
+var ErrLaneOverrideNotFound = errors.New("泳道配置覆盖不存在")

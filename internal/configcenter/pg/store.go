@@ -45,9 +45,10 @@ func NewStore(db *storagepg.DB) *Store { return &Store{db: db} }
 // 列常量与各 struct 字段顺序严格对齐（scan 列序必须一致）。
 // snapshot 列读取为 []byte，由 scanPublish 转 nil 安全的 map。
 const (
-	nsCols   = `id, tenant_id, name, scope, app_id, service_id, "desc", updated_at`
+	nsCols   = `id, tenant_id, name, scope, app_id, env_id, service_id, "desc", updated_at`
 	itemCols = `id, tenant_id, namespace_id, key, value, type, updated_at`
 	pubCols  = `id, tenant_id, namespace_id, version, snapshot, status, created_at`
+	ovCols   = `id, tenant_id, app_id, env_id, lane_id, key, value, updated_at`
 )
 
 // ---------- JSONB 辅助（nil 安全） ----------
@@ -79,7 +80,11 @@ func unmarshalSnapshot(raw []byte) map[string]string {
 // ---------- scan 辅助 ----------
 
 func scanNamespace(r storagepg.RowScanner, n *configcenter.Namespace) error {
-	return r.Scan(&n.ID, &n.TenantID, &n.Name, &n.Scope, &n.AppID, &n.ServiceID, &n.Desc, &n.UpdatedAt)
+	return r.Scan(&n.ID, &n.TenantID, &n.Name, &n.Scope, &n.AppID, &n.EnvID, &n.ServiceID, &n.Desc, &n.UpdatedAt)
+}
+
+func scanOverride(r storagepg.RowScanner, o *configcenter.LaneOverride) error {
+	return r.Scan(&o.ID, &o.TenantID, &o.AppID, &o.EnvID, &o.LaneID, &o.Key, &o.Value, &o.UpdatedAt)
 }
 
 func scanItem(r storagepg.RowScanner, it *configcenter.ConfigItem) error {
@@ -174,12 +179,13 @@ func (s *Store) CreateNamespace(ctx context.Context, n configcenter.Namespace) (
 	if err := n.Validate(); err != nil {
 		return configcenter.Namespace{}, err
 	}
-	// scope 语义：AppID 非空 → 应用派生（Name 强制 app-<appID>，防伪造 shared 占名）；空 → 共享。
+	// scope 语义：AppID 非空 → 应用派生（Name 强制派生名，防伪造 shared 占名）；空 → 共享。
 	if n.AppID != "" {
 		n.Scope = configcenter.ScopeApp
-		n.Name = "app-" + n.AppID
+		n.Name = configcenter.AppNSName(n.AppID, n.EnvID)
 	} else {
 		n.Scope = configcenter.ScopeShared
+		n.EnvID = ""
 	}
 	if n.ID == "" {
 		n.ID = newCCID("ns")
@@ -187,8 +193,8 @@ func (s *Store) CreateNamespace(ctx context.Context, n configcenter.Namespace) (
 	n.TenantID = tid
 	n.UpdatedAt = time.Now()
 	_, err = s.db.Pool().Exec(ctx,
-		`INSERT INTO cc_namespaces (`+nsCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-		n.ID, n.TenantID, n.Name, n.Scope, n.AppID, n.ServiceID, n.Desc, n.UpdatedAt)
+		`INSERT INTO cc_namespaces (`+nsCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		n.ID, n.TenantID, n.Name, n.Scope, n.AppID, n.EnvID, n.ServiceID, n.Desc, n.UpdatedAt)
 	if storagepg.IsUniqueViolation(err) {
 		return configcenter.Namespace{}, fmt.Errorf("%w: %s", configcenter.ErrNamespaceNameTaken, n.Name)
 	}
@@ -198,51 +204,76 @@ func (s *Store) CreateNamespace(ctx context.Context, n configcenter.Namespace) (
 	return n, nil
 }
 
-// EnsureByApp 懒建（或返回既有的）应用派生命名空间（scope=app，name=app-<appID>）。幂等。
-// 先查后插；并发竞态由 UNIQUE (tenant_id, name) 兜底——CreateNamespace 唯一冲突时
-// 回查既有的 app ns 返回（幂等兜底）。
+// EnsureByApp 懒建（或返回既有的）应用派生命名空间（env='' 基线，兼容旧签名）。
 func (s *Store) EnsureByApp(ctx context.Context, appID string) (configcenter.Namespace, error) {
+	return s.EnsureByAppEnv(ctx, appID, "")
+}
+
+// FindAppNamespace 查应用派生命名空间（env='' 基线，兼容旧签名）。无返回 false。
+func (s *Store) FindAppNamespace(ctx context.Context, appID string) (configcenter.Namespace, bool, error) {
+	return s.FindAppNamespaceEnv(ctx, appID, "")
+}
+
+// findAppNSRow 按 (tenant, app, env) 精确查询单行（不回退）。
+func (s *Store) findAppNSRow(ctx context.Context, tid, appID, envID string) (configcenter.Namespace, error) {
+	row := s.db.Pool().QueryRow(ctx,
+		`SELECT `+nsCols+` FROM cc_namespaces WHERE tenant_id=$1 AND scope='app' AND app_id=$2 AND env_id=$3`,
+		tid, appID, envID)
+	var n configcenter.Namespace
+	if err := scanNamespace(row, &n); err != nil {
+		return configcenter.Namespace{}, err
+	}
+	return n, nil
+}
+
+// EnsureByAppEnv 懒建（或返回既有的）(app, env) 维度应用派生命名空间。幂等。
+// 先查后插；并发竞态由 UNIQUE (tenant_id, name) 兜底——唯一冲突时回查返回（幂等兜底）。
+func (s *Store) EnsureByAppEnv(ctx context.Context, appID, envID string) (configcenter.Namespace, error) {
 	tid, err := storagepg.TenantOrErr(ctx)
 	if err != nil {
 		return configcenter.Namespace{}, err
 	}
-	row := s.db.Pool().QueryRow(ctx,
-		`SELECT `+nsCols+` FROM cc_namespaces WHERE tenant_id=$1 AND scope='app' AND app_id=$2`, tid, appID)
-	var n configcenter.Namespace
-	if err := scanNamespace(row, &n); err == nil {
+	if n, err := s.findAppNSRow(ctx, tid, appID, envID); err == nil {
 		return n, nil
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return configcenter.Namespace{}, err
 	}
 	created, err := s.CreateNamespace(ctx, configcenter.Namespace{
-		Name: "app-" + appID, Scope: configcenter.ScopeApp, AppID: appID,
+		Name: configcenter.AppNSName(appID, envID), Scope: configcenter.ScopeApp, AppID: appID, EnvID: envID,
 	})
 	if storagepg.IsUniqueViolation(err) {
 		// 并发 Ensure：另一请求已建，回查返回（幂等兜底）。
-		row := s.db.Pool().QueryRow(ctx,
-			`SELECT `+nsCols+` FROM cc_namespaces WHERE tenant_id=$1 AND scope='app' AND app_id=$2`, tid, appID)
-		var existing configcenter.Namespace
-		if err := scanNamespace(row, &existing); err == nil {
-			return existing, nil
+		if n, qerr := s.findAppNSRow(ctx, tid, appID, envID); qerr == nil {
+			return n, nil
 		}
 	}
 	return created, err
 }
 
-// FindAppNamespace 查应用派生命名空间（不创建）。无返回 false。
-func (s *Store) FindAppNamespace(ctx context.Context, appID string) (configcenter.Namespace, bool, error) {
+// FindAppNamespaceEnv 查 (app, env) 维度命名空间（不创建）。发现解析语义：
+// envID 非空时精确未命中回退 env='' 基线；envID 空仅精确匹配 env=''。
+func (s *Store) FindAppNamespaceEnv(ctx context.Context, appID, envID string) (configcenter.Namespace, bool, error) {
 	tid, err := storagepg.TenantOrErr(ctx)
 	if err != nil {
 		return configcenter.Namespace{}, false, err
 	}
-	row := s.db.Pool().QueryRow(ctx,
-		`SELECT `+nsCols+` FROM cc_namespaces WHERE tenant_id=$1 AND scope='app' AND app_id=$2`, tid, appID)
-	var n configcenter.Namespace
-	if err := scanNamespace(row, &n); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return configcenter.Namespace{}, false, nil
+	n, err := s.findAppNSRow(ctx, tid, appID, envID)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return configcenter.Namespace{}, false, err
 		}
-		return configcenter.Namespace{}, false, err
+		// 回退：env 精确未命中 → env='' 基线（envID 空不走此分支，已精确匹配过）。
+		if envID != "" {
+			n, err = s.findAppNSRow(ctx, tid, appID, "")
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return configcenter.Namespace{}, false, nil
+				}
+				return configcenter.Namespace{}, false, err
+			}
+			return n, true, nil
+		}
+		return configcenter.Namespace{}, false, nil
 	}
 	return n, true, nil
 }
@@ -608,4 +639,106 @@ var (
 // newCCID 生成带前缀的短 ID（纳秒时间戳 + 前缀）。mock 期保证基本唯一，与 governance PG 同款风格。
 func newCCID(prefix string) string {
 	return fmt.Sprintf("%s-%d", prefix, time.Now().UnixNano())
+}
+
+// ---------- LaneOverrideStore ----------
+
+// UpsertLaneOverride 同 (tenant, app, env, lane, key) 覆盖更新，否则新增（ON CONFLICT 主路径）。
+func (s *Store) UpsertLaneOverride(ctx context.Context, o configcenter.LaneOverride) (configcenter.LaneOverride, error) {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return configcenter.LaneOverride{}, err
+	}
+	if err := o.Validate(); err != nil {
+		return configcenter.LaneOverride{}, err
+	}
+	if o.ID == "" {
+		o.ID = newCCID("ovr")
+	}
+	o.TenantID = tid
+	o.UpdatedAt = time.Now()
+	row := s.db.Pool().QueryRow(ctx, `
+INSERT INTO cc_lane_overrides (`+ovCols+`)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+ON CONFLICT (tenant_id, app_id, env_id, lane_id, key) DO UPDATE
+    SET value      = EXCLUDED.value,
+        updated_at = EXCLUDED.updated_at
+RETURNING `+ovCols,
+		o.ID, o.TenantID, o.AppID, o.EnvID, o.LaneID, o.Key, o.Value, o.UpdatedAt)
+	var saved configcenter.LaneOverride
+	if err := scanOverride(row, &saved); err != nil {
+		return configcenter.LaneOverride{}, err
+	}
+	return saved, nil
+}
+
+// DeleteLaneOverride 删除覆盖；跨租户/不存在 RowsAffected==0 → ErrLaneOverrideNotFound（不泄漏）。
+func (s *Store) DeleteLaneOverride(ctx context.Context, appID, envID, laneID, key string) error {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	tag, err := s.db.Pool().Exec(ctx,
+		`DELETE FROM cc_lane_overrides WHERE tenant_id=$1 AND app_id=$2 AND env_id=$3 AND lane_id=$4 AND key=$5`,
+		tid, appID, envID, laneID, key)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: %s", configcenter.ErrLaneOverrideNotFound, key)
+	}
+	return nil
+}
+
+// ListLaneOverrides 按 (app, env, lane) 过滤（lane 空=该 env 全部泳道），按 Key 升序。
+func (s *Store) ListLaneOverrides(ctx context.Context, appID, envID, laneID string) ([]configcenter.LaneOverride, error) {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return nil, err
+	}
+	q := `SELECT ` + ovCols + ` FROM cc_lane_overrides WHERE tenant_id=$1 AND app_id=$2 AND env_id=$3`
+	args := []any{tid, appID, envID}
+	if laneID != "" {
+		args = append(args, laneID)
+		q += fmt.Sprintf(" AND lane_id=$%d", len(args))
+	}
+	q += " ORDER BY key"
+	rows, err := s.db.Pool().Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]configcenter.LaneOverride, 0)
+	for rows.Next() {
+		var o configcenter.LaneOverride
+		if err = scanOverride(rows, &o); err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
+}
+
+// ListLaneOverridesForClean 泳道回收级联清理用：按 (env, lane) 跨 app 列出（tenant 从 ctx）。
+func (s *Store) ListLaneOverridesForClean(ctx context.Context, envID, laneID string) ([]configcenter.LaneOverride, error) {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+ovCols+` FROM cc_lane_overrides WHERE tenant_id=$1 AND env_id=$2 AND lane_id=$3 ORDER BY key`,
+		tid, envID, laneID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]configcenter.LaneOverride, 0)
+	for rows.Next() {
+		var o configcenter.LaneOverride
+		if err = scanOverride(rows, &o); err != nil {
+			return nil, err
+		}
+		out = append(out, o)
+	}
+	return out, rows.Err()
 }

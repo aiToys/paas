@@ -308,11 +308,28 @@ CREATE TABLE IF NOT EXISTS cc_namespaces (
     name       TEXT NOT NULL,
     scope      TEXT NOT NULL DEFAULT 'shared',  -- app（应用派生，EnsureByApp 懒建）| shared（跨应用共享）
     app_id     TEXT NOT NULL DEFAULT '',         -- scope=app 时归属应用
+    env_id     TEXT NOT NULL DEFAULT '',         -- scope=app 时的环境维度（空=基线，兼容存量）
     service_id TEXT NOT NULL DEFAULT '',    -- 关联 governance Service（空=不关联，双向显示用）
     "desc"     TEXT NOT NULL DEFAULT '',
     updated_at TIMESTAMPTZ NOT NULL,
     UNIQUE (tenant_id, name)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uq_cc_ns_tenant_app_env
+  ON cc_namespaces(tenant_id, app_id, env_id) WHERE app_id != '';
+
+-- 泳道配置覆盖（key 级，无版本链，upsert 即生效；泳道回收时级联清理）。
+CREATE TABLE IF NOT EXISTS cc_lane_overrides (
+    id         TEXT PRIMARY KEY,
+    tenant_id  TEXT NOT NULL,
+    app_id     TEXT NOT NULL,
+    env_id     TEXT NOT NULL DEFAULT '',            -- 空=全环境基线
+    lane_id    TEXT NOT NULL,
+    key        TEXT NOT NULL,
+    value      TEXT NOT NULL DEFAULT '',
+    updated_at TIMESTAMPTZ NOT NULL,
+    UNIQUE (tenant_id, app_id, env_id, lane_id, key)
+);
+CREATE INDEX IF NOT EXISTS idx_cclo_lookup ON cc_lane_overrides(tenant_id, app_id, env_id, lane_id);
 
 CREATE TABLE IF NOT EXISTS cc_items (
     id           TEXT PRIMARY KEY,
