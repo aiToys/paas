@@ -213,7 +213,7 @@ cmd/core serveHTTP
 - **Composite 路由**：mux 粗粒度 subtree 保留（`mux.Handle("/api/applications/", composite)`），每个逻辑子操作用 `Operation` 登记（spec-only），spec 完整且不破坏内部派发。
 - **`GET /openapi.json`**：公开契约（无鉴权），含 55 路径 / 75 操作 / 36 schema。
 - **`GET /docs`**：Scalar 交互文档（公开无鉴权），拉 `/openapi.json` 渲染，支持 try-it-out（填 API Key 试请求）；CDN 加载 Scalar（Apache 2.0），离线场景 noscript 降级提示。
-- 前端：`openapi-typescript`（devDep）+ `pnpm gen:api`（需先 `make run`）从 `/openapi.json` 生成 `src/api/types.gen.ts`；`fetchJSON<T>` 泛型 helper 消费生成类型。新代码用生成类型，存量 49 个手写 interface 渐进迁移（YAGNI，不一次性重写）。
+- 前端：`openapi-typescript`（devDep）+ `pnpm gen:api`（需先 `make run`）从 `/openapi.json` 生成 `src/api/types.gen.ts`；`fetchJSON<T>` 泛型 helper 消费生成类型。**迁移现状（2026-08-30 审计）**：console-user 手写 interface 约 167 个、生成类型引用仅 1 处，console-admin 未接入（127 个手写）——早期「新代码用生成类型」约定实际未被执行。**现行策略**：不一次性重写（YAGNI）；改到哪个模块才迁哪个模块的手写 interface；console-admin 暂不接入（其手写 interface 已稳定，接入收益低）。
 - **写操作请求体全覆盖**：所有接收 JSON body 的 POST/PUT 均登记 `WithReqBody`（含 devops/configcenter 漏登记的 4 个 POST Operation）；无 body 的写操作（rollback/pay/heartbeat/publish/generate）按 REST 语义不强加 requestBody。
 - **响应契约全平台统一**（深度检测 P1）：所有平台 CRUD 成功响应一律 `{data:T}`（经 `httputil.WriteData`/`WriteDataCreated`），错误一律 `{error:msg}`（`WriteError`），500 脱敏（`WriteInternalError`）。**仅以下协议端点保留裸 JSON**（`httputil.WriteJSON`，非 `{data:T}`）：OpenAI 兼容 `/v1/*`（`{"object":"list","data":[...]}`）、K8s 探针 `/livez`（`{"status":"ok"}`）、数据面 SDK `/dp/*`（zeus 发现协议 shape）、配置中心发现 `/api/configcenter/.../published`（`{published,version,snapshot,publishId}` 客户端直取）。前端两路消费均兼容：console-user `fetchJSON` 智能解包 `{data:T}` 否则原样；console-admin http interceptor 检测 `'data' in payload` 自动解包。消除各 handler 50+ 处裸 `json.NewEncoder` + auth 自定义 `writeAuthData/writeErr` 重复（DRY 收敛到 httputil 单一真源）。单资源响应聚合用专用类型（如 `governance.ServiceDetail{Service,Instances}`）+ spec `WithResp` 对齐。
 - **后续**：vendored 本地 Scalar JS（离线）、自动 mock。
@@ -1012,6 +1012,8 @@ console-user 导航采用**三层信息架构**（避免「资源」概念被滥
 - 另有：应用（主线）/ DevOps / Playground
 
 关键区分：**配置中心属服务治理**（运行时动态、跨实例、版本灰度），与**应用详情的「应用配置」**（env/Secret、工作负载级、静态）是两个层面，勿混。
+
+**前端工程纪律（2026-08-30 前端审计切片落地）**：console-user 接入 ESLint 9 flat config（`eslint.config.js`，裁剪自 console-admin：无四层架构边界规则，保留 `no-explicit-any`/`no-unused-vars` error + vue recommended；纯格式规则对存量 off）。`pnpm lint` 0 error 0 warning 基线，新代码不得引入 `as any`——错误文案统一走 `api.ts` 的 `apiError(e, fallback)`（catch 分支）/ `respError(resp, prefix)`（手写 fetchAuth 非法响应），替代 `catch (e: any) e.message` 与 `(j as any)?.error` 反模式。`usePolling` 自带 in-flight 防重入（慢请求不堆叠）；PipelineRunView 的手写定时器同款防重入。landing 不接 lint（1.3k 行静态页，轻量是优点）。
 
 **环境信息架构（主辅结合）**：环境扮演两个角色，UI 厘清边界，避免三入口混乱--
 
