@@ -75,7 +75,7 @@ async function submit() {
       value: form.value.value,
       type: form.value.type,
     })
-    ElMessage.success('已保存（draft，发布后生效）')
+    ElMessage.success('已保存，发布后生效')
     showEdit.value = false
     load()
   } catch (e) {
@@ -95,7 +95,7 @@ async function remove(row: DynamicConfigItem) {
   removing.value = row.id
   try {
     await deleteAppDynamicConfig(props.appId, row.id)
-    ElMessage.success('已删除（draft，发布后生效）')
+    ElMessage.success('已删除，发布后生效')
     load()
   } catch (e) {
     ElMessage.error((e as Error).message || '删除失败')
@@ -150,30 +150,17 @@ watch(() => props.appId, load)
         <span class="block-hint">运行时热更新（无需重启）· 添加配置后发布生效</span>
       </div>
       <div>
-        <el-button size="small" :loading="publishing" @click="publish">发布当前 draft</el-button>
+        <!-- 生效版本 tag 内联到标题行：当前生效即发布历史 active 那条，不单独设展示区 -->
+        <span v-if="published?.published" class="ver-tag mono" style="margin-right: 10px">生效中 v{{ published.version }}</span>
+        <span v-else class="none" style="margin-right: 10px">未发布</span>
+        <el-button size="small" :loading="publishing" @click="publish">发布生效</el-button>
         <el-button size="small" type="primary" @click="openAdd">+ 新增配置</el-button>
       </div>
     </div>
 
-    <!-- 当前生效 -->
+    <!-- 配置项（编辑即 draft，点「发布生效」才对客户端可见） -->
     <section class="cfg-group">
-      <div class="group-title">
-        当前生效
-        <span v-if="published?.published" class="ver-tag mono">v{{ published.version }}</span>
-        <span v-else class="none">未发布</span>
-      </div>
-      <div v-if="published?.published && snapshotEntries(published.snapshot).length" class="kv-list">
-        <div v-for="[k, v] in snapshotEntries(published.snapshot)" :key="k" class="kv-row">
-          <span class="kv-key mono">{{ k }}</span>
-          <span class="kv-val mono">{{ v }}</span>
-        </div>
-      </div>
-      <div v-else class="empty-line">尚未发布任何版本</div>
-    </section>
-
-    <!-- draft 配置项 -->
-    <section class="cfg-group">
-      <div class="group-title">配置项（draft）<span class="group-cnt mono">{{ items.length }}</span></div>
+      <div class="group-title">配置项<span class="group-cnt mono">{{ items.length }}</span></div>
       <el-table :data="items" size="small" empty-text="动态配置用于运行时热更新（无需重启）。添加第一项配置后发布生效。">
         <el-table-column prop="key" label="Key" min-width="180">
           <template #default="{ row }"><span class="mono">{{ row.key }}</span></template>

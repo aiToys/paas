@@ -174,7 +174,7 @@ async function saveItem() {
       body: JSON.stringify({ key: itemForm.value.key, value: itemForm.value.value, type: itemForm.value.type }),
     })
     if (resp.ok) {
-      ElMessage.success('已保存（draft）')
+      ElMessage.success('已保存，发布后生效')
       showItem.value = false
       loadDetail()
     } else {
@@ -345,28 +345,14 @@ watch(() => route.params.nsId, load)
       </div>
 
       <div v-loading="loading">
-        <!-- 当前生效配置（客户端发现） -->
+        <!-- 配置项（编辑即 draft，点「发布生效」才对客户端可见；生效版本 tag 内联，不单独设展示区） -->
         <section class="block">
           <div class="block-head">
-            <span class="block-title">当前生效配置（客户端发现）</span>
-            <span v-if="published?.published" class="ver-tag mono">v{{ published.version }}</span>
-            <span v-else class="none">未发布</span>
-          </div>
-          <div v-if="published?.published && snapshotEntries(published.snapshot).length" class="kv-list">
-            <div v-for="[k, v] in snapshotEntries(published.snapshot)" :key="k" class="kv-row">
-              <span class="kv-key mono">{{ k }}</span>
-              <span class="kv-val mono">{{ v }}</span>
-            </div>
-          </div>
-          <el-empty v-else description="尚未发布任何版本" :image-size="48" />
-        </section>
-
-        <!-- draft 配置项 -->
-        <section class="block">
-          <div class="block-head">
-            <span class="block-title">配置项（draft）</span>
+            <span class="block-title">配置项</span>
             <div>
-              <el-button size="small" @click="publish">发布当前 draft</el-button>
+              <span v-if="published?.published" class="ver-tag mono">生效中 v{{ published.version }}</span>
+              <span v-else class="none">未发布</span>
+              <el-button size="small" @click="publish">发布生效</el-button>
               <el-button size="small" type="primary" @click="openItem()">+ 新增配置项</el-button>
             </div>
           </div>
