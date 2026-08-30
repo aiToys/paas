@@ -8,8 +8,13 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/httputil"
+	"github.com/aitoys/paas/pkg/tenant"
 )
+
+// EnvTypeResolver 解析环境类型（prod|test），用于生产写闸门（依赖倒置，同 appconfig 模式）。
+type EnvTypeResolver = environment.EnvTypeResolver
 
 // AppHandler 应用维度动态配置 handler（scope=app 主路径）。
 //
@@ -25,10 +30,11 @@ import (
 //
 // 权限 application:read/write（应用资产归应用权限域）；受限应用写需 AppGuard write 动作。
 type AppHandler struct {
-	repo      Repository
-	Authorize func(r *http.Request, perm string) bool
-	Guard     GuardAdapter // 可空：受限应用 enforcement
-	Audit     AuditFunc    // 可空：publish 审计
+	repo        Repository
+	envResolver EnvTypeResolver // 可空：生产写闸门（目标 env type=prod 需 prod:write）
+	Authorize   func(r *http.Request, perm string) bool
+	Guard       GuardAdapter // 可空：受限应用 enforcement
+	Audit       AuditFunc    // 可空：publish 审计
 }
 
 // GuardAdapter 应用级权限判定（依赖倒置，避免 configcenter→application import）。
@@ -50,6 +56,22 @@ func (h *AppHandler) WithGuard(g GuardAdapter) *AppHandler { h.Guard = g; return
 // WithAudit 注入审计记录器（publish 记 configcenter_publish）。
 func (h *AppHandler) WithAudit(fn AuditFunc) *AppHandler { h.Audit = fn; return h }
 
+// WithEnvResolver 注入环境类型解析器，启用生产写闸门（prod:write）。
+func (h *AppHandler) WithEnvResolver(r EnvTypeResolver) *AppHandler { h.envResolver = r; return h }
+
+// allowProd 校验目标环境的生产写权限（未注入 resolver/envID 空时跳过；非生产放行）。
+// fail-closed：环境查不到（不存在/跨租户）保守按生产处理，需 prod:write。
+func (h *AppHandler) allowProd(w http.ResponseWriter, r *http.Request, envID string) bool {
+	if h.envResolver == nil || envID == "" {
+		return true
+	}
+	etype, err := h.envResolver.EnvType(r.Context(), envID)
+	if err != nil || etype == environment.TypeProd {
+		return h.allow(w, r, environment.PermProdWrite)
+	}
+	return true
+}
+
 func (h *AppHandler) allow(w http.ResponseWriter, r *http.Request, perm string) bool {
 	if h.Authorize == nil || h.Authorize(r, perm) {
 		return true
@@ -58,9 +80,14 @@ func (h *AppHandler) allow(w http.ResponseWriter, r *http.Request, perm string) 
 	return false
 }
 
-// allowWrite 写权限：application:write + 受限应用 AppGuard write 动作（渐进启用，Guard 可空）。
-func (h *AppHandler) allowWrite(w http.ResponseWriter, r *http.Request, appID string) bool {
+// allowWrite 写权限：application:write + 受限应用 AppGuard write 动作（渐进启用，Guard 可空）
+// + 生产闸门（envID 非空且 type=prod 需 prod:write）。
+func (h *AppHandler) allowWrite(w http.ResponseWriter, r *http.Request, appID, envID string) bool {
 	if !h.allow(w, r, "application:write") {
+		return false
+	}
+	if !h.allowProd(w, r, envID) {
+		httputil.WriteError(w, http.StatusForbidden, "生产环境动态配置写需 prod:write 权限")
 		return false
 	}
 	if h.Guard != nil && !h.Guard.Allow(r, appID, "write") {
@@ -86,15 +113,17 @@ func (h *AppHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case len(sub) == 0:
 		h.serveCollection(w, r, appID)
 	case len(sub) == 1 && sub[0] == "publish":
-		h.servePublish(w, r, appID)
+		h.servePublish(w, r, appID, r.URL.Query().Get("envId"))
 	case len(sub) == 1 && sub[0] == "publishes":
-		h.servePublishHistory(w, r, appID)
+		h.servePublishHistory(w, r, appID, r.URL.Query().Get("envId"))
 	case len(sub) == 1 && sub[0] == "published":
-		h.servePublished(w, r, appID)
+		h.servePublished(w, r, appID, r.URL.Query().Get("envId"), r.URL.Query().Get("lane"))
 	case len(sub) == 2 && sub[0] == "items":
-		h.serveItemDelete(w, r, appID, sub[1])
+		h.serveItemDelete(w, r, appID, r.URL.Query().Get("envId"), sub[1])
 	case len(sub) == 2 && sub[0] == "rollback":
-		h.serveRollback(w, r, appID, sub[1])
+		h.serveRollback(w, r, appID, r.URL.Query().Get("envId"), sub[1])
+	case sub[0] == "lane-overrides":
+		h.serveLaneOverrides(w, r, appID, r.URL.Query().Get("envId"), r.URL.Query().Get("lane"), parts[3:])
 	default:
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
@@ -109,15 +138,14 @@ func (h *AppHandler) serveCollection(w http.ResponseWriter, r *http.Request, app
 			return
 		}
 	case http.MethodPost:
-		if !h.allowWrite(w, r, appID) {
-			return
-		}
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	envID := r.URL.Query().Get("envId")
 	if r.Method == http.MethodGet {
-		ns, ok, err := h.repo.FindAppNamespace(r.Context(), appID)
+		// 读路径回退语义：env 精确未命中回退 env='' 基线（FindAppNamespaceEnv）。
+		ns, ok, err := h.repo.FindAppNamespaceEnv(r.Context(), appID, envID)
 		if err != nil {
 			httputil.WriteInternalError(w, err)
 			return
@@ -134,7 +162,10 @@ func (h *AppHandler) serveCollection(w http.ResponseWriter, r *http.Request, app
 		httputil.WriteData(w, list)
 		return
 	}
-	ns, err := h.ensureAppNS(w, r, appID)
+	if !h.allowWrite(w, r, appID, envID) {
+		return
+	}
+	ns, err := h.ensureAppNS(w, r, appID, envID)
 	if err != nil {
 		return
 	}
@@ -149,15 +180,15 @@ func (h *AppHandler) serveCollection(w http.ResponseWriter, r *http.Request, app
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}
-	h.recordAudit(r.Context(), ns.TenantID, "configcenter_item_upsert", appID, "item="+saved.ID+",key="+saved.Key)
+	h.recordAudit(r.Context(), ns.TenantID, "configcenter_item_upsert", appID, "item="+saved.ID+",key="+saved.Key+",envId="+envID)
 	httputil.WriteDataCreated(w, saved)
 }
 
 // ensureAppNS 写路径懒建应用派生 ns（EnsureByApp）。名字冲突（手工共享 ns 占了 app-<id> 名，
 // sentinel ErrNamespaceNameTaken）映射 409 引导改名；其余错误 500 脱敏。
 // 失败时响应已写出，返回零值 + non-nil err 终止调用方。
-func (h *AppHandler) ensureAppNS(w http.ResponseWriter, r *http.Request, appID string) (Namespace, error) {
-	ns, err := h.repo.EnsureByApp(r.Context(), appID)
+func (h *AppHandler) ensureAppNS(w http.ResponseWriter, r *http.Request, appID, envID string) (Namespace, error) {
+	ns, err := h.repo.EnsureByAppEnv(r.Context(), appID, envID)
 	if err == nil {
 		return ns, nil
 	}
@@ -172,8 +203,8 @@ func (h *AppHandler) ensureAppNS(w http.ResponseWriter, r *http.Request, appID s
 
 // findAppNS 只读路径查应用派生 ns（不懒建）。无 ns 返 404（rollback/itemDelete 等需既有
 // 资源的操作不再凭空建 ns）。失败时响应已写出。
-func (h *AppHandler) findAppNS(w http.ResponseWriter, r *http.Request, appID string) (Namespace, bool) {
-	ns, ok, err := h.repo.FindAppNamespace(r.Context(), appID)
+func (h *AppHandler) findAppNS(w http.ResponseWriter, r *http.Request, appID, envID string) (Namespace, bool) {
+	ns, ok, err := h.repo.FindAppNamespaceEnv(r.Context(), appID, envID)
 	if err != nil {
 		httputil.WriteInternalError(w, err)
 		return Namespace{}, false
@@ -187,15 +218,15 @@ func (h *AppHandler) findAppNS(w http.ResponseWriter, r *http.Request, appID str
 
 // serveItemDelete DELETE /dynamic-configs/items/{itemId}（校验 item 归属该应用 ns，防跨 ns 越权删；
 // 不懒建——无 ns 即无 item，404）。
-func (h *AppHandler) serveItemDelete(w http.ResponseWriter, r *http.Request, appID, itemID string) {
+func (h *AppHandler) serveItemDelete(w http.ResponseWriter, r *http.Request, appID, envID, itemID string) {
 	if r.Method != http.MethodDelete {
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if !h.allowWrite(w, r, appID) {
+	if !h.allowWrite(w, r, appID, envID) {
 		return
 	}
-	ns, ok := h.findAppNS(w, r, appID)
+	ns, ok := h.findAppNS(w, r, appID, envID)
 	if !ok {
 		return
 	}
@@ -217,15 +248,15 @@ func (h *AppHandler) serveItemDelete(w http.ResponseWriter, r *http.Request, app
 }
 
 // servePublish POST 发布（EnsureByApp + CreatePublish 快照 + 审计）。
-func (h *AppHandler) servePublish(w http.ResponseWriter, r *http.Request, appID string) {
+func (h *AppHandler) servePublish(w http.ResponseWriter, r *http.Request, appID, envID string) {
 	if r.Method != http.MethodPost {
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if !h.allowWrite(w, r, appID) {
+	if !h.allowWrite(w, r, appID, envID) {
 		return
 	}
-	ns, err := h.ensureAppNS(w, r, appID)
+	ns, err := h.ensureAppNS(w, r, appID, envID)
 	if err != nil {
 		return
 	}
@@ -234,12 +265,12 @@ func (h *AppHandler) servePublish(w http.ResponseWriter, r *http.Request, appID 
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}
-	h.recordAudit(r.Context(), ns.TenantID, "configcenter_publish", appID, fmt.Sprintf("version=%d,publishId=%s", pub.Version, pub.ID))
+	h.recordAudit(r.Context(), ns.TenantID, "configcenter_publish", appID, fmt.Sprintf("version=%d,publishId=%s,envId=%s", pub.Version, pub.ID, envID))
 	httputil.WriteDataCreated(w, pub)
 }
 
 // servePublishHistory GET 发布历史（只读不懒建，无 ns 返空列表）。
-func (h *AppHandler) servePublishHistory(w http.ResponseWriter, r *http.Request, appID string) {
+func (h *AppHandler) servePublishHistory(w http.ResponseWriter, r *http.Request, appID, envID string) {
 	if r.Method != http.MethodGet {
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -247,7 +278,8 @@ func (h *AppHandler) servePublishHistory(w http.ResponseWriter, r *http.Request,
 	if !h.allow(w, r, "application:read") {
 		return
 	}
-	ns, ok, err := h.repo.FindAppNamespace(r.Context(), appID)
+	// 回退语义：env 精确未命中回退 env='' 基线（历史发现兼容）。
+	ns, ok, err := h.repo.FindAppNamespaceEnv(r.Context(), appID, envID)
 	if err != nil {
 		httputil.WriteInternalError(w, err)
 		return
@@ -265,8 +297,10 @@ func (h *AppHandler) servePublishHistory(w http.ResponseWriter, r *http.Request,
 }
 
 // servePublished GET 当前生效（只读不懒建，无 ns/无 active 返 {"published":false}）。
-// 发现协议 shape 与 ns 维度端点一致（{published,version,snapshot,publishId}）。
-func (h *AppHandler) servePublished(w http.ResponseWriter, r *http.Request, appID string) {
+// 发现解析：env 精确 → env='' 回退 → 无（store 层 FindAppNamespaceEnv）；lane 同规则取覆盖，
+// 服务端两层 merge（基线快照 + 泳道覆盖），有覆盖时附 overrideHash 指纹（无覆盖省略，向后兼容）。
+// 发现协议 shape：{published,version,snapshot,publishId[,overrideHash]}。
+func (h *AppHandler) servePublished(w http.ResponseWriter, r *http.Request, appID, envID, lane string) {
 	if r.Method != http.MethodGet {
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -274,7 +308,7 @@ func (h *AppHandler) servePublished(w http.ResponseWriter, r *http.Request, appI
 	if !h.allow(w, r, "application:read") {
 		return
 	}
-	ns, ok, err := h.repo.FindAppNamespace(r.Context(), appID)
+	ns, ok, err := h.repo.FindAppNamespaceEnv(r.Context(), appID, envID)
 	if err != nil {
 		httputil.WriteInternalError(w, err)
 		return
@@ -292,27 +326,54 @@ func (h *AppHandler) servePublished(w http.ResponseWriter, r *http.Request, appI
 		httputil.WriteJSON(w, http.StatusOK, map[string]interface{}{"published": false})
 		return
 	}
-	httputil.WriteJSON(w, http.StatusOK, map[string]interface{}{
+	snapshot := active.Snapshot
+	resp := map[string]interface{}{
 		"published": true,
 		"version":   active.Version,
-		"snapshot":  active.Snapshot,
+		"snapshot":  snapshot,
 		"publishId": active.ID,
-	})
+	}
+	// lane 非空才取覆盖（同回退规则），两层 merge + 指纹。
+	if lane != "" {
+		ovs, err := h.listOverridesResolved(r.Context(), appID, envID, lane)
+		if err != nil {
+			httputil.WriteInternalError(w, err)
+			return
+		}
+		if len(ovs) > 0 {
+			resp["snapshot"] = MergeSnapshot(snapshot, ovs)
+			resp["overrideHash"] = OverrideHash(ovs)
+		}
+	}
+	httputil.WriteJSON(w, http.StatusOK, resp)
+}
+
+// listOverridesResolved 泳道覆盖解析：env 精确 → env='' 回退（与 ns 发现同规则）。
+func (h *AppHandler) listOverridesResolved(ctx context.Context, appID, envID, lane string) ([]LaneOverride, error) {
+	ovs, err := h.repo.ListLaneOverrides(ctx, appID, envID, lane)
+	if err != nil {
+		return nil, err
+	}
+	if len(ovs) == 0 && envID != "" {
+		// env 精确无覆盖 → 回退 env='' 基线覆盖。
+		return h.repo.ListLaneOverrides(ctx, appID, "", lane)
+	}
+	return ovs, nil
 }
 
 // serveRollback POST /dynamic-configs/rollback/{pid} 应用维度回滚。
 // 权限域与 publish 对称（application:write + AppGuard write）；经 PublishNamespaceID 校验
 // pid 所属 ns 是本应用派生 ns（防跨应用回滚他人发布）；成功记审计 configcenter_rollback。
-func (h *AppHandler) serveRollback(w http.ResponseWriter, r *http.Request, appID, publishID string) {
+func (h *AppHandler) serveRollback(w http.ResponseWriter, r *http.Request, appID, envID, publishID string) {
 	if r.Method != http.MethodPost {
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if !h.allowWrite(w, r, appID) {
+	if !h.allowWrite(w, r, appID, envID) {
 		return
 	}
 	// 回滚不懒建：无派生 ns 即无发布历史，404（防只读意图产生写副作用）。
-	ns, ok := h.findAppNS(w, r, appID)
+	ns, ok := h.findAppNS(w, r, appID, envID)
 	if !ok {
 		return
 	}
@@ -335,8 +396,75 @@ func (h *AppHandler) serveRollback(w http.ResponseWriter, r *http.Request, appID
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}
-	h.recordAudit(r.Context(), ns.TenantID, "configcenter_rollback", appID, fmt.Sprintf("version=%d,publishId=%s", rb.Version, rb.ID))
+	h.recordAudit(r.Context(), ns.TenantID, "configcenter_rollback", appID, fmt.Sprintf("version=%d,publishId=%s,envId=%s", rb.Version, rb.ID, envID))
 	httputil.WriteData(w, rb)
+}
+
+// serveLaneOverrides 泳道覆盖三操作（挂 dynamic-configs/lane-overrides）：
+//
+//	GET    /dynamic-configs/lane-overrides?envId=&lane=  列覆盖（lane 空=该 env 全部泳道）
+//	POST   /dynamic-configs/lane-overrides?envId=&lane=  upsert 覆盖（即时生效，无版本链）
+//	DELETE /dynamic-configs/lane-overrides/{key}?envId=&lane=  删覆盖
+//
+// 写操作需 application:write + 生产闸门 + AppGuard write；全记审计（configcenter_lane_*）。
+func (h *AppHandler) serveLaneOverrides(w http.ResponseWriter, r *http.Request, appID, envID, lane string, rest []string) {
+	if lane == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "lane 参数必填")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		if !h.allow(w, r, "application:read") {
+			return
+		}
+		ovs, err := h.listOverridesResolved(r.Context(), appID, envID, lane)
+		if err != nil {
+			httputil.WriteInternalError(w, err)
+			return
+		}
+		httputil.WriteData(w, ovs)
+	case http.MethodPost:
+		if !h.allowWrite(w, r, appID, envID) {
+			return
+		}
+		var o LaneOverride
+		if err := json.NewDecoder(r.Body).Decode(&o); err != nil {
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+			return
+		}
+		o.AppID = appID
+		o.EnvID = envID
+		o.LaneID = lane
+		saved, err := h.repo.UpsertLaneOverride(r.Context(), o)
+		if err != nil {
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
+			return
+		}
+		h.recordAudit(r.Context(), saved.TenantID, "configcenter_lane_override_upsert", appID,
+			"key="+saved.Key+",lane="+lane+",envId="+envID)
+		httputil.WriteDataCreated(w, saved)
+	case http.MethodDelete:
+		if len(rest) != 1 || rest[0] == "" {
+			httputil.WriteError(w, http.StatusNotFound, "not found")
+			return
+		}
+		if !h.allowWrite(w, r, appID, envID) {
+			return
+		}
+		if err := h.repo.DeleteLaneOverride(r.Context(), appID, envID, lane, rest[0]); err != nil {
+			if errors.Is(err, ErrLaneOverrideNotFound) {
+				httputil.WriteError(w, http.StatusNotFound, err.Error())
+				return
+			}
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
+			return
+		}
+		h.recordAudit(r.Context(), tenantIDFromCtx(r.Context()), "configcenter_lane_override_delete", appID,
+			"key="+rest[0]+",lane="+lane+",envId="+envID)
+		httputil.WriteData(w, map[string]string{"deleted": rest[0]})
+	default:
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
 }
 
 // recordAudit 记审计（best-effort，失败仅日志不阻断主流程）。
@@ -346,4 +474,10 @@ func (h *AppHandler) recordAudit(ctx context.Context, tenantID, action, resource
 		return
 	}
 	h.Audit(ctx, tenantID, action, resourceID, detail)
+}
+
+// tenantIDFromCtx 从 ctx 取租户（无租户 ctx 返空串，由审计适配层兜底归 platform）。
+func tenantIDFromCtx(ctx context.Context) string {
+	tid, _ := tenant.TenantFrom(ctx)
+	return tid
 }

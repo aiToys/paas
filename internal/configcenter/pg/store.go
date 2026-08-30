@@ -242,9 +242,12 @@ func (s *Store) EnsureByAppEnv(ctx context.Context, appID, envID string) (config
 		Name: configcenter.AppNSName(appID, envID), Scope: configcenter.ScopeApp, AppID: appID, EnvID: envID,
 	})
 	if storagepg.IsUniqueViolation(err) {
-		// 并发 Ensure：另一请求已建，回查返回（幂等兜底）。
+		// 并发 Ensure：另一请求已建，回查返回（幂等兜底）；回查 ErrNoRows 说明冲突
+		// 来自手工共享 ns 抢占派生名，映射 ErrNamespaceNameTaken（与 memory 实现对齐）。
 		if n, qerr := s.findAppNSRow(ctx, tid, appID, envID); qerr == nil {
 			return n, nil
+		} else if errors.Is(qerr, pgx.ErrNoRows) {
+			return configcenter.Namespace{}, fmt.Errorf("%w: %s", configcenter.ErrNamespaceNameTaken, configcenter.AppNSName(appID, envID))
 		}
 	}
 	return created, err

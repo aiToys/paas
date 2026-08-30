@@ -770,6 +770,8 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	ccAppHandler := configcenter.NewAppHandler(stores.ConfigCenter)
 	ccAppHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 	ccAppHandler.WithGuard(appGuard)
+	// 生产闸门：环境隔离后写操作按目标 env type 接 prod:write（EnvTypeResolver 桥接，同 appconfig 模式）。
+	ccAppHandler.WithEnvResolver(stores.Environment)
 	ccAppHandler.WithAudit(func(ctx context.Context, tenantID, action, resourceID, detail string) {
 		_ = (&identityAuditAdapter{store: stores.Security}).Record(ctx, tenantID, gateway.UserIDFrom(ctx), action, "namespace", resourceID, detail)
 	})
@@ -1408,13 +1410,17 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/configcenter/namespaces/{id}/published", apiroute.Tags("配置中心"), apiroute.Summary("当前生效配置（客户端发现）"), apiroute.Perm("governance:read"), apiroute.WithResp(configcenter.Publish{}))
 	reg.Operation("POST", "/api/configcenter/publishes/{id}/rollback", apiroute.Tags("配置中心"), apiroute.Summary("回滚到历史版本"), apiroute.Perm("governance:write"), apiroute.WithResp(configcenter.Publish{}))
 	reg.Operation("GET", "/api/configcenter/apps/{appName}/published", apiroute.Tags("配置中心"), apiroute.Summary("按应用名发现当前生效动态配置（客户端发现）"), apiroute.Perm("governance:read"), apiroute.WithResp(configcenter.Publish{}))
-	// 配置中心（应用维度，scope=app，composite 内部派发）
-	reg.Operation("GET", "/api/applications/{id}/dynamic-configs", apiroute.Tags("配置中心"), apiroute.Summary("应用动态配置项（draft，自动派生命名空间）"), apiroute.Perm("application:read"), apiroute.WithResp([]configcenter.ConfigItem{}))
-	reg.Operation("POST", "/api/applications/{id}/dynamic-configs", apiroute.Tags("配置中心"), apiroute.Summary("应用动态配置 upsert"), apiroute.Perm("application:write"), apiroute.WithReqBody(configcenter.ConfigItem{}), apiroute.WithResp(configcenter.ConfigItem{}))
-	reg.Operation("DELETE", "/api/applications/{id}/dynamic-configs/items/{itemId}", apiroute.Tags("配置中心"), apiroute.Summary("删除应用动态配置项"), apiroute.Perm("application:write"))
-	reg.Operation("POST", "/api/applications/{id}/dynamic-configs/publish", apiroute.Tags("配置中心"), apiroute.Summary("发布应用动态配置版本"), apiroute.Perm("application:write"), apiroute.WithResp(configcenter.Publish{}))
-	reg.Operation("GET", "/api/applications/{id}/dynamic-configs/publishes", apiroute.Tags("配置中心"), apiroute.Summary("应用动态配置发布历史"), apiroute.Perm("application:read"), apiroute.WithResp([]configcenter.Publish{}))
-	reg.Operation("GET", "/api/applications/{id}/dynamic-configs/published", apiroute.Tags("配置中心"), apiroute.Summary("应用当前生效动态配置（客户端发现）"), apiroute.Perm("application:read"), apiroute.WithResp(configcenter.Publish{}))
+	// 配置中心（应用维度，scope=app，composite 内部派发；envId=环境维度空=基线，prod 写需 prod:write）
+	reg.Operation("GET", "/api/applications/{id}/dynamic-configs", apiroute.Tags("配置中心"), apiroute.Summary("应用动态配置项（draft，?envId= 环境维度，精确未命中回退基线）"), apiroute.Perm("application:read"), apiroute.WithResp([]configcenter.ConfigItem{}))
+	reg.Operation("POST", "/api/applications/{id}/dynamic-configs", apiroute.Tags("配置中心"), apiroute.Summary("应用动态配置 upsert（?envId=，prod 需 prod:write）"), apiroute.Perm("application:write"), apiroute.WithReqBody(configcenter.ConfigItem{}), apiroute.WithResp(configcenter.ConfigItem{}))
+	reg.Operation("DELETE", "/api/applications/{id}/dynamic-configs/items/{itemId}", apiroute.Tags("配置中心"), apiroute.Summary("删除应用动态配置项（?envId=，prod 需 prod:write）"), apiroute.Perm("application:write"))
+	reg.Operation("POST", "/api/applications/{id}/dynamic-configs/publish", apiroute.Tags("配置中心"), apiroute.Summary("发布应用动态配置版本（?envId=，prod 需 prod:write）"), apiroute.Perm("application:write"), apiroute.WithResp(configcenter.Publish{}))
+	reg.Operation("GET", "/api/applications/{id}/dynamic-configs/publishes", apiroute.Tags("配置中心"), apiroute.Summary("应用动态配置发布历史（?envId=）"), apiroute.Perm("application:read"), apiroute.WithResp([]configcenter.Publish{}))
+	reg.Operation("GET", "/api/applications/{id}/dynamic-configs/published", apiroute.Tags("配置中心"), apiroute.Summary("应用当前生效动态配置（发现：?envId=&lane=，两层 merge + overrideHash）"), apiroute.Perm("application:read"), apiroute.WithResp(configcenter.Publish{}))
+	reg.Operation("POST", "/api/applications/{id}/dynamic-configs/rollback/{publishId}", apiroute.Tags("配置中心"), apiroute.Summary("回滚应用动态配置（?envId=，prod 需 prod:write）"), apiroute.Perm("application:write"), apiroute.WithResp(configcenter.Publish{}))
+	reg.Operation("GET", "/api/applications/{id}/dynamic-configs/lane-overrides", apiroute.Tags("配置中心"), apiroute.Summary("泳道配置覆盖列表（?envId=&lane=，lane 必填）"), apiroute.Perm("application:read"), apiroute.WithResp([]configcenter.LaneOverride{}))
+	reg.Operation("POST", "/api/applications/{id}/dynamic-configs/lane-overrides", apiroute.Tags("配置中心"), apiroute.Summary("泳道配置覆盖 upsert（即时生效，?envId=&lane=，prod 需 prod:write）"), apiroute.Perm("application:write"), apiroute.WithReqBody(configcenter.LaneOverride{}), apiroute.WithResp(configcenter.LaneOverride{}))
+	reg.Operation("DELETE", "/api/applications/{id}/dynamic-configs/lane-overrides/{key}", apiroute.Tags("配置中心"), apiroute.Summary("删除泳道配置覆盖（?envId=&lane=，prod 需 prod:write）"), apiroute.Perm("application:write"))
 	reg.Operation("POST", "/api/applications/{id}/dynamic-configs/rollback/{pid}", apiroute.Tags("配置中心"), apiroute.Summary("应用动态配置回滚（校验发布属本应用派生命名空间）"), apiroute.Perm("application:write"), apiroute.WithResp(configcenter.Publish{}))
 	// 可观测
 	reg.Operation("GET", "/api/observability/metrics", apiroute.Tags("可观测"), apiroute.Summary("指标时序（惰性补点）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.MetricSeries{}))

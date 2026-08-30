@@ -2,6 +2,7 @@ package configcenter_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,11 @@ import (
 type guardFunc func(r *http.Request, appID, action string) bool
 
 func (f guardFunc) Allow(r *http.Request, appID, action string) bool { return f(r, appID, action) }
+
+// resolverFunc 把 func 适配为 configcenter.EnvTypeResolver（测试用）。
+type resolverFunc func(ctx context.Context, envID string) (string, error)
+
+func (f resolverFunc) EnvType(ctx context.Context, envID string) (string, error) { return f(ctx, envID) }
 
 // TestAppDynamicConfigsCRUDAndPublish 应用维度动态配置端到端：upsert（自动 EnsureByApp）→ 列表 → 发布 → 发现。
 func TestAppDynamicConfigsCRUDAndPublish(t *testing.T) {
@@ -428,5 +434,203 @@ func TestAppDynamicConfigsRollbackNoLazyCreate(t *testing.T) {
 	}
 	if _, ok, _ := repo.FindAppNamespace(ctx, "app-none"); ok {
 		t.Fatal("rollback/itemDelete 不应懒建 ns")
+	}
+}
+
+// TestPublishEnvIsolation 环境隔离：同一应用 test/prod 各自独立发布互不可见。
+func TestPublishEnvIsolation(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewAppHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	// test env 发布 v
+	postQ := func(body, q string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/api/applications/app-1/dynamic-configs?"+q, strings.NewReader(body))
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := postQ(`{"key":"greeting","value":"hello-test","type":"text"}`, "envId=env-t"); rec.Code != 201 {
+		t.Fatalf("test upsert: %d %s", rec.Code, rec.Body.String())
+	}
+	req := httptest.NewRequest("POST", "/api/applications/app-1/dynamic-configs/publish?envId=env-t", nil)
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 201 {
+		t.Fatalf("test publish: %d %s", rec.Code, rec.Body.String())
+	}
+	// prod env 独立 upsert + 发布
+	if rec := postQ(`{"key":"greeting","value":"hello-prod","type":"text"}`, "envId=env-p"); rec.Code != 201 {
+		t.Fatalf("prod upsert: %d %s", rec.Code, rec.Body.String())
+	}
+	req = httptest.NewRequest("POST", "/api/applications/app-1/dynamic-configs/publish?envId=env-p", nil)
+	req = req.WithContext(ctx)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 201 {
+		t.Fatalf("prod publish: %d %s", rec.Code, rec.Body.String())
+	}
+	// 发现 env-t 只见 hello-test；env-p 只见 hello-prod
+	get := func(q string) string {
+		req := httptest.NewRequest("GET", "/api/applications/app-1/dynamic-configs/published"+q, nil)
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Body.String()
+	}
+	if b := get("?envId=env-t"); !strings.Contains(b, "hello-test") || strings.Contains(b, "hello-prod") {
+		t.Fatalf("env-t 发现应只见 test 值: %s", b)
+	}
+	if b := get("?envId=env-p"); !strings.Contains(b, "hello-prod") || strings.Contains(b, "hello-test") {
+		t.Fatalf("env-p 发现应只见 prod 值: %s", b)
+	}
+	// 发布历史同样隔离：env-t 只有 1 个发布
+	req = httptest.NewRequest("GET", "/api/applications/app-1/dynamic-configs/publishes?envId=env-t", nil)
+	req = req.WithContext(ctx)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	var env struct {
+		Data []configcenter.Publish `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil || len(env.Data) != 1 {
+		t.Fatalf("env-t 发布历史应 1 条: %s err=%v", rec.Body.String(), err)
+	}
+}
+
+// TestProdPublishRequiresPerm 生产环境 publish/回滚/覆盖写需 prod:write（EnvTypeResolver fail-closed）。
+func TestProdPublishRequiresPerm(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewAppHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return perm != "prod:write" } // prod:write 拒绝
+	h.WithEnvResolver(resolverFunc(func(ctx context.Context, envID string) (string, error) {
+		switch envID {
+		case "env-prod":
+			return "prod", nil
+		case "env-test":
+			return "test", nil
+		}
+		return "", errors.New("环境不存在") // 未知 env 报错 → handler fail-closed 按生产
+	}))
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	req := httptest.NewRequest("POST", "/api/applications/app-1/dynamic-configs/publish?envId=env-prod", nil)
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 403 {
+		t.Fatalf("prod publish 应 403: %d %s", rec.Code, rec.Body.String())
+	}
+	// test env 不需要 prod:write
+	req = httptest.NewRequest("POST", "/api/applications/app-1/dynamic-configs/publish?envId=env-test", nil)
+	req = req.WithContext(ctx)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 201 {
+		t.Fatalf("test publish 应放行: %d %s", rec.Code, rec.Body.String())
+	}
+	// 未知环境 fail-closed 按生产：403
+	req = httptest.NewRequest("POST", "/api/applications/app-1/dynamic-configs/publish?envId=env-unknown", nil)
+	req = req.WithContext(ctx)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 403 {
+		t.Fatalf("未知 env 应 fail-closed 403: %d", rec.Code)
+	}
+}
+
+// TestLaneOverrideMerge 泳道覆盖端到端：发现时基线+覆盖 merge，overrideHash 随覆盖变化。
+func TestLaneOverrideMerge(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewAppHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	// 基线：upsert + publish（env=''）
+	req := httptest.NewRequest("POST", "/api/applications/app-1/dynamic-configs", strings.NewReader(`{"key":"a","value":"base","type":"text"}`))
+	req = req.WithContext(ctx)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	req = httptest.NewRequest("POST", "/api/applications/app-1/dynamic-configs/publish", nil)
+	req = req.WithContext(ctx)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	// 无覆盖发现：无 overrideHash 字段，基线值透传
+	req = httptest.NewRequest("GET", "/api/applications/app-1/dynamic-configs/published?lane=feat-x", nil)
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body := rec.Body.String()
+	if !strings.Contains(body, `"a":"base"`) || strings.Contains(body, "overrideHash") {
+		t.Fatalf("无覆盖发现应透传基线且无 overrideHash: %s", body)
+	}
+	// 写覆盖 key a
+	req = httptest.NewRequest("POST", "/api/applications/app-1/dynamic-configs/lane-overrides?envId=&lane=feat-x",
+		strings.NewReader(`{"key":"a","value":"override"}`))
+	req = req.WithContext(ctx)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 201 {
+		t.Fatalf("覆盖 upsert: %d %s", rec.Code, rec.Body.String())
+	}
+	// 有覆盖发现：merge 生效 + overrideHash 出现
+	req = httptest.NewRequest("GET", "/api/applications/app-1/dynamic-configs/published?lane=feat-x", nil)
+	req = req.WithContext(ctx)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body = rec.Body.String()
+	if !strings.Contains(body, `"a":"override"`) || !strings.Contains(body, "overrideHash") {
+		t.Fatalf("覆盖发现应 merge+hash: %s", body)
+	}
+	// 无 lane 参数：不取覆盖（基线）
+	req = httptest.NewRequest("GET", "/api/applications/app-1/dynamic-configs/published", nil)
+	req = req.WithContext(ctx)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if strings.Contains(rec.Body.String(), `"a":"override"`) {
+		t.Fatalf("无 lane 应基线: %s", rec.Body.String())
+	}
+	// 覆盖列表
+	req = httptest.NewRequest("GET", "/api/applications/app-1/dynamic-configs/lane-overrides?lane=feat-x", nil)
+	req = req.WithContext(ctx)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), "override") {
+		t.Fatalf("覆盖列表: %s", rec.Body.String())
+	}
+}
+
+// TestDiscoveryBackwardCompat 不带 env/lane 的发现调用行为与升级前一致（env='' 基线）。
+func TestDiscoveryBackwardCompat(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewAppHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	req := httptest.NewRequest("POST", "/api/applications/app-1/dynamic-configs", strings.NewReader(`{"key":"k","value":"v","type":"text"}`))
+	req = req.WithContext(ctx)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	req = httptest.NewRequest("POST", "/api/applications/app-1/dynamic-configs/publish", nil)
+	req = req.WithContext(ctx)
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	// 不带任何 query：published 可见基线（env='' + lane 空路径）
+	req = httptest.NewRequest("GET", "/api/applications/app-1/dynamic-configs/published", nil)
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), `"published":true`) || !strings.Contains(rec.Body.String(), `"k":"v"`) {
+		t.Fatalf("向后兼容发现失败: %s", rec.Body.String())
+	}
+	// env 精确 ns 不存在 → 回退 env='' 基线（Task 1 发现回退语义：存量 ns 继续可发现）。
+	req = httptest.NewRequest("GET", "/api/applications/app-1/dynamic-configs/published?envId=env-x", nil)
+	req = req.WithContext(ctx)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), `"k":"v"`) {
+		t.Fatalf("无精确 env ns 应回退基线: %s", rec.Body.String())
+	}
+	// 全部无 ns 的应用：published:false
+	req = httptest.NewRequest("GET", "/api/applications/app-none/dynamic-configs/published", nil)
+	req = req.WithContext(ctx)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), `"published":false`) {
+		t.Fatalf("无 ns 应用发现应 false: %s", rec.Body.String())
 	}
 }

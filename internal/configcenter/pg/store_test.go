@@ -655,7 +655,10 @@ func TestEnsureByAppEnvCreatesPerEnv(t *testing.T) {
 		t.Fatal("不同 env 应各自独立 ns")
 	}
 	// 幂等
-	again, _ := s.EnsureByAppEnv(ctx, "app-env", "env-acme-test")
+	again, err := s.EnsureByAppEnv(ctx, "app-env", "env-acme-test")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if again.ID != testNS.ID {
 		t.Fatal("幂等失败")
 	}
@@ -665,13 +668,19 @@ func TestFindAppNamespaceEnvFallbackPG(t *testing.T) {
 	db := newTestDB(t)
 	s := NewStore(db)
 	ctx := tenant.WithTenant(context.Background(), "t-acme")
-	base, _ := s.EnsureByAppEnv(ctx, "app-fb", "")
+	base, err := s.EnsureByAppEnv(ctx, "app-fb", "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	// 精确未命中 → 回退 env='' 基线。
 	got, ok, err := s.FindAppNamespaceEnv(ctx, "app-fb", "env-x")
 	if err != nil || !ok || got.ID != base.ID {
 		t.Fatalf("应回退到 env='' ns: ok=%v err=%v got=%+v", ok, err, got)
 	}
-	envNS, _ := s.EnsureByAppEnv(ctx, "app-fb", "env-x")
+	envNS, err := s.EnsureByAppEnv(ctx, "app-fb", "env-x")
+	if err != nil {
+		t.Fatal(err)
+	}
 	got, ok, _ = s.FindAppNamespaceEnv(ctx, "app-fb", "env-x")
 	if !ok || got.ID != envNS.ID {
 		t.Fatalf("env 精确应优先: got %+v", got)
@@ -692,14 +701,19 @@ func TestLaneOverrideRoundTrip(t *testing.T) {
 		t.Fatalf("TenantID/UpdatedAt 应由 store 填充: %+v", o1)
 	}
 	// 同 key 覆盖。
-	o2, _ := s.UpsertLaneOverride(ctx, configcenter.LaneOverride{
+	o2, err := s.UpsertLaneOverride(ctx, configcenter.LaneOverride{
 		AppID: "app-l", EnvID: "env-t", LaneID: "feat-x", Key: "rate.limit", Value: "200",
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if o2.ID != o1.ID || o2.Value != "200" {
 		t.Fatalf("upsert 应覆盖原行: %+v vs %+v", o2, o1)
 	}
 	// list 过滤。
-	s.UpsertLaneOverride(ctx, configcenter.LaneOverride{AppID: "app-l", EnvID: "env-t", LaneID: "feat-y", Key: "k3", Value: "v"})
+	if _, err := s.UpsertLaneOverride(ctx, configcenter.LaneOverride{AppID: "app-l", EnvID: "env-t", LaneID: "feat-y", Key: "k3", Value: "v"}); err != nil {
+		t.Fatal(err)
+	}
 	list, _ := s.ListLaneOverrides(ctx, "app-l", "env-t", "feat-x")
 	if len(list) != 1 || list[0].Key != "rate.limit" {
 		t.Fatalf("(app-l,env-t,feat-x) 应 1 条 rate.limit: %+v", list)
