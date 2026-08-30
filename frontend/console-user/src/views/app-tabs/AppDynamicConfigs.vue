@@ -21,7 +21,8 @@ import {
   fetchAppDynamicConfigs, upsertAppDynamicConfig, deleteAppDynamicConfig,
   publishAppDynamicConfigs, fetchAppPublishes, fetchAppPublished, rollbackAppPublish,
   fetchLaneOverrides, upsertLaneOverride, deleteLaneOverride, promoteLaneOverrides,
-  type DynamicConfigItem, type ConfigPublish, type ConfigPublished, type LaneOverride,
+  fetchSharedRefs, addSharedRef, deleteSharedRef, fetchNamespaces,
+  type DynamicConfigItem, type ConfigPublish, type ConfigPublished, type LaneOverride, type SharedRef,
 } from '@/api/configcenter'
 
 const props = defineProps<{ appId: string }>()
@@ -107,19 +108,66 @@ const snapshotEntries = (snap?: Record<string, string>) => (snap ? Object.entrie
 async function load() {
   loading.value = true
   try {
-    const [its, pubs, pub] = await Promise.all([
+    const [its, pubs, pub, refs] = await Promise.all([
       fetchAppDynamicConfigs(props.appId, selEnv.value),
       fetchAppPublishes(props.appId, selEnv.value),
       fetchAppPublished(props.appId, { envId: selEnv.value }).catch(() => null),
+      fetchSharedRefs(props.appId, selEnv.value).catch(() => []),
     ])
     items.value = its ?? []
     publishes.value = pubs ?? []
     published.value = pub
+    sharedRefs.value = refs ?? []
     setActiveVer(selEnv.value, pub)
   } catch (e) {
     ElMessage.error(apiError(e, '加载动态配置失败'))
   } finally {
     loading.value = false
+  }
+}
+
+// ---- 共享配置引用子区（shared ns 作为发现 merge 基础层，应用自身 key 优先） ----
+const sharedRefs = ref<SharedRef[]>([])
+const showRefAdd = ref(false)
+const refForm = ref<{ sharedNsId: string }>({ sharedNsId: '' })
+const sharedOptions = ref<{ id: string; name: string }[]>([])
+
+async function openRefAdd() {
+  // 数据源：租户内 shared ns（排除已引用的）
+  const [all, refs] = await Promise.all([
+    fetchNamespaces().catch(() => []),
+    Promise.resolve(sharedRefs.value),
+  ])
+  const used = new Set(refs.map(r => r.sharedNsId))
+  sharedOptions.value = (all ?? []).filter(n => !used.has(n.id))
+  refForm.value = { sharedNsId: '' }
+  showRefAdd.value = true
+}
+
+async function submitRefAdd() {
+  if (!refForm.value.sharedNsId) {
+    ElMessage.warning('请选择共享配置')
+    return
+  }
+  try {
+    await addSharedRef(props.appId, refForm.value.sharedNsId, selEnv.value)
+    ElMessage.success('已引用，发现时共享值自动合并进快照')
+    showRefAdd.value = false
+    load()
+  } catch (e) {
+    ElMessage.error(apiError(e, '引用失败'))
+  }
+}
+
+async function removeRef(r: SharedRef) {
+  const ok = await confirmDangerous({ action: '解除引用', target: r.sharedName || r.sharedNsId, isProd: isProdEnv.value })
+  if (!ok) return
+  try {
+    await deleteSharedRef(props.appId, r.id, selEnv.value)
+    ElMessage.success('已解除引用')
+    load()
+  } catch (e) {
+    ElMessage.error(apiError(e, '解除失败'))
   }
 }
 
@@ -515,6 +563,40 @@ watch(selEnv, () => { load(); loadLanes() })
       </el-table>
     </section>
 
+    <!-- 共享配置引用（shared ns 作为发现 merge 基础层；应用自身 key 优先） -->
+    <section class="cfg-group">
+      <div class="group-title">
+        共享配置引用<span class="group-cnt mono">{{ sharedRefs.length }}</span>
+        <span class="lane-hint">共享值作为底层默认并入发现快照 · 应用自身配置优先于共享值</span>
+        <el-button size="small" style="margin-left: auto" @click="openRefAdd">+ 引用共享配置</el-button>
+      </div>
+      <el-table :data="sharedRefs" size="small" empty-text="未引用共享配置。引用后共享值自动并入本应用发现快照（应用同名 key 优先）。">
+        <el-table-column label="共享配置" min-width="180">
+          <template #default="{ row }">
+            <span class="mono">{{ row.sharedName || row.sharedNsId }}</span>
+            <el-tag v-if="!row.sharedName" type="danger" size="small" style="margin-left: 6px">已删除</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="生效版本" width="100">
+          <template #default="{ row }">
+            <span v-if="row.sharedVersion" class="mono">v{{ row.sharedVersion }}</span>
+            <span v-else class="none">未发布</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="配置项数" width="90">
+          <template #default="{ row }">{{ row.sharedKeys ?? 0 }}</template>
+        </el-table-column>
+        <el-table-column label="引用时间" width="180">
+          <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="90">
+          <template #default="{ row }">
+            <el-button text type="danger" size="small" @click="removeRef(row)">解除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </section>
+
     <!-- 泳道灰度验证（key 级覆盖，即时生效，随泳道回收消失；验证后可提升到基线） -->
     <section class="cfg-group" v-if="selEnv">
       <div class="group-title">
@@ -604,6 +686,24 @@ v-loading="laneLoading" :data="overrides" size="small"
         <el-button type="primary" :disabled="ovSubmitting" @click="submitOverride">
           {{ ovSubmitting ? '保存中…' : '保存并生效' }}
         </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="showRefAdd" title="引用共享配置" width="480px">
+      <div class="ov-hint">引用后共享配置的已发布值自动并入本应用发现快照（<b>应用自身同名 key 优先</b>，可覆盖共享默认值）。共享配置重新发布后自动热更新，不改变应用自身版本号。</div>
+      <el-form label-width="90px">
+        <el-form-item label="共享配置">
+          <el-select v-model="refForm.sharedNsId" placeholder="选择共享配置" style="width: 100%" filterable>
+            <el-option v-for="n in sharedOptions" :key="n.id" :value="n.id" :label="n.name" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <div v-if="!sharedOptions.length" class="none" style="padding: 8px 0 0">
+        暂无可引用的共享配置。可在「平台能力 → 配置中心 → 共享配置」创建。
+      </div>
+      <template #footer>
+        <el-button @click="showRefAdd = false">取消</el-button>
+        <el-button type="primary" :disabled="!refForm.sharedNsId" @click="submitRefAdd">引用</el-button>
       </template>
     </el-dialog>
 

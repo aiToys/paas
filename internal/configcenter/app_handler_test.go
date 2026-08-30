@@ -846,3 +846,156 @@ func TestLanePromote(t *testing.T) {
 		t.Fatalf("lane=default promote 应 400: %d", rec.Code)
 	}
 }
+
+// TestSharedRefDiscoveryMerge 共享配置引用端到端：建 shared ns + 发布 → 应用引用 →
+// 按应用名发现快照含 shared key；应用自身同 key 胜出（逃生门）；sharedHash 指纹存在；
+// 解除引用后 snapshot 不再含 shared key、sharedHash 省略。
+func TestSharedRefDiscoveryMerge(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewAppHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+
+	run := func(method, path, body string) *httptest.ResponseRecorder {
+		var rd io.Reader
+		if body != "" {
+			rd = strings.NewReader(body)
+		}
+		req := httptest.NewRequest(method, path, rd)
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// shared ns：skey=shared-val, overlap=shared-default；发布 v1
+	nsHandler := configcenter.NewHandler(repo)
+	nsHandler.Authorize = func(r *http.Request, perm string) bool { return true }
+	var sharedID string
+	{
+		req := httptest.NewRequest("POST", "/api/configcenter/namespaces", strings.NewReader(`{"name":"common-flags"}`))
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+		nsHandler.ServeHTTP(rec, req)
+		if rec.Code != 201 {
+			t.Fatalf("create shared ns: %d %s", rec.Code, rec.Body.String())
+		}
+		var created struct{ Data configcenter.Namespace }
+		_ = json.Unmarshal(rec.Body.Bytes(), &created)
+		sharedID = created.Data.ID
+	}
+	for _, kv := range []string{
+		`{"key":"skey","value":"shared-val"}`,
+		`{"key":"overlap","value":"shared-default"}`,
+	} {
+		req := httptest.NewRequest("POST", "/api/configcenter/namespaces/"+sharedID+"/items", strings.NewReader(kv))
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+		nsHandler.ServeHTTP(rec, req)
+		if rec.Code != 201 {
+			t.Fatalf("shared item: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+	{
+		req := httptest.NewRequest("POST", "/api/configcenter/namespaces/"+sharedID+"/publish", nil)
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+		nsHandler.ServeHTTP(rec, req)
+		if rec.Code != 201 {
+			t.Fatalf("shared publish: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+
+	// 应用侧：overlap=app-wins（与 shared 同 key 冲突）+ own-key；发布 v1
+	run("POST", "/api/applications/app-1/dynamic-configs", `{"key":"overlap","value":"app-wins"}`)
+	run("POST", "/api/applications/app-1/dynamic-configs", `{"key":"own-key","value":"v"}`)
+	run("POST", "/api/applications/app-1/dynamic-configs/publish", "")
+
+	// 未引用：快照无 shared key、无 sharedHash
+	{
+		rec := run("GET", "/api/applications/app-1/dynamic-configs/published", "")
+		var pub struct {
+			Published  bool              `json:"published"`
+			Snapshot   map[string]string `json:"snapshot"`
+			SharedHash string            `json:"sharedHash"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &pub)
+		if !pub.Published || pub.SharedHash != "" {
+			t.Fatalf("未引用不应有 sharedHash: %s", rec.Body.String())
+		}
+		if _, has := pub.Snapshot["skey"]; has {
+			t.Fatalf("未引用快照不应含 shared key: %v", pub.Snapshot)
+		}
+	}
+
+	// 建引用
+	{
+		rec := run("POST", "/api/applications/app-1/dynamic-configs/shared-refs", `{"sharedNsId":"`+sharedID+`"}`)
+		if rec.Code != 201 {
+			t.Fatalf("add ref: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+
+	// 引用后：三层 merge 生效
+	{
+		rec := run("GET", "/api/applications/app-1/dynamic-configs/published", "")
+		var pub struct {
+			Version    int               `json:"version"`
+			Snapshot   map[string]string `json:"snapshot"`
+			SharedHash string            `json:"sharedHash"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &pub); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if pub.Snapshot["skey"] != "shared-val" {
+			t.Fatalf("shared key 应并入: %v", pub.Snapshot)
+		}
+		if pub.Snapshot["overlap"] != "app-wins" {
+			t.Fatalf("应用自身 key 应胜出（逃生门）: %v", pub.Snapshot)
+		}
+		if pub.SharedHash == "" {
+			t.Fatalf("引用后应有 sharedHash: %s", rec.Body.String())
+		}
+	}
+
+	// 影响面反查
+	refs, err := repo.ListNSRefUsers(ctx, sharedID)
+	if err != nil || len(refs) != 1 {
+		t.Fatalf("ref users: %v %d", err, len(refs))
+	}
+
+	// 解除引用
+	{
+		list := run("GET", "/api/applications/app-1/dynamic-configs/shared-refs", "")
+		var refs struct{ Data []configcenter.NSRef }
+		_ = json.Unmarshal(list.Body.Bytes(), &refs)
+		if len(refs.Data) != 1 {
+			t.Fatalf("refs list: %s", list.Body.String())
+		}
+		rec := run("DELETE", "/api/applications/app-1/dynamic-configs/shared-refs/"+refs.Data[0].ID, "")
+		if rec.Code != 200 {
+			t.Fatalf("delete ref: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+	{
+		rec := run("GET", "/api/applications/app-1/dynamic-configs/published", "")
+		if strings.Contains(rec.Body.String(), "skey") || strings.Contains(rec.Body.String(), "sharedHash") {
+			t.Fatalf("解除后快照不应含 shared key/sharedHash: %s", rec.Body.String())
+		}
+	}
+
+	// 越权/非法：自引/非 shared 拒；不存在 404 语义；重复引用 409 语义
+	appNSID := mustNSID(t, repo, ctx, "app-1")
+	if _, err := repo.AddNSRef(ctx, appNSID, appNSID); !errors.Is(err, configcenter.ErrRefNotShared) {
+		t.Fatalf("自引应 ErrRefNotShared: %v", err)
+	}
+	if _, err := repo.AddNSRef(ctx, appNSID, "ns-nope"); !errors.Is(err, configcenter.ErrNamespaceNotFound) {
+		t.Fatalf("不存在应 NotFound: %v", err)
+	}
+	if _, err := repo.AddNSRef(ctx, appNSID, sharedID); err != nil {
+		t.Fatalf("re-add: %v", err)
+	}
+	if _, err := repo.AddNSRef(ctx, appNSID, sharedID); !errors.Is(err, configcenter.ErrRefExists) {
+		t.Fatalf("重复应 ErrRefExists: %v", err)
+	}
+}

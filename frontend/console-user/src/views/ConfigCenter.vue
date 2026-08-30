@@ -80,10 +80,30 @@ async function loadNamespaces() {
       // 共享视图只展示手工命名空间：scope=app 的应用派生 ns 归应用详情「动态配置」区块管理（写路径后端已 403 拒绝）。
       namespaces.value = ((await resp.json()).data ?? []).filter((n: Namespace) => n.scope !== 'app')
     else namespaces.value = []
+    loadRefCounts()
   } catch (e) {
     namespaces.value = []
     ElMessage.error('加载命名空间失败：' + (e as Error).message)
   }
+}
+
+// 影响面：各 shared ns 被多少应用引用（发布时的影响面提示；失败静默——非关键信息）。
+const refCounts = ref<Record<string, number>>({})
+async function loadRefCounts() {
+  for (const n of namespaces.value) {
+    fetchAuth(`/api/configcenter/namespaces/${n.id}/ref-users`)
+      .then(async r => { if (r.ok) refCounts.value[n.id] = ((await r.json()).data ?? []).length })
+      .catch(() => {})
+  }
+}
+
+// 引用方列表（详情展示 + 发布影响面确认）。
+interface RefUser { id: string; appNsId: string; appNsName?: string; createdAt: string }
+const refUsers = ref<RefUser[]>([])
+async function refUserList(nsId: string): Promise<RefUser[]> {
+  const resp = await fetchAuth(`/api/configcenter/namespaces/${nsId}/ref-users`)
+  if (!resp.ok) return []
+  return (await resp.json()).data ?? []
 }
 
 // 服务列表（关联服务下拉用，governance 租户内全部服务）。
@@ -108,6 +128,7 @@ async function loadDetail() {
     if (ir.ok) items.value = (await ir.json()).data ?? []
     if (pr.ok) publishes.value = (await pr.json()).data ?? []
     if (drr.ok) published.value = await drr.json()
+    refUsers.value = await refUserList(id).catch(() => [])
   } catch (e) {
     ElMessage.error('加载命名空间详情失败：' + (e as Error).message)
   } finally {
@@ -226,7 +247,9 @@ async function deleteItem(row: ConfigItem) {
 
 async function publish() {
   if (!cur.value) return
-  const ok = await confirmDangerous({ action: '发布', target: cur.value.name ?? '' })
+  const users = await refUserList(cur.value.id).catch(() => [])
+  const impact = users.length > 0 ? `该共享配置正被 ${users.length} 个应用引用，发布后引用方将自动热更新。` : ''
+  const ok = await confirmDangerous({ action: '发布', target: cur.value.name ?? '', message: impact })
   if (!ok) return
   try {
     const resp = await fetchAuth(`/api/configcenter/namespaces/${cur.value.id}/publish`, { method: 'POST' })
@@ -324,6 +347,12 @@ watch(() => route.params.nsId, load)
           </template>
         </el-table-column>
         <el-table-column prop="desc" label="描述" min-width="200" show-overflow-tooltip />
+        <el-table-column label="被引用" width="100">
+          <template #default="{ row }">
+            <el-tag v-if="refCounts[row.id]" size="small" type="info">{{ refCounts[row.id] }} 应用</el-tag>
+            <span v-else class="dim">-</span>
+          </template>
+        </el-table-column>
         <el-table-column label="更新时间" width="180">
           <template #default="{ row }">{{ new Date(row.updatedAt).toLocaleString() }}</template>
         </el-table-column>
@@ -405,6 +434,22 @@ watch(() => route.params.nsId, load)
 回滚到此
 </el-button>
               </template>
+            </el-table-column>
+          </el-table>
+        </section>
+
+        <!-- 引用方（影响面：哪些应用派生 ns 引用了此共享配置） -->
+        <section class="block">
+          <div class="block-head">
+            <span class="block-title">引用方</span>
+            <span class="dim">引用本共享配置的应用（发布后自动热更新）</span>
+          </div>
+          <el-table :data="refUsers" size="small" empty-text="暂无应用引用。可在应用详情「配置」tab 引用本共享配置。">
+            <el-table-column label="应用命名空间" min-width="200">
+              <template #default="{ row }"><span class="mono">{{ row.appNsName || row.appNsId }}</span></template>
+            </el-table-column>
+            <el-table-column label="引用时间" width="180">
+              <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
             </el-table-column>
           </el-table>
         </section>

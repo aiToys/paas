@@ -745,3 +745,105 @@ func (s *Store) ListLaneOverridesForClean(ctx context.Context, envID, laneID str
 	}
 	return out, rows.Err()
 }
+
+// ---- 共享配置引用（shared ns → 应用派生 ns）----
+
+const refCols = `id, tenant_id, app_ns_id, shared_ns_id, created_at`
+
+func scanNSRef(r storagepg.RowScanner, ref *configcenter.NSRef) error {
+	return r.Scan(&ref.ID, &ref.TenantID, &ref.AppNSID, &ref.SharedNSID, &ref.CreatedAt)
+}
+
+// AddNSRef 建引用：前置校验 shared ns 存在 + 本租户 + scope=shared + 非自引；
+// 唯一约束 (tenant, app_ns, shared_ns) 冲突 → ErrRefExists。
+func (s *Store) AddNSRef(ctx context.Context, appNSID, sharedNSID string) (configcenter.NSRef, error) {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return configcenter.NSRef{}, err
+	}
+	// 跨租户/不存在统一 NotFound 不泄漏（scope 校验在前，非 shared 的 NotFound 也不泄漏存在性细节）。
+	var scope string
+	err = s.db.Pool().QueryRow(ctx,
+		`SELECT scope FROM cc_namespaces WHERE id=$1 AND tenant_id=$2`, sharedNSID, tid).Scan(&scope)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return configcenter.NSRef{}, fmt.Errorf("%w: %s", configcenter.ErrNamespaceNotFound, sharedNSID)
+		}
+		return configcenter.NSRef{}, err
+	}
+	if scope != configcenter.ScopeShared || appNSID == sharedNSID {
+		return configcenter.NSRef{}, configcenter.ErrRefNotShared
+	}
+	ref := configcenter.NSRef{
+		ID: newCCID("ref"), TenantID: tid,
+		AppNSID: appNSID, SharedNSID: sharedNSID, CreatedAt: time.Now(),
+	}
+	row := s.db.Pool().QueryRow(ctx, `
+INSERT INTO cc_ns_refs (`+refCols+`)
+VALUES ($1,$2,$3,$4,$5)
+ON CONFLICT (tenant_id, app_ns_id, shared_ns_id) DO NOTHING
+RETURNING `+refCols,
+		ref.ID, ref.TenantID, ref.AppNSID, ref.SharedNSID, ref.CreatedAt)
+	var saved configcenter.NSRef
+	if err := scanNSRef(row, &saved); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return configcenter.NSRef{}, configcenter.ErrRefExists
+		}
+		return configcenter.NSRef{}, err
+	}
+	return saved, nil
+}
+
+// DeleteNSRef 解除引用；跨租户/不存在 RowsAffected==0 → ErrRefNotFound（不泄漏）。
+func (s *Store) DeleteNSRef(ctx context.Context, refID string) error {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	tag, err := s.db.Pool().Exec(ctx,
+		`DELETE FROM cc_ns_refs WHERE id=$1 AND tenant_id=$2`, refID, tid)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: %s", configcenter.ErrRefNotFound, refID)
+	}
+	return nil
+}
+
+// ListNSRefs 列 app ns 的引用（created_at 升序 = merge 铺垫顺序）。
+func (s *Store) ListNSRefs(ctx context.Context, appNSID string) ([]configcenter.NSRef, error) {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return s.queryNSRefs(ctx,
+		`SELECT `+refCols+` FROM cc_ns_refs WHERE tenant_id=$1 AND app_ns_id=$2 ORDER BY created_at`, tid, appNSID)
+}
+
+// ListNSRefUsers 反查 shared ns 的引用方（影响面展示）。
+func (s *Store) ListNSRefUsers(ctx context.Context, sharedNSID string) ([]configcenter.NSRef, error) {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return s.queryNSRefs(ctx,
+		`SELECT `+refCols+` FROM cc_ns_refs WHERE tenant_id=$1 AND shared_ns_id=$2 ORDER BY created_at`, tid, sharedNSID)
+}
+
+func (s *Store) queryNSRefs(ctx context.Context, q string, args ...any) ([]configcenter.NSRef, error) {
+	rows, err := s.db.Pool().Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]configcenter.NSRef, 0)
+	for rows.Next() {
+		var r configcenter.NSRef
+		if err = scanNSRef(rows, &r); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}

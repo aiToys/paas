@@ -19,10 +19,12 @@ type Store struct {
 	items      map[string]configcenter.ConfigItem
 	publishes  map[string]configcenter.Publish
 	overrides  map[string]configcenter.LaneOverride
+	refs       map[string]configcenter.NSRef
 	nsSeq      int
 	itemSeq    int
 	pubSeq     int
 	ovSeq      int
+	refSeq     int
 }
 
 // NewStore 创建仓储（空，不 seed mock 配置）。
@@ -33,6 +35,7 @@ func NewStore() *Store {
 		items:      map[string]configcenter.ConfigItem{},
 		publishes:  map[string]configcenter.Publish{},
 		overrides:  map[string]configcenter.LaneOverride{},
+		refs:       map[string]configcenter.NSRef{},
 	}
 }
 
@@ -525,5 +528,93 @@ func (s *Store) ListLaneOverridesForClean(ctx context.Context, envID, laneID str
 		out = append(out, o)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
+}
+
+// ---- 共享配置引用（shared ns → 应用派生 ns）----
+
+func (s *Store) AddNSRef(ctx context.Context, appNSID, sharedNSID string) (configcenter.NSRef, error) {
+	tid, err := tenant.IDOrErr(ctx)
+	if err != nil {
+		return configcenter.NSRef{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// 前置校验：shared ns 存在 + 本租户 + scope=shared（跨租户/不存在统一 NotFound 不泄漏）+ 非自引。
+	shared, ok := s.namespaces[sharedNSID]
+	if !ok || shared.TenantID != tid {
+		return configcenter.NSRef{}, configcenter.ErrNamespaceNotFound
+	}
+	if shared.Scope != configcenter.ScopeShared {
+		return configcenter.NSRef{}, configcenter.ErrRefNotShared
+	}
+	if appNSID == sharedNSID {
+		return configcenter.NSRef{}, configcenter.ErrRefNotShared
+	}
+	for _, ex := range s.refs {
+		if ex.TenantID == tid && ex.AppNSID == appNSID && ex.SharedNSID == sharedNSID {
+			return configcenter.NSRef{}, configcenter.ErrRefExists
+		}
+	}
+	s.refSeq++
+	ref := configcenter.NSRef{
+		ID:         fmt.Sprintf("ref-%d-%d", time.Now().UnixNano(), s.refSeq),
+		TenantID:   tid,
+		AppNSID:    appNSID,
+		SharedNSID: sharedNSID,
+		CreatedAt:  time.Now(),
+	}
+	s.refs[ref.ID] = ref
+	return ref, nil
+}
+
+func (s *Store) DeleteNSRef(ctx context.Context, refID string) error {
+	tid, err := tenant.IDOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ex, ok := s.refs[refID]
+	if !ok || ex.TenantID != tid {
+		return configcenter.ErrRefNotFound
+	}
+	delete(s.refs, refID)
+	return nil
+}
+
+// ListNSRefs 列 app ns 的引用（创建时间升序 = merge 铺垫顺序）。
+func (s *Store) ListNSRefs(ctx context.Context, appNSID string) ([]configcenter.NSRef, error) {
+	tid, err := tenant.IDOrErr(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]configcenter.NSRef, 0)
+	for _, r := range s.refs {
+		if r.TenantID == tid && r.AppNSID == appNSID {
+			out = append(out, r)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out, nil
+}
+
+// ListNSRefUsers 反查 shared ns 的引用方（影响面展示）。
+func (s *Store) ListNSRefUsers(ctx context.Context, sharedNSID string) ([]configcenter.NSRef, error) {
+	tid, err := tenant.IDOrErr(ctx)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]configcenter.NSRef, 0)
+	for _, r := range s.refs {
+		if r.TenantID == tid && r.SharedNSID == sharedNSID {
+			out = append(out, r)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	return out, nil
 }

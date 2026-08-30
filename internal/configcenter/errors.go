@@ -18,3 +18,13 @@ var (
 
 // ErrLaneOverrideNotFound 泳道配置覆盖不存在（删除不存在的 key 时返回）。
 var ErrLaneOverrideNotFound = errors.New("泳道配置覆盖不存在")
+
+// 共享配置引用（shared ns → 应用派生 ns）。
+var (
+	// ErrRefNotFound 引用不存在（解除不存在的引用时返回）。
+	ErrRefNotFound = errors.New("共享配置引用不存在")
+	// ErrRefExists 引用已存在（同 app ns 对同一 shared ns 重复引用，handler 映射 409）。
+	ErrRefExists = errors.New("已引用该共享配置")
+	// ErrRefNotShared 被引用 ns 非 shared scope（app 派生 ns 不可被引用，拒 400）。
+	ErrRefNotShared = errors.New("目标命名空间不是共享配置")
+)

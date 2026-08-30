@@ -78,6 +78,17 @@ func (o LaneOverride) Validate() error {
 	return nil
 }
 
+// NSRef 共享配置引用：应用派生 ns（引用方）→ shared ns（被引用方）。
+// 发现时 shared 快照作为三层 merge 的基础层（shared → app×env 基线 → lane 覆盖，
+// 右者胜——应用自身 key 压制 shared 默认值是逃生门）。
+type NSRef struct {
+	ID         string    `json:"id"`
+	TenantID   string    `json:"tenantId,omitempty"` // ctx 写入，请求体忽略
+	AppNSID    string    `json:"appNsId"`           // 应用派生 ns（引用方；各 env 独立引用）
+	SharedNSID string    `json:"sharedNsId"`        // shared ns（被引用方）
+	CreatedAt  time.Time `json:"createdAt"`
+}
+
 // AppNSName 派生 (app, env) 维度应用命名空间名：env 空 = app-<appID>（兼容存量），
 // 非空 = app-<appID>-<envID>。memory/pg 两实现共用（DRY 单一真源）。
 func AppNSName(appID, envID string) string {

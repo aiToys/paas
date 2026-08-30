@@ -130,6 +130,10 @@ func (h *AppHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveLanePromote(w, r, appID, r.URL.Query().Get("envId"), r.URL.Query().Get("lane"))
 	case sub[0] == "lane-overrides":
 		h.serveLaneOverrides(w, r, appID, r.URL.Query().Get("envId"), r.URL.Query().Get("lane"), parts[3:])
+	case len(sub) == 1 && sub[0] == "shared-refs":
+		h.serveSharedRefs(w, r, appID, r.URL.Query().Get("envId"))
+	case len(sub) == 2 && sub[0] == "shared-refs":
+		h.serveSharedRefDelete(w, r, appID, r.URL.Query().Get("envId"), sub[1])
 	default:
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
@@ -304,8 +308,8 @@ func (h *AppHandler) servePublishHistory(w http.ResponseWriter, r *http.Request,
 
 // servePublished GET 当前生效（只读不懒建，无 ns/无 active 返 {"published":false}）。
 // 发现解析：env 精确 → env='' 回退 → 无（store 层 FindAppNamespaceEnv）；lane 同规则取覆盖，
-// 服务端两层 merge（基线快照 + 泳道覆盖），有覆盖时附 overrideHash 指纹（无覆盖省略，向后兼容）。
-// 发现协议 shape：{published,version,snapshot,publishId[,overrideHash]}。
+// 服务端三层 merge（shared 引用 → 基线快照 → 泳道覆盖），有覆盖/引用时附 overrideHash/sharedHash
+// 指纹（无则省略，向后兼容）。发现协议 shape：{published,version,snapshot,publishId[,overrideHash][,sharedHash]}。
 func (h *AppHandler) servePublished(w http.ResponseWriter, r *http.Request, appID, envID, lane string) {
 	if r.Method != http.MethodGet {
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -332,26 +336,58 @@ func (h *AppHandler) servePublished(w http.ResponseWriter, r *http.Request, appI
 		httputil.WriteJSON(w, http.StatusOK, map[string]interface{}{"published": false})
 		return
 	}
-	snapshot := active.Snapshot
-	resp := map[string]interface{}{
-		"published": true,
-		"version":   active.Version,
-		"snapshot":  snapshot,
-		"publishId": active.ID,
+	// shared 引用层（引用挂在 ns 上，env 隔离天然生效；shared 未发布贡献空集）。
+	shared, err := h.sharedLayers(r.Context(), ns.ID)
+	if err != nil {
+		httputil.WriteInternalError(w, err)
+		return
 	}
-	// lane 非空才取覆盖（同回退规则），两层 merge + 指纹。
+	// lane 非空才取覆盖（同回退规则）。
+	var ovs []LaneOverride
 	if lane != "" {
-		ovs, err := h.listOverridesResolved(r.Context(), appID, envID, lane)
+		ovs, err = h.listOverridesResolved(r.Context(), appID, envID, lane)
 		if err != nil {
 			httputil.WriteInternalError(w, err)
 			return
 		}
-		if len(ovs) > 0 {
-			resp["snapshot"] = MergeSnapshot(snapshot, ovs)
-			resp["overrideHash"] = OverrideHash(ovs)
-		}
+	}
+	snapshot := MergeSnapshot3(shared, active.Snapshot, ovs)
+	resp := map[string]interface{}{
+		"published": true,
+		"version":   active.Version, // 应用自身版本（shared 变更不污染，指纹独立）
+		"snapshot":  snapshot,
+		"publishId": active.ID,
+	}
+	if len(ovs) > 0 {
+		resp["overrideHash"] = OverrideHash(ovs)
+	}
+	if len(shared) > 0 {
+		resp["sharedHash"] = SharedHash(shared)
 	}
 	httputil.WriteJSON(w, http.StatusOK, resp)
+}
+
+// sharedLayers 解析 ns 的 shared 引用层（引用顺序 = merge 铺垫顺序）。
+// shared ns 已删（引用悬挂）静默跳过——引用是弱关联，删 shared 不应打断应用发现。
+func (h *AppHandler) sharedLayers(ctx context.Context, appNSID string) ([]SharedLayer, error) {
+	refs, err := h.repo.ListNSRefs(ctx, appNSID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]SharedLayer, 0, len(refs))
+	for _, ref := range refs {
+		shared, err := h.repo.GetNamespace(ctx, ref.SharedNSID)
+		if err != nil {
+			continue // 已删/跨租户（GetNamespace 租户过滤）悬挂引用跳过
+		}
+		layer := SharedLayer{NSID: shared.ID}
+		if pub, ok, err := h.repo.ActivePublish(ctx, shared.ID); err == nil && ok {
+			layer.Version = pub.Version
+			layer.Snapshot = pub.Snapshot
+		}
+		out = append(out, layer)
+	}
+	return out, nil
 }
 
 // listOverridesResolved 泳道覆盖解析：env 精确 → env='' 回退（与 ns 发现同规则）。
@@ -511,6 +547,129 @@ func (h *AppHandler) serveLaneOverrides(w http.ResponseWriter, r *http.Request, 
 		httputil.WriteData(w, map[string]string{"deleted": rest[0]})
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// serveSharedRefs 共享配置引用两操作（挂 dynamic-configs/shared-refs）：
+//
+//	GET    /dynamic-configs/shared-refs?envId=  列引用（富化：shared ns 名/active 版本/key 数）
+//	POST   /dynamic-configs/shared-refs?envId=  body {sharedNsId} 建引用
+//
+// 引用挂在 (app, env) 派生 ns 上（各 env 独立引用，隔离天然生效）。
+// 写需 application:write + 生产闸门 + AppGuard write；记审计 configcenter_ns_ref_*。
+func (h *AppHandler) serveSharedRefs(w http.ResponseWriter, r *http.Request, appID, envID string) {
+	switch r.Method {
+	case http.MethodGet:
+		if !h.allow(w, r, "application:read") {
+			return
+		}
+		ns, ok := h.findAppNS(w, r, appID, envID)
+		if !ok {
+			httputil.WriteData(w, []sharedRefView{})
+			return
+		}
+		refs, err := h.repo.ListNSRefs(r.Context(), ns.ID)
+		if err != nil {
+			httputil.WriteInternalError(w, err)
+			return
+		}
+		out := make([]sharedRefView, 0, len(refs))
+		for _, ref := range refs {
+			v := sharedRefView{NSRef: ref}
+			if shared, err := h.repo.GetNamespace(r.Context(), ref.SharedNSID); err == nil {
+				v.SharedName = shared.Name
+				if pub, ok, err := h.repo.ActivePublish(r.Context(), shared.ID); err == nil && ok {
+					v.SharedVersion = pub.Version
+					v.SharedKeys = len(pub.Snapshot)
+				}
+			}
+			out = append(out, v)
+		}
+		httputil.WriteData(w, out)
+	case http.MethodPost:
+		if !h.allowWrite(w, r, appID, envID) {
+			return
+		}
+		ns, err := h.ensureAppNS(w, r, appID, envID)
+		if err != nil {
+			return
+		}
+		var body struct{ SharedNSID string `json:"sharedNsId"` }
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.SharedNSID == "" {
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body: sharedNsId 必填")
+			return
+		}
+		ref, err := h.repo.AddNSRef(r.Context(), ns.ID, body.SharedNSID)
+		if err != nil {
+			h.writeRefErr(w, err)
+			return
+		}
+		h.recordAudit(r.Context(), ns.TenantID, "configcenter_ns_ref_add", appID, "ref="+ref.ID+",sharedNs="+body.SharedNSID+",envId="+envID)
+		httputil.WriteDataCreated(w, ref)
+	default:
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// serveSharedRefDelete DELETE /dynamic-configs/shared-refs/{refId}?envId= 解除引用。
+func (h *AppHandler) serveSharedRefDelete(w http.ResponseWriter, r *http.Request, appID, envID, refID string) {
+	if r.Method != http.MethodDelete {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.allowWrite(w, r, appID, envID) {
+		return
+	}
+	ns, ok := h.findAppNS(w, r, appID, envID)
+	if !ok {
+		return
+	}
+	// 归属校验：ref 必须挂在本应用派生 ns 上（防跨应用解除他人引用）。
+	refs, err := h.repo.ListNSRefs(r.Context(), ns.ID)
+	if err != nil {
+		httputil.WriteInternalError(w, err)
+		return
+	}
+	belongs := false
+	for _, ref := range refs {
+		if ref.ID == refID {
+			belongs = true
+			break
+		}
+	}
+	if !belongs {
+		httputil.WriteError(w, http.StatusNotFound, "引用不存在: "+refID)
+		return
+	}
+	if err := h.repo.DeleteNSRef(r.Context(), refID); err != nil {
+		h.writeRefErr(w, err)
+		return
+	}
+	h.recordAudit(r.Context(), ns.TenantID, "configcenter_ns_ref_remove", appID, "ref="+refID+",envId="+envID)
+	httputil.WriteData(w, map[string]string{"deleted": refID})
+}
+
+// sharedRefView 引用富化视图（列表展示：shared ns 名 + active 版本 + key 数）。
+type sharedRefView struct {
+	NSRef
+	SharedName    string `json:"sharedName,omitempty"`    // shared ns 已删（悬挂）省略
+	SharedVersion int    `json:"sharedVersion,omitempty"` // 0=未发布
+	SharedKeys    int    `json:"sharedKeys"`
+}
+
+// writeRefErr 引用错误统一映射（sentinel → HTTP）。
+func (h *AppHandler) writeRefErr(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrNamespaceNotFound):
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, ErrRefExists):
+		httputil.WriteError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, ErrRefNotShared):
+		httputil.WriteError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, ErrRefNotFound):
+		httputil.WriteError(w, http.StatusNotFound, err.Error())
+	default:
+		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 	}
 }
 

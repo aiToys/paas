@@ -60,3 +60,43 @@ func TestLaneOverrideValidate(t *testing.T) {
 		t.Fatal("合法覆盖不应报错")
 	}
 }
+
+// TestMergeSnapshot3 三层 merge 优先级：shared（引用顺序后者覆盖前者）→ 基线 → lane，右者胜。
+func TestMergeSnapshot3(t *testing.T) {
+	shared := []SharedLayer{
+		{NSID: "ns-s1", Snapshot: map[string]string{"a": "s1", "b": "s1", "c": "s1"}},
+		{NSID: "ns-s2", Snapshot: map[string]string{"b": "s2", "d": "s2"}},
+	}
+	base := map[string]string{"a": "base", "e": "base"}
+	ovs := []LaneOverride{{Key: "a", Value: "lane"}}
+	got := MergeSnapshot3(shared, base, ovs)
+	want := map[string]string{"a": "lane", "b": "s2", "c": "s1", "d": "s2", "e": "base"}
+	if len(got) != len(want) {
+		t.Fatalf("应 %d 项，实得 %v", len(want), got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("key=%s want %s got %s", k, v, got[k])
+		}
+	}
+	// 输入不被修改（拷贝隔离）
+	if base["a"] != "base" || shared[0].Snapshot["a"] != "s1" {
+		t.Fatal("merge 污染了输入层")
+	}
+}
+
+// TestSharedHash 指纹：无引用空串；version 变化 hash 变；顺序无关。
+func TestSharedHash(t *testing.T) {
+	if SharedHash(nil) != "" {
+		t.Fatal("无引用应空串")
+	}
+	l1 := []SharedLayer{{NSID: "a", Version: 1}, {NSID: "b", Version: 3}}
+	l2 := []SharedLayer{{NSID: "b", Version: 3}, {NSID: "a", Version: 1}} // 顺序无关
+	if SharedHash(l1) != SharedHash(l2) {
+		t.Fatal("顺序无关")
+	}
+	l1[0].Version = 2 // shared 重发布
+	if SharedHash(l1) == SharedHash(l2) {
+		t.Fatal("version 变化应改变 hash")
+	}
+}

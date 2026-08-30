@@ -75,3 +75,30 @@ export const deleteLaneOverride = (appId: string, envId: string, lane: string, k
 export const promoteLaneOverrides = (appId: string, envId: string, lane: string) =>
   fetchAuth(`/api/applications/${appId}/dynamic-configs/lane-overrides/promote?envId=${encodeURIComponent(envId)}&lane=${encodeURIComponent(lane)}`, { method: 'POST' })
     .then(r => unwrap<ConfigPublish>(r))
+
+// ---------- 共享配置引用（shared ns → 应用派生 ns，发现时作为三层 merge 基础层） ----------
+
+// 共享配置引用（富化视图：含 shared ns 名/active 版本/key 数）
+export interface SharedRef {
+  id: string; appNsId: string; sharedNsId: string; createdAt: string
+  sharedName?: string; sharedVersion?: number; sharedKeys?: number
+}
+// 影响面反查（shared 管理侧：被哪些应用引用）
+export interface RefUser {
+  id: string; appNsId: string; sharedNsId: string; createdAt: string
+  appNsName?: string
+}
+export const fetchSharedRefs = (appId: string, envId?: string) =>
+  fetchAuth(`/api/applications/${appId}/dynamic-configs/shared-refs${qs(envId)}`).then(r => unwrap<SharedRef[]>(r))
+export const addSharedRef = (appId: string, sharedNsId: string, envId?: string) =>
+  fetchAuth(`/api/applications/${appId}/dynamic-configs/shared-refs${qs(envId)}`, { method: 'POST', body: JSON.stringify({ sharedNsId }) }).then(r => unwrap<SharedRef>(r))
+export const deleteSharedRef = (appId: string, refId: string, envId?: string) =>
+  fetchAuth(`/api/applications/${appId}/dynamic-configs/shared-refs/${refId}${qs(envId)}`, { method: 'DELETE' }).then(r => unwrap<unknown>(r))
+export const fetchRefUsers = (nsId: string) =>
+  fetchAuth(`/api/configcenter/namespaces/${nsId}/ref-users`).then(r => unwrap<RefUser[]>(r))
+
+// 租户内 shared ns 列表（引用选择器数据源；app 派生 ns 归应用详情管理，不在此返回）
+export interface ConfigNamespace { id: string; name: string; scope: string }
+export const fetchNamespaces = () =>
+  fetchAuth('/api/configcenter/namespaces')
+    .then(async r => { const list = await unwrap<ConfigNamespace[]>(r); return (list ?? []).filter(n => n.scope !== 'app') })

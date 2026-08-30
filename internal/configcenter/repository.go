@@ -10,6 +10,22 @@ type Repository interface {
 	ItemStore
 	PublishStore
 	LaneOverrideStore
+	NSRefStore
+}
+
+// NSRefStore 共享配置引用仓储（shared ns → 应用派生 ns）。
+type NSRefStore interface {
+	// AddNSRef 建引用；前置校验 shared ns 存在 + scope=shared + 本租户 + 非自引，
+	// 违反返回 ErrNamespaceNotFound/ErrRefNotShared；已引用返回 ErrRefExists。
+	AddNSRef(ctx context.Context, appNSID, sharedNSID string) (NSRef, error)
+	// DeleteNSRef 解除引用；不存在返回 ErrRefNotFound。
+	DeleteNSRef(ctx context.Context, refID string) error
+	// ListNSRefs 列出 app ns 的引用（按创建时间升序——merge 铺垫顺序，
+	// 多 shared 引用时后者覆盖前者，与 UI 展示顺序一致可预期）。
+	ListNSRefs(ctx context.Context, appNSID string) ([]NSRef, error)
+	// ListNSRefUsers 反查 shared ns 的引用方（影响面展示：shared 发布时
+	// 告知发布者会被哪些应用消费）。返回引用列表（含 app_ns_id 供前端解析归属）。
+	ListNSRefUsers(ctx context.Context, sharedNSID string) ([]NSRef, error)
 }
 
 // NamespaceStore 命名空间仓储。

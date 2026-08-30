@@ -1,0 +1,1 @@
+DROP TABLE IF EXISTS cc_ns_refs;

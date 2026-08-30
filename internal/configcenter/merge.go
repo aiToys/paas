@@ -3,6 +3,7 @@ package configcenter
 import (
 	"fmt"
 	"sort"
+	"strconv"
 )
 
 // fmtHexHash uint32 → 8 位十六进制串。
@@ -46,6 +47,63 @@ func OverrideHash(overrides []LaneOverride) string {
 		buf = append(buf, k...)
 		buf = append(buf, '=')
 		buf = append(buf, byKey[k]...)
+	}
+	const (
+		offset32 = 2166136261
+		prime32  = 16777619
+	)
+	h := uint32(offset32)
+	for _, b := range buf {
+		h ^= uint32(b)
+		h *= prime32
+	}
+	return fmtHexHash(h)
+}
+
+// SharedLayer 发现 merge 的 shared 引用层（快照 + 来源标识，供指纹计算）。
+type SharedLayer struct {
+	NSID     string
+	Version  int    // shared ns 当前 active 版本（未发布 0，层贡献空集）
+	Snapshot map[string]string
+}
+
+// MergeSnapshot3 三层 merge：shared 引用（按引用顺序铺垫，后者覆盖前者）→
+// app×env 基线 → lane 覆盖，右者胜。应用自身 key 压制 shared（逃生门），
+// lane 覆盖最强（灰度验证语义）。各层均不被修改（拷贝隔离）。
+func MergeSnapshot3(shared []SharedLayer, base map[string]string, overrides []LaneOverride) map[string]string {
+	out := make(map[string]string, len(base)+len(overrides)+8)
+	for _, l := range shared {
+		for k, v := range l.Snapshot {
+			out[k] = v
+		}
+	}
+	for k, v := range base {
+		out[k] = v
+	}
+	for _, o := range overrides {
+		out[o.Key] = o.Value
+	}
+	return out
+}
+
+// SharedHash shared 引用层指纹：FNV-1a(排序后 "nsID:version" 串)。
+// 无引用返回空串（发现响应省略 sharedHash 字段，向后兼容）；shared 重新发布 →
+// version 变 → hash 变（客户端据此热替换），但应用自身 version 不受污染。
+func SharedHash(shared []SharedLayer) string {
+	if len(shared) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(shared))
+	for _, l := range shared {
+		parts = append(parts, l.NSID+":"+strconv.Itoa(l.Version))
+	}
+	sort.Strings(parts)
+	var buf []byte
+	for i, p := range parts {
+		if i > 0 {
+			buf = append(buf, ';')
+		}
+		buf = append(buf, p...)
 	}
 	const (
 		offset32 = 2166136261

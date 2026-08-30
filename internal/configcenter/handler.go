@@ -250,6 +250,8 @@ func (h *Handler) serveNamespaceItem(w http.ResponseWriter, r *http.Request) {
 			h.servePublishHistory(w, r, nsID)
 		case "published":
 			h.servePublished(w, r, nsID)
+		case "ref-users":
+			h.serveRefUsers(w, r, nsID)
 		default:
 			httputil.WriteError(w, http.StatusNotFound, "not found")
 		}
@@ -534,4 +536,34 @@ func (h *Handler) servePublishAction(w http.ResponseWriter, r *http.Request) {
 	}
 	h.recordAudit(r, "", "configcenter_rollback", nsID, fmt.Sprintf("version=%d,publishId=%s", rb.Version, rb.ID))
 	httputil.WriteData(w, rb)
+}
+
+// serveRefUsers GET /namespaces/{id}/ref-users 影响面反查：该 shared ns 被哪些
+// 应用派生 ns 引用（发布时展示影响面）。富化 app ns 名（前端解析应用/env 归属）。
+func (h *Handler) serveRefUsers(w http.ResponseWriter, r *http.Request, nsID string) {
+	if r.Method != http.MethodGet {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.allow(w, r, PermConfigCenterRead) {
+		return
+	}
+	refs, err := h.repo.ListNSRefUsers(r.Context(), nsID)
+	if err != nil {
+		httputil.WriteInternalError(w, err)
+		return
+	}
+	type refUserView struct {
+		NSRef
+		AppNSName string `json:"appNsName,omitempty"` // 引用方派生 ns 名（app-<id>[-<env>]）
+	}
+	out := make([]refUserView, 0, len(refs))
+	for _, ref := range refs {
+		v := refUserView{NSRef: ref}
+		if ns, err := h.repo.GetNamespace(r.Context(), ref.AppNSID); err == nil {
+			v.AppNSName = ns.Name
+		}
+		out = append(out, v)
+	}
+	httputil.WriteData(w, out)
 }
