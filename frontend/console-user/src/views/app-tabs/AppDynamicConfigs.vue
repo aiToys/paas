@@ -2,10 +2,10 @@
 // 应用详情 - 动态配置（热更新）区块：应用维度动态配置（scope=app）。
 // 与上方 AppConfigs（工作负载级静态 env/Secret，重启注入）正交：本区块是
 // 版本化动态配置——draft 编辑 → 发布出不可变快照 → 客户端按版本发现 → 可回滚。
-// 发布/回滚高危走 confirmDangerous（生产 scope 输入应用名确认）。
+// 发布/回滚走普通确认（配置中心独立于物理环境，与 ConfigCenter.vue 语义对齐，
+// 不随顶栏 env scope 漂移确认强度）。
 import { onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import {
   fetchAppDynamicConfigs, upsertAppDynamicConfig, deleteAppDynamicConfig,
@@ -14,13 +14,14 @@ import {
 } from '@/api/configcenter'
 
 const props = defineProps<{ appId: string }>()
-const envStore = useEnvStore()
 
 const items = ref<DynamicConfigItem[]>([])
 const publishes = ref<ConfigPublish[]>([])
 const published = ref<ConfigPublished | null>(null)
 const loading = ref(false)
 const publishing = ref(false)
+const removing = ref('')
+const rollingBack = ref('')
 
 const showEdit = ref(false)
 const submitting = ref(false)
@@ -32,7 +33,6 @@ const types = [
   { value: 'yaml', label: 'YAML' },
 ]
 
-const isProd = () => envStore.isProd
 const snapshotEntries = (snap?: Record<string, string>) => (snap ? Object.entries(snap) : [])
 
 async function load() {
@@ -89,15 +89,18 @@ async function remove(row: DynamicConfigItem) {
   const ok = await confirmDangerous({
     action: '删除动态配置项',
     target: row.key,
-    requireNameConfirm: isProd(),
+    requireNameConfirm: false,
   })
   if (!ok) return
+  removing.value = row.id
   try {
     await deleteAppDynamicConfig(props.appId, row.id)
     ElMessage.success('已删除（draft，发布后生效）')
     load()
   } catch (e) {
     ElMessage.error((e as Error).message || '删除失败')
+  } finally {
+    removing.value = ''
   }
 }
 
@@ -105,7 +108,7 @@ async function publish() {
   const ok = await confirmDangerous({
     action: '发布动态配置',
     target: props.appId,
-    requireNameConfirm: isProd(),
+    requireNameConfirm: false,
   })
   if (!ok) return
   publishing.value = true
@@ -121,14 +124,17 @@ async function publish() {
 }
 
 async function rollback(p: ConfigPublish) {
-  const ok = await confirmDangerous({ action: '回滚到', target: `v${p.version}`, requireNameConfirm: isProd() })
+  const ok = await confirmDangerous({ action: '回滚到', target: `v${p.version}`, requireNameConfirm: false })
   if (!ok) return
+  rollingBack.value = p.id
   try {
     await rollbackAppPublish(props.appId, p.id)
     ElMessage.success(`已回滚到 v${p.version}`)
     load()
   } catch (e) {
     ElMessage.error((e as Error).message || '回滚失败')
+  } finally {
+    rollingBack.value = ''
   }
 }
 
@@ -182,7 +188,7 @@ watch(() => props.appId, load)
         <el-table-column label="操作" width="120">
           <template #default="{ row }">
             <el-button text type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-            <el-button text type="danger" size="small" @click="remove(row)">删除</el-button>
+            <el-button text type="danger" size="small" :loading="removing === row.id" @click="remove(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -208,7 +214,7 @@ watch(() => props.appId, load)
         </el-table-column>
         <el-table-column label="操作" width="100">
           <template #default="{ row }">
-            <el-button v-if="row.status !== 'active'" text type="warning" size="small" @click="rollback(row)">回滚到此</el-button>
+            <el-button v-if="row.status !== 'active'" text type="warning" size="small" :loading="rollingBack === row.id" @click="rollback(row)">回滚到此</el-button>
           </template>
         </el-table-column>
       </el-table>

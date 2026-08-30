@@ -34,8 +34,9 @@ const selectedAppId = ref('')
 async function loadApps() {
   try {
     apps.value = await fetchJSON<{ id: string; name: string }[]>('/api/applications')
-  } catch {
+  } catch (e) {
     apps.value = []
+    ElMessage.error('加载应用列表失败：' + (e as Error).message)
   }
 }
 const items = ref<ConfigItem[]>([])
@@ -50,6 +51,7 @@ const itemSubmitting = ref(false)
 const showNs = ref(false)
 const nsForm = ref({ name: '', serviceId: '', desc: '' })
 const nsSubmitting = ref(false)
+const rollingBack = ref('')
 
 const types = [
   { value: 'text', label: 'Text' },
@@ -61,11 +63,27 @@ function isDetail() {
   return !!route.params.nsId
 }
 
+// viewMode 切换同步路由 query：按应用视图清掉 ?serviceId= 残留（防刷新跳回共享视图），
+// 共享视图保留已有 serviceId（服务详情跳转入口语义）。
+function onModeChange(mode: 'app' | 'shared') {
+  if (mode === 'app') {
+    if (route.query.serviceId) router.replace({ query: { ...route.query, serviceId: undefined } })
+  } else if (route.query.serviceId) {
+    // 保持 serviceId（无需动作）
+  }
+}
+
 async function loadNamespaces() {
-  const resp = await fetchAuth('/api/configcenter/namespaces')
-  if (resp.ok)
-    // 共享视图只展示手工命名空间：scope=app 的应用派生 ns 归应用详情「动态配置」区块管理（写路径后端已 403 拒绝）。
-    namespaces.value = ((await resp.json()).data ?? []).filter((n: Namespace) => n.scope !== 'app')
+  try {
+    const resp = await fetchAuth('/api/configcenter/namespaces')
+    if (resp.ok)
+      // 共享视图只展示手工命名空间：scope=app 的应用派生 ns 归应用详情「动态配置」区块管理（写路径后端已 403 拒绝）。
+      namespaces.value = ((await resp.json()).data ?? []).filter((n: Namespace) => n.scope !== 'app')
+    else namespaces.value = []
+  } catch (e) {
+    namespaces.value = []
+    ElMessage.error('加载命名空间失败：' + (e as Error).message)
+  }
 }
 
 // 服务列表（关联服务下拉用，governance 租户内全部服务）。
@@ -86,7 +104,7 @@ async function loadDetail() {
       fetchAuth(`/api/configcenter/namespaces/${id}/publishes`),
       fetchAuth(`/api/configcenter/namespaces/${id}/published`),
     ])
-    if (nr.ok) cur.value = await nr.json()
+    if (nr.ok) cur.value = (await nr.json()).data ?? null
     if (ir.ok) items.value = (await ir.json()).data ?? []
     if (pr.ok) publishes.value = (await pr.json()).data ?? []
     if (drr.ok) published.value = await drr.json()
@@ -148,9 +166,10 @@ async function saveItem() {
     ElMessage.warning('请填写 Key 和 Value')
     return
   }
+  if (!cur.value) return
   itemSubmitting.value = true
   try {
-    const resp = await fetchAuth(`/api/configcenter/namespaces/${cur.value!.id}/items`, {
+    const resp = await fetchAuth(`/api/configcenter/namespaces/${cur.value.id}/items`, {
       method: 'POST',
       body: JSON.stringify({ key: itemForm.value.key, value: itemForm.value.value, type: itemForm.value.type }),
     })
@@ -188,10 +207,11 @@ async function deleteNamespace(row: Namespace) {
 }
 
 async function deleteItem(row: ConfigItem) {
+  if (!cur.value) return
   const ok = await confirmDangerous({ action: '删除配置项', target: row.key })
   if (!ok) return
   try {
-    const resp = await fetchAuth(`/api/configcenter/namespaces/${cur.value!.id}/items/${row.id}`, { method: 'DELETE' })
+    const resp = await fetchAuth(`/api/configcenter/namespaces/${cur.value.id}/items/${row.id}`, { method: 'DELETE' })
     if (resp.ok) {
       ElMessage.success('已删除')
       loadDetail()
@@ -205,10 +225,11 @@ async function deleteItem(row: ConfigItem) {
 }
 
 async function publish() {
-  const ok = await confirmDangerous({ action: '发布', target: cur.value?.name ?? '' })
+  if (!cur.value) return
+  const ok = await confirmDangerous({ action: '发布', target: cur.value.name ?? '' })
   if (!ok) return
   try {
-    const resp = await fetchAuth(`/api/configcenter/namespaces/${cur.value!.id}/publish`, { method: 'POST' })
+    const resp = await fetchAuth(`/api/configcenter/namespaces/${cur.value.id}/publish`, { method: 'POST' })
     if (resp.ok) {
       ElMessage.success('已发布新版本')
       loadDetail()
@@ -224,6 +245,7 @@ async function publish() {
 async function rollback(p: Publish) {
   const ok = await confirmDangerous({ action: '回滚到', target: `v${p.version}` })
   if (!ok) return
+  rollingBack.value = p.id
   try {
     const resp = await fetchAuth(`/api/configcenter/publishes/${p.id}/rollback`, { method: 'POST' })
     if (resp.ok) {
@@ -235,6 +257,8 @@ async function rollback(p: Publish) {
     }
   } catch (e) {
     ElMessage.error('回滚失败：' + (e as Error).message)
+  } finally {
+    rollingBack.value = ''
   }
 }
 
@@ -258,7 +282,7 @@ watch(() => route.params.nsId, load)
           <p class="sub">运行时动态配置 · 版本/发布/回滚 · 跨实例共享（区别于应用配置的静态注入）</p>
         </div>
         <div style="display: flex; align-items: center; gap: 12px">
-          <el-radio-group v-model="viewMode" size="small">
+          <el-radio-group v-model="viewMode" size="small" @change="(m: any) => onModeChange(m)">
             <el-radio-button value="app">按应用</el-radio-button>
             <el-radio-button value="shared">共享配置</el-radio-button>
           </el-radio-group>
@@ -389,6 +413,7 @@ watch(() => route.params.nsId, load)
                 <el-button
                   v-if="row.status !== 'active'"
                   text type="warning" size="small"
+                  :loading="rollingBack === row.id"
                   @click="rollback(row)"
                 >回滚到此</el-button>
               </template>

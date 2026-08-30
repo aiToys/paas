@@ -687,7 +687,8 @@ internal/governance/  领域(Service http|grpc + Instance healthy|unhealthy + La
 - **按应用名发现**（数据面主入口）：`GET /api/configcenter/apps/{appName}/published`（`AppLookup` 依赖倒置桥接 application.List 按名匹配，租户过滤）；响应裸 JSON `{published,version,snapshot}`（不含 publishId）；未知应用/无 ns/无 active 三路统一 `{"published":false}` 不泄漏。
 - **前端**：应用详情「配置」tab 加「动态配置」子区（`app-tabs/AppDynamicConfigs.vue`：draft KV + 发布/回滚 useDangerConfirm + 当前生效 + 版本历史）；ConfigCenter 页双视图（默认「按应用」/「共享配置」保留 ns CRUD，`?serviceId=` 兼容）。
 - **dogfooding**：paas-shop chatbot 接入（examples `chatbot/dynconfig.go`）——启动拉取 + 60s 轮询按名发现，version 比对原子替换（RWMutex），消费 `welcome_message`/`recommend_topk`，失败静默降级默认值不 panic。e2e 已验证：upsert→publish→按名发现→跨租户不泄漏→chatbot 热更新。
-- 留后续：EnsureByApp 不校验 app 存在性（孤儿 ns，仿 ServiceLookup 可补）、回滚审计、AppIDByName O(N) 优化、shared 应用侧引用（Nacos common.yml 模式）、长连接 watch、灰度下发。
+- 留后续：EnsureByApp 不校验 app 存在性（孤儿 ns，仿 ServiceLookup 可补）、AppIDByName O(N) 优化、shared 应用侧引用（Nacos common.yml 模式）、长连接 watch、灰度下发、key/value 长度上限、json 类型不校验、发布历史上限、前端快照 KV 组件抽取。
+- **10 轮深度审计修复（2026-08-30）**：修 PG 并发双 active（migration 0037 partial unique index `uq_cc_publishes_ns_active` + 存量脏数据保留最大 version 清理 + RollbackPublish 读 target 加 `FOR UPDATE`）；审计全覆盖（ns 维度 Handler 注入 `AuditFunc`，6 写操作 `configcenter_*` 审计 + app 维度补 item upsert/delete）；死端点收口（删 `GET /api/configcenter/publishes` 注册+登记，补 ns 级 publishes / items delete 两条漏登 Operation）；领域 sentinel 化（`ErrNamespaceNameTaken` 等，409 判定删 strings.Contains 中文匹配）；rollback/itemDelete 不懒建（FindAppNamespace 不存在 404）；精简（memory Seed 三死函数 + pg Count 三方法 + 锁外预检删除 + `itemBelongsToNS`/`writePublishedJSON` helper 收敛）；前端修 `cur` 未解包 `{data:T}`（详情页写操作全挂）、加载失败不再静默、radio 切换清 `?serviceId=` 残留、确认强度统一不随顶栏 env 漂移。
 
 ```
 internal/configcenter/  领域(Namespace + ConfigItem draft + Publish 不可变快照) + Repository(三仓储带前缀方法) + 内存 seed
