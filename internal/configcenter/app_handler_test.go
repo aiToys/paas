@@ -251,6 +251,72 @@ func TestAppDynamicConfigsRollback(t *testing.T) {
 	}
 }
 
+// TestRollbackResetsDraftItems 锁住「回滚同步重置草稿」：回滚后 draft items
+// 对齐目标版本快照（值改回、多余 key 删、缺失 key 补），不再显示假差异待发布。
+func TestRollbackResetsDraftItems(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewAppHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+
+	run := func(method, path, body string) *httptest.ResponseRecorder {
+		var rd io.Reader
+		if body != "" {
+			rd = strings.NewReader(body)
+		}
+		req := httptest.NewRequest(method, path, rd)
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// v1：k1=a, k2=b
+	run("POST", "/api/applications/app-1/dynamic-configs", `{"key":"k1","value":"a"}`)
+	run("POST", "/api/applications/app-1/dynamic-configs", `{"key":"k2","value":"b"}`)
+	run("POST", "/api/applications/app-1/dynamic-configs/publish", "")
+	// v2：k1 改值 + k2 删除 + k3 新增
+	run("POST", "/api/applications/app-1/dynamic-configs", `{"key":"k1","value":"a2"}`)
+	run("POST", "/api/applications/app-1/dynamic-configs", `{"key":"k3","value":"c"}`)
+	nsID := mustNSID(t, repo, ctx, "app-1")
+	items, _ := repo.ListItems(ctx, nsID)
+	var k2id string
+	for _, it := range items {
+		if it.Key == "k2" {
+			k2id = it.ID
+		}
+	}
+	run("DELETE", "/api/applications/app-1/dynamic-configs/items/"+k2id, "")
+	run("POST", "/api/applications/app-1/dynamic-configs/publish", "")
+
+	pubs, _ := repo.ListPublishes(ctx, nsID)
+	var v1id string
+	for _, p := range pubs {
+		if p.Version == 1 {
+			v1id = p.ID
+		}
+	}
+	if rec := run("POST", "/api/applications/app-1/dynamic-configs/rollback/"+v1id, ""); rec.Code != 200 {
+		t.Fatalf("rollback: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// 断言：draft 对齐 v1 快照——k1=a（值改回）、k2=b（补回）、k3 无（删除）
+	items, _ = repo.ListItems(ctx, nsID)
+	got := map[string]string{}
+	for _, it := range items {
+		got[it.Key] = it.Value
+	}
+	want := map[string]string{"k1": "a", "k2": "b"}
+	if len(got) != len(want) {
+		t.Fatalf("回滚后 draft 应 %d 项，实得 %v", len(want), got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("key=%s 应 %s，实得 %q（全部: %v）", k, v, got[k], got)
+		}
+	}
+}
+
 func mustNSID(t *testing.T, repo configcenter.Repository, ctx context.Context, appID string) string {
 	t.Helper()
 	ns, ok, err := repo.FindAppNamespace(ctx, appID)

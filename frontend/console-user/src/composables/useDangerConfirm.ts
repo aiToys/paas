@@ -14,6 +14,8 @@ export interface DangerOptions {
   /** 显式 isProd：由调用方按资源所在环境判定传入，覆盖顶栏 scope。
    *  防顶栏 scope 与资源环境不一致时（如测试 scope 下操作生产资源）防护被削弱。 */
   isProd?: boolean
+  /** 追加提示（如副作用警示「回滚将丢弃 N 项未发布草稿」），拼在确认文案之后 */
+  message?: string
 }
 
 /**
@@ -32,7 +34,7 @@ export async function confirmDangerous(opt: DangerOptions): Promise<boolean> {
   if (opt.requireNameConfirm && isProd) {
     try {
       const { value } = await ElMessageBox.prompt(
-        `${prefix}确认${opt.action}「${opt.target}」？此操作不可逆。请输入名称「${opt.target}」确认。`,
+        `${prefix}确认${opt.action}「${opt.target}」？此操作不可逆。${opt.message ?? ''}请输入名称「${opt.target}」确认。`,
         `${prefix}${opt.action}确认`,
         {
           type: 'error',
@@ -50,7 +52,7 @@ export async function confirmDangerous(opt: DangerOptions): Promise<boolean> {
 
   try {
     await ElMessageBox.confirm(
-      `${prefix}确认${opt.action}「${opt.target}」？`,
+      `${prefix}确认${opt.action}「${opt.target}」？${opt.message ?? ''}`,
       `${prefix}${opt.action}确认`,
       {
         type: isProd ? 'error' : 'warning',

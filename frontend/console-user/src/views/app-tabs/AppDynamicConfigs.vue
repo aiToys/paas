@@ -307,12 +307,20 @@ async function confirmPublish() {
 }
 
 async function rollback(p: ConfigPublish) {
-  const ok = await confirmDangerous({ action: '回滚到', target: `v${p.version}`, requireNameConfirm: isProdEnv.value })
+  // 回滚会将草稿重置为目标版本快照——真有未发布编辑时显式警示（防静默丢弃）
+  const pending = pendingCount.value.modified + pendingCount.value.added
+  const pendingHint = pending > 0
+    ? `当前有 ${pending} 项未发布的草稿修改，回滚后将被重置为 v${p.version} 的内容。`
+    : ''
+  const ok = await confirmDangerous({
+    action: '回滚到', target: `v${p.version}`, requireNameConfirm: isProdEnv.value,
+    message: pendingHint,
+  })
   if (!ok) return
   rollingBack.value = p.id
   try {
     await rollbackAppPublish(props.appId, p.id, selEnv.value)
-    ElMessage.success(`已回滚到 v${p.version}`)
+    ElMessage.success(`已回滚到 v${p.version}，草稿已同步为该版本内容`)
     load()
   } catch (e) {
     ElMessage.error(apiError(e, '回滚失败'))

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -393,8 +394,52 @@ func (h *AppHandler) serveRollback(w http.ResponseWriter, r *http.Request, appID
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}
+	// 回滚同步重置草稿为目标版本快照：draft 与 active 指针同时归位，
+	// 避免回滚后 draft（仍是旧版本发布时的值）与生效值错位——前端 diff 显示
+	// 「有待发布变更」的假差异（用户并未编辑任何东西）。失败语义：回滚已生效，
+	// 草稿重置失败仅日志提示可手动编辑对齐（不做事务回滚——active 指针切换是主操作）。
+	if err := h.resetItemsToSnapshot(r.Context(), ns.ID, rb.Snapshot); err != nil {
+		log.Printf("configcenter rollback %s: reset draft items failed: %v", rb.ID, err)
+	}
 	h.recordAudit(r.Context(), ns.TenantID, "configcenter_rollback", appID, fmt.Sprintf("version=%d,publishId=%s,envId=%s", rb.Version, rb.ID, envID))
 	httputil.WriteData(w, rb)
+}
+
+// resetItemsToSnapshot 把 ns 的 draft items 逐 key 对齐到快照（多的删、缺的补、不同的改）。
+func (h *AppHandler) resetItemsToSnapshot(ctx context.Context, namespaceID string, snapshot map[string]string) error {
+	existing, err := h.repo.ListItems(ctx, namespaceID)
+	if err != nil {
+		return err
+	}
+	existingByKey := make(map[string]ConfigItem, len(existing))
+	for _, it := range existing {
+		existingByKey[it.Key] = it
+	}
+	// 快照中的 key：补缺 + 改异（type 保留 draft 原值，快照不存 type）
+	for key, val := range snapshot {
+		if cur, ok := existingByKey[key]; ok {
+			if cur.Value == val {
+				continue
+			}
+			cur.Value = val
+			if _, err := h.repo.UpsertItem(ctx, cur); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := h.repo.UpsertItem(ctx, ConfigItem{NamespaceID: namespaceID, Key: key, Value: val}); err != nil {
+			return err
+		}
+	}
+	// draft 有但快照没有的 key：删（回滚目标版本里不存在）
+	for key, it := range existingByKey {
+		if _, ok := snapshot[key]; !ok {
+			if err := h.repo.DeleteItem(ctx, it.ID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // serveLaneOverrides 泳道覆盖三操作（挂 dynamic-configs/lane-overrides）：
