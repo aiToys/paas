@@ -44,8 +44,8 @@ type Handler struct {
 	repo          Repository
 	Authorize     func(r *http.Request, perm string) bool
 	serviceLookup ServiceLookup // 可选，CreateNamespace 时校验 ServiceID 归属（防悬挂引用）
-	appLookup     AppLookup    // 可选，按应用名发现端点（/api/configcenter/apps/{name}/published）
-	Audit         AuditFunc    // 可空：写操作审计（与 AppHandler.AuditFunc 同源桥接）
+	appLookup     AppLookup     // 可选，按应用名发现端点（/api/configcenter/apps/{name}/published）
+	Audit         AuditFunc     // 可空：写操作审计（与 AppHandler.AuditFunc 同源桥接）
 }
 
 // NewHandler 创建配置中心 handler。
@@ -105,6 +105,18 @@ func writePublishedJSON(w http.ResponseWriter, p Publish, withPID bool) {
 		body["publishId"] = p.ID
 	}
 	httputil.WriteJSON(w, http.StatusOK, body)
+}
+
+// listOverridesResolvedRepo 泳道覆盖解析（env 精确 → env=” 回退），包级供两类发现端点复用。
+func listOverridesResolvedRepo(ctx context.Context, repo Repository, appID, envID, lane string) ([]LaneOverride, error) {
+	ovs, err := repo.ListLaneOverrides(ctx, appID, envID, lane)
+	if err != nil {
+		return nil, err
+	}
+	if len(ovs) == 0 && envID != "" {
+		return repo.ListLaneOverrides(ctx, appID, "", lane)
+	}
+	return ovs, nil
 }
 
 // writeUnpublishedJSON 写发现端点空态（未发布/未知应用统一此 shape，不泄漏存在性）。
@@ -445,7 +457,9 @@ func (h *Handler) serveAppPublished(w http.ResponseWriter, r *http.Request) {
 		writeUnpublishedJSON(w)
 		return
 	}
-	ns, ok, err := h.repo.FindAppNamespace(r.Context(), appID)
+	// env 解析：env 精确 → env='' 回退（与 FindAppNamespaceEnv 同规则；query 名为 env）。
+	envID := r.URL.Query().Get("env")
+	ns, ok, err := h.repo.FindAppNamespaceEnv(r.Context(), appID, envID)
 	if err != nil {
 		httputil.WriteInternalError(w, err)
 		return
@@ -464,7 +478,24 @@ func (h *Handler) serveAppPublished(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 发现协议：与 ns 维度 servePublished 同款 {published,version,snapshot} shape（客户端直取）。
-	writePublishedJSON(w, active, false)
+	body := map[string]interface{}{
+		"published": true,
+		"version":   active.Version,
+		"snapshot":  active.Snapshot,
+	}
+	// lane 非空且非 default：两层 merge + overrideHash 指纹（与应用维度端点同款语义）。
+	if lane := r.URL.Query().Get("lane"); lane != "" && lane != "default" {
+		ovs, err := listOverridesResolvedRepo(r.Context(), h.repo, appID, envID, lane)
+		if err != nil {
+			httputil.WriteInternalError(w, err)
+			return
+		}
+		if len(ovs) > 0 {
+			body["snapshot"] = MergeSnapshot(active.Snapshot, ovs)
+			body["overrideHash"] = OverrideHash(ovs)
+		}
+	}
+	httputil.WriteJSON(w, http.StatusOK, body)
 }
 
 // servePublishAction POST /api/configcenter/publishes/{pid}/rollback 回滚。

@@ -569,3 +569,71 @@ func TestRollbackAlreadyActive409(t *testing.T) {
 		t.Fatalf("回滚 active 应 409, got %d: %s", w.Code, w.Body.String())
 	}
 }
+
+// TestAppPublishedByNameEnvLane 按应用名发现接 env/lane（F1 修复）：env 回退 + lane merge + overrideHash。
+func TestAppPublishedByNameEnvLane(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	h.WithAppLookup(fakeAppLookup{m: map[string]string{"shop": "app-1"}})
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	// 基线（env=''）发布 topk=3
+	ns, _ := repo.EnsureByApp(ctx, "app-1")
+	_, _ = repo.UpsertItem(ctx, configcenter.ConfigItem{NamespaceID: ns.ID, Key: "topk", Value: "3", Type: "text"})
+	if _, err := repo.CreatePublish(ctx, ns.ID); err != nil {
+		t.Fatalf("CreatePublish: %v", err)
+	}
+	// lane 覆盖 topk=5（写入在 env='' 层——发现带 env 时回退命中）
+	if _, err := repo.UpsertLaneOverride(ctx, configcenter.LaneOverride{AppID: "app-1", LaneID: "feat", Key: "topk", Value: "5"}); err != nil {
+		t.Fatalf("UpsertLaneOverride: %v", err)
+	}
+
+	get := func(path string) string {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req(ctx, "GET", path, nil))
+		if w.Code != 200 {
+			t.Fatalf("%s -> %d %s", path, w.Code, w.Body.String())
+		}
+		return w.Body.String()
+	}
+	// 不带 query：向后兼容（基线，无 overrideHash）
+	if b := get("/api/configcenter/apps/shop/published"); strings.Contains(b, "overrideHash") || !strings.Contains(b, `"topk":"3"`) {
+		t.Fatalf("无 query 应基线无 hash: %s", b)
+	}
+	// env 精确未命中 → 回退基线；lane=feat 命中覆盖 → merge + hash
+	b := get("/api/configcenter/apps/shop/published?env=env-x&lane=feat")
+	if !strings.Contains(b, `"topk":"5"`) || !strings.Contains(b, "overrideHash") {
+		t.Fatalf("env 回退 + lane merge 失败: %s", b)
+	}
+	// lane 不带：基线值
+	if b := get("/api/configcenter/apps/shop/published?env=env-x"); !strings.Contains(b, `"topk":"3"`) {
+		t.Fatalf("仅 env 回退应基线: %s", b)
+	}
+	// 未知应用带 query 仍统一 {"published":false} 不泄漏
+	if b := get("/api/configcenter/apps/nope/published?env=env-x&lane=feat"); !strings.Contains(b, `"published":false`) {
+		t.Fatalf("未知应用带 query 应 unpublished: %s", b)
+	}
+}
+
+// lane=default 在按应用名发现端点同样归一为基线（不报错——发现是数据面宽入口，与覆盖写 400 语义区分）。
+func TestAppPublishedByNameLaneDefault(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	h.WithAppLookup(fakeAppLookup{m: map[string]string{"shop": "app-1"}})
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	ns, _ := repo.EnsureByApp(ctx, "app-1")
+	_, _ = repo.UpsertItem(ctx, configcenter.ConfigItem{NamespaceID: ns.ID, Key: "k", Value: "v", Type: "text"})
+	if _, err := repo.CreatePublish(ctx, ns.ID); err != nil {
+		t.Fatalf("CreatePublish: %v", err)
+	}
+	// 覆盖挂在 lane=default 上不会被消费（归一基线后 lane=""）
+	if _, err := repo.UpsertLaneOverride(ctx, configcenter.LaneOverride{AppID: "app-1", LaneID: "default", Key: "k", Value: "x"}); err != nil {
+		t.Fatalf("UpsertLaneOverride: %v", err)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req(ctx, "GET", "/api/configcenter/apps/shop/published?lane=default", nil))
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"k":"v"`) || strings.Contains(w.Body.String(), "overrideHash") {
+		t.Fatalf("lane=default 发现应基线无 hash: %d %s", w.Code, w.Body.String())
+	}
+}

@@ -1423,7 +1423,6 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/applications/{id}/dynamic-configs/lane-overrides", apiroute.Tags("配置中心"), apiroute.Summary("泳道配置覆盖列表（?envId=&lane=，lane 必填）"), apiroute.Perm("application:read"), apiroute.WithResp([]configcenter.LaneOverride{}))
 	reg.Operation("POST", "/api/applications/{id}/dynamic-configs/lane-overrides", apiroute.Tags("配置中心"), apiroute.Summary("泳道配置覆盖 upsert（即时生效，?envId=&lane=，prod 需 prod:write）"), apiroute.Perm("application:write"), apiroute.WithReqBody(configcenter.LaneOverride{}), apiroute.WithResp(configcenter.LaneOverride{}))
 	reg.Operation("DELETE", "/api/applications/{id}/dynamic-configs/lane-overrides/{key}", apiroute.Tags("配置中心"), apiroute.Summary("删除泳道配置覆盖（?envId=&lane=，prod 需 prod:write）"), apiroute.Perm("application:write"))
-	reg.Operation("POST", "/api/applications/{id}/dynamic-configs/rollback/{pid}", apiroute.Tags("配置中心"), apiroute.Summary("应用动态配置回滚（校验发布属本应用派生命名空间）"), apiroute.Perm("application:write"), apiroute.WithResp(configcenter.Publish{}))
 	// 可观测
 	reg.Operation("GET", "/api/observability/metrics", apiroute.Tags("可观测"), apiroute.Summary("指标时序（惰性补点）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.MetricSeries{}))
 	reg.Operation("GET", "/api/observability/alert-rules", apiroute.Tags("可观测"), apiroute.Summary("告警规则列表"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.AlertRule{}))

@@ -59,17 +59,14 @@ func (h *AppHandler) WithAudit(fn AuditFunc) *AppHandler { h.Audit = fn; return 
 // WithEnvResolver 注入环境类型解析器，启用生产写闸门（prod:write）。
 func (h *AppHandler) WithEnvResolver(r EnvTypeResolver) *AppHandler { h.envResolver = r; return h }
 
-// allowProd 校验目标环境的生产写权限（未注入 resolver/envID 空时跳过；非生产放行）。
-// fail-closed：环境查不到（不存在/跨租户）保守按生产处理，需 prod:write。
-func (h *AppHandler) allowProd(w http.ResponseWriter, r *http.Request, envID string) bool {
+// prodGateRequired 判定目标环境是否需生产闸门（只判定不写响应）。
+// 未注入 resolver/envID 空时跳过；fail-closed：环境查不到（不存在/跨租户）保守按生产。
+func (h *AppHandler) prodGateRequired(r *http.Request, envID string) bool {
 	if h.envResolver == nil || envID == "" {
-		return true
+		return false
 	}
 	etype, err := h.envResolver.EnvType(r.Context(), envID)
-	if err != nil || etype == environment.TypeProd {
-		return h.allow(w, r, environment.PermProdWrite)
-	}
-	return true
+	return err != nil || etype == environment.TypeProd
 }
 
 func (h *AppHandler) allow(w http.ResponseWriter, r *http.Request, perm string) bool {
@@ -86,9 +83,8 @@ func (h *AppHandler) allowWrite(w http.ResponseWriter, r *http.Request, appID, e
 	if !h.allow(w, r, "application:write") {
 		return false
 	}
-	if !h.allowProd(w, r, envID) {
-		httputil.WriteError(w, http.StatusForbidden, "生产环境动态配置写需 prod:write 权限")
-		return false
+	if h.prodGateRequired(r, envID) && !h.allow(w, r, environment.PermProdWrite) {
+		return false // 403 已由 allow 写出（单一出口，F2 修复双重写响应）
 	}
 	if h.Guard != nil && !h.Guard.Allow(r, appID, "write") {
 		httputil.WriteError(w, http.StatusForbidden, "无该应用的应用级权限（write）")
@@ -350,15 +346,7 @@ func (h *AppHandler) servePublished(w http.ResponseWriter, r *http.Request, appI
 
 // listOverridesResolved 泳道覆盖解析：env 精确 → env='' 回退（与 ns 发现同规则）。
 func (h *AppHandler) listOverridesResolved(ctx context.Context, appID, envID, lane string) ([]LaneOverride, error) {
-	ovs, err := h.repo.ListLaneOverrides(ctx, appID, envID, lane)
-	if err != nil {
-		return nil, err
-	}
-	if len(ovs) == 0 && envID != "" {
-		// env 精确无覆盖 → 回退 env='' 基线覆盖。
-		return h.repo.ListLaneOverrides(ctx, appID, "", lane)
-	}
-	return ovs, nil
+	return listOverridesResolvedRepo(ctx, h.repo, appID, envID, lane)
 }
 
 // serveRollback POST /dynamic-configs/rollback/{pid} 应用维度回滚。
@@ -408,8 +396,13 @@ func (h *AppHandler) serveRollback(w http.ResponseWriter, r *http.Request, appID
 //
 // 写操作需 application:write + 生产闸门 + AppGuard write；全记审计（configcenter_lane_*）。
 func (h *AppHandler) serveLaneOverrides(w http.ResponseWriter, r *http.Request, appID, envID, lane string, rest []string) {
+	// lane="default" 即基线（无覆盖语义），入口统一拒 400 防客户端误传静默当基线。
 	if lane == "" {
 		httputil.WriteError(w, http.StatusBadRequest, "lane 参数必填")
+		return
+	}
+	if lane == "default" {
+		httputil.WriteError(w, http.StatusBadRequest, "lane=default 即基线，不接受覆盖")
 		return
 	}
 	switch r.Method {

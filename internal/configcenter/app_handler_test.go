@@ -634,3 +634,92 @@ func TestDiscoveryBackwardCompat(t *testing.T) {
 		t.Fatalf("无 ns 应用发现应 false: %s", rec.Body.String())
 	}
 }
+
+// TestLaneDefaultRejected lane="default" 即基线，不作为泳道接受（F4：入口统一拒 400，
+// 客户端误传 default 时显式报错而非静默当基线）。
+func TestLaneDefaultRejected(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewAppHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	run := func(method, path, body string) *httptest.ResponseRecorder {
+		var rd io.Reader
+		if body != "" {
+			rd = strings.NewReader(body)
+		}
+		req := httptest.NewRequest(method, path, rd).WithContext(ctx)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := run("GET", "/api/applications/app-1/dynamic-configs/lane-overrides?lane=default", ""); rec.Code != 400 {
+		t.Fatalf("lane-overrides GET default 应 400: %d", rec.Code)
+	}
+	if rec := run("POST", "/api/applications/app-1/dynamic-configs/lane-overrides?lane=default", `{"key":"k","value":"v"}`); rec.Code != 400 {
+		t.Fatalf("lane-overrides POST default 应 400: %d", rec.Code)
+	}
+}
+
+// TestProdGateCoversAllWrites 生产闸门覆盖全部写路径（F5）：rollback/item delete/lane-overrides
+// 写在 prod env（含 fail-closed 未知 env）均 403。
+func TestProdGateCoversAllWrites(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewAppHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return perm != "prod:write" }
+	h.WithEnvResolver(resolverFunc(func(ctx context.Context, envID string) (string, error) {
+		if envID == "env-t" {
+			return "test", nil
+		}
+		return "", errors.New("环境不存在") // fail-closed
+	}))
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	// 在 test env 建配置 + 发布，拿 itemID/publishID
+	mk := func(method, path, body string) *httptest.ResponseRecorder {
+		var rd io.Reader
+		if body != "" {
+			rd = strings.NewReader(body)
+		}
+		req := httptest.NewRequest(method, path, rd).WithContext(ctx)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	rec := mk("POST", "/api/applications/app-1/dynamic-configs?envId=env-t", `{"key":"k","value":"v","type":"text"}`)
+	if rec.Code != 201 {
+		t.Fatalf("test upsert: %d %s", rec.Code, rec.Body.String())
+	}
+	var saved struct {
+		Data configcenter.ConfigItem `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &saved); err != nil {
+		t.Fatalf("解包 upsert: %v", err)
+	}
+	rec = mk("POST", "/api/applications/app-1/dynamic-configs/publish?envId=env-t", "")
+	if rec.Code != 201 {
+		t.Fatalf("test publish: %d %s", rec.Code, rec.Body.String())
+	}
+	var pub struct {
+		Data configcenter.Publish `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &pub); err != nil {
+		t.Fatalf("解包 publish: %v", err)
+	}
+
+	// 以下各写路径带 prod envId → 403
+	cases := []struct{ name, method, path, body string }{
+		{"item delete", "DELETE", "/api/applications/app-1/dynamic-configs/items/" + saved.Data.ID + "?envId=env-p", ""},
+		{"rollback", "POST", "/api/applications/app-1/dynamic-configs/rollback/" + pub.Data.ID + "?envId=env-p", ""},
+		{"lane override upsert", "POST", "/api/applications/app-1/dynamic-configs/lane-overrides?envId=env-p&lane=feat", `{"key":"k","value":"v"}`},
+		{"lane override delete", "DELETE", "/api/applications/app-1/dynamic-configs/lane-overrides/k?envId=env-p&lane=feat", ""},
+		{"未知 env item delete fail-closed", "DELETE", "/api/applications/app-1/dynamic-configs/items/" + saved.Data.ID + "?envId=env-unknown", ""},
+	}
+	for _, c := range cases {
+		if rec := mk(c.method, c.path, c.body); rec.Code != 403 {
+			t.Errorf("%s 应 403: %d %s", c.name, rec.Code, rec.Body.String())
+		}
+	}
+	// 同路径 test env 放行（对照）
+	if rec := mk("DELETE", "/api/applications/app-1/dynamic-configs/items/"+saved.Data.ID+"?envId=env-t", ""); rec.Code == 403 {
+		t.Errorf("test env item delete 不应 403: %d", rec.Code)
+	}
+}
