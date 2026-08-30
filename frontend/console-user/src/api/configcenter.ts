@@ -71,3 +71,7 @@ export const upsertLaneOverride = (appId: string, envId: string, lane: string, b
 export const deleteLaneOverride = (appId: string, envId: string, lane: string, key: string) =>
   fetchAuth(`/api/applications/${appId}/dynamic-configs/lane-overrides/${encodeURIComponent(key)}?envId=${encodeURIComponent(envId)}&lane=${encodeURIComponent(lane)}`, { method: 'DELETE' })
     .then(r => unwrap<unknown>(r))
+// 提升：覆盖合并进基线草稿 + 发新版本 + 清覆盖（灰度验证 → 全量生效的单步操作）
+export const promoteLaneOverrides = (appId: string, envId: string, lane: string) =>
+  fetchAuth(`/api/applications/${appId}/dynamic-configs/lane-overrides/promote?envId=${encodeURIComponent(envId)}&lane=${encodeURIComponent(lane)}`, { method: 'POST' })
+    .then(r => unwrap<ConfigPublish>(r))

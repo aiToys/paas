@@ -723,3 +723,60 @@ func TestProdGateCoversAllWrites(t *testing.T) {
 		t.Errorf("test env item delete 不应 403: %d", rec.Code)
 	}
 }
+
+// TestLanePromote 泳道灰度提升到基线：覆盖合并进 draft → 新版本 → 覆盖清空。
+// 失败语义：空集 400；提升后再次 promote 空集（幂等边界）。
+func TestLanePromote(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewAppHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	mk := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req = req.WithContext(ctx)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	// 基线：a=base 发布 v1
+	mk("POST", "/api/applications/app-1/dynamic-configs?envId=env-t", `{"key":"a","value":"base","type":"text"}`)
+	mk("POST", "/api/applications/app-1/dynamic-configs/publish?envId=env-t", "")
+	// 泳道覆盖：a=override + 新 key b=new
+	if rec := mk("POST", "/api/applications/app-1/dynamic-configs/lane-overrides?envId=env-t&lane=feat-x", `{"key":"a","value":"override"}`); rec.Code != 201 {
+		t.Fatalf("覆盖 a: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := mk("POST", "/api/applications/app-1/dynamic-configs/lane-overrides?envId=env-t&lane=feat-x", `{"key":"b","value":"new"}`); rec.Code != 201 {
+		t.Fatalf("覆盖 b: %d %s", rec.Code, rec.Body.String())
+	}
+	// 提升
+	rec := mk("POST", "/api/applications/app-1/dynamic-configs/lane-overrides/promote?envId=env-t&lane=feat-x", "")
+	if rec.Code != 201 {
+		t.Fatalf("promote: %d %s", rec.Code, rec.Body.String())
+	}
+	var pub struct{ Data configcenter.Publish }
+	if err := json.Unmarshal(rec.Body.Bytes(), &pub); err != nil || pub.Data.Version != 2 {
+		t.Fatalf("promote 应产生 v2: %s", rec.Body.String())
+	}
+	// 基线发现：a=override、b=new（新 key 也在快照）
+	rec = mk("GET", "/api/applications/app-1/dynamic-configs/published?envId=env-t", "")
+	body := rec.Body.String()
+	if !strings.Contains(body, `"a":"override"`) || !strings.Contains(body, `"b":"new"`) {
+		t.Fatalf("提升后基线应含覆盖值: %s", body)
+	}
+	if strings.Contains(body, "overrideHash") {
+		t.Fatalf("无 lane 发现不应有 overrideHash: %s", body)
+	}
+	// 覆盖清空：列表空 + 带 lane 发现等于基线
+	rec = mk("GET", "/api/applications/app-1/dynamic-configs/lane-overrides?envId=env-t&lane=feat-x", "")
+	if rec.Body.String() != "null" && !strings.Contains(rec.Body.String(), `"data":[]`) && !strings.Contains(rec.Body.String(), `"data":null`) {
+		t.Fatalf("提升后覆盖应清空: %s", rec.Body.String())
+	}
+	// 幂等边界：再次 promote 空集 400
+	if rec := mk("POST", "/api/applications/app-1/dynamic-configs/lane-overrides/promote?envId=env-t&lane=feat-x", ""); rec.Code != 400 {
+		t.Fatalf("空覆盖 promote 应 400: %d %s", rec.Code, rec.Body.String())
+	}
+	// lane=default 拒绝
+	if rec := mk("POST", "/api/applications/app-1/dynamic-configs/lane-overrides/promote?envId=env-t&lane=default", ""); rec.Code != 400 {
+		t.Fatalf("lane=default promote 应 400: %d", rec.Code)
+	}
+}

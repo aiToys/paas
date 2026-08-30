@@ -2,27 +2,54 @@
 // 应用详情 - 动态配置（热更新）区块：应用维度动态配置（scope=app，按环境隔离）。
 // 与上方 AppConfigs（工作负载级静态 env/Secret，重启注入）正交：本区块是
 // 版本化动态配置——draft 编辑 → 发布出不可变快照 → 客户端按版本发现 → 可回滚。
-// 环境维度：全部请求带顶栏 scope envId（与 AppConfigs 同款交互），同应用 test/prod
-// 各一份独立配置/版本/闸门；发布目标 prod 走 confirmDangerous 生产档。
-// 泳道覆盖子区：key 级差异集，即时生效（无版本链），随泳道回收消失。
+//
+// UX（对标 Nacos/Apollo 及格线 + 泳道灰度产品化，2026-08-30 L1+L2）：
+// ① 页内显式 env tab（基线固定第一，承载 env 隔离前的存量草稿；与顶栏 scope 解耦，
+//    本页 env 是局部状态，配置查看是读操作不改全局操作面）；
+// ② 草稿 vs 生效三态列表（修改/新增高亮，数据前端 diff）；
+// ③ 发布确认弹窗带完整 diff（prod 走 confirmDangerous 输入环境名）；
+// ④ 发布目标二选一：基线（全量生效·新版本）或泳道（灰度验证·key 级覆盖即时生效）；
+// ⑤ 灰度验证视图：覆盖 vs 基线对照 + 服务端真实 merge 预览 + 「提升到基线」。
 import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
-import { useEnvStore } from '@/stores/env'
+import { useEnvStore, type Env } from '@/stores/env'
 import { listLanes } from '@/api/lane'
+import { apiError } from '@/api'
 import {
   fetchAppDynamicConfigs, upsertAppDynamicConfig, deleteAppDynamicConfig,
   publishAppDynamicConfigs, fetchAppPublishes, fetchAppPublished, rollbackAppPublish,
-  fetchLaneOverrides, upsertLaneOverride, deleteLaneOverride,
+  fetchLaneOverrides, upsertLaneOverride, deleteLaneOverride, promoteLaneOverrides,
   type DynamicConfigItem, type ConfigPublish, type ConfigPublished, type LaneOverride,
 } from '@/api/configcenter'
 
 const props = defineProps<{ appId: string }>()
 
+const route = useRoute()
 const envStore = useEnvStore()
-const envId = computed(() => envStore.currentEnvId)
-const envName = computed(() => envStore.currentEnv?.name ?? '')
-const hasEnv = computed(() => !!envId.value)
+
+// ---- 页内 env 选择（局部状态：query ?env= > 顶栏 scope > 基线）----
+// 基线（id=''）固定第一个 tab：承载 env 隔离上线前的存量草稿。
+interface EnvTab { id: string; name: string; isProd: boolean }
+const selEnv = ref('') // '' = 基线
+const envTabs = computed<EnvTab[]>(() => [
+  { id: '', name: '基线', isProd: false },
+  ...envStore.envs.map((e: Env) => ({ id: e.id, name: e.name, isProd: e.type === 'prod' })),
+])
+const curTab = computed(() => envTabs.value.find(t => t.id === selEnv.value) ?? envTabs.value[0])
+const isProdEnv = computed(() => curTab.value.isProd)
+const envLabel = computed(() => curTab.value.name)
+
+// 各 env 的 active 版本（tab 徽标 + 状态条用）；key: envId（''=基线）
+const envActiveVer = ref<Record<string, number | null>>({})
+function setActiveVer(envId: string, pub: ConfigPublished | null) {
+  envActiveVer.value = { ...envActiveVer.value, [envId]: pub?.published ? (pub.version ?? null) : null }
+}
+const curActiveVer = computed(() => envActiveVer.value[selEnv.value] ?? null)
+
+// 顶部 prod 视觉提示跟随本页选中 env（与全局生产视觉语言一致）
+const prodWarn = computed(() => isProdEnv.value ? '生产环境：发布/回滚/提升均需输入环境名确认' : '')
 
 const items = ref<DynamicConfigItem[]>([])
 const publishes = ref<ConfigPublish[]>([])
@@ -36,15 +63,38 @@ const showEdit = ref(false)
 const submitting = ref(false)
 const form = ref<{ id: string; key: string; value: string; type: string }>({ id: '', key: '', value: '', type: 'text' })
 
-// ---- 泳道覆盖子区状态 ----
-const lanes = ref<{ name: string; mode: string }[]>([])
-const laneSel = ref('')
-const overrides = ref<LaneOverride[]>([])
-const laneLoading = ref(false)
-const ovRemoving = ref('')
-const showOvEdit = ref(false)
-const ovSubmitting = ref(false)
-const ovForm = ref<{ key: string; value: string }>({ key: '', value: '' })
+// ---- 草稿 vs 生效 diff（纯前端，数据都在手里）----
+interface DiffRow {
+  key: string
+  type: string
+  effective?: string   // 生效值（active snapshot），undefined = 新增
+  draft: string
+  state: 'modified' | 'added' | 'clean'
+}
+const diffRows = computed<DiffRow[]>(() => {
+  const snap = published.value?.snapshot ?? {}
+  const rows: DiffRow[] = []
+  const seen = new Set<string>()
+  for (const it of items.value) {
+    seen.add(it.key)
+    const eff = snap[it.key]
+    rows.push({
+      key: it.key, type: it.type, draft: it.value,
+      effective: it.key in snap ? eff : undefined,
+      state: !(it.key in snap) ? 'added' : (eff !== it.value ? 'modified' : 'clean'),
+    })
+  }
+  // 生效有但 draft 已删的 key：提示「发布后将移除」
+  for (const k of Object.keys(snap)) {
+    if (!seen.has(k)) rows.push({ key: k, type: 'text', effective: snap[k], draft: '', state: 'modified' })
+  }
+  return rows
+})
+const pendingCount = computed(() => ({
+  modified: diffRows.value.filter(r => r.state === 'modified').length,
+  added: diffRows.value.filter(r => r.state === 'added').length,
+}))
+const hasPending = computed(() => pendingCount.value.modified + pendingCount.value.added > 0)
 
 const types = [
   { value: 'text', label: 'Text' },
@@ -55,40 +105,78 @@ const types = [
 const snapshotEntries = (snap?: Record<string, string>) => (snap ? Object.entries(snap) : [])
 
 async function load() {
-  if (!hasEnv.value) return
   loading.value = true
   try {
     const [its, pubs, pub] = await Promise.all([
-      fetchAppDynamicConfigs(props.appId, envId.value),
-      fetchAppPublishes(props.appId, envId.value),
-      fetchAppPublished(props.appId, { envId: envId.value }).catch(() => null),
+      fetchAppDynamicConfigs(props.appId, selEnv.value),
+      fetchAppPublishes(props.appId, selEnv.value),
+      fetchAppPublished(props.appId, { envId: selEnv.value }).catch(() => null),
     ])
     items.value = its ?? []
     publishes.value = pubs ?? []
     published.value = pub
+    setActiveVer(selEnv.value, pub)
   } catch (e) {
-    ElMessage.error('加载动态配置失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载动态配置失败'))
   } finally {
     loading.value = false
   }
 }
 
+// 轻量加载各 env 的 active 版本（tab 徽标；失败静默——非关键信息）
+async function loadAllActiveVers() {
+  for (const t of envTabs.value) {
+    if (!t.id) continue
+    fetchAppPublished(props.appId, { envId: t.id })
+      .then(pub => setActiveVer(t.id, pub))
+      .catch(() => setActiveVer(t.id, null))
+  }
+}
+
+function switchTab(id: string) {
+  selEnv.value = id
+  // 同步到 URL query（可分享/刷新保持）
+  if (route.query.env !== (id || undefined)) {
+    const q: Record<string, string> = { ...route.query as Record<string, string> }
+    if (id) q.env = id
+    else delete q.env
+    history.replaceState(null, '', { query: q } as never)
+  }
+}
+
+// ---- 泳道（灰度验证）子区 ----
+const lanes = ref<{ name: string; mode: string }[]>([])
+const laneSel = ref('')
+const overrides = ref<LaneOverride[]>([])
+const laneLoading = ref(false)
+const ovRemoving = ref('')
+const showOvEdit = ref(false)
+const ovSubmitting = ref(false)
+const ovForm = ref<{ key: string; value: string }>({ key: '', value: '' })
+// merge 预览：服务端 MergeSnapshot 真实结果（泳道实例实际拿到的完整配置）
+const mergedPreview = ref<ConfigPublished | null>(null)
+
 async function loadLanes() {
-  if (!hasEnv.value) { lanes.value = []; return }
+  if (!selEnv.value) { lanes.value = []; return }
   try {
-    lanes.value = (await listLanes(envId.value) ?? [])
+    lanes.value = (await listLanes(selEnv.value) ?? [])
       .filter(l => l.status === 'active')
       .map(l => ({ name: l.name, mode: l.mode }))
   } catch { lanes.value = [] }
 }
 
 async function loadOverrides() {
-  if (!laneSel.value) { overrides.value = []; return }
+  if (!laneSel.value || !selEnv.value) { overrides.value = []; mergedPreview.value = null; return }
   laneLoading.value = true
   try {
-    overrides.value = (await fetchLaneOverrides(props.appId, envId.value, laneSel.value)) ?? []
+    const [ovs, merged] = await Promise.all([
+      fetchLaneOverrides(props.appId, selEnv.value, laneSel.value),
+      fetchAppPublished(props.appId, { envId: selEnv.value, lane: laneSel.value }).catch(() => null),
+    ])
+    overrides.value = ovs ?? []
+    mergedPreview.value = merged
   } catch (e) {
-    ElMessage.error('加载泳道覆盖失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载泳道覆盖失败'))
   } finally {
     laneLoading.value = false
   }
@@ -101,8 +189,11 @@ function openAdd() {
   showEdit.value = true
 }
 
-function openEdit(row: DynamicConfigItem) {
-  form.value = { id: row.id, key: row.key, value: row.value, type: row.type }
+function openEdit(row: DiffRow) {
+  // 从 diff 行编辑：查 draft item（「发布后移除」的行无 draft，不可编辑，只能重新新增）
+  const it = items.value.find(i => i.key === row.key)
+  if (!it) { openAdd(); form.value.key = row.key; return }
+  form.value = { id: it.id, key: it.key, value: it.value, type: it.type }
   showEdit.value = true
 }
 
@@ -117,71 +208,120 @@ async function submit() {
       key: form.value.key.trim(),
       value: form.value.value,
       type: form.value.type,
-    }, envId.value)
-    ElMessage.success('已保存，发布后生效')
+    }, selEnv.value)
+    ElMessage.success('已保存草稿，发布后生效')
     showEdit.value = false
     load()
   } catch (e) {
-    ElMessage.error((e as Error).message || '保存失败')
+    ElMessage.error(apiError(e, '保存失败'))
   } finally {
     submitting.value = false
   }
 }
 
-async function remove(row: DynamicConfigItem) {
+async function remove(row: DiffRow) {
+  const it = items.value.find(i => i.key === row.key)
+  if (!it) return
   const ok = await confirmDangerous({
     action: '删除动态配置项',
     target: row.key,
-    requireNameConfirm: envStore.isProd,
+    requireNameConfirm: isProdEnv.value,
   })
   if (!ok) return
-  removing.value = row.id
+  removing.value = it.id
   try {
-    await deleteAppDynamicConfig(props.appId, row.id, envId.value)
-    ElMessage.success('已删除，发布后生效')
+    await deleteAppDynamicConfig(props.appId, it.id, selEnv.value)
+    ElMessage.success('已删除草稿，发布后生效')
     load()
   } catch (e) {
-    ElMessage.error((e as Error).message || '删除失败')
+    ElMessage.error(apiError(e, '删除失败'))
   } finally {
     removing.value = ''
   }
 }
 
-async function publish() {
+// ---- 发布：确认弹窗带 diff + 目标二选一（基线/泳道）----
+const showPub = ref(false)
+const pubTarget = ref<'baseline' | 'lane'>('baseline')
+const pubLane = ref('')
+
+function openPublish() {
+  if (!hasPending.value) {
+    ElMessage.info('草稿与生效版本一致，无需发布')
+    return
+  }
+  pubTarget.value = 'baseline'
+  pubLane.value = lanes.value[0]?.name ?? ''
+  showPub.value = true
+}
+
+async function confirmPublish() {
+  showPub.value = false
+  // 泳道目标：逐项写 key 级覆盖（即时生效，无版本记录）
+  if (pubTarget.value === 'lane') {
+    if (!pubLane.value) { ElMessage.warning('请选择泳道'); showPub.value = true; return }
+    const changed = diffRows.value.filter(r => r.state !== 'clean')
+    const ok = await confirmDangerous({
+      action: `发布 ${changed.length} 项覆盖到泳道`,
+      target: pubLane.value,
+      requireNameConfirm: isProdEnv.value,
+    })
+    if (!ok) { showPub.value = true; return }
+    publishing.value = true
+    try {
+      for (const r of changed) {
+        if (r.state === 'added') {
+          // 新增 key 基线无值：先写基线 draft（占位当前值），再写泳道覆盖——
+          // 保证提升到基线时该 key 有 draft 可合并。
+          await upsertAppDynamicConfig(props.appId, { key: r.key, value: r.draft, type: r.type }, selEnv.value)
+        }
+        await upsertLaneOverride(props.appId, selEnv.value, pubLane.value, { key: r.key, value: r.draft })
+      }
+      ElMessage.success(`已发布 ${changed.length} 项覆盖到泳道 ${pubLane.value}（即时生效，基线不变）`)
+      await load()
+      laneSel.value = pubLane.value
+    } catch (e) {
+      ElMessage.error(apiError(e, '泳道发布失败'))
+    } finally {
+      publishing.value = false
+    }
+    return
+  }
+  // 基线目标：新版本（prod 需输入环境名）
   const ok = await confirmDangerous({
     action: '发布动态配置',
-    target: envName.value || props.appId,
-    requireNameConfirm: envStore.isProd,
+    target: envLabel.value || props.appId,
+    requireNameConfirm: isProdEnv.value,
   })
-  if (!ok) return
+  if (!ok) { showPub.value = true; return }
   publishing.value = true
   try {
-    const pub = await publishAppDynamicConfigs(props.appId, envId.value)
+    const pub = await publishAppDynamicConfigs(props.appId, selEnv.value)
     ElMessage.success(`已发布 v${pub.version}`)
     load()
   } catch (e) {
-    ElMessage.error((e as Error).message || '发布失败')
+    ElMessage.error(apiError(e, '发布失败'))
   } finally {
     publishing.value = false
   }
 }
 
 async function rollback(p: ConfigPublish) {
-  const ok = await confirmDangerous({ action: '回滚到', target: `v${p.version}`, requireNameConfirm: envStore.isProd })
+  const ok = await confirmDangerous({ action: '回滚到', target: `v${p.version}`, requireNameConfirm: isProdEnv.value })
   if (!ok) return
   rollingBack.value = p.id
   try {
-    await rollbackAppPublish(props.appId, p.id, envId.value)
+    await rollbackAppPublish(props.appId, p.id, selEnv.value)
     ElMessage.success(`已回滚到 v${p.version}`)
     load()
   } catch (e) {
-    ElMessage.error((e as Error).message || '回滚失败')
+    ElMessage.error(apiError(e, '回滚失败'))
   } finally {
     rollingBack.value = ''
   }
 }
 
-// ---- 泳道覆盖操作（即时生效，无「发布」步骤） ----
+// ---- 泳道覆盖操作（即时生效，无「发布」步骤）----
 
 function openOvAdd() {
   ovForm.value = { key: '', value: '' }
@@ -193,15 +333,14 @@ async function submitOverride() {
     ElMessage.warning('请填写 Key 和 Value')
     return
   }
-  // 泳道覆盖即时生效，生产环境与其他 prod 写同强度二次确认。
   const ok = await confirmDangerous({
     action: '保存泳道覆盖', target: `${laneSel.value} / ${ovForm.value.key}`,
-    requireNameConfirm: envStore.isProd,
+    requireNameConfirm: isProdEnv.value,
   })
   if (!ok) return
   ovSubmitting.value = true
   try {
-    await upsertLaneOverride(props.appId, envId.value, laneSel.value, {
+    await upsertLaneOverride(props.appId, selEnv.value, laneSel.value, {
       key: ovForm.value.key.trim(),
       value: ovForm.value.value,
     })
@@ -209,7 +348,7 @@ async function submitOverride() {
     showOvEdit.value = false
     loadOverrides()
   } catch (e) {
-    ElMessage.error((e as Error).message || '保存失败')
+    ElMessage.error(apiError(e, '保存失败'))
   } finally {
     ovSubmitting.value = false
   }
@@ -219,68 +358,124 @@ async function removeOverride(row: LaneOverride) {
   const ok = await confirmDangerous({
     action: '删除泳道覆盖',
     target: row.key,
-    requireNameConfirm: envStore.isProd,
+    requireNameConfirm: isProdEnv.value,
   })
   if (!ok) return
   ovRemoving.value = row.key
   try {
-    await deleteLaneOverride(props.appId, envId.value, laneSel.value, row.key)
+    await deleteLaneOverride(props.appId, selEnv.value, laneSel.value, row.key)
     loadOverrides()
   } catch (e) {
-    ElMessage.error((e as Error).message || '删除失败')
+    ElMessage.error(apiError(e, '删除失败'))
   } finally {
     ovRemoving.value = ''
   }
 }
 
+// 提升：覆盖合并进基线草稿 + 发新版本 + 清覆盖（后端单端点完成）
+const promoting = ref(false)
+async function promoteLane() {
+  if (!laneSel.value || !overrides.value.length) return
+  const ok = await confirmDangerous({
+    action: `提升泳道 ${laneSel.value} 的 ${overrides.value.length} 项覆盖到基线`,
+    target: envLabel.value || props.appId,
+    requireNameConfirm: isProdEnv.value,
+  })
+  if (!ok) return
+  promoting.value = true
+  try {
+    const pub = await promoteLaneOverrides(props.appId, selEnv.value, laneSel.value)
+    ElMessage.success(`已提升到基线并发布 v${pub.version}（泳道覆盖已清空）`)
+    await Promise.all([load(), loadOverrides()])
+  } catch (e) {
+    ElMessage.error(apiError(e, '提升失败（泳道覆盖保持不变，可重试）'))
+  } finally {
+    promoting.value = false
+  }
+}
+
 function init() {
+  // 初值：query ?env= > 顶栏 scope env > 基线
+  const q = route.query.env
+  selEnv.value = typeof q === 'string' ? q : (envStore.currentEnvId || '')
   load()
   loadLanes()
   laneSel.value = ''
   overrides.value = []
 }
 
-onMounted(init)
+onMounted(async () => {
+  await envStore.loadEnvs()
+  init()
+  loadAllActiveVers()
+})
 watch(() => props.appId, init)
-watch(envId, init)
+watch(selEnv, () => { load(); loadLanes() })
 </script>
 
 <template>
   <div class="dyn-block" v-loading="loading">
-    <div v-if="!hasEnv" class="env-hint">请先在顶栏选择环境，动态配置按环境独立（test/prod 各一份）。</div>
-    <template v-else>
+    <!-- 页内显式 env tab（与顶栏 scope 解耦；基线固定第一，承载存量草稿） -->
+    <div class="env-tabs">
+      <button
+        v-for="t in envTabs" :key="t.id"
+        class="env-tab" :class="{ active: t.id === selEnv, prod: t.isProd }"
+        @click="switchTab(t.id)"
+      >
+        {{ t.name }}
+        <span v-if="envActiveVer[t.id]" class="tab-ver mono">v{{ envActiveVer[t.id] }}</span>
+        <span v-else class="tab-ver none">未发布</span>
+      </button>
+    </div>
+    <div v-if="prodWarn" class="prod-warn">{{ prodWarn }}</div>
+
     <div class="block-head">
       <div>
         <span class="block-title">动态配置（热更新）</span>
-        <span class="block-hint">环境：{{ envName }}（按环境独立）· 添加配置后发布生效</span>
+        <span class="block-hint">{{ envLabel }}（按环境独立）· 草稿编辑后发布生效</span>
       </div>
       <div>
-        <!-- 生效版本 tag 内联到标题行：当前生效即发布历史 active 那条，不单独设展示区 -->
-        <span v-if="published?.published" class="ver-tag mono" style="margin-right: 10px">生效中 v{{ published.version }}</span>
+        <span v-if="curActiveVer" class="ver-tag mono" style="margin-right: 10px">生效中 v{{ curActiveVer }}</span>
         <span v-else class="none" style="margin-right: 10px">未发布</span>
-        <el-button size="small" :loading="publishing" @click="publish">发布生效</el-button>
-        <el-button size="small" type="primary" @click="openAdd">+ 新增配置</el-button>
+        <el-button size="small" type="primary" :disabled="!hasPending" :loading="publishing" @click="openPublish">
+          发布{{ hasPending ? `（${pendingCount.modified + pendingCount.added} 项变更）` : '' }}
+        </el-button>
+        <el-button size="small" @click="openAdd">+ 新增配置</el-button>
       </div>
     </div>
 
-    <!-- 配置项（编辑即 draft，点「发布生效」才对客户端可见） -->
+    <!-- 配置项：草稿 vs 生效三态（修改/新增高亮） -->
     <section class="cfg-group">
-      <div class="group-title">配置项<span class="group-cnt mono">{{ items.length }}</span></div>
-      <el-table :data="items" size="small" empty-text="动态配置用于运行时热更新（无需重启）。添加第一项配置后发布生效。">
-        <el-table-column prop="key" label="Key" min-width="180">
-          <template #default="{ row }"><span class="mono">{{ row.key }}</span></template>
+      <div class="group-title">
+        配置项<span class="group-cnt mono">{{ items.length }}</span>
+        <span v-if="hasPending" class="pending-hint">
+          {{ pendingCount.modified }} 修改 · {{ pendingCount.added }} 新增（待发布）
+        </span>
+      </div>
+      <el-table :data="diffRows" size="small" empty-text="动态配置用于运行时热更新（无需重启）。添加第一项配置后发布生效。">
+        <el-table-column prop="key" label="Key" min-width="170">
+          <template #default="{ row }">
+            <span class="mono">{{ row.key }}</span>
+            <el-tag v-if="row.state === 'modified'" type="warning" size="small" style="margin-left: 6px">已修改</el-tag>
+            <el-tag v-else-if="row.state === 'added'" type="success" size="small" style="margin-left: 6px">新增</el-tag>
+          </template>
         </el-table-column>
-        <el-table-column prop="type" label="类型" width="80" />
-        <el-table-column prop="value" label="Value" min-width="220" show-overflow-tooltip>
-          <template #default="{ row }"><span class="mono">{{ row.value }}</span></template>
+        <el-table-column label="生效值" min-width="180" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span v-if="row.effective !== undefined" class="mono dim">{{ row.effective }}</span>
+            <span v-else class="none">—（无）</span>
+          </template>
         </el-table-column>
-        <el-table-column label="更新时间" width="170">
-          <template #default="{ row }">{{ new Date(row.updatedAt).toLocaleString() }}</template>
+        <el-table-column label="草稿值" min-width="180" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span v-if="row.draft" class="mono" :class="{ hl: row.state !== 'clean' }">{{ row.draft }}</span>
+            <span v-else class="none">（发布后将移除）</span>
+          </template>
         </el-table-column>
         <el-table-column label="操作" width="120">
           <template #default="{ row }">
-            <el-button text type="primary" size="small" @click="openEdit(row)">编辑</el-button>
-            <el-button text type="danger" size="small" :loading="removing === row.id" @click="remove(row)">删除</el-button>
+            <el-button text type="primary" size="small" @click="openEdit(row)">{{ row.draft ? '编辑' : '重新新增' }}</el-button>
+            <el-button v-if="row.draft" text type="danger" size="small" @click="remove(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -312,39 +507,55 @@ watch(envId, init)
       </el-table>
     </section>
 
-    <!-- 泳道覆盖（key 级差异集，即时生效，随泳道回收消失） -->
-    <section class="cfg-group">
+    <!-- 泳道灰度验证（key 级覆盖，即时生效，随泳道回收消失；验证后可提升到基线） -->
+    <section class="cfg-group" v-if="selEnv">
       <div class="group-title">
-        泳道覆盖
-        <span class="lane-hint">即时生效（无需发布）· 随泳道回收消失 · 服务端 merge 到基线快照上</span>
+        泳道灰度验证
+        <span class="lane-hint">先发泳道验证 → 提升到基线 · 覆盖即时生效 · 随泳道回收消失</span>
       </div>
       <div class="lane-bar">
         <el-select v-model="laneSel" placeholder="选择泳道" size="small" style="width: 240px" clearable>
           <el-option v-for="l in lanes" :key="l.name" :value="l.name" :label="l.name + (l.mode === 'permanent' ? '（常驻）' : '')" />
         </el-select>
-        <el-button size="small" type="primary" :disabled="!laneSel" @click="openOvAdd">+ 新增覆盖</el-button>
+        <el-button size="small" :disabled="!laneSel" @click="openOvAdd">+ 单项覆盖</el-button>
+        <el-button v-if="laneSel && overrides.length" size="small" type="warning" :loading="promoting" @click="promoteLane">
+          提升到基线（{{ overrides.length }} 项）
+        </el-button>
       </div>
-      <el-table
-v-if="laneSel" v-loading="laneLoading" :data="overrides" size="small"
-        empty-text="该泳道暂无覆盖；覆盖后带该泳道发现的客户端立即拿到差异值，基线不变。"
+      <template v-if="laneSel">
+        <el-table
+v-loading="laneLoading" :data="overrides" size="small"
+          empty-text="该泳道暂无覆盖。可在发布弹窗选择「泳道」目标，把当前待发布变更作为覆盖先发到此泳道验证。"
 >
-        <el-table-column prop="key" label="Key" min-width="180">
-          <template #default="{ row }"><span class="mono">{{ row.key }}</span></template>
-        </el-table-column>
-        <el-table-column prop="value" label="覆盖值" min-width="220" show-overflow-tooltip>
-          <template #default="{ row }"><span class="mono">{{ row.value }}</span></template>
-        </el-table-column>
-        <el-table-column label="更新时间" width="170">
-          <template #default="{ row }">{{ new Date(row.updatedAt).toLocaleString() }}</template>
-        </el-table-column>
-        <el-table-column label="操作" width="90">
-          <template #default="{ row }">
-            <el-button text type="danger" size="small" :loading="ovRemoving === row.key" @click="removeOverride(row)">删除</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
+          <el-table-column prop="key" label="Key" min-width="150">
+            <template #default="{ row }"><span class="mono">{{ row.key }}</span></template>
+          </el-table-column>
+          <el-table-column label="覆盖值" min-width="160" show-overflow-tooltip>
+            <template #default="{ row }"><span class="mono hl">{{ row.value }}</span></template>
+          </el-table-column>
+          <el-table-column label="基线值" min-width="160" show-overflow-tooltip>
+            <template #default="{ row }">
+              <span v-if="published?.snapshot && row.key in published.snapshot" class="mono dim">{{ published.snapshot[row.key] }}</span>
+              <span v-else class="none">—（基线无此 key）</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="90">
+            <template #default="{ row }">
+              <el-button text type="danger" size="small" :loading="ovRemoving === row.key" @click="removeOverride(row)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <!-- 服务端真实 merge 预览：泳道实例实际拿到的完整配置 -->
+        <div v-if="mergedPreview?.published" class="merge-preview">
+          <div class="mp-title">泳道实例实际生效（服务端 merge 结果 · v{{ mergedPreview.version }}<template v-if="mergedPreview.overrideHash"> + 覆盖</template>）：</div>
+          <div class="mp-body mono">
+            <div v-for="[k, v] in snapshotEntries(mergedPreview.snapshot)" :key="k">
+              <span class="dim">{{ k }}</span> = <span :class="{ hl: overrides.some(o => o.key === k) }">{{ v }}</span>
+            </div>
+          </div>
+        </div>
+      </template>
     </section>
-    </template>
 
     <!-- 编辑弹窗（基线 draft） -->
     <el-dialog v-model="showEdit" :title="form.id ? '编辑动态配置' : '新增动态配置'" width="500px">
@@ -369,7 +580,7 @@ v-if="laneSel" v-loading="laneLoading" :data="overrides" size="small"
       </template>
     </el-dialog>
 
-    <!-- 泳道覆盖弹窗 -->
+    <!-- 泳道单项覆盖弹窗 -->
     <el-dialog v-model="showOvEdit" title="新增泳道覆盖" width="500px">
       <div class="ov-hint">覆盖即时生效：带泳道 <code>{{ laneSel }}</code> 发现的客户端立即拿到该值；其余实例不受影响。</div>
       <el-form label-width="70px">
@@ -387,11 +598,61 @@ v-if="laneSel" v-loading="laneLoading" :data="overrides" size="small"
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- 发布确认弹窗（带 diff + 目标二选一） -->
+    <el-dialog v-model="showPub" title="发布动态配置" width="620px">
+      <div class="pub-target">
+        <span class="pt-label">发布到：</span>
+        <el-radio-group v-model="pubTarget">
+          <el-radio value="baseline">基线（全量生效 · 新版本 v{{ (curActiveVer ?? 0) + 1 }}）</el-radio>
+          <el-radio value="lane" :disabled="!lanes.length">泳道（灰度验证 · 仅该泳道实例）</el-radio>
+        </el-radio-group>
+        <el-select v-if="pubTarget === 'lane'" v-model="pubLane" size="small" style="width: 220px; margin-left: 12px" placeholder="选择泳道">
+          <el-option v-for="l in lanes" :key="l.name" :value="l.name" :label="l.name + (l.mode === 'permanent' ? '（常驻）' : '')" />
+        </el-select>
+      </div>
+      <div class="pub-diff-title">
+        即将发布 {{ pendingCount.modified + pendingCount.added }} 项变更
+        <template v-if="curActiveVer">（v{{ curActiveVer }} → v{{ curActiveVer + 1 }}）</template>：
+      </div>
+      <div class="pub-diff">
+        <div v-for="r in diffRows.filter(x => x.state !== 'clean')" :key="r.key" class="diff-row">
+          <el-tag :type="r.state === 'added' ? 'success' : 'warning'" size="small">{{ r.state === 'added' ? '新增' : '修改' }}</el-tag>
+          <span class="mono dk">{{ r.key }}</span>
+          <span v-if="r.effective !== undefined" class="mono dim">{{ r.effective }}</span>
+          <span v-if="r.effective !== undefined" class="arrow">→</span>
+          <span class="mono hl">{{ r.draft || '（移除）' }}</span>
+        </div>
+      </div>
+      <div v-if="pubTarget === 'lane'" class="ov-hint" style="margin-top: 10px">
+        泳道发布以 key 级覆盖写入（即时生效、无版本记录、随泳道回收消失）；验证通过后在「泳道灰度验证」区提升到基线。
+      </div>
+      <template #footer>
+        <el-button @click="showPub = false">取消</el-button>
+        <el-button type="primary" :disabled="publishing" @click="confirmPublish">
+          {{ publishing ? '发布中…' : (pubTarget === 'lane' ? `发布到泳道` : '确认发布') }}
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <style scoped>
 .dyn-block { margin-top: 8px; }
+.env-tabs { display: flex; gap: 6px; margin-bottom: 12px; flex-wrap: wrap; }
+.env-tab {
+  padding: 5px 14px; border: 1px solid var(--border, #dcdfe6); border-radius: 6px;
+  background: transparent; cursor: pointer; font-size: 12.5px; color: var(--text-dim, #909399);
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.env-tab.active { border-color: var(--el-color-primary); color: var(--el-color-primary); font-weight: 600; }
+.env-tab.prod { border-left: 3px solid var(--danger, #f56c6c); }
+.env-tab.prod.active { color: var(--danger, #f56c6c); border-color: var(--danger, #f56c6c); }
+.tab-ver { font-size: 11px; }
+.prod-warn {
+  font-size: 12px; color: var(--danger, #f56c6c); margin-bottom: 10px;
+  padding: 6px 10px; background: rgba(245, 108, 108, 0.08); border-radius: 4px;
+}
 .block-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
 .block-title { font-size: 14px; font-weight: 600; margin-right: 10px; }
 .block-hint { font-size: 12px; color: var(--text-dim); }
@@ -401,11 +662,24 @@ v-if="laneSel" v-loading="laneLoading" :data="overrides" size="small"
   font-size: 13px; font-weight: 600; color: var(--text-dim); margin-bottom: 8px;
 }
 .group-cnt { font-size: 11px; color: var(--text-faint); padding: 1px 7px; background: var(--surface-2, transparent); border-radius: 8px; }
+.pending-hint { font-size: 11.5px; font-weight: 400; color: var(--warning, #e6a23c); }
 .lane-hint { font-size: 11.5px; font-weight: 400; color: var(--text-faint); }
 .lane-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-.env-hint { font-size: 13px; color: var(--text-faint); padding: 20px 0; }
 .ver-tag { padding: 2px 8px; background: var(--success-soft); color: var(--success); border-radius: 4px; font-size: 12px; }
 .none { font-size: 12px; color: var(--text-faint); font-weight: 400; }
 .ov-hint { font-size: 12.5px; color: var(--text-dim); margin-bottom: 12px; }
 .mono { font-family: var(--font-mono, monospace); }
+.mono.dim { color: var(--text-faint); }
+.mono.hl { background: rgba(230, 162, 60, 0.12); border-radius: 3px; padding: 0 3px; }
+.merge-preview { margin-top: 10px; padding: 10px 12px; border: 1px dashed var(--border, #dcdfe6); border-radius: 6px; }
+.mp-title { font-size: 12px; color: var(--text-dim); margin-bottom: 6px; }
+.mp-body { font-size: 11.5px; max-height: 180px; overflow: auto; line-height: 1.8; }
+.mp-body .dim { color: var(--text-faint); }
+.pub-target { display: flex; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+.pt-label { font-size: 13px; margin-right: 8px; }
+.pub-diff-title { font-size: 13px; margin-bottom: 8px; }
+.pub-diff { max-height: 260px; overflow: auto; border: 1px solid var(--border, #dcdfe6); border-radius: 6px; padding: 8px 12px; }
+.diff-row { display: flex; align-items: center; gap: 10px; padding: 4px 0; font-size: 12px; }
+.diff-row .dk { font-weight: 600; min-width: 120px; }
+.diff-row .arrow { color: var(--text-faint); }
 </style>

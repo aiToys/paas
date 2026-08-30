@@ -123,6 +123,10 @@ func (h *AppHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveItemDelete(w, r, appID, r.URL.Query().Get("envId"), sub[1])
 	case len(sub) == 2 && sub[0] == "rollback":
 		h.serveRollback(w, r, appID, r.URL.Query().Get("envId"), sub[1])
+	case len(sub) == 2 && sub[0] == "lane-overrides" && sub[1] == "promote":
+		// 精确匹配先于通配 lane-overrides/{key} DELETE（promote 是保留字，key 不会叫 promote——
+		// DELETE /lane-overrides/promote 会被此分支吃掉返 405，可接受：key 命名空间保留字）。
+		h.serveLanePromote(w, r, appID, r.URL.Query().Get("envId"), r.URL.Query().Get("lane"))
 	case sub[0] == "lane-overrides":
 		h.serveLaneOverrides(w, r, appID, r.URL.Query().Get("envId"), r.URL.Query().Get("lane"), parts[3:])
 	default:
@@ -463,6 +467,64 @@ func (h *AppHandler) serveLaneOverrides(w http.ResponseWriter, r *http.Request, 
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+// serveLanePromote POST /dynamic-configs/lane-overrides/promote 泳道灰度提升到基线：
+// 覆盖合并进基线 draft（UpsertItem 覆盖值）→ CreatePublish 新版本 → 逐 key 删覆盖。
+// 失败语义：合并/发布失败时不删覆盖（泳道维持原状，可重试）；删覆盖失败则新版本已生效
+// 但覆盖残留（幂等重试 promote 会因空集 400，提示手动清理——接受此边界，不做分布式事务）。
+// 权限与 publish 对称（application:write + AppGuard write + prod 闸门——提升即全量生效）。
+func (h *AppHandler) serveLanePromote(w http.ResponseWriter, r *http.Request, appID, envID, lane string) {
+	if r.Method != http.MethodPost {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if lane == "" || lane == "default" {
+		httputil.WriteError(w, http.StatusBadRequest, "lane 参数必填且非 default")
+		return
+	}
+	if !h.allowWrite(w, r, appID, envID) {
+		return
+	}
+	ns, err := h.ensureAppNS(w, r, appID, envID)
+	if err != nil {
+		return
+	}
+	// 直接按精确 (app, env, lane) 取覆盖（不走 env 回退——提升的是用户在页面上看到的那个 env 的泳道覆盖）
+	ovs, err := h.repo.ListLaneOverrides(r.Context(), appID, envID, lane)
+	if err != nil {
+		httputil.WriteInternalError(w, err)
+		return
+	}
+	if len(ovs) == 0 {
+		httputil.WriteError(w, http.StatusBadRequest, "该泳道无覆盖可提升")
+		return
+	}
+	// ① 覆盖值合并进基线 draft（同 key 覆盖更新）
+	for _, o := range ovs {
+		if _, err := h.repo.UpsertItem(r.Context(), ConfigItem{
+			NamespaceID: ns.ID, Key: o.Key, Value: o.Value,
+		}); err != nil {
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
+			return // 不删覆盖，可重试
+		}
+	}
+	// ② 发新版本（快照含覆盖值）
+	pub, err := h.repo.CreatePublish(r.Context(), ns.ID)
+	if err != nil {
+		httputil.WriteServiceError(w, http.StatusBadRequest, err)
+		return // 同上，覆盖未动
+	}
+	// ③ 逐 key 删覆盖（新版本已生效；失败则覆盖残留，幂等重试 400 提示手动清理）
+	for _, o := range ovs {
+		if err := h.repo.DeleteLaneOverride(r.Context(), appID, envID, lane, o.Key); err != nil {
+			httputil.WriteServiceError(w, http.StatusInternalServerError, fmt.Errorf("新版本 v%d 已发布，但清理泳道覆盖失败（key=%s）：请手动删除残留覆盖", pub.Version, o.Key))
+			return
+		}
+	}
+	h.recordAudit(r.Context(), ns.TenantID, "configcenter_lane_promote", appID,
+		fmt.Sprintf("lane=%s,version=%d,keys=%d,envId=%s", lane, pub.Version, len(ovs), envID))
+	httputil.WriteDataCreated(w, pub)
 }
 
 // recordAudit 记审计（best-effort，失败仅日志不阻断主流程）。
