@@ -685,7 +685,7 @@ internal/governance/  领域(Service http|grpc + Instance healthy|unhealthy + La
 
 - **应用维度 REST**（`internal/configcenter/app_handler.go`，挂 application composite `dynamic-configs` 分发）：`GET/POST /api/applications/{id}/dynamic-configs`（列表自动懒建/upsert）+ `DELETE .../items/{itemId}`（归属校验防跨 ns 越权）+ `POST .../publish`（记审计 `configcenter_publish`）+ `GET .../publishes|published`（只读走 FindAppNamespace 不懒建）。删应用级联清 app ns（appCascadeDeleter `cc` 字段）。
 - **按应用名发现**（数据面主入口）：`GET /api/configcenter/apps/{appName}/published`（`AppLookup` 依赖倒置桥接 application.List 按名匹配，租户过滤）；响应裸 JSON `{published,version,snapshot}`（不含 publishId）；未知应用/无 ns/无 active 三路统一 `{"published":false}` 不泄漏。
-- **前端**：应用详情「配置」tab 加「动态配置」子区（`app-tabs/AppDynamicConfigs.vue`：draft KV + 发布/回滚 useDangerConfirm + 当前生效 + 版本历史）；ConfigCenter 页双视图（默认「按应用」/「共享配置」保留 ns CRUD，`?serviceId=` 兼容）。
+- **前端**：应用详情「配置」tab 加「动态配置」子区（`app-tabs/AppDynamicConfigs.vue`：配置项 KV + 发布生效/回滚 useDangerConfirm + 生效版本 tag + 版本历史）；ConfigCenter 页双视图（默认「按应用」/「共享配置」保留 ns CRUD，`?serviceId=` 兼容）。**UX 简化（2026-08-30）**：两页面删「当前生效」独立展示区（与发布历史 active 条重复），生效状态收敛为标题行 tag（`生效中 vN`/`未发布`），页面为 配置项+发布历史 两段；文案去 draft 术语（「发布生效」）。
 - **dogfooding**：paas-shop chatbot 接入（examples `chatbot/dynconfig.go`）——启动拉取 + 60s 轮询按名发现，version 比对原子替换（RWMutex），消费 `welcome_message`/`recommend_topk`，失败静默降级默认值不 panic。e2e 已验证：upsert→publish→按名发现→跨租户不泄漏→chatbot 热更新。
 - 留后续：EnsureByApp 不校验 app 存在性（孤儿 ns，仿 ServiceLookup 可补）、AppIDByName O(N) 优化、shared 应用侧引用（Nacos common.yml 模式）、长连接 watch、灰度下发、key/value 长度上限、json 类型不校验、发布历史上限、前端快照 KV 组件抽取。
 - **10 轮深度审计修复（2026-08-30）**：修 PG 并发双 active（migration 0037 partial unique index `uq_cc_publishes_ns_active` + 存量脏数据保留最大 version 清理 + RollbackPublish 读 target 加 `FOR UPDATE`）；审计全覆盖（ns 维度 Handler 注入 `AuditFunc`，6 写操作 `configcenter_*` 审计 + app 维度补 item upsert/delete）；死端点收口（删 `GET /api/configcenter/publishes` 注册+登记，补 ns 级 publishes / items delete 两条漏登 Operation）；领域 sentinel 化（`ErrNamespaceNameTaken` 等，409 判定删 strings.Contains 中文匹配）；rollback/itemDelete 不懒建（FindAppNamespace 不存在 404）；精简（memory Seed 三死函数 + pg Count 三方法 + 锁外预检删除 + `itemBelongsToNS`/`writePublishedJSON` helper 收敛）；前端修 `cur` 未解包 `{data:T}`（详情页写操作全挂）、加载失败不再静默、radio 切换清 `?serviceId=` 残留、确认强度统一不随顶栏 env 漂移。
@@ -701,7 +701,7 @@ internal/configcenter/  领域(Namespace + ConfigItem draft + Publish 不可变�
 - Repository 单 Store 实现三接口（`ListNamespaces/CreateNamespace/...`、`ListItems/UpsertItem/DeleteItem`、`ListPublishes/CreatePublish/RollbackPublish/ActivePublish`）；全方法租户强制过滤；`DeleteNamespace` 级联清 item+publish。
 - REST：namespace CRUD + `GET/POST /items`、`POST /publish`、`GET /publishes`、`GET /published`（客户端发现）、`POST /publishes/{pid}/rollback`。
 - mock：客户端主动拉 version 比对（不做长连接监听）；灰度/审计/diff/数据面热更新留后续。
-- console-user「平台能力 → 配置中心」`/platform/config-center`（命名空间列表）+ `/:nsId`（详情：当前生效配置发现视图 + draft 配置项 + 发布历史 + 发布/回滚）。
+- console-user「平台能力 → 配置中心」`/platform/config-center`（命名空间列表）+ `/:nsId`（详情：配置项编辑 + 发布历史 + 发布/回滚）。
 - **产品区分已落地**：appconfig（应用详情→配置 tab，静态重启注入）vs configcenter（平台能力→配置中心，动态版本热更新）是两个层面，UI 与实现完全独立。
 
 ### 可观测（指标监控 + 日志聚合 + 链路追踪 + 告警，平台能力横切）
