@@ -12,9 +12,16 @@ export function usePolling(
   opts?: { active?: () => boolean },
 ): void {
   let timer: number | undefined
-  const tick = () => {
+  let inFlight = false // 上一次 fn 未返回时跳过本次 tick，防慢请求堆叠
+  const tick = async () => {
+    if (inFlight) return
     if (opts?.active && !opts.active()) return
-    fn()
+    inFlight = true
+    try {
+      await fn()
+    } finally {
+      inFlight = false
+    }
   }
 
   function start() {
