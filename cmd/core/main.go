@@ -27,7 +27,6 @@ import (
 	"github.com/aitoys/paas/internal/ai/skill"
 	"github.com/aitoys/paas/internal/ai/tool"
 	"github.com/aitoys/paas/internal/apiroute"
-	"github.com/aitoys/paas/internal/crypto"
 	"github.com/aitoys/paas/internal/appconfig"
 	"github.com/aitoys/paas/internal/backup"
 	"github.com/aitoys/paas/internal/billing"
@@ -39,6 +38,7 @@ import (
 	"github.com/aitoys/paas/internal/core/health"
 	"github.com/aitoys/paas/internal/core/identity"
 	coreplugin "github.com/aitoys/paas/internal/core/plugin"
+	"github.com/aitoys/paas/internal/crypto"
 	"github.com/aitoys/paas/internal/dashboard"
 	"github.com/aitoys/paas/internal/dataplane"
 	"github.com/aitoys/paas/internal/dataservice"
@@ -181,6 +181,8 @@ func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, metrics
 			}
 		},
 		Audit: &identityAuditAdapter{store: stores.Security}, // lane_gc 审计（spec 承诺，审计只增不删）
+		// 泳道全组回收后级联清配置中心泳道覆盖（发现回落基线，spec 验收 3）。
+		Cleaners: []workload.LaneOverrideCleaner{configcenter.NewLaneOverrideCleaner(stores.ConfigCenter)},
 	}
 	if v := envDuration("PAAS_LANE_GC_INTERVAL", 30*time.Minute); v > 0 {
 		stopGC := gc.Start(ctx, v)

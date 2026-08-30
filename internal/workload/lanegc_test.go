@@ -233,3 +233,73 @@ func (f *laneFilterRepo) List(_ context.Context, _, _, laneID, _, _ string) ([]W
 	}
 	return out, nil
 }
+
+type fakeOverrideCleaner struct {
+	cleaned []string // "tenantID/envID/laneID"
+	err     error
+}
+
+func (f *fakeOverrideCleaner) CleanLane(ctx context.Context, tenantID, envID, laneID string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.cleaned = append(f.cleaned, tenantID+"/"+envID+"/"+laneID)
+	return nil
+}
+
+// 回收路径级联清配置中心泳道覆盖：Sweep（同泳道全删完才清，与 MarkClosed 同款时机）
+func TestSweepCleansLaneOverrides(t *testing.T) {
+	g, _ := newGC([]Workload{
+		wl("w1", "feature-x", gcOld), wl("w2", "feature-x", gcOld), wl("w3", "default", gcOld),
+	}, nil)
+	oc := &fakeOverrideCleaner{}
+	g.Cleaners = []LaneOverrideCleaner{oc}
+	g.Sweep(context.Background())
+	if len(oc.cleaned) != 1 || oc.cleaned[0] != "t1/e1/feature-x" {
+		t.Fatalf("同泳道全部回收后应清覆盖, got %v", oc.cleaned)
+	}
+}
+
+// 部分删除（MaxSweep 截断）不清：同泳道仍有剩余 workload，覆盖保留
+func TestSweepPartialDeleteSkipsClean(t *testing.T) {
+	g, _ := newGC([]Workload{
+		wl("w1", "feature-x", gcOld), wl("w2", "feature-x", gcOld),
+	}, nil)
+	g.MaxSweep = 1 // 只删 1 个，另一条下轮
+	oc := &fakeOverrideCleaner{}
+	g.Cleaners = []LaneOverrideCleaner{oc}
+	if n := g.Sweep(context.Background()); n != 1 {
+		t.Fatalf("应删 1 个, got %d", n)
+	}
+	if len(oc.cleaned) != 0 {
+		t.Fatalf("部分删除不应清覆盖, got %v", oc.cleaned)
+	}
+}
+
+// 清理失败 best-effort：不 panic 不阻断（MarkClosed 照常）
+func TestSweepCleanErrorBestEffort(t *testing.T) {
+	g, _ := newGC([]Workload{wl("w1", "feature-x", gcOld)}, nil)
+	g.Cleaners = []LaneOverrideCleaner{&fakeOverrideCleaner{err: context.DeadlineExceeded}}
+	if n := g.Sweep(context.Background()); n != 1 {
+		t.Fatalf("应删 1 个, got %d", n)
+	}
+}
+
+// ReclaimLane（lane handler 关闭泳道）同样级联清覆盖
+func TestReclaimLaneCleansOverrides(t *testing.T) {
+	repo := &gcFakeRepo{items: []Workload{wl("w1", "feature-x", gcOld), wl("w2", "default", gcOld)}}
+	repo.list = repo.items
+	g := &LaneGC{
+		Repos:   &laneFilterRepo{gcFakeRepo: repo, lane: "feature-x"},
+		Runs:    gcFakeRuns{},
+		EnvType: func(context.Context, string) (string, error) { return "test", nil },
+	}
+	oc := &fakeOverrideCleaner{}
+	g.Cleaners = []LaneOverrideCleaner{oc}
+	if _, err := g.ReclaimLane(context.Background(), "t1", "e1", "feature-x"); err != nil {
+		t.Fatalf("ReclaimLane: %v", err)
+	}
+	if len(oc.cleaned) != 1 || oc.cleaned[0] != "t1/e1/feature-x" {
+		t.Fatalf("ReclaimLane 应清覆盖, got %v", oc.cleaned)
+	}
+}

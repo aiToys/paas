@@ -73,3 +73,11 @@ type PublishStore interface {
 type ServiceLookup interface {
 	ServiceExists(ctx context.Context, serviceID string) (bool, error)
 }
+
+// LaneOverrideCleaner 泳道回收级联清理（依赖倒置：workload/lane 回收路径消费，
+// configcenter 侧实现，避免下游模块 import configcenter）。
+// 按 (tenant, env, lane) 跨 app 全量清理——LaneGC 按泳道维度回收（多 app），清理同维度。
+type LaneOverrideCleaner interface {
+	// CleanLane 物理删除该 (tenant, env, lane) 的全部覆盖（泳道已消失，覆盖无保留价值）。
+	CleanLane(ctx context.Context, tenantID, envID, laneID string) error
+}

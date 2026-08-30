@@ -32,6 +32,12 @@ type QuotaDec func(ctx context.Context, tenantID string)
 // laneModePermanent 与 lane.ModePermanent 对齐（workload 不 import lane，靠桥接层保证一致）。
 const laneModePermanent = "permanent"
 
+// LaneOverrideCleaner 泳道配置覆盖级联清理（依赖倒置：configcenter.LaneOverrideCleaner 同形接口，
+// workload 不 import configcenter，靠 cmd/core 桥接保证一致）。
+type LaneOverrideCleaner interface {
+	CleanLane(ctx context.Context, tenantID, envID, laneID string) error
+}
+
 // LaneStatusStore 泳道实体的模式/状态查询（依赖倒置：workload 不 import lane）。
 // Mode 返回 lane.Mode；无实体（纯遗留泳道）返 "" 照旧回收。
 // MarkClosed 回收后同步实体 closed（无实体忽略；best-effort，失败不阻断回收）。
@@ -48,12 +54,13 @@ type LaneGC struct {
 	Runs     LaneActivityChecker
 	Lanes    LaneStatusStore // 可空（nil 跳过实体联动：无 permanent 跳过/无 MarkClosed）
 	EnvType  EnvType
-	Quota    QuotaDec           // 可空（nil 跳过配额回退）
-	TTL      time.Duration      // 闲置阈值（默认 72h）
-	MaxSweep int                // 单轮删除上限（默认 20）
-	Now      func() time.Time   // 测试注入时钟
-	Log      *log.Logger        // 可空（nil 用 log.Default）
-	Audit    AdminAuditRecorder // 可空（nil 跳过审计）；回收是删除用户资源，审计只增不删（合规）
+	Quota    QuotaDec              // 可空（nil 跳过配额回退）
+	TTL      time.Duration         // 闲置阈值（默认 72h）
+	MaxSweep int                   // 单轮删除上限（默认 20）
+	Now      func() time.Time      // 测试注入时钟
+	Log      *log.Logger           // 可空（nil 用 log.Default）
+	Audit    AdminAuditRecorder    // 可空（nil 跳过审计）；回收是删除用户资源，审计只增不删（合规）
+	Cleaners []LaneOverrideCleaner // 可空；泳道全组回收后级联清依赖资源（如配置中心泳道覆盖），best-effort
 }
 
 // Sweep 执行一轮回收，返回删除数。单轮上限 MaxSweep（防 TTL 误配短引发雪崩）；
@@ -150,7 +157,9 @@ func (g *LaneGC) Sweep(ctx context.Context) int {
 	for lk, n := range laneDeletedCnt {
 		if laneRemaining[lk] == 0 && n > 0 {
 			parts := strings.SplitN(lk, "/", 3)
-			g.markLaneClosed(tenant.WithTenant(ctx, parts[0]), parts[1], parts[2])
+			wctx := tenant.WithTenant(ctx, parts[0])
+			g.markLaneClosed(wctx, parts[1], parts[2])
+			g.cleanLaneOverrides(wctx, parts[0], parts[1], parts[2])
 		}
 	}
 	return deleted
@@ -176,6 +185,19 @@ func (g *LaneGC) markLaneClosed(ctx context.Context, envID, laneName string) {
 	}
 	if err := g.Lanes.MarkClosed(ctx, envID, laneName); err != nil {
 		g.logf("laneGC: mark lane closed env=%s lane=%s: %v", envID, laneName, err)
+	}
+}
+
+// cleanLaneOverrides 泳道全组回收后级联清依赖资源（当前：配置中心泳道覆盖）。
+// best-effort：失败仅日志，不阻断回收（覆盖遗留不影响正确性——泳道已消失，无人带该 lane 拉配置）。
+func (g *LaneGC) cleanLaneOverrides(wctx context.Context, tenantID, envID, laneName string) {
+	for _, c := range g.Cleaners {
+		if c == nil {
+			continue
+		}
+		if err := c.CleanLane(wctx, tenantID, envID, laneName); err != nil {
+			g.logf("laneGC: clean lane overrides env=%s lane=%s: %v", envID, laneName, err)
+		}
 	}
 }
 
@@ -207,6 +229,7 @@ func (g *LaneGC) ReclaimLane(ctx context.Context, tenantID, envID, laneName stri
 	}
 	if deleted > 0 {
 		g.markLaneClosed(wctx, envID, laneName)
+		g.cleanLaneOverrides(wctx, tenantID, envID, laneName)
 	}
 	return deleted, nil
 }
