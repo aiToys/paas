@@ -272,6 +272,10 @@ func (h *AppHandler) servePublish(w http.ResponseWriter, r *http.Request, appID,
 	}
 	pub, err := h.repo.CreatePublish(r.Context(), ns.ID)
 	if err != nil {
+		if errors.Is(err, ErrNoChanges) {
+			httputil.WriteError(w, http.StatusConflict, err.Error())
+			return
+		}
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}

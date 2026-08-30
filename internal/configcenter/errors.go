@@ -14,6 +14,9 @@ var (
 	ErrPublishNotFound = errors.New("发布不存在")
 	// ErrPublishAlreadyActive 发布已是当前生效版本（回滚拒绝，handler 映射 409）。
 	ErrPublishAlreadyActive = errors.New("发布已是当前生效版本")
+	// ErrNoChanges 新快照与当前 active 完全一致（空发布拒绝，handler 映射 409）——
+	// 防无变更重复发布虚涨版本号、污染发布历史与回滚目标。
+	ErrNoChanges = errors.New("配置无变更，无需发布")
 )
 
 // ErrLaneOverrideNotFound 泳道配置覆盖不存在（删除不存在的 key 时返回）。

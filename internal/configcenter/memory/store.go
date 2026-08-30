@@ -350,6 +350,16 @@ func (s *Store) CreatePublish(ctx context.Context, namespaceID string) (configce
 			snapshot[it.Key] = it.Value
 		}
 	}
+	// 空发布拒绝：新快照与当前 active 完全一致 → ErrNoChanges（锁内比较，
+	// 防 API 直调/前端状态错位产出内容相同的空版本虚涨版本号）。
+	for _, p := range s.publishes {
+		if p.TenantID == tid && p.NamespaceID == namespaceID && p.Status == configcenter.StatusActive {
+			if configcenter.SnapshotsEqual(p.Snapshot, snapshot) {
+				return configcenter.Publish{}, configcenter.ErrNoChanges
+			}
+			break // active 唯一（发布时翻态保证），找到即止
+		}
+	}
 	for _, p := range s.publishes {
 		if p.TenantID == tid && p.NamespaceID == namespaceID && p.Version > maxVersion {
 			maxVersion = p.Version

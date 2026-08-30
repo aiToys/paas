@@ -127,7 +127,7 @@ func writeUnpublishedJSON(w http.ResponseWriter) {
 // writeNamespaceErr 按 sentinel 错误统一映射：名字冲突 → 409（引导改名），
 // 其余业务错误 → 400，底层技术错误由 WriteServiceError 内部脱敏为 500。
 func writeNamespaceErr(w http.ResponseWriter, err error) {
-	if errors.Is(err, ErrNamespaceNameTaken) {
+	if errors.Is(err, ErrNamespaceNameTaken) || errors.Is(err, ErrNoChanges) {
 		httputil.WriteError(w, http.StatusConflict, err.Error())
 		return
 	}

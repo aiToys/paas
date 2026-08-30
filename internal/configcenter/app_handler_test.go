@@ -411,6 +411,8 @@ func TestAppDynamicConfigsPublishHistory(t *testing.T) {
 	req = req.WithContext(ctx)
 	h.ServeHTTP(httptest.NewRecorder(), req)
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/applications/app-1/dynamic-configs/publish", nil).WithContext(ctx))
+	// 改值再发布 v2（空发布被 ErrNoChanges 拒）
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/applications/app-1/dynamic-configs", strings.NewReader(`{"key":"k","value":"v2"}`)).WithContext(ctx))
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("POST", "/api/applications/app-1/dynamic-configs/publish", nil).WithContext(ctx))
 
 	rec = run("/api/applications/app-1/dynamic-configs/publishes")
@@ -1064,5 +1066,47 @@ func TestPublishedSharedSnapshotField(t *testing.T) {
 	{
 		req := httptest.NewRequest("GET", "/api/configcenter/apps/Nope/published", nil)
 		_ = req
+	}
+}
+
+// TestPublishNoChangesRejected 锁住空发布闸门：draft 与 active 完全一致时 publish 409，
+// 改值后放行（防无变更重复发布虚涨版本号——应用维度与 shared ns 维度同款语义）。
+func TestPublishNoChangesRejected(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewAppHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	run := func(method, path, body string) *httptest.ResponseRecorder {
+		var rd io.Reader
+		if body != "" {
+			rd = strings.NewReader(body)
+		}
+		r := httptest.NewRequest(method, path, rd)
+		r = r.WithContext(ctx)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+
+	run("POST", "/api/applications/app-1/dynamic-configs", `{"key":"k","value":"v"}`)
+	if rec := run("POST", "/api/applications/app-1/dynamic-configs/publish", ""); rec.Code != 201 {
+		t.Fatalf("首次发布应 201: %d %s", rec.Code, rec.Body.String())
+	}
+	// 无变更再发布 → 409
+	if rec := run("POST", "/api/applications/app-1/dynamic-configs/publish", ""); rec.Code != 409 {
+		t.Fatalf("空发布应 409: %d %s", rec.Code, rec.Body.String())
+	}
+	// 版本仍 1
+	pub := run("GET", "/api/applications/app-1/dynamic-configs/published", "")
+	if !strings.Contains(pub.Body.String(), `"version":1`) {
+		t.Fatalf("版本应仍 1: %s", pub.Body.String())
+	}
+	// 改值后放行 → v2
+	run("POST", "/api/applications/app-1/dynamic-configs", `{"key":"k","value":"v2"}`)
+	if rec := run("POST", "/api/applications/app-1/dynamic-configs/publish", ""); rec.Code != 201 {
+		t.Fatalf("变更后发布应 201: %d %s", rec.Code, rec.Body.String())
+	}
+	if pub := run("GET", "/api/applications/app-1/dynamic-configs/published", ""); !strings.Contains(pub.Body.String(), `"version":2`) {
+		t.Fatalf("应 v2: %s", pub.Body.String())
 	}
 }

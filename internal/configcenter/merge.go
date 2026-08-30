@@ -116,3 +116,17 @@ func SharedHash(shared []SharedLayer) string {
 	}
 	return fmtHexHash(h)
 }
+
+// SnapshotsEqual 两个快照 deep equal（nil 与空 map 视为相等）。
+// CreatePublish 空发布拒绝用（新快照 == 当前 active → ErrNoChanges）。
+func SnapshotsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
+}

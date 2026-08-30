@@ -3,8 +3,10 @@ package memory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/aitoys/paas/internal/configcenter"
 	"github.com/aitoys/paas/pkg/tenant"
@@ -115,7 +117,8 @@ func TestRollback(t *testing.T) {
 	nsID := mustCreateNs(t, s, acmeCtx(), "acme-app")
 	mustUpsertItem(t, s, acmeCtx(), nsID, "feature.newui", "off")
 	v1 := mustPublish(t, s, acmeCtx(), nsID)
-	// 再发布一版（v2，v1 转 rolled-back）
+	// 再发布一版（v2，v1 转 rolled-back；先改值——空发布被 ErrNoChanges 拒绝）
+	mustUpsertItem(t, s, acmeCtx(), nsID, "feature.newui", "on")
 	mustPublish(t, s, acmeCtx(), nsID)
 	// 回滚到 v1
 	rb, err := s.RollbackPublish(acmeCtx(), v1.ID)
@@ -230,6 +233,8 @@ func TestCreatePublishConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			// 每次发布前改值——并发测试意图是 version 唯一性，空发布会被 ErrNoChanges 拒
+			mustUpsertItem(t, s, ctx, nsID, "k", fmt.Sprintf("v-%d", time.Now().UnixNano()))
 			pub, err := s.CreatePublish(ctx, nsID)
 			if err != nil {
 				t.Errorf("并发发布失败: %v", err)

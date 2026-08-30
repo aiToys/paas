@@ -3,7 +3,7 @@
 // 命名空间列表 + 命名空间详情（draft 配置项编辑 + 发布历史 + 发布/回滚 + 客户端发现视图）。
 // 与 appconfig（工作负载级、静态、重启注入）正交：本页是版本化动态配置，跨实例共享，热更新。
 // 配置中心独立于物理环境；发布/回滚高危走 confirmDangerous（统一二次确认）。
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth, fetchJSON } from '@/api'
@@ -245,6 +245,17 @@ async function deleteItem(row: ConfigItem) {
   }
 }
 
+// draft vs active 是否有变更（发布按钮 disabled 依据；后端 ErrNoChanges 409 兜底）
+const hasChanges = computed(() => {
+  const snap = published.value?.snapshot ?? {}
+  const byKey = new Map(items.value.map(i => [i.key, i.value]))
+  if (byKey.size !== Object.keys(snap).length) return true
+  for (const [k, v] of byKey) {
+    if (!(k in snap) || snap[k] !== v) return true
+  }
+  return false
+})
+
 async function publish() {
   if (!cur.value) return
   const users = await refUserList(cur.value.id).catch(() => [])
@@ -381,7 +392,7 @@ watch(() => route.params.nsId, load)
             <div>
               <span v-if="published?.published" class="ver-tag mono">生效中 v{{ published.version }}</span>
               <span v-else class="none">未发布</span>
-              <el-button size="small" @click="publish">发布生效</el-button>
+              <el-button size="small" :disabled="published?.published && !hasChanges" @click="publish">发布生效</el-button>
               <el-button size="small" type="primary" @click="openItem()">+ 新增配置项</el-button>
             </div>
           </div>

@@ -75,6 +75,19 @@ func publishViaHTTP(t *testing.T, h *configcenter.Handler, ctx context.Context, 
 	return pub
 }
 
+// upsertViaHTTP 经 HTTP upsert 配置项（改值驱动新版本——空发布被 ErrNoChanges 拒）。
+func upsertViaHTTP(t *testing.T, h *configcenter.Handler, ctx context.Context, nsID, key, value string) {
+	t.Helper()
+	// req() 会对 body json.Marshal——传 struct（传 io.Reader 会被序列化成 JSON 字符串）
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req(ctx, "POST", "/api/configcenter/namespaces/"+nsID+"/items", configcenter.ConfigItem{
+		Key: key, Value: value, Type: configcenter.TypeText,
+	}))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("upsert 应 201，got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 // TestHandlerList 验证命名空间列表（租户隔离）。
 func TestHandlerList(t *testing.T) {
 	h := newHandler()
@@ -157,7 +170,8 @@ func TestHandlerRollback(t *testing.T) {
 		t.Fatalf("upsert 应 201，got %d", w.Code)
 	}
 	v1 := publishViaHTTP(t, h, acmeCtx(), nsID)
-	// 再发布 v2（v1 转 rolled-back）
+	// 改值再发布 v2（v1 转 rolled-back；空发布被 ErrNoChanges 拒）
+	upsertViaHTTP(t, h, acmeCtx(), nsID, "feature.newui", "on")
 	publishViaHTTP(t, h, acmeCtx(), nsID)
 
 	// 回滚 v1
@@ -450,7 +464,8 @@ func TestHandlerNamespaceAudit(t *testing.T) {
 	if w.Code != http.StatusCreated {
 		t.Fatalf("publish: %d %s", w.Code, w.Body.String())
 	}
-	// 再发布 v2（v1 转 rolled-back，供回滚）
+	// 改值再发布 v2（v1 转 rolled-back，供回滚；空发布被 ErrNoChanges 拒）
+	upsertViaHTTP(t, h, ctx, n.ID, "audit.key", "v2")
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req(ctx, "POST", "/api/configcenter/namespaces/"+n.ID+"/publish", nil))
 	if w.Code != http.StatusCreated {
@@ -484,8 +499,8 @@ func TestHandlerNamespaceAudit(t *testing.T) {
 
 	want := []string{
 		"configcenter_ns_create", "configcenter_item_upsert", "configcenter_publish",
-		"configcenter_publish", "configcenter_rollback", "configcenter_item_delete",
-		"configcenter_ns_delete",
+		"configcenter_item_upsert", "configcenter_publish", "configcenter_rollback",
+		"configcenter_item_delete", "configcenter_ns_delete",
 	}
 	aud.mu.Lock()
 	defer aud.mu.Unlock()

@@ -508,6 +508,23 @@ func (s *Store) CreatePublish(ctx context.Context, namespaceID string) (configce
 		return configcenter.Publish{}, err
 	}
 
+	// 2.5) 空发布拒绝：新快照与当前 active 完全一致 → ErrNoChanges（事务内比较，
+	// 防 API 直调/前端状态错位产出内容相同的空版本虚涨版本号、污染回滚目标）。
+	var curActiveRaw []byte
+	err = tx.QueryRow(ctx,
+		`SELECT snapshot FROM cc_publishes WHERE namespace_id=$1 AND tenant_id=$2 AND status=$3`,
+		namespaceID, tid, configcenter.StatusActive).Scan(&curActiveRaw)
+	switch {
+	case err == nil:
+		if configcenter.SnapshotsEqual(unmarshalSnapshot(curActiveRaw), snapshot) {
+			return configcenter.Publish{}, configcenter.ErrNoChanges
+		}
+	case errors.Is(err, pgx.ErrNoRows):
+		// 无 active（首次发布）——放行
+	default:
+		return configcenter.Publish{}, err
+	}
+
 	// 3) 旧 active → rolled-back（先翻后插：partial unique index uq_cc_publishes_ns_active
 	// 要求同 ns 仅一行 active，先 INSERT 会撞索引）。
 	if _, err = tx.Exec(ctx,
