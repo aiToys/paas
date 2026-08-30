@@ -165,7 +165,7 @@ func (s *Store) GetNamespace(ctx context.Context, id string) (configcenter.Names
 }
 
 // CreateNamespace 写入命名空间。以 ctx 租户为准忽略请求体；空 ID 自动生成。
-// 租户内 Name 唯一冲突 → 「命名空间已存在」（沿用内存版领域文本，不用 FormatExists 哨兵）。
+// 租户内 Name 唯一冲突 → ErrNamespaceNameTaken sentinel（跨实现统一 409 判定）。
 func (s *Store) CreateNamespace(ctx context.Context, n configcenter.Namespace) (configcenter.Namespace, error) {
 	tid, err := storagepg.TenantOrErr(ctx)
 	if err != nil {
@@ -587,7 +587,7 @@ func (s *Store) PublishNamespaceID(ctx context.Context, publishID string) (strin
 	err = s.db.Pool().QueryRow(ctx,
 		`SELECT namespace_id FROM cc_publishes WHERE id=$1 AND tenant_id=$2`, publishID, tid).Scan(&nsID)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", fmt.Errorf("发布不存在: %s", publishID)
+		return "", fmt.Errorf("%w: %s", configcenter.ErrPublishNotFound, publishID)
 	}
 	return nsID, err
 }
