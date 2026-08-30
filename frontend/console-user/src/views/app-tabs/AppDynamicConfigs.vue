@@ -135,13 +135,13 @@ async function loadAllActiveVers() {
 
 function switchTab(id: string) {
   selEnv.value = id
-  // 同步到 URL query（可分享/刷新保持）
-  if (route.query.env !== (id || undefined)) {
-    const q: Record<string, string> = { ...route.query as Record<string, string> }
-    if (id) q.env = id
-    else delete q.env
-    history.replaceState(null, '', { query: q } as never)
-  }
+  // 同步到 URL query（可分享/刷新保持）。router.replace 会触发路由守卫/重渲染，
+  // 这里只改 query 用 replaceState 拼 URL 字符串（保持当前 tab/path 不动）。
+  const q = new URLSearchParams(route.query as Record<string, string>)
+  if (id) q.set('env', id)
+  else q.delete('env')
+  const qs = q.toString()
+  history.replaceState(null, '', window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash)
 }
 
 // ---- 泳道（灰度验证）子区 ----
