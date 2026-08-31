@@ -15,6 +15,8 @@ import (
 	"github.com/aitoys/paas/internal/ai/agent"
 	"github.com/aitoys/paas/internal/ai/guardrail"
 	"github.com/aitoys/paas/internal/ai/knowledgebase"
+	"github.com/aitoys/paas/internal/ai/tool"
+	"github.com/aitoys/paas/internal/ai/tool/mcp"
 	"github.com/aitoys/paas/internal/core/gateway"
 	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/internal/maas"
@@ -294,4 +296,45 @@ func (a agentDispatcherAdapter) ServeSSEConv(w http.ResponseWriter, r *http.Requ
 		return err
 	}
 	return a.rt.ServeSSEConv(w, r.Context(), agentID, conversationID, msgs)
+}
+
+// —— 工作流引擎桥接（workflow 依赖倒置接口 -> agent.Runtime / mcp client）——
+
+// workflowAgentRunner 把 agent.Runtime 适配为 workflow.AgentRunner：
+// 收集全部 content chunk 拼接为最终文本（工作流节点消费完整输出，非流式透传）。
+type workflowAgentRunner struct{ rt *agent.Runtime }
+
+func (w workflowAgentRunner) RunNode(ctx context.Context, agentID, prompt string) (string, error) {
+	var sb strings.Builder
+	err := w.rt.Run(ctx, agentID, []provider.Message{{Role: "user", Content: prompt}}, func(c provider.Chunk) {
+		sb.WriteString(c.Content)
+	})
+	return sb.String(), err
+}
+
+// workflowToolRunner 把 tool.Repository + mcp client 适配为 workflow.ToolRunner。
+// 仅支持 MCP 工具（与 tool handler invoke 同款语义）；工具不存在/类型不符返错。
+type workflowToolRunner struct {
+	repo tool.Repository
+}
+
+func (w workflowToolRunner) Invoke(ctx context.Context, toolID, toolName string, args map[string]string) (string, error) {
+	t, err := w.repo.Get(ctx, toolID)
+	if err != nil {
+		return "", err
+	}
+	if t.Type != tool.TypeMCP {
+		return "", fmt.Errorf("工作流工具节点暂仅支持 mcp 类型（%s 是 %s）", toolID, t.Type)
+	}
+	margs := make(map[string]any, len(args))
+	for k, v := range args {
+		margs[k] = v
+	}
+	cli := mcp.GetClient(t.Config[tool.CfgMCPServerURL], t.Config[tool.CfgMCPAPIKey])
+	res, err := cli.Invoke(ctx, toolName, margs)
+	if err != nil {
+		return "", err
+	}
+	b, err := json.Marshal(res)
+	return string(b), err
 }

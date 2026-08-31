@@ -175,6 +175,7 @@ const nav: NavItem[] = [
     children: [
       { label: '广场', icon: 'rocket', to: '/ai/explore' },
       { label: 'Agent', icon: 'bot', to: '/ai/agents' },
+      { label: '工作流', icon: 'pipeline', to: '/ai/workflows' },
       { label: '知识库', icon: 'book', to: '/ai/knowledgebases' },
       { label: '工具', icon: 'tool', to: '/ai/tools' },
       { label: '提示词', icon: 'prompt', to: '/ai/prompts' },

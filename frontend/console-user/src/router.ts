@@ -137,6 +137,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'Agent' },
   },
   {
+    path: '/ai/workflows',
+    name: 'ai-workflows',
+    component: () => import('@/views/Workflow.vue'),
+    meta: { title: '工作流' },
+  },
+  {
     path: '/resources/search',
     name: 'res-search',
     component: () => import('@/views/DataServices.vue'),

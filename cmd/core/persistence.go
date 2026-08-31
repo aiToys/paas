@@ -35,6 +35,9 @@ import (
 	"github.com/aitoys/paas/internal/ai/tool"
 	toolmemory "github.com/aitoys/paas/internal/ai/tool/memory"
 	toolpg "github.com/aitoys/paas/internal/ai/tool/pg"
+	"github.com/aitoys/paas/internal/ai/workflow"
+	workflowmemory "github.com/aitoys/paas/internal/ai/workflow/memory"
+	workflowpg "github.com/aitoys/paas/internal/ai/workflow/pg"
 	"github.com/aitoys/paas/internal/appconfig"
 	appcfgmemory "github.com/aitoys/paas/internal/appconfig/memory"
 	appcfgpg "github.com/aitoys/paas/internal/appconfig/pg"
@@ -47,13 +50,13 @@ import (
 	ccmemory "github.com/aitoys/paas/internal/configcenter/memory"
 	ccpg "github.com/aitoys/paas/internal/configcenter/pg"
 	"github.com/aitoys/paas/internal/controller"
-	"github.com/aitoys/paas/internal/crypto"
 	"github.com/aitoys/paas/internal/core/application"
 	appmemory "github.com/aitoys/paas/internal/core/application/memory"
 	applicationpg "github.com/aitoys/paas/internal/core/application/pg"
 	"github.com/aitoys/paas/internal/core/identity"
 	idmemory "github.com/aitoys/paas/internal/core/identity/memory"
 	identitypg "github.com/aitoys/paas/internal/core/identity/pg"
+	"github.com/aitoys/paas/internal/crypto"
 	"github.com/aitoys/paas/internal/dataservice"
 	dsmemory "github.com/aitoys/paas/internal/dataservice/memory"
 	dspg "github.com/aitoys/paas/internal/dataservice/pg"
@@ -125,6 +128,7 @@ type Stores struct {
 	Tool           tool.Repository
 	Prompt         prompt.Repository
 	Skill          skill.Repository
+	Workflow       workflow.Repository
 	Agent          agent.Repository
 	Marketplace    marketplace.Repository
 	Eval           eval.Repository
@@ -193,6 +197,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto
 		toolRepo := toolpg.NewStore(db)
 		promptRepo := promptpg.NewStore(db)
 		skillRepo := skillpg.NewStore(db)
+		workflowRepo := workflowpg.NewStore(db)
 		agentRepo := agentpg.NewStore(db)
 		marketRepo := marketplacepg.NewStore(db)
 		evalRepo := evalpg.NewStore(db)
@@ -257,6 +262,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto
 			Tool:           toolRepo,
 			Prompt:         promptRepo,
 			Skill:          skillRepo,
+			Workflow:       workflowRepo,
 			Agent:          agentRepo,
 			Marketplace:    marketRepo,
 			Eval:           evalRepo,
@@ -305,6 +311,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto
 	toolRepo := toolmemory.NewStore()
 	promptRepo := promptmemory.NewStore()
 	skillRepo := skillmemory.NewStore()
+	workflowRepo := workflowmemory.NewStore()
 	agentRepo := agentmemory.NewStore()
 	marketRepo := marketplacememory.NewStore()
 	msgRepo := messaging.Repository(msgmemory.NewStore())
@@ -354,6 +361,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto
 		Tool:           toolRepo,
 		Prompt:         promptRepo,
 		Skill:          skillRepo,
+		Workflow:       workflowRepo,
 		Agent:          agentRepo,
 		Marketplace:    marketRepo,
 		Eval:           evalmemory.NewStore(),

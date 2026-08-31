@@ -26,6 +26,7 @@ import (
 	"github.com/aitoys/paas/internal/ai/prompt"
 	"github.com/aitoys/paas/internal/ai/skill"
 	"github.com/aitoys/paas/internal/ai/tool"
+	"github.com/aitoys/paas/internal/ai/workflow"
 	"github.com/aitoys/paas/internal/apiroute"
 	"github.com/aitoys/paas/internal/appconfig"
 	"github.com/aitoys/paas/internal/backup"
@@ -1154,6 +1155,26 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/agent-evals/runs", apiroute.Tags("评估"), apiroute.Summary("评估历史列表（?agentId=，最近 20 次/agent）"), apiroute.Perm("agent:read"), apiroute.WithResp([]eval.EvalRun{}))
 	reg.Operation("GET", "/api/agent-evals/runs/{id}", apiroute.Tags("评估"), apiroute.Summary("单次评估历史详情"), apiroute.Perm("agent:read"), apiroute.WithResp(eval.EvalRun{}))
 
+	// AI 工作流编排：把 Agent/Tool 串成多步流程（llm/condition/approve/end）。
+	// engine 桥接 agentRuntime（LLM 节点）+ mcp 工具（tool 节点）。
+	workflowEngine := workflow.NewEngine(stores.Workflow, workflowAgentRunner{rt: agentRuntime}, workflowToolRunner{repo: stores.Tool})
+	workflowHandler := workflow.NewHandler(stores.Workflow, workflowEngine).
+		WithAuthorize(func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }).
+		WithAudit(&identityAuditAdapter{store: stores.Security}).
+		WithActorFn(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) })
+	mux.Handle("/api/workflows", auth(workflowHandler))
+	mux.Handle("/api/workflows/", auth(workflowHandler))
+	reg.Operation("GET", "/api/workflows", apiroute.Tags("工作流"), apiroute.Summary("工作流列表"), apiroute.Perm("agent:read"), apiroute.WithResp([]workflow.WorkflowDef{}))
+	reg.Operation("POST", "/api/workflows", apiroute.Tags("工作流"), apiroute.Summary("创建工作流"), apiroute.Perm("agent:write"), apiroute.WithReqBody(workflow.WorkflowDef{}), apiroute.WithResp(workflow.WorkflowDef{}))
+	reg.Operation("GET", "/api/workflows/{id}", apiroute.Tags("工作流"), apiroute.Summary("工作流详情"), apiroute.Perm("agent:read"), apiroute.WithResp(workflow.WorkflowDef{}))
+	reg.Operation("PUT", "/api/workflows/{id}", apiroute.Tags("工作流"), apiroute.Summary("更新工作流"), apiroute.Perm("agent:write"), apiroute.WithReqBody(workflow.WorkflowDef{}), apiroute.WithResp(workflow.WorkflowDef{}))
+	reg.Operation("DELETE", "/api/workflows/{id}", apiroute.Tags("工作流"), apiroute.Summary("删除工作流"), apiroute.Perm("agent:write"))
+	reg.Operation("POST", "/api/workflows/{id}/runs", apiroute.Tags("工作流"), apiroute.Summary("触发运行（body=inputs）"), apiroute.Perm("agent:write"), apiroute.WithReqBody(map[string]string{}), apiroute.WithResp(workflow.WorkflowRun{}))
+	reg.Operation("GET", "/api/workflows/{id}/runs", apiroute.Tags("工作流"), apiroute.Summary("运行历史"), apiroute.Perm("agent:read"), apiroute.WithResp([]workflow.WorkflowRun{}))
+	reg.Operation("GET", "/api/workflows/runs/{rid}", apiroute.Tags("工作流"), apiroute.Summary("运行详情"), apiroute.Perm("agent:read"), apiroute.WithResp(workflow.WorkflowRun{}))
+	reg.Operation("POST", "/api/workflows/runs/{rid}/approve", apiroute.Tags("工作流"), apiroute.Summary("恢复等待确认的运行（?node=）"), apiroute.Perm("agent:write"))
+	reg.Operation("POST", "/api/workflows/runs/{rid}/abort", apiroute.Tags("工作流"), apiroute.Summary("中止运行"), apiroute.Perm("agent:write"))
+
 	// AI 编排广场：跨租户共享能力市场（发布脱敏快照 / 浏览搜索 / 安装 fork）。
 	marketHandler := marketplace.NewHandler(stores.Marketplace)
 	marketHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
@@ -1424,7 +1445,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("POST", "/api/applications/{id}/dynamic-configs/lane-overrides", apiroute.Tags("配置中心"), apiroute.Summary("泳道配置覆盖 upsert（即时生效，?envId=&lane=，prod 需 prod:write）"), apiroute.Perm("application:write"), apiroute.WithReqBody(configcenter.LaneOverride{}), apiroute.WithResp(configcenter.LaneOverride{}))
 	reg.Operation("DELETE", "/api/applications/{id}/dynamic-configs/lane-overrides/{key}", apiroute.Tags("配置中心"), apiroute.Summary("删除泳道配置覆盖（?envId=&lane=，prod 需 prod:write）"), apiroute.Perm("application:write"))
 	reg.Operation("GET", "/api/applications/{id}/dynamic-configs/shared-refs", apiroute.Tags("配置中心"), apiroute.Summary("共享配置引用列表（?envId=，含 shared ns 名/版本/key 数）"), apiroute.Perm("application:read"), apiroute.WithResp([]configcenter.NSRef{}))
-	reg.Operation("POST", "/api/applications/{id}/dynamic-configs/shared-refs", apiroute.Tags("配置中心"), apiroute.Summary("引用共享配置（body {sharedNsId}，?envId=，prod 需 prod:write；发现时 shared 作为三层 merge 基础层）"), apiroute.Perm("application:write"), apiroute.WithReqBody(struct{ SharedNSID string `json:"sharedNsId"` }{}), apiroute.WithResp(configcenter.NSRef{}))
+	reg.Operation("POST", "/api/applications/{id}/dynamic-configs/shared-refs", apiroute.Tags("配置中心"), apiroute.Summary("引用共享配置（body {sharedNsId}，?envId=，prod 需 prod:write；发现时 shared 作为三层 merge 基础层）"), apiroute.Perm("application:write"), apiroute.WithReqBody(struct {
+		SharedNSID string `json:"sharedNsId"`
+	}{}), apiroute.WithResp(configcenter.NSRef{}))
 	reg.Operation("DELETE", "/api/applications/{id}/dynamic-configs/shared-refs/{refId}", apiroute.Tags("配置中心"), apiroute.Summary("解除共享配置引用（?envId=，prod 需 prod:write）"), apiroute.Perm("application:write"))
 	reg.Operation("GET", "/api/configcenter/namespaces/{id}/ref-users", apiroute.Tags("配置中心"), apiroute.Summary("共享配置影响面反查（被哪些应用派生 ns 引用）"), apiroute.Perm("governance:read"), apiroute.WithResp([]configcenter.NSRef{}))
 	// 可观测
