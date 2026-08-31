@@ -159,7 +159,6 @@ const nav: NavItem[] = [
       { label: '对象存储', icon: 'storage', to: '/resources/storage' },
       { label: '向量数据库', icon: 'layers', to: '/resources/vector' },
       { label: '搜索引擎', icon: 'search', to: '/resources/search' },
-      { label: '知识库', icon: 'book', to: '/resources/knowledgebase' },
     ],
   },
   {
@@ -170,14 +169,16 @@ const nav: NavItem[] = [
       { label: '定时', icon: 'clock', to: '/workloads/cronjobs' },
     ],
   },
+  // AI 服务：模型消费侧六件套（知识库归此——Agent 绑定消费，非通用数据服务）。
   {
-    label: '智能体', icon: 'bot', section: 'resources', group: 'ai',
+    label: 'AI 服务', icon: 'bot', section: 'resources', group: 'ai',
     children: [
       { label: '广场', icon: 'rocket', to: '/ai/explore' },
+      { label: 'Agent', icon: 'bot', to: '/ai/agents' },
+      { label: '知识库', icon: 'book', to: '/ai/knowledgebases' },
       { label: '工具', icon: 'tool', to: '/ai/tools' },
       { label: '提示词', icon: 'prompt', to: '/ai/prompts' },
       { label: 'Skill', icon: 'skill', to: '/ai/skills' },
-      { label: 'Agent', icon: 'bot', to: '/ai/agents' },
     ],
   },
   {

@@ -96,10 +96,15 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '向量数据库' },
   },
   {
-    path: '/resources/knowledgebase',
-    name: 'res-knowledgebase',
+    path: '/ai/knowledgebases',
+    name: 'ai-knowledgebases',
     component: () => import('@/views/KnowledgeBases.vue'),
     meta: { title: '知识库' },
+  },
+  {
+    // 旧路径兼容（KB 曾属资源中心）：redirect 到 AI 服务新路径
+    path: '/resources/knowledgebase',
+    redirect: '/ai/knowledgebases',
   },
   {
     path: '/ai/explore',

@@ -414,7 +414,7 @@ onMounted(load)
               </div>
             </el-option>
           </el-select>
-          <div v-if="!skills.length" class="hint">还没有 Skill，可先到「智能体 → Skill」创建</div>
+          <div v-if="!skills.length" class="hint">还没有 Skill，可先到「AI 服务 → Skill」创建</div>
         </el-form-item>
         <el-form-item label="工具">
           <el-select v-model="form.tools" multiple filterable placeholder="选择可调用的外部工具">
@@ -425,7 +425,7 @@ onMounted(load)
               </div>
             </el-option>
           </el-select>
-          <div v-if="!tools.length" class="hint">还没有工具，可先到「智能体 → 工具」注册 MCP/HTTP 工具</div>
+          <div v-if="!tools.length" class="hint">还没有工具，可先到「AI 服务 → 工具」注册 MCP/HTTP 工具</div>
         </el-form-item>
         <el-form-item label="知识库">
           <el-select v-model="form.knowledgeBases" multiple filterable placeholder="选择 RAG 检索的知识库">
