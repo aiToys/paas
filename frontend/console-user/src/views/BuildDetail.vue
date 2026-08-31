@@ -1,12 +1,9 @@
 <template>
   <div class="page detail-page">
-    <header class="crumb">
-      <button class="back" @click="goBack">←</button>
-      <span>构建</span>
-      <span class="sep">/</span>
-      <span class="mono">{{ build?.id }}</span>
-      <el-tag v-if="build" :type="stType(build.status)" size="small">{{ build.status }}</el-tag>
-    </header>
+    <DetailShell
+      :crumbs="[{ label: '构建', to: '/devops' }, { label: build?.id ?? (route.params.id as string) }]"
+      :tags="build ? [{ label: build.status, type: stType(build.status) as ShellTag['type'] }] : []"
+    />
 
     <div v-if="build" class="body">
       <section class="card">
@@ -42,6 +39,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import { imageLink, repoLink } from '@/composables/useDevopsLinks'
+import DetailShell from '@/components/DetailShell.vue'
+import type { ShellTag } from '@/components/DetailShell.vue'
 
 interface BuildRunFull {
   id: string; appId: string; repoId: string; commit: string; branch: string; message: string
@@ -51,11 +50,6 @@ interface BuildRunFull {
 const route = useRoute()
 const router = useRouter()
 const build = ref<BuildRunFull>()
-
-function goBack() {
-  if (history.length > 1) history.back()
-  else router.push('/devops')
-}
 
 const stType = (s?: string) => ({ success: 'success', failed: 'danger', running: 'warning' } as Record<string, string>)[s ?? ''] ?? 'info'
 
@@ -75,9 +69,6 @@ watch(() => route.params.id, () => load())
 
 <style scoped>
 .detail-page { padding: 20px; max-width: 960px; margin: 0 auto; }
-.crumb { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
-.crumb .sep { color: var(--el-text-color-placeholder); }
-.back { border: none; background: none; cursor: pointer; font-size: 16px; color: var(--el-text-color-primary); }
 .body { display: grid; gap: 14px; }
 .card { background: var(--el-bg-color); border: 1px solid var(--el-border-color-lighter); border-radius: 8px; padding: 16px 20px; }
 .card h3 { margin: 0 0 12px; font-size: 14px; color: var(--el-text-color-secondary); }

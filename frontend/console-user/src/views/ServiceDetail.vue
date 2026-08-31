@@ -6,6 +6,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
+import DetailShell from '@/components/DetailShell.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -170,16 +171,15 @@ watch(() => route.params.id, load)
 
 <template>
   <div class="gov-page">
-    <button class="back" @click="router.push('/platform/governance')">← 返回服务列表</button>
-    <div v-if="svc" class="svc-head">
-      <h2>{{ svc.name }}</h2>
-      <div class="svc-meta">
-        <el-tag size="small" :type="svc.protocol === 'grpc' ? 'warning' : 'info'">{{ svc.protocol.toUpperCase() }}:{{ svc.port }}</el-tag>
-        <span class="kv">环境：<b>{{ envName(svc.envId) }}</b></span>
-        <span v-if="svc.appId" class="kv">应用：<b>{{ svc.appId }}</b></span>
-        <span v-if="svc.desc" class="kv">{{ svc.desc }}</span>
-      </div>
-    </div>
+    <DetailShell
+      :crumbs="[{ label: '服务治理', to: '/platform/governance' }, { label: svc?.name ?? (route.params.id as string) }]"
+      :tags="svc ? [
+        { label: `${svc.protocol.toUpperCase()}:${svc.port}`, type: svc.protocol === 'grpc' ? 'warning' : 'info' },
+        { label: envName(svc.envId) },
+        ...(svc.appId ? [{ label: `应用 ${svc.appId}` }] : []),
+      ] : []"
+      :loading="loading"
+    />
 
     <div class="inst-head">
       <span class="inst-title">服务实例（{{ instances.length }}）</span>
@@ -260,18 +260,6 @@ watch(() => route.params.id, load)
 .gov-page {
   max-width: 1100px;
   margin: 0 auto;
-}
-.back {
-  border: none;
-  background: transparent;
-  color: var(--text-faint);
-  font-family: inherit;
-  font-size: 13px;
-  cursor: pointer;
-  margin-bottom: 12px;
-}
-.back:hover {
-  color: var(--text);
 }
 .svc-head {
   margin-bottom: 20px;

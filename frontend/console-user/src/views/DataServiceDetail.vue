@@ -11,6 +11,8 @@ import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
+import DetailShell from '@/components/DetailShell.vue'
+import type { ShellTag } from '@/components/DetailShell.vue'
 
 type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
 
@@ -436,13 +438,18 @@ async function upgrade() {
 </script>
 
 <template>
-  <div class="ds-detail-page">
-    <button class="back" @click="router.push(`/resources/${kind}`)">← 返回{{ kindLabel }}列表</button>
-
-    <div v-if="ds" class="page-head">
-      <h2>{{ ds.name }}</h2>
-      <p class="sub">资源中心 · {{ kindLabel }} 详情</p>
-    </div>
+  <DetailShell
+    :crumbs="[{ label: kindLabel, to: `/resources/${kind}` }, { label: ds?.name ?? id }]"
+    :tags="ds ? [
+      { label: STATUS_LABEL[ds.status] || ds.status, type: STATUS_TYPE[ds.status] as ShellTag['type'] || 'info' },
+      { label: envLabel(ds.envId) },
+    ] : []"
+    :loading="loading"
+    :fallback="errorMsg && !ds ? { to: `/resources/${kind}`, label: `返回${kindLabel}列表` } : null"
+  >
+    <template #actions>
+      <el-button size="small" @click="router.push(`/resources/${kind}`)">返回列表</el-button>
+    </template>
 
     <!-- 应用上下文条：从应用「资源绑定」点入时展示绑定关系（注入到哪、跳应用、解绑） -->
     <section v-if="ds && ctxApp" class="ctx-bar">
@@ -662,16 +669,10 @@ v-else type="info" :closable="false"
         </el-button>
       </template>
     </el-dialog>
-  </div>
+  </DetailShell>
 </template>
 
 <style scoped>
-.ds-detail-page { max-width: 1100px; margin: 0 auto; }
-.back { border: none; background: transparent; color: var(--text-faint); font-family: inherit; font-size: 13px; cursor: pointer; margin-bottom: 12px; }
-.back:hover { color: var(--text); }
-.page-head { margin-bottom: 20px; }
-.page-head h2 { margin: 0 0 4px; font-size: 18px; }
-.sub { margin: 0; font-size: 12.5px; color: var(--text-dim); }
 .block { margin-bottom: 24px; }
 .mgmt-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 8px 0; }
 .mgmt-sub { font-size: 12.5px; color: var(--text-dim); margin: 14px 0 2px; }

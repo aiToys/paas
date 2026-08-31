@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
+import DetailShell from '@/components/DetailShell.vue'
 import { fetchAuth, fetchJSON } from '@/api'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import AppServices from './app-tabs/AppServices.vue'
@@ -431,19 +432,15 @@ async function deleteApp() {
 
 <template>
   <div class="detail">
-    <div v-if="loading" class="crumb skel-bar" />
-    <template v-else-if="app">
-      <header class="crumb">
-        <div class="crumb-left">
-          <button class="crumb-back" @click="router.push('/applications')" title="返回应用列表">
-            <Icon name="chevron" :size="16" style="transform: rotate(-90deg)" />
-          </button>
-          <span class="crumb-root">应用</span>
-          <Icon name="chevron" :size="13" class="crumb-sep" />
-          <span class="crumb-name">{{ app.name }}</span>
-          <span class="env" :class="{ prodenv: app.env === 'prod' }">{{ app.env }}</span>
-          <span class="health"><span class="pulse-dot" /> {{ statusLabel[app.status] ?? app.status }}</span>
-        </div>
+    <DetailShell
+      :crumbs="[{ label: '应用', to: '/applications' }, { label: app?.name ?? '' }]"
+      :tags="app ? [
+        { label: app.env, cls: app.env === 'prod' ? 'prodenv' : 'envchip' },
+        { label: statusLabel[app.status] ?? app.status, cls: 'health' },
+      ] : []"
+      :loading="loading"
+    >
+      <template #actions>
         <el-dropdown trigger="click" placement="bottom-end">
           <button class="crumb-more" title="更多操作">
             <span class="crumb-dots">⋯</span>
@@ -454,9 +451,10 @@ async function deleteApp() {
             </el-dropdown-menu>
           </template>
         </el-dropdown>
-      </header>
-
-      <div class="tabs">
+      </template>
+    </DetailShell>
+    <template v-if="app">
+<div class="tabs">
         <template v-for="g in tabGroups" :key="g.label">
           <span class="tab-group-label">{{ g.label }}</span>
           <button
@@ -774,75 +772,41 @@ v-for="e in accessEntries" :key="e.workload"
   font-size: 14px;
   margin: 0 0 12px;
 }
-/* 面包屑紧凑身份条：替代旧 header 大卡片，回收首屏垂直空间。 */
-.crumb {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 14px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  margin-bottom: 14px;
-}
-.crumb.skel-bar {
-  height: 44px;
-  border: none;
-}
-.crumb-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.crumb-back {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  flex-shrink: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: transparent;
-  color: var(--text-dim);
-  cursor: pointer;
-  transition: all 0.12s;
-}
-.crumb-back:hover {
-  border-color: var(--border-strong);
-  color: var(--text);
-}
-.crumb-root {
-  font-size: 13px;
-  color: var(--text-faint);
-}
-.crumb-sep {
-  color: var(--text-faint);
-}
-.crumb-name {
-  font-size: 15px;
-  font-weight: 650;
-  letter-spacing: -0.01em;
-  color: var(--text);
-}
-.crumb .env {
+/* 身份 chips（DetailShell cls 自定义变体）：env 绿/prod 红、health 带脉动点 */
+:deep(.shell-chip.envchip) {
   padding: 1px 7px;
   border-radius: 4px;
   font-size: 11px;
   background: var(--success-soft);
   color: var(--success);
 }
-.crumb .env.prodenv {
+:deep(.shell-chip.prodenv) {
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-size: 11px;
   background: rgba(244, 63, 94, 0.12);
   color: #f43f5e;
 }
-.crumb .health {
+:deep(.shell-chip.health) {
   display: flex;
   align-items: center;
   gap: 5px;
   font-size: 12px;
+  padding: 0;
+  background: transparent;
   color: var(--success);
+}
+:deep(.shell-chip.health)::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  animation: pulse 1.8s infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
 }
 .crumb-more {
   display: grid;

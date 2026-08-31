@@ -8,6 +8,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { getLane, closeLane, type Lane, type LaneDetail } from '@/api/lane'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import { useEnvStore } from '@/stores/env'
+import DetailShell from '@/components/DetailShell.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -75,26 +76,16 @@ function fmtTime(s?: string) {
 
 <template>
   <div class="page lane-detail">
-    <div class="page-header">
-      <button class="back-btn" @click="router.back()">←</button>
-      <div v-if="lane">
-        <div class="title-row">
-          <h2>泳道 {{ lane.name }}</h2>
-          <el-tag :type="lane.status === 'active' ? 'success' : 'info'">
-            {{ lane.status === 'active' ? '活跃' : '已关闭' }}
-          </el-tag>
-          <el-tag :type="modeMeta[lane.mode]?.type ?? 'info'" effect="plain">
-            {{ modeMeta[lane.mode]?.label ?? lane.mode }}
-          </el-tag>
-        </div>
-        <div class="sub">
-          归属环境 {{ lane.envId }}
-          <span v-if="lane.description"> · {{ lane.description }}</span>
-          <span v-if="lane.externalLink"> · 关联 {{ lane.externalLink }}</span>
-        </div>
-      </div>
-      <div v-else class="title-row"><h2>泳道详情</h2></div>
-      <div class="actions">
+    <DetailShell
+      :crumbs="[{ label: '泳道', to: '/environments' }, { label: lane?.name ?? (route.params.id as string) }]"
+      :tags="lane ? [
+        { label: lane.status === 'active' ? '活跃' : '已关闭', type: lane.status === 'active' ? 'success' : 'info' },
+        { label: modeMeta[lane.mode]?.label ?? lane.mode, type: modeMeta[lane.mode]?.type },
+        { label: `环境 ${lane.envId}` },
+      ] : []"
+      :loading="loading"
+    >
+      <template #actions>
         <el-button
           v-if="lane && lane.status === 'active'"
           size="small"
@@ -109,8 +100,8 @@ function fmtTime(s?: string) {
         >
           关闭泳道
         </el-button>
-      </div>
-    </div>
+      </template>
+    </DetailShell>
 
     <div v-if="loading" class="loading">加载中…</div>
     <template v-else-if="lane">
@@ -167,10 +158,6 @@ function fmtTime(s?: string) {
 
 <style scoped>
 .lane-detail { display: flex; flex-direction: column; gap: 16px; }
-.page-header { display: flex; align-items: flex-start; gap: 12px; }
-.title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.sub { color: var(--el-text-color-secondary); font-size: 13px; margin-top: 4px; }
-.actions { margin-left: auto; display: flex; gap: 8px; }
 .card { background: var(--el-bg-color-overlay, var(--paas-card-bg, #fff)); border: 1px solid var(--paas-border, #e5e7eb); border-radius: 10px; padding: 16px; }
 .card-title { font-size: 14px; margin: 0 0 12px; }
 .loading { color: var(--el-text-color-secondary); padding: 40px; text-align: center; }

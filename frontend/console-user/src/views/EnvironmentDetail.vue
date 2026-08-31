@@ -6,6 +6,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
+import DetailShell from '@/components/DetailShell.vue'
 import { fetchAuth } from '@/api'
 import { listLanes, createLane, closeLane, type Lane as LaneEntity } from '@/api/lane'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
@@ -224,26 +225,21 @@ watch(() => route.params.id, load)
 
 <template>
   <div class="page">
-    <button class="back" @click="router.push('/environments')">
-      <Icon name="chevron" :size="16" style="transform: rotate(90deg)" /> 返回环境列表
-    </button>
+    <DetailShell
+      :crumbs="[{ label: '环境', to: '/environments' }, { label: env?.name ?? (route.params.id as string) }]"
+      :tags="env ? [
+        { label: env.type === 'prod' ? '生产' : '测试', type: env.type === 'prod' ? 'danger' : 'success' },
+        { label: `物理落点 ${env.cluster || '默认'}` },
+      ] : []"
+      :loading="loading"
+    >
+      <template #actions>
+        <el-button v-if="env" size="small" type="primary" plain @click="workHere">在此环境工作</el-button>
+      </template>
+    </DetailShell>
 
     <div v-if="loading" class="skel-bar" />
     <template v-else-if="env">
-      <header class="head" :class="{ prod: env.type === 'prod' }">
-        <div class="e-icon" :class="env.type">
-          <Icon :name="env.type === 'prod' ? 'shield' : 'server'" :size="22" />
-        </div>
-        <div class="head-info">
-          <div class="name-row">
-            <h2>{{ env.name }}</h2>
-            <span class="type-badge" :class="env.type">{{ env.type === 'prod' ? '生产' : '测试' }}</span>
-          </div>
-          <div class="e-id mono">{{ env.id }} · 物理落点 {{ env.cluster || '默认' }}</div>
-        </div>
-        <button class="work-btn" @click="workHere">在此环境工作</button>
-      </header>
-
       <section class="card">
         <h3 class="card-title">工作负载总览</h3>
         <div class="stat-row">

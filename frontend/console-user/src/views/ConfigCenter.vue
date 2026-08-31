@@ -8,6 +8,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth, fetchJSON } from '@/api'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
+import DetailShell from '@/components/DetailShell.vue'
 import AppDynamicConfigs from './app-tabs/AppDynamicConfigs.vue'
 
 const route = useRoute()
@@ -378,11 +379,13 @@ watch(() => route.params.nsId, load)
 
     <!-- 详情视图 -->
     <template v-else>
-      <button class="back" @click="router.push('/platform/config-center')">← 返回命名空间列表</button>
-      <div v-if="cur" class="ns-head">
-        <h2>{{ cur.name }}</h2>
-        <p v-if="cur.desc" class="sub">{{ cur.desc }}</p>
-      </div>
+      <DetailShell
+        :crumbs="[{ label: '配置中心', to: '/platform/config-center' }, { label: cur?.name ?? (route.params.nsId as string) }]"
+        :tags="published?.published
+          ? [{ label: `生效中 v${published.version}`, type: 'success' }]
+          : [{ label: '未发布', type: 'info' }]"
+        :loading="loading && !cur"
+      />
 
       <div v-loading="loading">
         <!-- 配置项（编辑即 draft，点「发布生效」才对客户端可见；生效版本 tag 内联，不单独设展示区） -->
@@ -523,10 +526,6 @@ watch(() => route.params.nsId, load)
 .link { font-weight: 600; color: var(--brand); cursor: pointer; }
 .link:hover { text-decoration: underline; }
 .dim { color: var(--text-dim); }
-.back { border: none; background: transparent; color: var(--text-faint); font-family: inherit; font-size: 13px; cursor: pointer; margin-bottom: 12px; }
-.back:hover { color: var(--text); }
-.ns-head { margin-bottom: 18px; }
-.ns-head h2 { margin: 0 0 4px; font-size: 18px; }
 .block { margin-bottom: 24px; }
 .block-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .block-title { font-size: 14px; font-weight: 600; }

@@ -1,12 +1,9 @@
 <template>
   <div class="page detail-page">
-    <header class="crumb">
-      <button class="back" @click="goBack">←</button>
-      <span>集成批次</span>
-      <span class="sep">/</span>
-      <span class="mono">{{ batch?.id }}</span>
-      <el-tag v-if="batch" :type="statusType(batch.status)" size="small">{{ statusLabel(batch.status) }}</el-tag>
-    </header>
+    <DetailShell
+      :crumbs="[{ label: '集成批次', to: '/devops' }, { label: batch?.id ?? (route.params.id as string) }]"
+      :tags="batch ? [{ label: statusLabel(batch.status), type: statusType(batch.status) as ShellTag['type'] }] : []"
+    />
 
     <div v-if="batch" class="body">
       <!-- 状态机 -->
@@ -84,16 +81,13 @@ import { getBatch, listAllBatches, listAllChanges, integrateBatch, approveBatch,
 import { usePolling } from '@/composables/usePolling'
 import { BATCH_STATUS, statusOf } from '@/composables/useStatus'
 import { confirmAbandon } from '@/composables/useAbandonConfirm'
+import DetailShell from '@/components/DetailShell.vue'
+import type { ShellTag } from '@/components/DetailShell.vue'
 
 const route = useRoute()
 const router = useRouter()
 const batch = ref<IntegrationBatch>()
 const changes = ref<Change[]>([])
-
-function goBack() {
-  if (history.length > 1) history.back()
-  else router.push('/devops')
-}
 
 const statusType = (s: string) => statusOf(BATCH_STATUS, s).type
 const statusLabel = (s: string) => statusOf(BATCH_STATUS, s).label
@@ -152,7 +146,7 @@ async function doAbandon() {
     if (!(await confirmAbandon('batch', batch.value.title))) return
     await abandonBatch(batch.value.appId, batch.value.id)
     ElMessage.success('已放弃')
-    goBack()
+    router.push('/devops')
   } catch (e) {
     if (e !== 'cancel') ElMessage.error(apiError(e))
   }
@@ -169,9 +163,6 @@ usePolling(() => {
 
 <style scoped>
 .detail-page { padding: 20px; max-width: 960px; margin: 0 auto; }
-.crumb { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
-.crumb .sep { color: var(--el-text-color-placeholder); }
-.back { border: none; background: none; cursor: pointer; font-size: 16px; color: var(--el-text-color-primary); }
 .body { display: grid; gap: 14px; }
 .card { background: var(--el-bg-color); border: 1px solid var(--el-border-color-lighter); border-radius: 8px; padding: 16px 20px; }
 .card h3 { margin: 0 0 12px; font-size: 14px; color: var(--el-text-color-secondary); }

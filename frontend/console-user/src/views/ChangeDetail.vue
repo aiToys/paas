@@ -1,15 +1,13 @@
 <template>
   <div class="page detail-page">
-    <!-- 面包屑身份条 -->
-    <header class="crumb">
-      <button class="back" @click="goBack">←</button>
-      <span>变更</span>
-      <span class="sep">/</span>
-      <span class="mono">{{ change?.id }}</span>
-      <el-tag v-if="change" :type="statusType(change.status)" size="small">{{ statusLabel(change.status) }}</el-tag>
-      <span v-if="change" class="grow"></span>
-      <el-button v-if="change?.status === 'open' && !change.batchId" size="small" type="danger" plain @click="abandon">放弃变更</el-button>
-    </header>
+    <DetailShell
+      :crumbs="[{ label: '变更', to: '/devops' }, { label: change?.id ?? (route.params.id as string) }]"
+      :tags="change ? [{ label: statusLabel(change.status), type: statusType(change.status) as ShellTag['type'] }] : []"
+    >
+      <template #actions>
+        <el-button v-if="change?.status === 'open' && !change.batchId" size="small" type="danger" plain @click="abandon">放弃变更</el-button>
+      </template>
+    </DetailShell>
 
     <div v-if="change" class="inbox">
       <!-- ① 我的代码 -->
@@ -93,6 +91,8 @@ import { fetchAuth, apiError } from '@/api'
 import { repoLink } from '@/composables/useDevopsLinks'
 import { CHANGE_STATUS, BATCH_STATUS, statusOf } from '@/composables/useStatus'
 import { confirmAbandon } from '@/composables/useAbandonConfirm'
+import DetailShell from '@/components/DetailShell.vue'
+import type { ShellTag } from '@/components/DetailShell.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -104,11 +104,6 @@ const repoGitUrl = ref('')
 // 克隆命令：仓库地址来自仓库详情（GitURL，internal=内网 Gitea / external=用户填的公网地址）
 const cloneCmd = computed(() =>
   repoGitUrl.value ? `git clone -b ${change.value?.branch ?? ''} ${repoGitUrl.value}` : '（仓库地址加载中…）')
-
-function goBack() {
-  if (history.length > 1) history.back()
-  else router.push('/devops')
-}
 
 const statusType = (s: string) => statusOf(CHANGE_STATUS, s).type
 const statusLabel = (s: string) => statusOf(CHANGE_STATUS, s).label
@@ -196,9 +191,6 @@ watch(() => route.params.id, () => load())
 
 <style scoped>
 .detail-page { padding: 20px; max-width: 960px; margin: 0 auto; }
-.crumb { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
-.crumb .sep { color: var(--el-text-color-placeholder); }
-.back { border: none; background: none; cursor: pointer; font-size: 16px; color: var(--el-text-color-primary); }
 .grow { flex: 1; }
 .inbox { display: grid; gap: 14px; }
 .card { background: var(--el-bg-color); border: 1px solid var(--el-border-color-lighter); border-radius: 8px; padding: 16px 20px; }

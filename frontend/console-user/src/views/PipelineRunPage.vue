@@ -11,6 +11,7 @@ import { ElMessage } from 'element-plus'
 import PipelineRunView from './app-tabs/PipelineRunView.vue'
 import { getRun, listRuns, listPipelines, type Pipeline, type PipelineRun } from '@/api/pipeline'
 import { fetchAuth, apiError } from '@/api'
+import DetailShell from '@/components/DetailShell.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -95,20 +96,17 @@ watch(runId, async (id, old) => {
   if (!appId.value) await bootstrap()
 })
 
-function goBack() {
-  // 返回应用详情（应用为主线，运行归属应用）；无应用归属兜底 DevOps 中心
-  if (appId.value) router.push(`/applications/${appId.value}`)
-  else router.push('/devops')
-}
 </script>
 
 <template>
   <div class="run-page">
-    <div class="page-bar">
-      <button class="back" @click="goBack">← 返回</button>
-      <span class="title">流水线运行</span>
-      <span v-if="appName" class="app">应用：<b>{{ appName }}</b></span>
-    </div>
+    <DetailShell
+      :crumbs="[
+        { label: '流水线运行', to: appId ? `/applications/${appId}` : '/devops' },
+        { label: runId ?? '' },
+      ]"
+      :tags="appName ? [{ label: `应用 ${appName}` }] : []"
+    />
 
     <!-- ① 流水线 tab（CI/CD） -->
     <el-tabs v-if="pipelines.length" v-model="activePid" class="pipe-tabs" @tab-change="switchPipeline">
@@ -142,17 +140,6 @@ v-for="r in runs" :key="r.id" class="run-chip" :class="{ active: r.id === runId 
 
 <style scoped>
 .run-page { max-width: 1100px; margin: 0 auto; }
-.page-bar {
-  display: flex; align-items: center; gap: 14px;
-  padding: 4px 0 14px; margin-bottom: 4px;
-  border-bottom: 1px solid var(--border, #eee);
-}
-.back {
-  border: none; background: transparent; color: var(--text-faint, #999);
-  font-family: inherit; font-size: 13px; cursor: pointer; padding: 4px 8px;
-}
-.back:hover { color: var(--text, #333); }
-.title { font-size: 16px; font-weight: 600; }
 .app { font-size: 12.5px; color: var(--text-dim, #888); }
 .app b { color: var(--text, #333); }
 

@@ -1,14 +1,12 @@
 <template>
   <div class="page detail-page">
-    <header class="crumb">
-      <button class="back" @click="goBack">←</button>
-      <span>发布</span>
-      <span class="sep">/</span>
-      <span class="mono">{{ release?.id }}</span>
-      <el-tag v-if="release" :type="release.status === 'succeeded' ? 'success' : release.status === 'rolled-back' ? 'info' : 'warning'" size="small">
-        {{ release.status }}{{ release.isRollback ? '（回滚单）' : '' }}
-      </el-tag>
-    </header>
+    <DetailShell
+      :crumbs="[{ label: '发布', to: '/devops' }, { label: release?.id ?? (route.params.id as string) }]"
+      :tags="release ? [{
+        label: `${release.status}${release.isRollback ? '（回滚单）' : ''}`,
+        type: (release.status === 'succeeded' ? 'success' : release.status === 'rolled-back' ? 'info' : 'warning') as ShellTag['type'],
+      }] : []"
+    />
 
     <div v-if="release" class="body">
       <section class="card">
@@ -61,6 +59,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchAuth, apiError } from '@/api'
 import { imageLink, deployLink } from '@/composables/useDevopsLinks'
+import DetailShell from '@/components/DetailShell.vue'
+import type { ShellTag } from '@/components/DetailShell.vue'
 
 interface ReleaseFull {
   id: string; appId: string; envId: string; imageId: string; imageDigest: string
@@ -83,11 +83,6 @@ const imageMismatch = computed(() => {
   if (!release.value?.imageDigest || !workload.value?.imageRef) return false
   return !workload.value.imageRef.includes(release.value.imageDigest)
 })
-
-function goBack() {
-  if (history.length > 1) history.back()
-  else router.push('/devops')
-}
 
 async function rollback() {
   if (!release.value) return
@@ -131,9 +126,6 @@ watch(() => route.params.id, () => load())
 
 <style scoped>
 .detail-page { padding: 20px; max-width: 960px; margin: 0 auto; }
-.crumb { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
-.crumb .sep { color: var(--el-text-color-placeholder); }
-.back { border: none; background: none; cursor: pointer; font-size: 16px; color: var(--el-text-color-primary); }
 .body { display: grid; gap: 14px; }
 .card { background: var(--el-bg-color); border: 1px solid var(--el-border-color-lighter); border-radius: 8px; padding: 16px 20px; }
 .card h3 { margin: 0 0 12px; font-size: 14px; color: var(--el-text-color-secondary); }
