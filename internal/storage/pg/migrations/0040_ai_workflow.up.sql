@@ -3,7 +3,7 @@ CREATE TABLE IF NOT EXISTS ai_workflows (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
-    desc TEXT NOT NULL DEFAULT '',
+    "desc" TEXT NOT NULL DEFAULT '',
     nodes JSONB NOT NULL DEFAULT '[]',
     enabled BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL,

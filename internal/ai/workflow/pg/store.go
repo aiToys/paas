@@ -24,7 +24,7 @@ type Store struct {
 func NewStore(db *storagepg.DB) *Store { return &Store{db: db} }
 
 // 列顺序与 scan 对齐（列错位 panic 警示）。
-const defCols = `id, tenant_id, name, desc, nodes, enabled, created_at, updated_at`
+const defCols = `id, tenant_id, name, "desc", nodes, enabled, created_at, updated_at`
 const runCols = `id, tenant_id, workflow_id, status, inputs, node_runs, created_at, finished_at`
 
 func (s *Store) newID(prefix string) string {
@@ -131,7 +131,7 @@ func (s *Store) Update(ctx context.Context, in workflow.WorkflowDef) (workflow.W
 	in.TenantID = tid
 	in.UpdatedAt = time.Now()
 	tag, err := s.db.Pool().Exec(ctx,
-		`UPDATE ai_workflows SET name=$3, desc=$4, nodes=$5, enabled=$6, updated_at=$7
+		`UPDATE ai_workflows SET name=$3, "desc"=$4, nodes=$5, enabled=$6, updated_at=$7
 		 WHERE tenant_id=$1 AND id=$2`,
 		tid, in.ID, in.Name, in.Desc, nodes, in.Enabled, in.UpdatedAt)
 	if err != nil {
