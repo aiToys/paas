@@ -232,7 +232,8 @@ func (h *Handler) serveInstall(w http.ResponseWriter, r *http.Request, id string
 	}
 	f, ok := h.forkers[it.EntityType]
 	if !ok {
-		httputil.WriteError(w, http.StatusInternalServerError, "unsupported entityType: "+it.EntityType)
+		// 数据驱动脏数据（entityType 未注册 forker）属业务错误，非内部故障
+		httputil.WriteError(w, http.StatusBadRequest, "unsupported entityType: "+it.EntityType)
 		return
 	}
 	res, err := f.InstallSnapshot(r.Context(), it)

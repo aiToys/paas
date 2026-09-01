@@ -52,6 +52,9 @@ type Runtime struct {
 	guard    guardrail.Guard // 输入/输出护栏（nil 全放行）
 	// promptLogEnabled 为 true 时，结构化日志记录输入/输出摘要（脱敏长度），便于审计/调试。
 	promptLogEnabled bool
+	// MeterFn token 用量记账钩子（cmd/core 注入 gateway.Meter.Record，粗估口径与 gateway stream 一致）。
+	// 覆盖不经 gateway 的三条推理路径（/api/agents/{id}/run、eval、workflow llm 节点），防绕过 billing 配额。nil 则不记。
+	MeterFn func(ctx context.Context, agentID string, tokens int)
 }
 
 // WithSkills 注入 skill 仓储（依赖倒置；不调则 skill 维度降级跳过）。
@@ -269,6 +272,10 @@ func (r *Runtime) RunConv(ctx context.Context, agentID, conversationID string, m
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err
+	}
+	// token 计量（rune 粗估：输入 + 输出，gateway stream 同口径）
+	if r.MeterFn != nil {
+		r.MeterFn(ctx, agentID, totalChars(msgs)+finalText.Len())
 	}
 	span.SetAttributes(attribute.Int("gen_ai.agent.max_steps", a.MaxSteps))
 	// 多轮记忆：成功结束后追加本轮 user + assistant（user 取原始最后一条）

@@ -203,9 +203,9 @@ func (h *Handler) serveRun(w http.ResponseWriter, r *http.Request, id string) {
 
 func (h *Handler) writeErr(w http.ResponseWriter, err error) {
 	switch {
-	case err == ErrAgentNotFound:
+	case errors.Is(err, ErrAgentNotFound):
 		httputil.WriteError(w, http.StatusNotFound, err.Error())
-	case err == ErrAgentExists:
+	case errors.Is(err, ErrAgentExists):
 		httputil.WriteError(w, http.StatusConflict, err.Error())
 	case isFieldErr(err):
 		httputil.WriteError(w, http.StatusBadRequest, err.Error())

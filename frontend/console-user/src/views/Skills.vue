@@ -5,7 +5,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchJSON, fetchAuth, respError } from '@/api'
+import { fetchJSON, fetchAuth, respError, apiError } from '@/api'
 import { CATEGORIES, catLabel } from '@/api/marketplace'
 import { usePublish } from '@/composables/usePublish'
 
@@ -77,18 +77,22 @@ async function submit() {
   }
   const method = editing.value ? 'PUT' : 'POST'
   const url = editing.value ? `/api/skills/${editing.value.id}` : '/api/skills'
-  const resp = await fetchAuth(url, {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(f),
-  })
-  if (!resp.ok) {
-    ElMessage.error(await respError(resp, '保存失败：'))
-    return
+  try {
+    const resp = await fetchAuth(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(f),
+    })
+    if (!resp.ok) {
+      ElMessage.error(await respError(resp, '保存失败：'))
+      return
+    }
+    ElMessage.success(editing.value ? '已更新' : '已创建')
+    showForm.value = false
+    load()
+  } catch (e) {
+    ElMessage.error(apiError(e, '保存失败'))
   }
-  ElMessage.success(editing.value ? '已更新' : '已创建')
-  showForm.value = false
-  load()
 }
 
 async function remove(s: Skill) {
@@ -97,14 +101,18 @@ async function remove(s: Skill) {
     ElMessage.warning(`该 Skill 正被 ${used.length} 个 Agent 引用（${used.join('、')}），请先在 Agent 中解绑`)
     return
   }
-  await ElMessageBox.confirm(`确定删除 Skill「${s.name}」？`, '删除确认', { type: 'warning' })
-  const resp = await fetchAuth(`/api/skills/${s.id}`, { method: 'DELETE' })
-  if (!resp.ok) {
-    ElMessage.error('删除失败')
-    return
+  try {
+    await ElMessageBox.confirm(`确定删除 Skill「${s.name}」？`, '删除确认', { type: 'warning' })
+    const resp = await fetchAuth(`/api/skills/${s.id}`, { method: 'DELETE' })
+    if (!resp.ok) {
+      ElMessage.error(await respError(resp, '删除失败：'))
+      return
+    }
+    ElMessage.success('已删除')
+    load()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(apiError(e, '删除失败'))
   }
-  ElMessage.success('已删除')
-  load()
 }
 
 // 详情抽屉（instructions + useCases + examples 全文查看）

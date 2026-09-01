@@ -17,4 +17,5 @@ type Repository interface {
 	GetRun(ctx context.Context, id string) (WorkflowRun, error)
 	UpdateRun(ctx context.Context, r WorkflowRun) (WorkflowRun, error)
 	ListRuns(ctx context.Context, workflowID string) ([]WorkflowRun, error)
+	ListActiveRuns(ctx context.Context) ([]WorkflowRun, error) // 全表 running/paused（Sweep 启动恢复）
 }

@@ -3,7 +3,7 @@
 // 租户私有；test/invoke 仅 mcp 类型（initialize + tools/list + tools/call）。
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchJSON, fetchAuth, respError } from '@/api'
+import { fetchJSON, fetchAuth, respError, apiError } from '@/api'
 import { usePublish } from '@/composables/usePublish'
 
 interface Tool {
@@ -78,18 +78,22 @@ async function submit() {
   }
   const method = editing.value ? 'PUT' : 'POST'
   const url = editing.value ? `/api/tools/${editing.value.id}` : '/api/tools'
-  const resp = await fetchAuth(url, {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(f),
-  })
-  if (!resp.ok) {
-    ElMessage.error(await respError(resp, '保存失败：'))
-    return
+  try {
+    const resp = await fetchAuth(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(f),
+    })
+    if (!resp.ok) {
+      ElMessage.error(await respError(resp, '保存失败：'))
+      return
+    }
+    ElMessage.success(editing.value ? '已更新' : '已创建')
+    showForm.value = false
+    load()
+  } catch (e) {
+    ElMessage.error(apiError(e, '保存失败'))
   }
-  ElMessage.success(editing.value ? '已更新' : '已创建')
-  showForm.value = false
-  load()
 }
 
 // 发布到广场（凭证自动剔除，装完自行补填）
@@ -102,22 +106,28 @@ const { publish } = usePublish('tool', async (row, category) => {
 }, load)
 
 async function remove(t: Tool) {
-  await ElMessageBox.confirm(`确定删除工具「${t.name}」？`, '删除确认', { type: 'warning' })
-  const resp = await fetchAuth(`/api/tools/${t.id}`, { method: 'DELETE' })
-  if (!resp.ok) {
-    ElMessage.error('删除失败')
-    return
+  try {
+    await ElMessageBox.confirm(`确定删除工具「${t.name}」？`, '删除确认', { type: 'warning' })
+    const resp = await fetchAuth(`/api/tools/${t.id}`, { method: 'DELETE' })
+    if (!resp.ok) {
+      ElMessage.error(await respError(resp, '删除失败：'))
+      return
+    }
+    ElMessage.success('已删除')
+    load()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(apiError(e, '删除失败'))
   }
-  ElMessage.success('已删除')
-  load()
 }
 
 // 测试 MCP 工具（initialize + tools/list）
 async function testTool(t: Tool) {
   const resp = await fetchAuth(`/api/tools/${t.id}/test`, { method: 'POST' })
+  // body 只能读一次：先 json() 再从已解析对象取 error 字段（respError 会重复消费 body 丢文案）
   const j = await resp.json().catch(() => ({}))
   if (!resp.ok) {
-    ElMessage.error(await respError(resp, '测试失败：'))
+    const msg = (j as { error?: string }).error || `HTTP ${resp.status}`
+    ElMessage.error('测试失败：' + msg)
     return
   }
   // 响应兼容 {data:{tools:[]}} 与裸 {tools:[]} 两种形态

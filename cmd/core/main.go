@@ -1129,6 +1129,12 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		WithSkills(stores.Skill).
 		WithGuard(guardrail.NewFromEnv()).
 		WithPromptLog(os.Getenv("PAAS_AI_LOG_PROMPTS") == "true")
+	// token 计量（rune 粗估）：覆盖不经 gateway 的推理路径（agent run / eval / workflow llm），
+	// 防 agent:write 权限者绕过 billing ResTokens 配额。
+	agentRuntime.MeterFn = func(ctx context.Context, agentID string, tokens int) {
+		tid, _ := tenant.TenantFrom(ctx)
+		meter.Record(tid, "", "agent:"+agentID, "agent-run", tokens)
+	}
 	// 注入 gateway 虚拟模型路由：/v1/chat/completions 收 model="agent:{id}" 时转交 runtime。
 	agentDispatcherHolder.Set(agentDispatcherAdapter{rt: agentRuntime})
 	agentHandler := agent.NewHandler(stores.Agent, agentRuntime)
@@ -1158,6 +1164,8 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// AI 工作流编排：把 Agent/Tool 串成多步流程（llm/condition/approve/end）。
 	// engine 桥接 agentRuntime（LLM 节点）+ mcp 工具（tool 节点）。
 	workflowEngine := workflow.NewEngine(stores.Workflow, workflowAgentRunner{rt: agentRuntime}, workflowToolRunner{repo: stores.Tool})
+	// 启动恢复（devops SweepInterrupted 同款）：running 孤儿标 failed；paused 保留由 Approve 拉起续跑
+	workflowEngine.Sweep(context.Background())
 	workflowHandler := workflow.NewHandler(stores.Workflow, workflowEngine).
 		WithAuthorize(func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }).
 		WithAudit(&identityAuditAdapter{store: stores.Security}).

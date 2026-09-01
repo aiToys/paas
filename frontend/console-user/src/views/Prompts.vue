@@ -3,7 +3,7 @@
 // 创建同 name 自动 version+1 且激活；可手动激活历史版本。
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchJSON, fetchAuth, respError } from '@/api'
+import { fetchJSON, fetchAuth, respError, apiError } from '@/api'
 import { usePublish } from '@/composables/usePublish'
 
 interface Prompt {
@@ -63,29 +63,37 @@ async function submit() {
   if (f.variables.trim()) {
     body.variables = f.variables.split(',').map((s) => s.trim()).filter(Boolean)
   }
-  const resp = await fetchAuth('/api/prompts', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-  if (!resp.ok) {
-    ElMessage.error(await respError(resp, '创建失败：'))
-    return
+  try {
+    const resp = await fetchAuth('/api/prompts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (!resp.ok) {
+      ElMessage.error(await respError(resp, '创建失败：'))
+      return
+    }
+    ElMessage.success('已创建（同 name 自动 version+1 且激活）')
+    showForm.value = false
+    load()
+  } catch (e) {
+    ElMessage.error(apiError(e, '创建失败'))
   }
-  ElMessage.success('已创建（同 name 自动 version+1 且激活）')
-  showForm.value = false
-  load()
 }
 
 async function activate(p: Prompt) {
-  await ElMessageBox.confirm(`激活「${p.name} v${p.version}」？`, '激活确认', { type: 'warning' })
-  const resp = await fetchAuth(`/api/prompts/${p.id}/activate`, { method: 'POST' })
-  if (!resp.ok) {
-    ElMessage.error('激活失败')
-    return
+  try {
+    await ElMessageBox.confirm(`激活「${p.name} v${p.version}」？`, '激活确认', { type: 'warning' })
+    const resp = await fetchAuth(`/api/prompts/${p.id}/activate`, { method: 'POST' })
+    if (!resp.ok) {
+      ElMessage.error(await respError(resp, '激活失败：'))
+      return
+    }
+    ElMessage.success('已激活')
+    load()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(apiError(e, '激活失败'))
   }
-  ElMessage.success('已激活')
-  load()
 }
 
 // 发布到广场（发布 active 版本快照）
@@ -95,14 +103,18 @@ const { publish } = usePublish('prompt', async (row, category) => {
 }, load)
 
 async function remove(p: Prompt) {
-  await ElMessageBox.confirm(`删除「${p.name} v${p.version}」？`, '删除确认', { type: 'warning' })
-  const resp = await fetchAuth(`/api/prompts/${p.id}`, { method: 'DELETE' })
-  if (!resp.ok) {
-    ElMessage.error('删除失败')
-    return
+  try {
+    await ElMessageBox.confirm(`删除「${p.name} v${p.version}」？`, '删除确认', { type: 'warning' })
+    const resp = await fetchAuth(`/api/prompts/${p.id}`, { method: 'DELETE' })
+    if (!resp.ok) {
+      ElMessage.error(await respError(resp, '删除失败：'))
+      return
+    }
+    ElMessage.success('已删除')
+    load()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(apiError(e, '删除失败'))
   }
-  ElMessage.success('已删除')
-  load()
 }
 
 onMounted(load)

@@ -2,6 +2,7 @@ package skill
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -136,9 +137,9 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request) {
 // writeErr 映射领域 sentinel 到 HTTP 状态（与 tool/agent 同款）。
 func (h *Handler) writeErr(w http.ResponseWriter, err error) {
 	switch {
-	case err == ErrSkillNotFound:
+	case errors.Is(err, ErrSkillNotFound):
 		httputil.WriteError(w, http.StatusNotFound, err.Error())
-	case err == ErrSkillExists:
+	case errors.Is(err, ErrSkillExists):
 		httputil.WriteError(w, http.StatusConflict, err.Error())
 	case isFieldErr(err):
 		httputil.WriteError(w, http.StatusBadRequest, err.Error())

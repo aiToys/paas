@@ -18,14 +18,21 @@ const detail = ref<MarketItem | null>(null)
 const detailLoading = ref(false)
 const installing = ref(false)
 
+// 请求序号守卫：快速切换 tab/分类时丢弃过期响应（参考 Pulls.vue 既有模式）
+let loadSeq = 0
+
 async function load() {
+  const my = ++loadSeq
   loading.value = true
   try {
-    items.value = await listMarket(entityType.value, category.value, q.value)
+    const res = await listMarket(entityType.value, category.value, q.value)
+    if (my !== loadSeq) return
+    items.value = res
   } catch (e) {
+    if (my !== loadSeq) return
     ElMessage.error('加载广场失败：' + (e as Error).message)
   } finally {
-    loading.value = false
+    if (my === loadSeq) loading.value = false
   }
 }
 
@@ -39,17 +46,26 @@ function pickCategory(c: string) {
   load()
 }
 
+// 详情请求守卫：记录当前请求的 item id，响应回来若抽屉已切到别的条目则丢弃
+let detailReqId = ''
+
 async function openDetail(it: MarketItem) {
   detail.value = it
+  detailReqId = it.id
   detailLoading.value = true
   try {
     // 详情拉全量（含 snapshot 预览）
-    detail.value = await getMarketItem(it.id)
+    const full = await getMarketItem(it.id)
+    if (detailReqId !== it.id) return
+    detail.value = full
   } catch {
     // 列表元信息兜底
+    if (detailReqId !== it.id) return
   } finally {
-    detailLoading.value = false
-    if (detail.value) buildPreview(detail.value)
+    if (detailReqId === it.id) {
+      detailLoading.value = false
+      if (detail.value) buildPreview(detail.value)
+    }
   }
 }
 

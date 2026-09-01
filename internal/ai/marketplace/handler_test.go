@@ -41,10 +41,10 @@ func TestRouteDispatch(t *testing.T) {
 		req := httptest.NewRequest(c.method, c.path, strings.NewReader("{}")).WithContext(ctx)
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req)
-		// install 特例：forker 未注册时 500（internal error）——本测试只验证分发不 panic
+		// install 特例：forker 未注册时 400（数据驱动脏数据，业务错误）——本测试只验证分发不 panic
 		if c.path == "/api/marketplace/"+item.ID+"/install" {
-			if rec.Code != http.StatusInternalServerError {
-				t.Fatalf("%s %s: expect 500 (no forker), got %d", c.method, c.path, rec.Code)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("%s %s: expect 400 (no forker), got %d", c.method, c.path, rec.Code)
 			}
 			continue
 		}

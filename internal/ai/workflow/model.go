@@ -14,6 +14,14 @@ import (
 	"time"
 )
 
+// min 兼容占位符错误提示的长度截断（Go 1.21+ 内置 min 可直接用，此处显式以防早期版本）。
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // NodeType 节点类型。
 const (
 	NodeStart   = "start"     // 起点（唯一，无配置）
@@ -41,6 +49,7 @@ var (
 	ErrInvalidDef       = errors.New("工作流定义不合法")
 	ErrRunNotPaused     = errors.New("运行不在等待确认状态")
 	ErrNodeNotApprove   = errors.New("该节点不是人工确认节点")
+	ErrActiveRunExists  = errors.New("工作流仍有进行中的运行，须先中止再删除")
 )
 
 // Branch 条件分支的一支。
@@ -148,6 +157,14 @@ func (d *WorkflowDef) Validate() error {
 			if len(n.Branches) == 0 || n.ElseID == "" {
 				return fmt.Errorf("%w: condition 节点 %s 需 branches + elseId", ErrInvalidDef, n.ID)
 			}
+			for _, b := range n.Branches {
+				if strings.TrimSpace(b.When) == "" {
+					return fmt.Errorf("%w: condition 节点 %s 存在空条件表达式", ErrInvalidDef, n.ID)
+				}
+				if b.NextID == "" {
+					return fmt.Errorf("%w: condition 节点 %s 分支缺 nextId", ErrInvalidDef, n.ID)
+				}
+			}
 		case NodeApprove:
 			// Message 可选
 		default:
@@ -181,7 +198,53 @@ func (d *WorkflowDef) Validate() error {
 			return fmt.Errorf("%w: 节点 %s 从 start 不可达", ErrInvalidDef, n.ID)
 		}
 	}
+	// 环检测（DFS 三色标记）：环定义在运行期只能靠 maxSteps 兜底——每步都是真实
+	// LLM/工具调用（费用放大），必须在创建期拦截。
+	onStack := map[string]bool{}
+	seen := map[string]bool{}
+	var visit func(id string) error
+	visit = func(id string) error {
+		if onStack[id] {
+			return fmt.Errorf("%w: 节点 %s 处于环路中", ErrInvalidDef, id)
+		}
+		if !reach[id] || seen[id] {
+			return nil
+		}
+		seen[id] = true
+		onStack[id] = true
+		n, ok := d.node(id)
+		if !ok {
+			return nil
+		}
+		for _, t := range d.targets(n) {
+			if err := visit(t); err != nil {
+				return err
+			}
+		}
+		onStack[id] = false
+		return nil
+	}
+	if err := visit(d.entry()); err != nil {
+		return err
+	}
 	return nil
+}
+
+// targets 节点的全部出边目标。
+func (d *WorkflowDef) targets(n NodeDef) []string {
+	out := []string{}
+	if n.NextID != "" {
+		out = append(out, n.NextID)
+	}
+	if n.ElseID != "" {
+		out = append(out, n.ElseID)
+	}
+	for _, b := range n.Branches {
+		if b.NextID != "" {
+			out = append(out, b.NextID)
+		}
+	}
+	return out
 }
 
 func (d *WorkflowDef) entry() string {
@@ -230,8 +293,8 @@ func RenderTemplate(tpl string, inputs map[string]string, nodes map[string]strin
 		}
 		close_ := strings.Index(tpl[i+open:], "}}")
 		if close_ < 0 {
-			b.WriteString(tpl[i:])
-			break
+			// 未闭合占位符报错（fail-fast，防字面量 {{xxx 静默流向 LLM 产生错误结果）
+			return "", fmt.Errorf("占位符未闭合：{{ 后缺少 }}（模板片段 %q）", tpl[i:i+open+min(len(tpl[i+open:]), 32)])
 		}
 		b.WriteString(tpl[i : i+open])
 		ref := strings.TrimSpace(tpl[i+open+2 : i+open+close_])

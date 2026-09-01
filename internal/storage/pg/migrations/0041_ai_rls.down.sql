@@ -1,0 +1,23 @@
+-- 对称回退：禁用 AI 表 RLS
+ALTER TABLE ai_workflows DISABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON ai_workflows;
+ALTER TABLE ai_workflow_runs DISABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON ai_workflow_runs;
+ALTER TABLE ai_knowledgebases DISABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS ai_knowledgebases_tenant_isolation ON ai_knowledgebases;
+ALTER TABLE ai_documents DISABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS ai_documents_tenant_isolation ON ai_documents;
+ALTER TABLE ai_chunks DISABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS ai_chunks_tenant_isolation ON ai_chunks;
+ALTER TABLE ai_tools DISABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS ai_tools_tenant_isolation ON ai_tools;
+ALTER TABLE ai_prompts DISABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS ai_prompts_tenant_isolation ON ai_prompts;
+ALTER TABLE ai_agents DISABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS ai_agents_tenant_isolation ON ai_agents;
+ALTER TABLE ai_eval_cases DISABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS ai_eval_cases_tenant_isolation ON ai_eval_cases;
+ALTER TABLE eval_runs DISABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS eval_runs_tenant_isolation ON eval_runs;
+ALTER TABLE ai_skills DISABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS ai_skills_tenant_isolation ON ai_skills;

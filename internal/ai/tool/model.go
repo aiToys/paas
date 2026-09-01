@@ -11,6 +11,8 @@ package tool
 
 import (
 	"errors"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -52,8 +54,13 @@ func (t Tool) Validate() error {
 	default:
 		return fieldErr("type 必须是 mcp/http/builtin")
 	}
-	if t.Type == TypeMCP && t.Config[CfgMCPServerURL] == "" {
-		return fieldErr("mcp 类型需配置 serverURL")
+	if t.Type == TypeMCP {
+		if t.Config[CfgMCPServerURL] == "" {
+			return fieldErr("mcp 类型需配置 serverURL")
+		}
+		if err := validateMCPServerURL(t.Config[CfgMCPServerURL]); err != nil {
+			return err
+		}
 	}
 	if t.Type == TypeHTTP && t.Config["endpoint"] == "" {
 		return fieldErr("http 类型需配置 endpoint")
@@ -62,6 +69,77 @@ func (t Tool) Validate() error {
 		return fieldErr("builtin 类型需配置 handler")
 	}
 	return nil
+}
+
+// ConfigMask 掩码占位（与 appconfig.SecretMask / security.SecretMask 同款，不泄漏长度/内容）。
+const ConfigMask = "••••••"
+
+// Masked 返回掩码副本：敏感 key（apiKey 等凭证类）替换为固定掩码，其余字段保留。
+// list/get 响应一律返回掩码副本（明文仅运行时 invoke 内部使用，不回传前端）。
+func (t Tool) Masked() Tool {
+	masked := t
+	masked.Config = t.MaskedConfig()
+	return masked
+}
+
+// MaskKeys 是 Config 中的敏感 key 集合（凭证类，回传前端一律掩码）。
+var MaskKeys = []string{CfgMCPAPIKey, "token", "password", "secret"}
+
+// MaskedConfig 返回掩码后的 Config 副本（敏感 key 替换为掩码，其余原样；原 map 不动）。
+func (t Tool) MaskedConfig() map[string]string {
+	out := make(map[string]string, len(t.Config))
+	for k, v := range t.Config {
+		if isSensitiveKey(k) && v != "" {
+			out[k] = ConfigMask
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+func isSensitiveKey(k string) bool {
+	lk := strings.ToLower(k)
+	for _, s := range MaskKeys {
+		if lk == strings.ToLower(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// validateMCPServerURL 校验 MCP server 地址，防 SSRF（参考 devops CodeRepo 的防护模式）：
+//   - scheme 仅 http/https
+//   - 拒环回（localhost/127.0.0.0/8/0.0.0.0/::1）+ 链路本地（169.254.0.0/16）+ 云元数据 host
+//
+// 与 CodeRepo 不同：不拒私网段与 *.svc.cluster.local——MCP server 可合法部署在集群内
+//（dev 集群 gitea.paas.svc 同款场景），只拦「借用平台身份探本机/云元数据」的高敏目标。
+func validateMCPServerURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fieldErr("serverURL 不是合法 URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fieldErr("serverURL scheme 仅支持 http/https")
+	}
+	host := u.Hostname()
+	if isLoopbackOrMetadataHost(host) {
+		return fieldErr("serverURL 不允许指向环回/链路本地/云元数据地址")
+	}
+	return nil
+}
+
+// isLoopbackOrMetadataHost 判定环回 + 链路本地 + 云元数据 host（SSRF 高敏目标）。
+func isLoopbackOrMetadataHost(host string) bool {
+	h := strings.ToLower(strings.Trim(host, "[]"))
+	switch h {
+	case "", "localhost", "0.0.0.0", "::1", "metadata", "metadata.google.internal":
+		return true
+	}
+	if strings.HasPrefix(h, "127.") || strings.HasPrefix(h, "169.254.") {
+		return true
+	}
+	return false
 }
 
 // sentinel 错误（handler 映射 HTTP 状态）。

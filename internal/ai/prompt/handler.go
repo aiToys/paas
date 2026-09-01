@@ -2,6 +2,7 @@ package prompt
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -162,9 +163,9 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) writeErr(w http.ResponseWriter, err error) {
 	switch {
-	case err == ErrPromptNotFound, err == ErrNoActivePrompt:
+	case errors.Is(err, ErrPromptNotFound), errors.Is(err, ErrNoActivePrompt):
 		httputil.WriteError(w, http.StatusNotFound, err.Error())
-	case err == ErrPromptExists:
+	case errors.Is(err, ErrPromptExists):
 		httputil.WriteError(w, http.StatusConflict, err.Error())
 	case isFieldErr(err):
 		httputil.WriteError(w, http.StatusBadRequest, err.Error())

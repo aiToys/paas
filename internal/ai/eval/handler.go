@@ -188,6 +188,8 @@ func (h *Handler) writeErr(w http.ResponseWriter, err error) {
 		httputil.WriteError(w, http.StatusNotFound, err.Error())
 	case err == ErrEvalCaseNotFound:
 		httputil.WriteError(w, http.StatusNotFound, err.Error())
+	case err == ErrEvalUnavailable:
+		httputil.WriteError(w, http.StatusServiceUnavailable, err.Error())
 	case err == ErrEvalCaseExists:
 		httputil.WriteError(w, http.StatusConflict, err.Error())
 	case IsFieldErr(err):

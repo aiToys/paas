@@ -72,6 +72,7 @@ type Runner interface {
 // sentinel 错误。
 var (
 	ErrEvalCaseNotFound = errors.New("评估用例不存在")
+	ErrEvalUnavailable  = errors.New("评估服务未装配执行器")
 	ErrEvalCaseExists   = errors.New("评估用例已存在")
 	ErrEvalRunNotFound  = errors.New("评估记录不存在")
 )

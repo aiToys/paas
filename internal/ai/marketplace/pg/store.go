@@ -100,9 +100,10 @@ func (s *Store) Create(ctx context.Context, in marketplace.Item) (marketplace.It
 	_, err := s.db.Pool().Exec(ctx,
 		`INSERT INTO marketplace_items (`+itemCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		 ON CONFLICT (entity_type, name, publisher_tenant) DO UPDATE SET
-		   id=EXCLUDED.id, description=EXCLUDED.description, category=EXCLUDED.category,
+		   description=EXCLUDED.description, category=EXCLUDED.category,
 		   snapshot=EXCLUDED.snapshot, publisher_name=EXCLUDED.publisher_name,
-		   installs=0, created_at=EXCLUDED.created_at`,
+		   installs=0, created_at=EXCLUDED.created_at
+		   /* 保留原主键 id：重发布覆盖内容不换 id，防旧引用（收藏/InstalledFrom）悬挂 */`,
 		in.ID, in.EntityType, in.Name, in.Description, in.Category, in.Snapshot,
 		in.PublisherTenant, in.PublisherName, in.Installs, in.CreatedAt)
 	if err != nil {

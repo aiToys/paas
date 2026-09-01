@@ -81,6 +81,14 @@ func TestValidate(t *testing.T) {
 		{"http 无 endpoint", tool.Tool{Name: "x", Type: tool.TypeHTTP, Config: map[string]string{}}, true},
 		{"builtin 无 handler", tool.Tool{Name: "x", Type: tool.TypeBuiltin, Config: map[string]string{}}, true},
 		{"合法 mcp", tool.Tool{Name: "x", Type: tool.TypeMCP, Config: map[string]string{"serverURL": "http://s"}}, false},
+		{"mcp 内网段合法", tool.Tool{Name: "x2", Type: tool.TypeMCP, Config: map[string]string{"serverURL": "http://192.168.1.10:8080"}}, false},
+		// SSRF 防护：环回/链路本地/云元数据/scheme 拒绝；内网与 *.svc 合法（集群内 MCP server）
+		{"mcp 指向 localhost", tool.Tool{Name: "x", Type: tool.TypeMCP, Config: map[string]string{"serverURL": "http://localhost:8080"}}, true},
+		{"mcp 指向 127.0.0.1", tool.Tool{Name: "x", Type: tool.TypeMCP, Config: map[string]string{"serverURL": "http://127.0.0.1:8080"}}, true},
+		{"mcp 指向 169.254.169.254", tool.Tool{Name: "x", Type: tool.TypeMCP, Config: map[string]string{"serverURL": "http://169.254.169.254/latest/meta-data"}}, true},
+		{"mcp 指向 metadata.google.internal", tool.Tool{Name: "x", Type: tool.TypeMCP, Config: map[string]string{"serverURL": "http://metadata.google.internal"}}, true},
+		{"mcp file scheme", tool.Tool{Name: "x", Type: tool.TypeMCP, Config: map[string]string{"serverURL": "file:///etc/passwd"}}, true},
+		{"mcp 集群内 svc 合法", tool.Tool{Name: "x-svc", Type: tool.TypeMCP, Config: map[string]string{"serverURL": "http://mcp.paas.svc.cluster.local:8080"}}, false},
 	}
 	s := memory.NewStore()
 	for _, c := range cases {
@@ -115,5 +123,22 @@ func TestUpdateAndDelete(t *testing.T) {
 	}
 	if err := s.Delete(ctx, t1.ID); !errors.Is(err, tool.ErrToolNotFound) {
 		t.Fatalf("重复删应 not found")
+	}
+}
+
+func TestMasked(t *testing.T) {
+	t1 := tool.Tool{
+		Name: "mcp-tool", Type: tool.TypeMCP,
+		Config: map[string]string{"serverURL": "http://srv", "apiKey": "sk-real-secret"},
+	}
+	m := t1.Masked()
+	if m.Config["apiKey"] != tool.ConfigMask {
+		t.Fatalf("apiKey 应掩码，got %q", m.Config["apiKey"])
+	}
+	if m.Config["serverURL"] != "http://srv" {
+		t.Fatalf("非敏感字段应保留")
+	}
+	if t1.Config["apiKey"] != "sk-real-secret" {
+		t.Fatalf("Masked 不应改原对象")
 	}
 }

@@ -51,6 +51,9 @@ func cloneDef(d workflow.WorkflowDef) workflow.WorkflowDef {
 	out.Nodes = append([]workflow.NodeDef(nil), d.Nodes...)
 	for i := range out.Nodes {
 		out.Nodes[i].Branches = append([]workflow.Branch(nil), out.Nodes[i].Branches...)
+		if out.Nodes[i].Config.Args != nil {
+			out.Nodes[i].Config.Args = cloneMap(out.Nodes[i].Config.Args)
+		}
 	}
 	return out
 }
@@ -235,6 +238,19 @@ func (s *Store) UpdateRun(ctx context.Context, in workflow.WorkflowRun) (workflo
 	in.TenantID = tid
 	s.runs[in.ID] = cloneRun(in)
 	return cloneRun(in), nil
+}
+
+// ListActiveRuns 全表 running/paused（Sweep 启动恢复专用，平台级调用带各租户 ctx 之外的聚合视图）。
+func (s *Store) ListActiveRuns(ctx context.Context) ([]workflow.WorkflowRun, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]workflow.WorkflowRun, 0)
+	for _, r := range s.runs {
+		if r.Status == workflow.StatusRunning || r.Status == workflow.StatusPaused {
+			out = append(out, cloneRun(r))
+		}
+	}
+	return out, nil
 }
 
 func (s *Store) ListRuns(ctx context.Context, workflowID string) ([]workflow.WorkflowRun, error) {

@@ -29,7 +29,7 @@ func (s *Service) WithRuns(r RunRepository) *Service { s.runs = r; return s }
 // 用例为空时返空切片 + nil（调用方可提示「无用例」）。
 func (s *Service) RunAll(ctx context.Context, agentID string) ([]EvalResult, error) {
 	if s.runner == nil {
-		return nil, ErrEvalCaseNotFound // runtime 未装配，借用 sentinel 表达不可用
+		return nil, ErrEvalUnavailable // runtime 未装配（503 语义，不误导为 404）
 	}
 	cases, err := s.repo.List(ctx, agentID)
 	if err != nil {

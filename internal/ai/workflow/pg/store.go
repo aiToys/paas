@@ -265,6 +265,25 @@ func (s *Store) UpdateRun(ctx context.Context, in workflow.WorkflowRun) (workflo
 	return in, nil
 }
 
+// ListActiveRuns 全表 running/paused（Sweep 启动恢复，平台级聚合视图）。
+func (s *Store) ListActiveRuns(ctx context.Context) ([]workflow.WorkflowRun, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+runCols+` FROM ai_workflow_runs WHERE status IN ('running','paused') LIMIT 1000`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]workflow.WorkflowRun, 0)
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) ListRuns(ctx context.Context, workflowID string) ([]workflow.WorkflowRun, error) {
 	tid, err := storagepg.TenantOrErr(ctx)
 	if err != nil {

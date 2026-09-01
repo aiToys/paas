@@ -3,6 +3,7 @@ package knowledgebase
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -372,9 +373,9 @@ func (h *Handler) serveRetrieve(w http.ResponseWriter, r *http.Request, kbID str
 // writeErr 映射领域 sentinel 到 HTTP 状态（与 dataservice/maas 同款）。
 func (h *Handler) writeErr(w http.ResponseWriter, err error) {
 	switch {
-	case err == ErrKBNotFound, err == ErrDocNotFound:
+	case errors.Is(err, ErrKBNotFound), errors.Is(err, ErrDocNotFound):
 		httputil.WriteError(w, http.StatusNotFound, err.Error())
-	case err == ErrKBExists:
+	case errors.Is(err, ErrKBExists):
 		httputil.WriteError(w, http.StatusConflict, err.Error())
 	case isFieldErr(err):
 		httputil.WriteError(w, http.StatusBadRequest, err.Error())

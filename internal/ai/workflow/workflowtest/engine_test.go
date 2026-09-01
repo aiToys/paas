@@ -282,3 +282,163 @@ func waitStatus(t *testing.T, repo workflow.Repository, runID, want string) {
 	}
 	t.Fatalf("等待状态 %s 超时", want)
 }
+
+// 环定义在创建期拒绝（防运行期 maxSteps 兜底前的真实 LLM/工具调用费用放大）。
+func TestDefValidateRejectsCycle(t *testing.T) {
+	d := workflow.WorkflowDef{
+		Name: "cycle", Enabled: true,
+		Nodes: []workflow.NodeDef{
+			{ID: "s", Type: workflow.NodeStart, NextID: "a"},
+			{ID: "a", Type: workflow.NodeLLM, NextID: "b",
+				Config: workflow.NodeConfig{AgentID: "x", InputTemplate: "1"}},
+			{ID: "b", Type: workflow.NodeCond, Branches: []workflow.Branch{
+				{When: "inputs.go == 1", NextID: "a"}, // 回指 a：成环
+			}, ElseID: "e"},
+			{ID: "e", Type: workflow.NodeEnd},
+		},
+	}
+	if err := d.Validate(); err == nil {
+		t.Fatal("环定义应被拒绝")
+	}
+	// 空条件表达式 / 分支缺 nextId 拒绝
+	d2 := workflow.WorkflowDef{
+		Name: "bad-cond", Enabled: true,
+		Nodes: []workflow.NodeDef{
+			{ID: "s", Type: workflow.NodeStart, NextID: "c"},
+			{ID: "c", Type: workflow.NodeCond, Branches: []workflow.Branch{
+				{When: "  ", NextID: "e"},
+			}, ElseID: "e"},
+			{ID: "e", Type: workflow.NodeEnd},
+		},
+	}
+	if err := d2.Validate(); err == nil {
+		t.Fatal("空条件表达式应被拒绝")
+	}
+}
+
+// 未闭合 {{ 占位符 fail-fast（防字面量静默流向 LLM）。
+func TestRenderTemplateUnclosed(t *testing.T) {
+	if _, err := workflow.RenderTemplate("前缀{{nodes.cls.output", nil, nil); err == nil {
+		t.Fatal("未闭合占位符应报错")
+	}
+}
+
+// Abort 在节点执行期间落库后，advance 不得把 aborted 覆写回 succeeded/running。
+func TestAbortDuringNodeExecutionNotOverwritten(t *testing.T) {
+	repo := memory.NewStore()
+	d, err := repo.Create(ctxTenant(), ticketDef())
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := make(chan struct{})
+	agents := &blockingAgents{release: block}
+	e := workflow.NewEngine(repo, agents, nil)
+	_, err = e.Start(ctxTenant(), d, map[string]string{"ticket": "退款"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond) // 等 llm 节点进入执行
+	if err := e.Abort(ctxTenant(), mustListFirstRun(t, repo, d.ID)); err != nil {
+		t.Fatalf("abort: %v", err)
+	}
+	close(block) // 节点此刻才返回
+	time.Sleep(150 * time.Millisecond)
+	run := mustGetRun(t, repo, mustListFirstRun(t, repo, d.ID))
+	if run.Status != workflow.StatusAborted {
+		t.Fatalf("abort 后不得被覆盖：status=%s", run.Status)
+	}
+}
+
+// 无本进程等待者的 paused run（模拟重启后孤儿），Approve 直接拉起 advance 续跑到终态。
+func TestApproveWithoutWaiterResumes(t *testing.T) {
+	repo := memory.NewStore()
+	d, err := repo.Create(ctxTenant(), ticketDef())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 第一个引擎推进到 paused 后丢弃（模拟进程重启丢失 goroutine；run 留 paused 在库里）
+	e1 := workflow.NewEngine(repo, &fakeAgents{}, nil)
+	_, err = e1.Start(ctxTenant(), d, map[string]string{"ticket": "要求退款"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rid := waitForStatus(t, repo, workflow.StatusPaused)
+	// 全新引擎（无等待者）approve：应拉起续跑到 succeeded
+	e2 := workflow.NewEngine(repo, &fakeAgents{}, nil)
+	if err := e2.Approve(ctxTenant(), rid, "af"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	final := waitForStatus(t, repo, workflow.StatusSucceeded)
+	if final != rid {
+		t.Fatalf("续跑应完成原 run：rid=%s", final)
+	}
+}
+
+// Sweep：running 孤儿标 failed「进程重启中断」，paused 保留（等 Approve 拉起）。
+func TestSweepInterrupted(t *testing.T) {
+	repo := memory.NewStore()
+	d, err := repo.Create(ctxTenant(), ticketDef())
+	if err != nil {
+		t.Fatal(err)
+	}
+	block := make(chan struct{})
+	e := workflow.NewEngine(repo, &blockingAgents{release: block}, nil)
+	_, _ = e.Start(ctxTenant(), d, map[string]string{"ticket": "退款"})
+	time.Sleep(100 * time.Millisecond)
+	rid := mustListFirstRun(t, repo, d.ID)
+	e.Sweep(context.Background()) // 模拟另一进程启动清扫（run 还在 running）
+	time.Sleep(50 * time.Millisecond)
+	run := mustGetRun(t, repo, rid)
+	if run.Status != workflow.StatusFailed {
+		t.Fatalf("Sweep 应把 running 孤儿标 failed，got %s", run.Status)
+	}
+	close(block)
+	time.Sleep(100 * time.Millisecond)
+	run = mustGetRun(t, repo, rid)
+	if run.Status != workflow.StatusFailed {
+		t.Fatalf("被清扫的 run 不得被残留 goroutine 覆写，got %s", run.Status)
+	}
+}
+
+// —— 测试辅助 ——
+
+type blockingAgents struct{ release chan struct{} }
+
+func (b *blockingAgents) RunNode(ctx context.Context, agentID, prompt string) (string, error) {
+	<-b.release
+	return "售后", nil
+}
+
+func mustListFirstRun(t *testing.T, repo *memory.Store, wfID string) string {
+	t.Helper()
+	runs, err := repo.ListRuns(ctxTenant(), wfID)
+	if err != nil || len(runs) == 0 {
+		t.Fatalf("ListRuns: err=%v len=%d", err, len(runs))
+	}
+	return runs[0].ID
+}
+
+func mustGetRun(t *testing.T, repo *memory.Store, rid string) workflow.WorkflowRun {
+	t.Helper()
+	run, err := repo.GetRun(ctxTenant(), rid)
+	if err != nil {
+		t.Fatalf("GetRun: %v", err)
+	}
+	return run
+}
+
+func waitForStatus(t *testing.T, repo *memory.Store, status string) string {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		runs, _ := repo.ListRuns(ctxTenant(), "")
+		for _, r := range runs {
+			if r.Status == status {
+				return r.ID
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("等待状态 %s 超时", status)
+	return ""
+}

@@ -68,20 +68,47 @@ function emptyForm(): WorkflowDef {
 function openCreate() {
   editingId.value = null
   form.value = emptyForm()
+  argRowsMap.clear()
   showForm.value = true
 }
 
 function openEdit(w: WorkflowDef) {
   editingId.value = w.id
   form.value = JSON.parse(JSON.stringify(w))
+  argRowsMap.clear()
+  // 旧数据兜底：每个节点确保 config 与类型匹配（防模板 `n.config!.x` 崩溃）
+  for (const n of form.value.nodes) ensureConfig(n)
   showForm.value = true
+}
+
+// 按节点类型补齐默认 config（切换类型/载入旧数据时兜底，防 config 缺失崩溃）
+function ensureConfig(n: NodeDef) {
+  if (n.type === 'llm') {
+    n.config = { agentId: n.config?.agentId ?? '', inputTemplate: n.config?.inputTemplate ?? '{{inputs.input}}' }
+  } else if (n.type === 'tool') {
+    n.config = { toolId: n.config?.toolId ?? '', toolName: n.config?.toolName ?? '', args: n.config?.args ?? {} }
+  } else if (n.type === 'approve') {
+    n.config = { message: n.config?.message ?? '' }
+  } else {
+    // start/condition/end 无 config 语义，清空防脏数据
+    n.config = undefined
+  }
 }
 
 const nodeIds = computed(() => form.value.nodes.map(n => n.id))
 
+// 找最大不重复的 n<k> 新 ID（删除节点后按 length 生成会撞已有 ID）
+function nextNodeId(): string {
+  const used = new Set(form.value.nodes.map(n => n.id))
+  for (let k = 1; ; k++) {
+    const id = `n${k}`
+    if (!used.has(id)) return id
+  }
+}
+
 function addNode() {
   form.value.nodes.splice(form.value.nodes.length - 1, 0, {
-    id: `n${form.value.nodes.length}`, type: 'llm', name: '',
+    id: nextNodeId(), type: 'llm', name: '',
     nextId: form.value.nodes[form.value.nodes.length - 1]?.id || 'e',
     config: { agentId: agents.value[0]?.id ?? '', inputTemplate: '{{inputs.input}}' },
   })
@@ -123,10 +150,33 @@ function removeBranch(n: NodeDef, i: number) {
   n.branches?.splice(i, 1)
 }
 
+// 节点类型切换：重置为该类型的默认 config（防旧 config 残留/缺失）
+function onTypeChange(n: NodeDef) {
+  ensureConfig(n)
+}
+
 async function save() {
   if (!form.value.name.trim()) {
     ElMessage.warning('请输入工作流名')
     return
+  }
+  // 节点 ID 校验：非空 + 唯一（重复时指明哪个 ID 重复）
+  const seen = new Set<string>()
+  for (const n of form.value.nodes) {
+    const id = n.id.trim()
+    if (!id) {
+      ElMessage.error(`节点「${n.name || n.type}」的 ID 不能为空`)
+      return
+    }
+    if (seen.has(id)) {
+      ElMessage.error(`节点 ID「${id}」重复，请修改后重试`)
+      return
+    }
+    seen.add(id)
+  }
+  // 参数行收口：@change 未触发（如最后一行未失焦）时兜底同步回 config.args
+  for (const n of form.value.nodes) {
+    if (n.type === 'tool') syncArgs(n)
   }
   saving.value = true
   try {
@@ -221,10 +271,10 @@ function openRuns(w: WorkflowDef) {
           节点（{{ form.nodes.length }}/50）
           <el-button size="small" @click="addNode" :disabled="form.nodes.length >= 50">+ 添加节点</el-button>
         </div>
-        <div v-for="(n, i) in form.nodes" :key="i" class="node-card">
+        <div v-for="(n, i) in form.nodes" :key="n.id" class="node-card">
           <div class="node-row">
             <el-input v-model="n.id" placeholder="节点 ID（如 cls）" style="width: 120px" class="mono" />
-            <el-select v-model="n.type" style="width: 140px">
+            <el-select v-model="n.type" style="width: 140px" @change="onTypeChange(n)">
               <el-option v-for="t in NODE_TYPES" :key="t.value" :value="t.value" :label="t.label" />
             </el-select>
             <el-input v-model="n.name" placeholder="展示名（可选）" style="width: 130px" />

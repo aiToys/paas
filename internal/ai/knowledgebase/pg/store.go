@@ -433,7 +433,8 @@ func (s *Store) UpsertChunks(ctx context.Context, chunks []knowledgebase.Chunk) 
 		if _, err := tx.Exec(ctx, `
 INSERT INTO ai_chunks (id, kb_id, doc_id, tenant_id, seq, content, metadata, created_at)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-ON CONFLICT (id) DO UPDATE SET seq=$5, content=$6, metadata=$7`,
+ON CONFLICT (id) DO UPDATE SET seq=$5, content=$6, metadata=$7
+WHERE ai_chunks.tenant_id = $4`,
 			c.ID, c.KBID, c.DocID, c.TenantID, c.Seq, c.Content, metaBytes, c.CreatedAt,
 		); err != nil {
 			return err

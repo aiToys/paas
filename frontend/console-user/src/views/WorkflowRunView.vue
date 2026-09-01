@@ -44,11 +44,18 @@ async function loadRuns() {
 }
 
 async function refreshCur() {
-  if (!cur.value) return
+  if (!cur.value || refreshing) return
+  refreshing = true
+  const rid = cur.value.id
   try {
-    cur.value = await getRun(cur.value.id)
-  } catch { /* 已被清理（定义删除级联）静默 */ }
+    const run = await getRun(rid)
+    // 响应回来时用户可能已 pick 其它 run——仅同 ID 才赋值（防旧响应覆盖）
+    if (cur.value?.id === rid) cur.value = run
+  } catch { /* 已被清理（定义删除级联）静默 */ } finally {
+    refreshing = false
+  }
 }
+let refreshing = false
 
 function pick(r: WorkflowRun) {
   cur.value = r

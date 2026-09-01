@@ -2,11 +2,11 @@
 // AI 编排 -> Agent（P3）：组装 system prompt + skill 能力 + 工具 + KB RAG 调底层 LLM。
 // 虚拟模型 agent:{id} 经 /v1/chat/completions 调用；此处提供 CRUD + 试运行 + 评估入口。
 // 绑定资源（工具/知识库/Skill）用「名称+描述+类型」富选择器展示（非裸 ID）。
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 const router = useRouter()
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchJSON, fetchAuth, respError } from '@/api'
+import { fetchJSON, fetchAuth, respError, apiError } from '@/api'
 import Icon from '@/components/Icon.vue'
 import { usePublish } from '@/composables/usePublish'
 
@@ -124,33 +124,43 @@ async function submit() {
   }
   const method = editing.value ? 'PUT' : 'POST'
   const url = editing.value ? `/api/agents/${editing.value.id}` : '/api/agents'
-  const resp = await fetchAuth(url, {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(f),
-  })
-  if (!resp.ok) {
-    ElMessage.error(await respError(resp, '保存失败：'))
-    return
+  try {
+    const resp = await fetchAuth(url, {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(f),
+    })
+    if (!resp.ok) {
+      ElMessage.error(await respError(resp, '保存失败：'))
+      return
+    }
+    ElMessage.success(editing.value ? '已更新' : '已创建')
+    showForm.value = false
+    load()
+  } catch (e) {
+    ElMessage.error(apiError(e, '保存失败'))
   }
-  ElMessage.success(editing.value ? '已更新' : '已创建')
-  showForm.value = false
-  load()
 }
 
 async function remove(a: Agent) {
-  await ElMessageBox.confirm(`确定删除 Agent「${a.name}」？`, '删除确认', { type: 'warning' })
-  const resp = await fetchAuth(`/api/agents/${a.id}`, { method: 'DELETE' })
-  if (!resp.ok) {
-    ElMessage.error('删除失败')
-    return
+  try {
+    await ElMessageBox.confirm(`确定删除 Agent「${a.name}」？`, '删除确认', { type: 'warning' })
+    const resp = await fetchAuth(`/api/agents/${a.id}`, { method: 'DELETE' })
+    if (!resp.ok) {
+      ElMessage.error(await respError(resp, '删除失败：'))
+      return
+    }
+    ElMessage.success('已删除')
+    load()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(apiError(e, '删除失败'))
   }
-  ElMessage.success('已删除')
-  load()
 }
 
 // 试运行（SSE 流式，OpenAI 兼容）
 const runDialog = ref(false)
+// 试运行 SSE 中止器：弹窗关闭/组件卸载时断流（防后台继续消费+写 ref）
+let runAbort: AbortController | null = null
 const runAgent = ref<Agent | null>(null)
 const runInput = ref('')
 const runOutput = ref('')
@@ -188,8 +198,10 @@ async function doRun() {
   runOutput.value = ''
   runReasoning.value = ''
   try {
+    runAbort = new AbortController()
     const resp = await fetchAuth('/v1/chat/completions', {
       method: 'POST',
+      signal: runAbort.signal,
       headers: {
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',
@@ -249,7 +261,11 @@ async function openEval(a: Agent) {
   evalAgent.value = a
   evalResults.value = []
   evalDialog.value = true
-  await Promise.all([loadEvalCases(), loadEvalRuns()])
+  try {
+    await Promise.all([loadEvalCases(), loadEvalRuns()])
+  } catch (e) {
+    ElMessage.error(apiError(e, '加载评估数据失败'))
+  }
 }
 
 // 评估历史（最近 20 次，跑完刷新——回归趋势）
@@ -271,23 +287,31 @@ async function addCase() {
     ElMessage.warning('输入与期望必填')
     return
   }
-  const resp = await fetchAuth('/api/agent-evals', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...c, agentId: evalAgent.value.id }),
-  })
-  if (!resp.ok) {
-    ElMessage.error(await respError(resp, '创建失败：'))
-    return
+  try {
+    const resp = await fetchAuth('/api/agent-evals', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...c, agentId: evalAgent.value.id }),
+    })
+    if (!resp.ok) {
+      ElMessage.error(await respError(resp, '创建失败：'))
+      return
+    }
+    newCase.value = { name: '', input: '', expected: '', matchType: 'contains' }
+    loadEvalCases()
+  } catch (e) {
+    ElMessage.error(apiError(e, '创建失败'))
   }
-  newCase.value = { name: '', input: '', expected: '', matchType: 'contains' }
-  loadEvalCases()
 }
 
 async function removeCase(c: EvalCase) {
-  await ElMessageBox.confirm(`删除用例「${c.name || c.id}」？`, '删除确认', { type: 'warning' })
-  await fetchAuth(`/api/agent-evals/${c.id}`, { method: 'DELETE' })
-  loadEvalCases()
+  try {
+    await ElMessageBox.confirm(`删除用例「${c.name || c.id}」？`, '删除确认', { type: 'warning' })
+    await fetchAuth(`/api/agent-evals/${c.id}`, { method: 'DELETE' })
+    loadEvalCases()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(apiError(e, '删除失败'))
+  }
 }
 
 async function runEval() {
@@ -296,9 +320,11 @@ async function runEval() {
   evalResults.value = []
   try {
     const resp = await fetchAuth(`/api/agent-evals/run?agentId=${evalAgent.value.id}`, { method: 'POST' })
+    // body 只能读一次：先 json() 再从已解析对象取 error 字段（respError 会重复消费 body 丢文案）
     const j = await resp.json().catch(() => ({}))
     if (!resp.ok) {
-      ElMessage.error(await respError(resp, '评估失败：'))
+      const msg = (j as { error?: string }).error || `HTTP ${resp.status}`
+      ElMessage.error('评估失败：' + msg)
       return
     }
     evalResults.value = (j as { data?: EvalResult[] }).data ?? (j as unknown as EvalResult[])
@@ -309,6 +335,7 @@ async function runEval() {
 }
 
 onMounted(load)
+onUnmounted(() => runAbort?.abort())
 </script>
 
 <template>
@@ -448,7 +475,7 @@ onMounted(load)
     </el-dialog>
 
     <!-- 试运行 -->
-    <el-dialog v-model="runDialog" :title="`试运行：${runAgent?.name || ''}`" width="680px">
+    <el-dialog v-model="runDialog" :title="`试运行：${runAgent?.name || ''}`" width="680px" @close="runAbort?.abort()">
       <el-input v-model="runInput" type="textarea" :rows="2" placeholder="输入测试问题" />
       <div style="margin-top: 8px">
         <el-button type="primary" :loading="runLoading" @click="doRun">运行</el-button>

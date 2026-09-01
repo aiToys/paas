@@ -175,6 +175,19 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request) {
 			h.writeErr(w, err)
 			return
 		}
+		// 有进行中 run 拒删（对齐 pipeline HasActiveRun 语义）：删除会级联清 runs，
+		// 而 advance goroutine 持定义快照继续执行（LLM 继续计费）+ paused 等待者永久悬挂。
+		runs, err := h.repo.ListRuns(r.Context(), id)
+		if err != nil {
+			h.writeErr(w, err)
+			return
+		}
+		for _, run := range runs {
+			if run.Status == StatusRunning || run.Status == StatusPaused {
+				httputil.WriteError(w, http.StatusConflict, ErrActiveRunExists.Error())
+				return
+			}
+		}
 		if err := h.repo.Delete(r.Context(), id); err != nil {
 			h.writeErr(w, err)
 			return
@@ -280,7 +293,8 @@ func (h *Handler) writeErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrWorkflowNotFound), errors.Is(err, ErrRunNotFound):
 		httputil.WriteError(w, http.StatusNotFound, err.Error())
-	case errors.Is(err, ErrWorkflowExists), errors.Is(err, ErrRunNotPaused), errors.Is(err, ErrNodeNotApprove):
+	case errors.Is(err, ErrWorkflowExists), errors.Is(err, ErrRunNotPaused), errors.Is(err, ErrNodeNotApprove),
+		errors.Is(err, ErrActiveRunExists):
 		httputil.WriteError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrInvalidDef):
 		httputil.WriteError(w, http.StatusBadRequest, err.Error())

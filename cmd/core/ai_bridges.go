@@ -302,6 +302,7 @@ func (a agentDispatcherAdapter) ServeSSEConv(w http.ResponseWriter, r *http.Requ
 
 // workflowAgentRunner 把 agent.Runtime 适配为 workflow.AgentRunner：
 // 收集全部 content chunk 拼接为最终文本（工作流节点消费完整输出，非流式透传）。
+// 计量经 Runtime.MeterFn 统一覆盖（agent run / eval / workflow 三路径同源，防绕过 billing 配额）。
 type workflowAgentRunner struct{ rt *agent.Runtime }
 
 func (w workflowAgentRunner) RunNode(ctx context.Context, agentID, prompt string) (string, error) {

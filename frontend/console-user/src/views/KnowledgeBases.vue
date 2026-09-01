@@ -132,6 +132,8 @@ const docDrawer = ref(false)
 const currentKB = ref<KnowledgeBase | null>(null)
 const docs = ref<Document[]>([])
 let pollTimer: ReturnType<typeof setInterval> | null = null
+let pollLoading = false // in-flight 防重入（慢请求不堆叠）
+let pollErrShown = false // 连续失败只提示一次（防 3s 轮询错误刷屏），成功后复位
 
 async function openDocs(kb: KnowledgeBase) {
   currentKB.value = kb
@@ -141,11 +143,19 @@ async function openDocs(kb: KnowledgeBase) {
 }
 
 async function loadDocs() {
-  if (!currentKB.value) return
+  if (!currentKB.value || pollLoading) return
+  pollLoading = true
   try {
     docs.value = await fetchJSON<Document[]>(`/api/knowledgebases/${currentKB.value.id}/documents`)
+    pollErrShown = false
   } catch (e) {
-    ElMessage.error('加载文档失败：' + (e as Error).message)
+    // 首次失败提示；轮询连续失败静默（防 3s 间隔错误 toast 刷屏），成功后复位
+    if (!pollErrShown) {
+      ElMessage.error('加载文档失败：' + (e as Error).message)
+      pollErrShown = true
+    }
+  } finally {
+    pollLoading = false
   }
 }
 

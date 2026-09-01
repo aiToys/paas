@@ -2,6 +2,7 @@ package tool
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -67,7 +68,12 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteInternalError(w, err)
 			return
 		}
-		httputil.WriteData(w, list)
+		// 响应一律掩码副本（apiKey 等凭证不回传前端）
+		masked := make([]Tool, len(list))
+		for i, t := range list {
+			masked[i] = t.Masked()
+		}
+		httputil.WriteData(w, masked)
 		return
 	}
 	if r.Method == http.MethodPost {
@@ -84,7 +90,7 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request) {
 			h.writeErr(w, err)
 			return
 		}
-		httputil.WriteDataCreated(w, saved)
+		httputil.WriteDataCreated(w, saved.Masked())
 		return
 	}
 	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -122,7 +128,7 @@ func (h *Handler) serveOne(w http.ResponseWriter, r *http.Request, id string) {
 			h.writeErr(w, err)
 			return
 		}
-		httputil.WriteData(w, t)
+		httputil.WriteData(w, t.Masked())
 	case http.MethodPut:
 		if !h.allow(w, r, PermToolWrite) {
 			return
@@ -133,12 +139,23 @@ func (h *Handler) serveOne(w http.ResponseWriter, r *http.Request, id string) {
 			return
 		}
 		t.ID = id
+		// 掩码回写保护：前端编辑回填掩码值时保留库中原值，防掩码覆盖真实凭证（与 appconfig 同款）
+		cur, err := h.repo.Get(r.Context(), id)
+		if err != nil {
+			h.writeErr(w, err)
+			return
+		}
+		for k, v := range t.Config {
+			if v == ConfigMask && cur.Config[k] != "" {
+				t.Config[k] = cur.Config[k]
+			}
+		}
 		saved, err := h.repo.Update(r.Context(), t)
 		if err != nil {
 			h.writeErr(w, err)
 			return
 		}
-		httputil.WriteData(w, saved)
+		httputil.WriteData(w, saved.Masked())
 	case http.MethodDelete:
 		if !h.allow(w, r, PermToolWrite) {
 			return
@@ -231,9 +248,9 @@ func (h *Handler) serveInvoke(w http.ResponseWriter, r *http.Request, id string)
 // writeErr 映射领域 sentinel 到 HTTP 状态（与 KB/maas 同款）。
 func (h *Handler) writeErr(w http.ResponseWriter, err error) {
 	switch {
-	case err == ErrToolNotFound:
+	case errors.Is(err, ErrToolNotFound):
 		httputil.WriteError(w, http.StatusNotFound, err.Error())
-	case err == ErrToolExists:
+	case errors.Is(err, ErrToolExists):
 		httputil.WriteError(w, http.StatusConflict, err.Error())
 	case isFieldErr(err):
 		httputil.WriteError(w, http.StatusBadRequest, err.Error())
