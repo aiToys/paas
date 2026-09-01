@@ -162,6 +162,36 @@ type Alert struct {
 	LastSeen   time.Time `json:"lastSeen,omitempty"` // 最近一次评估命中时间（引擎路径填充）
 }
 
+// AlertEvent 告警历史事件（状态转变时落库，只增不删；PG alert_events 表）。
+// ID 由持久层生成；OccurredAt = 转变发生时间。
+type AlertEvent struct {
+	ID         string    `json:"id"`
+	TenantID   string    `json:"tenantId,omitempty"` // ctx 写入，请求体忽略
+	RuleID     string    `json:"ruleId"`
+	RuleName   string    `json:"ruleName"`
+	TargetType string    `json:"targetType"`
+	TargetID   string    `json:"targetId"`
+	MetricName string    `json:"metricName"`
+	Value      float64   `json:"value"`
+	Threshold  float64   `json:"threshold"`
+	Operator   string    `json:"operator"`
+	Severity   string    `json:"severity"`
+	Status     string    `json:"status"`    // firing | resolved（转变事件，pending 不落）
+	FiredAt    time.Time `json:"firedAt"`   // 告警首次 firing 时间
+	OccurredAt time.Time `json:"occurredAt"` // 本转变发生时间
+}
+
+// AlertEventFromAlert 由告警实例构造历史事件（ID 留给持久层生成）。
+func AlertEventFromAlert(a Alert, status string, occurredAt time.Time) AlertEvent {
+	return AlertEvent{
+		TenantID: a.TenantID, RuleID: a.RuleID, RuleName: a.RuleName,
+		TargetType: a.TargetType, TargetID: a.TargetID,
+		MetricName: a.MetricName, Value: a.Value, Threshold: a.Threshold,
+		Operator: a.Operator, Severity: a.Severity,
+		Status: status, FiredAt: a.FiredAt, OccurredAt: occurredAt,
+	}
+}
+
 // 日志级别。
 const (
 	LevelInfo  = "info"

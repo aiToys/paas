@@ -11,9 +11,9 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import {
-  listMetrics, listAlertRules, createAlertRule, deleteAlertRule, listAlerts, listLogs,
+  listMetrics, listAlertRules, createAlertRule, deleteAlertRule, listAlerts, listAlertEvents, listLogs,
   listTraces, getTrace,
-  type MetricPoint, type MetricSeries, type AlertRule, type Alert, type LogEntry,
+  type MetricPoint, type MetricSeries, type AlertRule, type Alert, type AlertEvent, type LogEntry,
 } from '@/api/observability'
 import { listLanes } from '@/api/workload'
 import {
@@ -218,6 +218,26 @@ async function loadAlerts() {
   alerts.value = await listAlerts()
 }
 
+// 告警历史（migration 0042）：501 = 内存路径无历史，静默隐藏面板（不算错误）。
+const alertEvents = ref<AlertEvent[]>([])
+const eventsSupported = ref(true)
+
+async function loadAlertEvents() {
+  try {
+    alertEvents.value = await listAlertEvents(50)
+  } catch (e) {
+    if (e instanceof Error && e.message.includes('PG')) {
+      eventsSupported.value = false
+      return
+    }
+    throw e
+  }
+}
+
+function fmtTime(iso: string): string {
+  return new Date(iso).toLocaleString('zh-CN', { hour12: false })
+}
+
 async function loadLogs() {
   const params: Record<string, string> = { range: rangeSel.value }
   if (logsAppId.value) params.appId = logsAppId.value
@@ -330,7 +350,7 @@ async function loadAll(silent = false) {
   // 首次加载设 loading（骨架）；10s 轮询 silent=true 不设 loading，避免 v-loading 闪烁。
   if (!silent) loading.value = true
   try {
-    await Promise.all([loadMetrics(), loadRules(), loadAlerts(), loadLogs(), loadTraces()])
+    await Promise.all([loadMetrics(), loadRules(), loadAlerts(), loadLogs(), loadTraces(), loadAlertEvents()])
   } finally {
     if (!silent) loading.value = false
   }
@@ -505,6 +525,22 @@ v-model="traceIdQuery" placeholder="🔍 TraceID 直查" style="width: 240px; ma
           <span class="drill-hint">下钻 →</span>
         </div>
       </div>
+      <!-- 告警历史（firing/resolved 转变事件，PG 持久化；折叠默认收起） -->
+      <el-collapse v-if="eventsSupported" class="alert-history">
+        <el-collapse-item :title="`告警历史（最近 ${alertEvents.length} 条）`" name="events">
+          <el-empty v-if="!alertEvents.length" description="暂无历史事件" :image-size="40" />
+          <div v-else class="event-list">
+            <div v-for="ev in alertEvents" :key="ev.id" class="event-row" :class="[ev.severity, ev.status]">
+              <span class="sev-tag" :class="ev.severity">{{ ev.severity === 'critical' ? '严重' : '警告' }}</span>
+              <span class="status-tag" :class="ev.status">{{ ev.status === 'firing' ? '触发' : '恢复' }}</span>
+              <span class="alert-name">{{ ev.ruleName }}</span>
+              <span class="alert-target mono">{{ ev.targetId }} · {{ ev.metricName }}</span>
+              <span class="alert-val mono">{{ ev.value.toFixed(1) }} {{ ev.operator }} {{ ev.threshold }}</span>
+              <span class="event-time mono">{{ fmtTime(ev.occurredAt) }}</span>
+            </div>
+          </div>
+        </el-collapse-item>
+      </el-collapse>
     </section>
 
     <!-- 实体健康矩阵（全部/环境视图：租户全局总览，异常定位入口） -->
@@ -900,6 +936,10 @@ v-for="node in spanRows(row)" :key="node.span.id"
 .alert-row.resolved { opacity: 0.6; }
 
 .alert-list { display: flex; flex-direction: column; gap: 6px; }
+.alert-history { margin-top: 10px; border-top: 1px dashed var(--el-border-color); }
+.event-list { display: flex; flex-direction: column; gap: 4px; }
+.event-row { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 4px; background: var(--el-fill-color-lighter); font-size: 12px; }
+.event-row .event-time { margin-left: auto; color: var(--el-text-color-secondary); }
 .alert-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); border-left: 3px solid var(--warning); font-size: 13px; }
 .alert-row.critical { border-left-color: var(--danger); background: var(--danger-soft); }
 .sev-tag { padding: 2px 8px; border-radius: 4px; font-size: 11px; background: var(--warning-soft); color: var(--warning); }

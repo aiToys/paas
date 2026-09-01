@@ -231,17 +231,29 @@ func TestCreatePublishConcurrent(t *testing.T) {
 	versions := make(chan int, n)
 	for i := 0; i < n; i++ {
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
-			// 每次发布前改值——并发测试意图是 version 唯一性，空发布会被 ErrNoChanges 拒
-			mustUpsertItem(t, s, ctx, nsID, "k", fmt.Sprintf("v-%d", time.Now().UnixNano()))
-			pub, err := s.CreatePublish(ctx, nsID)
-			if err != nil {
-				t.Errorf("并发发布失败: %v", err)
+			// 快照是整个 ns：并发 upsert 交错时，后来者的快照可能与前一个发布完全一致
+			//（ErrNoChanges，空发布防护的正确行为）。被测属性是 version 唯一性，
+			// 故对 ErrNoChanges 重试：每轮改自己的 key 直到抢到独占快照。
+			for attempt := 0; ; attempt++ {
+				if attempt > 100 {
+					t.Errorf("goroutine %d: 重试耗尽仍未发布成功", i)
+					return
+				}
+				mustUpsertItem(t, s, ctx, nsID, fmt.Sprintf("k-%d", i), fmt.Sprintf("v-%d-%d", i, time.Now().UnixNano()))
+				pub, err := s.CreatePublish(ctx, nsID)
+				if errors.Is(err, configcenter.ErrNoChanges) {
+					continue
+				}
+				if err != nil {
+					t.Errorf("并发发布失败: %v", err)
+					return
+				}
+				versions <- pub.Version
 				return
 			}
-			versions <- pub.Version
-		}()
+		}(i)
 	}
 	wg.Wait()
 	close(versions)

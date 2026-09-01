@@ -35,6 +35,8 @@ type Engine struct {
 	metrics  observability.MetricsReader
 	client   *http.Client
 	interval time.Duration
+	states2  StateStore // 可选：状态机持久化（nil=纯内存）
+	events   EventStore // 可选：历史事件落库（nil=不落）
 
 	mu     sync.RWMutex
 	states map[string]*alertState // key = ruleID|targetType|targetID
@@ -48,14 +50,37 @@ type RuleSource interface {
 	ListAllAlertRules(ctx context.Context) ([]observability.AlertRule, error)
 }
 
-// alertState 单条告警的状态机（内存态；重启重置，规则配置在 PG 不丢）。
+// PersistedState 引擎状态机持久化快照（重启恢复用）。
+type PersistedState struct {
+	StateKey   string
+	TenantID   string
+	Alert      observability.Alert
+	TickBreach int
+}
+
+// StateStore 告警状态机持久化（PG 实现；nil 降级纯内存）。
+// 引擎是跨租户组件（评估全租户规则），Save/Delete 不走 ctx 租户过滤，
+// 数据自带 tenant_id；Load 由 owner 连接调用（RLS 放行）。
+type StateStore interface {
+	LoadStates(ctx context.Context) ([]PersistedState, error)
+	SaveStates(ctx context.Context, states []PersistedState) error
+	DeleteStates(ctx context.Context, keys []string) error
+}
+
+// EventStore 告警历史事件持久化（只增不删 + 租户级保留上限，PG 实现；nil 不落历史）。
+type EventStore interface {
+	AppendEvent(ctx context.Context, ev observability.AlertEvent) error
+}
+
+// alertState 单条告警的状态机（内存态为主；StateStore 注入时变更批次落 PG，重启恢复）。
 type alertState struct {
 	alert      observability.Alert
 	tickBreach int // 连续命中计数（达 breachToFireTicks 转 firing）
 }
 
 // NewEngine 创建评估引擎。interval<=0 用 DefaultInterval。
-func NewEngine(rules RuleSource, metrics observability.MetricsReader, interval time.Duration) *Engine {
+// states2/events 可选持久化注入（PG 路径）；nil 时纯内存行为与历史版本一致。
+func NewEngine(rules RuleSource, metrics observability.MetricsReader, interval time.Duration, states2 StateStore, events EventStore) *Engine {
 	if interval <= 0 {
 		interval = DefaultInterval
 	}
@@ -64,9 +89,31 @@ func NewEngine(rules RuleSource, metrics observability.MetricsReader, interval t
 		metrics:  metrics,
 		client:   httputil.NewClient(10 * time.Second),
 		interval: interval,
+		states2:  states2,
+		events:   events,
 		states:   map[string]*alertState{},
 		stop:     make(chan struct{}),
 		done:     make(chan struct{}),
+	}
+}
+
+// Restore 从 StateStore 恢复状态机（Start 前调用一次；重启不重置 pending/firing 计数）。
+func (e *Engine) Restore(ctx context.Context) {
+	if e.states2 == nil {
+		return
+	}
+	loaded, err := e.states2.LoadStates(ctx)
+	if err != nil {
+		log.Printf("alert engine: 恢复告警状态失败（从空状态开始）: %v", err)
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, ps := range loaded {
+		e.states[ps.StateKey] = &alertState{alert: ps.Alert, tickBreach: ps.TickBreach}
+	}
+	if len(loaded) > 0 {
+		log.Printf("alert engine: 恢复 %d 条告警状态", len(loaded))
 	}
 }
 
@@ -185,6 +232,7 @@ func (e *Engine) evaluate(ctx context.Context) {
 	// 未命中且曾命中（pending/firing）→ resolved；已 resolved 的保留一轮后清理。
 	e.mu.Lock()
 	var expired []string
+	var resolved []observability.Alert
 	for key, st := range e.states {
 		if _, ok := seen[key]; ok {
 			continue
@@ -194,6 +242,7 @@ func (e *Engine) evaluate(ctx context.Context) {
 			st.alert.Status = observability.AlertResolved
 			st.alert.LastSeen = now
 			st.tickBreach = 0
+			resolved = append(resolved, st.alert)
 		case observability.AlertResolved:
 			expired = append(expired, key) // resolved 展示一轮后清理（防列表无限膨胀）
 		}
@@ -206,6 +255,55 @@ func (e *Engine) evaluate(ctx context.Context) {
 	// webhook 出站（锁外，防慢 webhook 阻塞评估循环）：每条 firing 通知一次。
 	for i, rule := range webhooks {
 		e.postWebhook(fired[i], rule.WebhookURL)
+	}
+
+	// 持久化（锁外，WithoutCancel 防 SIGTERM 后用已 cancel ctx 落库）：
+	// firing/resolved 转变写历史事件；本轮有状态的条目 upsert、过期条目删除。
+	if e.states2 != nil || e.events != nil {
+		pctx := context.WithoutCancel(ctx)
+		if e.events != nil {
+			for _, a := range fired {
+				if err := e.events.AppendEvent(pctx, observability.AlertEventFromAlert(a, observability.AlertFiring, now)); err != nil {
+					log.Printf("alert engine: 落告警历史失败: %v", err)
+				}
+			}
+			for _, a := range resolved {
+				if err := e.events.AppendEvent(pctx, observability.AlertEventFromAlert(a, observability.AlertResolved, now)); err != nil {
+					log.Printf("alert engine: 落告警历史失败: %v", err)
+				}
+			}
+		}
+		if e.states2 != nil {
+			e.persistStates(pctx, seen, expired, now)
+		}
+	}
+}
+
+// persistStates 把本轮命中的全部状态 + resolved 未过期的条目批次落库，过期条目删除。
+// 只在本轮有变更（seen/expired 非空）时写，避免每 tick 全量 upsert。
+func (e *Engine) persistStates(ctx context.Context, seen map[string]struct{}, expired []string, now time.Time) {
+	if len(seen) == 0 && len(expired) == 0 {
+		return
+	}
+	e.mu.RLock()
+	batch := make([]PersistedState, 0, len(seen))
+	for key := range seen {
+		if st, ok := e.states[key]; ok && st.alert.Status != "" {
+			batch = append(batch, PersistedState{
+				StateKey: key, TenantID: st.alert.TenantID, Alert: st.alert, TickBreach: st.tickBreach,
+			})
+		}
+	}
+	e.mu.RUnlock()
+	if len(batch) > 0 {
+		if err := e.states2.SaveStates(ctx, batch); err != nil {
+			log.Printf("alert engine: 落告警状态失败: %v", err)
+		}
+	}
+	if len(expired) > 0 {
+		if err := e.states2.DeleteStates(ctx, expired); err != nil {
+			log.Printf("alert engine: 清理过期告警状态失败: %v", err)
+		}
 	}
 }
 

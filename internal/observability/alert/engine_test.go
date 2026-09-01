@@ -60,7 +60,7 @@ func acmeCtx() context.Context { return tenant.WithTenant(context.Background(), 
 func TestEngineStateLifecycle(t *testing.T) {
 	rules := &fakeRules{rules: []observability.AlertRule{testRule()}}
 	metrics := &fakeMetrics{byTenant: map[string][]observability.MetricSeries{}}
-	e := NewEngine(rules, metrics, time.Hour) // 不 Start，手动 evaluate
+	e := NewEngine(rules, metrics, time.Hour, nil, nil) // 不 Start，手动 evaluate
 	ctx := context.Background()
 
 	metrics.byTenant["t-acme"] = []observability.MetricSeries{highCPU(95)}
@@ -112,7 +112,7 @@ func TestEngineWebhookOnFiring(t *testing.T) {
 	metrics := &fakeMetrics{byTenant: map[string][]observability.MetricSeries{
 		"t-acme": {highCPU(95)},
 	}}
-	e := NewEngine(rules, metrics, time.Hour)
+	e := NewEngine(rules, metrics, time.Hour, nil, nil)
 	ctx := context.Background()
 
 	e.evaluate(ctx) // pending，不发
@@ -139,7 +139,7 @@ func TestEngineDisabledRuleSkipped(t *testing.T) {
 	metrics := &fakeMetrics{byTenant: map[string][]observability.MetricSeries{
 		"t-acme": {highCPU(95)},
 	}}
-	e := NewEngine(rules, metrics, time.Hour)
+	e := NewEngine(rules, metrics, time.Hour, nil, nil)
 	e.evaluate(context.Background())
 	e.evaluate(context.Background())
 	alerts, _ := e.ListAlerts(acmeCtx(), "", "")
@@ -154,7 +154,7 @@ func TestEngineTenantIsolation(t *testing.T) {
 	metrics := &fakeMetrics{byTenant: map[string][]observability.MetricSeries{
 		"t-acme": {highCPU(95)},
 	}}
-	e := NewEngine(rules, metrics, time.Hour)
+	e := NewEngine(rules, metrics, time.Hour, nil, nil)
 	e.evaluate(context.Background())
 	e.evaluate(context.Background())
 	globex := tenant.WithTenant(context.Background(), "t-globex")
@@ -170,7 +170,7 @@ func TestEngineTargetFilter(t *testing.T) {
 	metrics := &fakeMetrics{byTenant: map[string][]observability.MetricSeries{
 		"t-acme": {highCPU(95)},
 	}}
-	e := NewEngine(rules, metrics, time.Hour)
+	e := NewEngine(rules, metrics, time.Hour, nil, nil)
 	e.evaluate(context.Background())
 	e.evaluate(context.Background())
 	ds, _ := e.ListAlerts(acmeCtx(), observability.TargetDataservice, "")
@@ -180,5 +180,115 @@ func TestEngineTargetFilter(t *testing.T) {
 	app, _ := e.ListAlerts(acmeCtx(), observability.TargetApp, "app-1")
 	if len(app) != 1 {
 		t.Fatalf("app-1 维度应 1, got %d", len(app))
+	}
+}
+
+// fakeStateStore 内存版 StateStore（验证引擎持久化行为，不依赖 PG）。
+type fakeStateStore struct {
+	mu     sync.Mutex
+	saved  []PersistedState
+	loaded []PersistedState
+	dead   map[string]struct{}
+}
+
+func (f *fakeStateStore) LoadStates(ctx context.Context) ([]PersistedState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]PersistedState{}, f.loaded...), nil
+}
+
+func (f *fakeStateStore) SaveStates(ctx context.Context, states []PersistedState) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.saved = append(f.saved, states...)
+	return nil
+}
+
+func (f *fakeStateStore) DeleteStates(ctx context.Context, keys []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.dead == nil {
+		f.dead = map[string]struct{}{}
+	}
+	for _, k := range keys {
+		f.dead[k] = struct{}{}
+	}
+	return nil
+}
+
+// fakeEventStore 内存版 EventStore。
+type fakeEventStore struct {
+	mu     sync.Mutex
+	events []observability.AlertEvent
+}
+
+func (f *fakeEventStore) AppendEvent(ctx context.Context, ev observability.AlertEvent) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, ev)
+	return nil
+}
+
+// TestEnginePersistLifecycle：firing 转变落事件 + 状态落库；resolved 落事件 + 过期删除。
+func TestEnginePersistLifecycle(t *testing.T) {
+	rules := &fakeRules{rules: []observability.AlertRule{testRule()}}
+	metrics := &fakeMetrics{byTenant: map[string][]observability.MetricSeries{
+		"t-acme": {highCPU(95)},
+	}}
+	ss := &fakeStateStore{}
+	es := &fakeEventStore{}
+	e := NewEngine(rules, metrics, time.Hour, ss, es)
+	ctx := context.Background()
+
+	e.evaluate(ctx) // pending
+	e.evaluate(ctx) // firing
+	es.mu.Lock()
+	if len(es.events) != 1 || es.events[0].Status != observability.AlertFiring {
+		es.mu.Unlock()
+		t.Fatalf("firing 应落 1 条历史事件, got %+v", es.events)
+	}
+	es.mu.Unlock()
+
+	metrics.byTenant["t-acme"] = []observability.MetricSeries{highCPU(30)}
+	e.evaluate(ctx) // resolved
+	e.evaluate(ctx) // resolved 过期清理
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	if len(es.events) != 2 || es.events[1].Status != observability.AlertResolved {
+		t.Fatalf("resolved 应落第 2 条历史事件, got %+v", es.events)
+	}
+	if len(ss.saved) == 0 {
+		t.Fatal("状态应落库")
+	}
+	key := "rule-1|" + observability.TargetApp + "|app-1"
+	if _, ok := ss.dead[key]; !ok {
+		t.Fatalf("过期状态应删除 key=%s, dead=%v", key, ss.dead)
+	}
+}
+
+// TestEngineRestore：恢复快照后直接 firing（tickBreach 续接，不从 pending 重来）。
+func TestEngineRestore(t *testing.T) {
+	rules := &fakeRules{rules: []observability.AlertRule{testRule()}}
+	metrics := &fakeMetrics{byTenant: map[string][]observability.MetricSeries{
+		"t-acme": {highCPU(95)},
+	}}
+	key := "rule-1|" + observability.TargetApp + "|app-1"
+	ss := &fakeStateStore{loaded: []PersistedState{{
+		StateKey: key, TenantID: "t-acme",
+		Alert: observability.Alert{
+			RuleID: "rule-1", RuleName: "CPU 高", TenantID: "t-acme",
+			TargetType: observability.TargetApp, TargetID: "app-1",
+			Status: observability.AlertPending,
+		},
+		TickBreach: 1, // 已 pending 一轮：恢复后再命中一轮即 firing
+	}}}
+	e := NewEngine(rules, metrics, time.Hour, ss, nil)
+	e.Restore(context.Background())
+	e.evaluate(context.Background())
+	alerts, _ := e.ListAlerts(acmeCtx(), "", "")
+	if len(alerts) != 1 || alerts[0].Status != observability.AlertFiring {
+		t.Fatalf("恢复后续接计数应直接 firing, got %+v", alerts)
 	}
 }

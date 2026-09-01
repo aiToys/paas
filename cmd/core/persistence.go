@@ -140,6 +140,9 @@ type Stores struct {
 	// AlertRules 是告警规则存储（R4-C1 持久化）。PG 路径非 nil（重启不丢）；
 	// 内存路径 nil——observability 内部回退 memory 规则存储（含 dev seed）。
 	AlertRules observability.RuleStore
+	// AlertEvents 是告警状态机/历史事件存储（migration 0042）。PG 路径非 nil
+	//（重启恢复 pending/firing + firing/resolved 历史可回看）；内存路径 nil（纯内存行为）。
+	AlertEvents *obspg.Store
 }
 
 // buildAllStores 选择持久化后端、构造全模块 store 并完成 seed。
@@ -238,6 +241,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto
 		backfillTenantIDs(ctx, idb, svcRepo, wlRepo)
 		log.Println("持久化后端: PostgreSQL（全 11 模块已迁移）")
 
+		alertStore := obspg.NewStore(db) // 规则 + 状态机 + 历史事件共用（migration 0042 起同 store）
 		stores := &Stores{
 			Identity:       idb,
 			Application:    appRepo,
@@ -271,7 +275,8 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto
 			Change:         changeRepo,
 			Service:        svcRepo,
 			Lane:           laneRepo,
-			AlertRules:     obspg.NewStore(db),
+			AlertRules:     alertStore,
+			AlertEvents:    alertStore,
 		}
 		return stores, db.Close, nil
 	}

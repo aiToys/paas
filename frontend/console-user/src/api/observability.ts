@@ -17,6 +17,12 @@ export interface Alert {
   metricName: string; value: number; threshold: number; operator?: string
   severity: string; status: string
 }
+// 告警历史事件（firing/resolved 转变落库，时间倒序；PG 持久化路径）。
+export interface AlertEvent {
+  id: string; ruleId: string; ruleName: string; targetType: string; targetId: string
+  metricName: string; value: number; threshold: number; operator: string
+  severity: string; status: string; firedAt: string; occurredAt: string
+}
 export interface LogEntry {
   id: string; appId: string; targetType?: string; targetId?: string
   level: string; message: string; traceId: string; timestamp: string
@@ -46,6 +52,9 @@ export const listAlerts = (params: Record<string, string> = {}) => {
   const q = new URLSearchParams(params).toString()
   return fetchAuth(`/api/observability/alerts${q ? `?${q}` : ''}`).then(r => unwrap<Alert[]>(r))
 }
+
+export const listAlertEvents = (limit = 50) =>
+  fetchAuth(`/api/observability/alerts/events?limit=${limit}`).then(r => unwrap<AlertEvent[]>(r))
 
 export const listLogs = (params: Record<string, string>) =>
   fetchAuth(`/api/observability/logs?${new URLSearchParams(params).toString()}`).then(r => unwrap<LogEntry[]>(r))

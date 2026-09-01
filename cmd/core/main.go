@@ -192,7 +192,9 @@ func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, metrics
 	}
 	srv := serveHTTP(gw, meter, stores, appliers, metricsReg, gc)
 	// 告警评估引擎（R4-C2）：后台 30s tick 评估 + 状态机 + webhook 出站，随进程 ctx 退出。
+	// PG 路径先恢复状态机（migration 0042：重启不重置 pending/firing 计数），再启动评估。
 	if obsAlertEngine != nil {
+		obsAlertEngine.Restore(ctx)
 		obsAlertEngine.Start(ctx)
 	}
 	ran, err := bootstrapCore(ctx, plugins, deps)
@@ -423,7 +425,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// 可观测 Repository + 告警评估引擎先行构造（单实例）：changeHandler 通知桥接（下方）与
 	// obsHandler（下方可观测段）共用；必须在第一个消费者之前，否则 bridge 捕获 nil。
 	// 引擎启动在 run 层（有进程生命周期 ctx）。
-	obsRepo, obsAlertEngine = buildObservabilityStore(workloadLister{repo: stores.Workload}, tenantEntityLister{apps: stores.Application, ds: stores.DataService, wls: stores.Workload}, stores.AlertRules)
+	obsRepo, obsAlertEngine = buildObservabilityStore(workloadLister{repo: stores.Workload}, tenantEntityLister{apps: stores.Application, ds: stores.DataService, wls: stores.Workload}, stores.AlertRules, stores.AlertEvents, stores.AlertEvents)
 	mux := http.NewServeMux()
 	// BearerAuth 双通道：JWT（admin 浏览器登录）/ API Key（程序化调用）共存，下游零改动。
 	auth := gateway.BearerAuth(stores.Identity, jwtSecret)
@@ -784,6 +786,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// obsRepo/engine 已在 serveHTTP 开头构造（单实例，通知桥接同源）。
 	obsHandler := observability.NewHandler(obsRepo)
 	obsHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+	if stores.AlertEvents != nil {
+		obsHandler.WithEvents(stores.AlertEvents) // 告警历史（migration 0042，PG 路径）
+	}
 
 	// 安全（密钥/证书 + 审计日志，平台能力横切）。
 	// 注入 UserIDFrom 填审计 actor；Secret 明文存储/掩码返回，写操作自动记审计。
@@ -1003,6 +1008,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	mux.Handle("/api/observability/alert-rules", auth(obsHandler))
 	mux.Handle("/api/observability/alert-rules/", auth(obsHandler))
 	mux.Handle("/api/observability/alerts", auth(obsHandler))
+	mux.Handle("/api/observability/alerts/events", auth(obsHandler))
 	mux.Handle("/api/observability/logs", auth(obsHandler))
 	mux.Handle("/api/observability/traces", auth(obsHandler))
 	mux.Handle("/api/observability/traces/", auth(obsHandler))
@@ -1464,6 +1470,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("POST", "/api/observability/alert-rules", apiroute.Tags("可观测"), apiroute.Summary("创建告警规则"), apiroute.Perm("observability:write"), apiroute.WithReqBody(observability.AlertRule{}), apiroute.WithResp(observability.AlertRule{}))
 	reg.Operation("DELETE", "/api/observability/alert-rules/{id}", apiroute.Tags("可观测"), apiroute.Summary("删除告警规则"), apiroute.Perm("observability:write"))
 	reg.Operation("GET", "/api/observability/alerts", apiroute.Tags("可观测"), apiroute.Summary("当前告警（即时评估）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.Alert{}))
+	reg.Operation("GET", "/api/observability/alerts/events", apiroute.Tags("可观测"), apiroute.Summary("告警历史事件（firing/resolved，PG 持久化）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.AlertEvent{}))
 	reg.Operation("GET", "/api/observability/logs", apiroute.Tags("可观测"), apiroute.Summary("日志聚合（?lane= 泳道过滤、?traceId= 按 trace 关联日志，真实 Loki 模式生效）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.LogEntry{}))
 	reg.Operation("GET", "/api/observability/traces", apiroute.Tags("可观测"), apiroute.Summary("链路追踪（惰性生成）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.Trace{}))
 	reg.Operation("GET", "/api/observability/traces/{traceID}", apiroute.Tags("可观测"), apiroute.Summary("按 traceId 直查单条链路（排障入口）"), apiroute.Perm("observability:read"), apiroute.WithResp(observability.Trace{}))

@@ -9,8 +9,10 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/aitoys/paas/internal/observability"
+	alertengine "github.com/aitoys/paas/internal/observability/alert"
 	storagepg "github.com/aitoys/paas/internal/storage/pg"
 	"github.com/aitoys/paas/pkg/tenant"
 )
@@ -99,5 +101,59 @@ func TestRuleCRUDRoundTrip(t *testing.T) {
 	}
 	if list, _ := s.ListAlertRules(ctx); len(list) != 0 {
 		t.Fatal("删除后应 0 条")
+	}
+}
+
+// TestStateAndEventRoundTrip：状态机 upsert/load/delete + 历史事件追加/租户过滤/裁剪。
+func TestStateAndEventRoundTrip(t *testing.T) {
+	db := newTestDB(t)
+	s := NewStore(db)
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	other := tenant.WithTenant(context.Background(), "t-globex")
+
+	// 状态机：save → load → 覆盖 → delete。
+	key := "rule-1|app|app-1"
+	st := alertengine.PersistedState{
+		StateKey: key, TenantID: "t-acme", TickBreach: 1,
+		Alert: observability.Alert{RuleID: "rule-1", TenantID: "t-acme", TargetType: "app", TargetID: "app-1", Status: observability.AlertPending},
+	}
+	if err := s.SaveStates(ctx, []alertengine.PersistedState{st}); err != nil {
+		t.Fatalf("SaveStates: %v", err)
+	}
+	loaded, err := s.LoadStates(ctx)
+	if err != nil || len(loaded) != 1 || loaded[0].TickBreach != 1 || loaded[0].Alert.Status != observability.AlertPending {
+		t.Fatalf("LoadStates 应恢复 1 条快照: %v %+v", err, loaded)
+	}
+	st.TickBreach = 2
+	st.Alert.Status = observability.AlertFiring
+	if err := s.SaveStates(ctx, []alertengine.PersistedState{st}); err != nil {
+		t.Fatalf("SaveStates 覆盖: %v", err)
+	}
+	if loaded, _ = s.LoadStates(ctx); len(loaded) != 1 || loaded[0].TickBreach != 2 {
+		t.Fatalf("upsert 应覆盖同 key: %+v", loaded)
+	}
+	if err := s.DeleteStates(ctx, []string{key}); err != nil {
+		t.Fatalf("DeleteStates: %v", err)
+	}
+	if loaded, _ = s.LoadStates(ctx); len(loaded) != 0 {
+		t.Fatalf("删除后应 0 条, got %d", len(loaded))
+	}
+
+	// 历史事件：追加 → 租户查询 → 跨租户不可见。
+	ev := observability.AlertEventFromAlert(observability.Alert{
+		RuleID: "rule-1", RuleName: "CPU 高", TenantID: "t-acme",
+		TargetType: "app", TargetID: "app-1", MetricName: "cpu",
+		Value: 95, Threshold: 80, Operator: ">", Severity: "critical",
+		Status: observability.AlertFiring, FiredAt: time.Now(),
+	}, observability.AlertFiring, time.Now())
+	if err := s.AppendEvent(ctx, ev); err != nil {
+		t.Fatalf("AppendEvent: %v", err)
+	}
+	list, err := s.ListAlertEvents(ctx, 10)
+	if err != nil || len(list) != 1 || list[0].Status != observability.AlertFiring || list[0].TenantID != "t-acme" {
+		t.Fatalf("ListAlertEvents 应 1 条 firing: %v %+v", err, list)
+	}
+	if list, _ = s.ListAlertEvents(other, 10); len(list) != 0 {
+		t.Fatalf("跨租户应不可见, got %d", len(list))
 	}
 }
