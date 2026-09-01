@@ -272,7 +272,8 @@ func TestCreatePublishVersionMonotonicAndActiveUnique(t *testing.T) {
 		t.Fatalf("ActivePublish 应返回 p1, ok=%v id=%s", ok, active.ID)
 	}
 
-	// 第 2 次发布 → v2 active；p1 翻 rolled-back。
+	// 第 2 次发布 → v2 active；p1 翻 rolled-back。发布前改值（空发布闸门：快照一致会被 ErrNoChanges 拒）。
+	s.UpsertItem(ctx, sampleItem("i1", ns.ID, "feature.newui", "off"))
 	p2, err := s.CreatePublish(ctx, ns.ID)
 	if err != nil {
 		t.Fatalf("CreatePublish #2: %v", err)
@@ -364,8 +365,12 @@ func TestRollbackPublishActivateHistory(t *testing.T) {
 	ctx := acmeCtx()
 	ns := createNamespace(t, s, ctx, "ns-rb", "rb-ns")
 
+	// 每次发布前改值（空发布闸门：快照一致 → ErrNoChanges），三版本快照各不相同。
+	s.UpsertItem(ctx, sampleItem("i1", ns.ID, "k", "v1"))
 	p1, _ := s.CreatePublish(ctx, ns.ID)
+	s.UpsertItem(ctx, sampleItem("i1", ns.ID, "k", "v2"))
 	p2, _ := s.CreatePublish(ctx, ns.ID)
+	s.UpsertItem(ctx, sampleItem("i1", ns.ID, "k", "v3"))
 	p3, _ := s.CreatePublish(ctx, ns.ID)
 	// 当前状态：p1=rolled-back, p2=rolled-back, p3=active。
 
