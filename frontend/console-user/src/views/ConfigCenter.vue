@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
 // 平台能力 → 配置中心（治理四件套：运行时动态配置）。
 // 命名空间列表 + 命名空间详情（draft 配置项编辑 + 发布历史 + 发布/回滚 + 客户端发现视图）。
 // 与 appconfig（工作负载级、静态、重启注入）正交：本页是版本化动态配置，跨实例共享，热更新。
@@ -6,7 +7,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { fetchAuth, fetchJSON } from '@/api'
+import { fetchAuth, fetchJSON, apiError } from '@/api'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import DetailShell from '@/components/DetailShell.vue'
 import AppDynamicConfigs from './app-tabs/AppDynamicConfigs.vue'
@@ -37,7 +38,7 @@ async function loadApps() {
     apps.value = await fetchJSON<{ id: string; name: string }[]>('/api/applications')
   } catch (e) {
     apps.value = []
-    ElMessage.error('加载应用列表失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载应用列表失败'))
   }
 }
 const items = ref<ConfigItem[]>([])
@@ -84,7 +85,7 @@ async function loadNamespaces() {
     loadRefCounts()
   } catch (e) {
     namespaces.value = []
-    ElMessage.error('加载命名空间失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载命名空间失败'))
   }
 }
 
@@ -131,7 +132,7 @@ async function loadDetail() {
     if (drr.ok) published.value = await drr.json()
     refUsers.value = await refUserList(id).catch(() => [])
   } catch (e) {
-    ElMessage.error('加载命名空间详情失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载命名空间详情失败'))
   } finally {
     loading.value = false
   }
@@ -170,7 +171,7 @@ async function submitNs() {
       ElMessage.error(err.error || '创建失败')
     }
   } catch (e) {
-    ElMessage.error('创建失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '创建失败'))
   } finally {
     nsSubmitting.value = false
   }
@@ -204,7 +205,7 @@ async function saveItem() {
       ElMessage.error(err.error || '保存失败')
     }
   } catch (e) {
-    ElMessage.error('保存失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '保存失败'))
   } finally {
     itemSubmitting.value = false
   }
@@ -224,7 +225,7 @@ async function deleteNamespace(row: Namespace) {
       ElMessage.error(err.error || '删除失败')
     }
   } catch (e) {
-    ElMessage.error('删除失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '删除失败'))
   }
 }
 
@@ -242,7 +243,7 @@ async function deleteItem(row: ConfigItem) {
       ElMessage.error(err.error || '删除失败')
     }
   } catch (e) {
-    ElMessage.error('删除失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '删除失败'))
   }
 }
 
@@ -273,7 +274,7 @@ async function publish() {
       ElMessage.error(err.error || '发布失败')
     }
   } catch (e) {
-    ElMessage.error('发布失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '发布失败'))
   }
 }
 
@@ -291,7 +292,7 @@ async function rollback(p: Publish) {
       ElMessage.error(err.error || '回滚失败')
     }
   } catch (e) {
-    ElMessage.error('回滚失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '回滚失败'))
   } finally {
     rollingBack.value = ''
   }
@@ -366,7 +367,7 @@ watch(() => route.params.nsId, load)
           </template>
         </el-table-column>
         <el-table-column label="更新时间" width="180">
-          <template #default="{ row }">{{ new Date(row.updatedAt).toLocaleString() }}</template>
+          <template #default="{ row }">{{ formatDateTime(row.updatedAt) }}</template>
         </el-table-column>
         <el-table-column label="操作" width="140">
           <template #default="{ row }">
@@ -406,7 +407,7 @@ watch(() => route.params.nsId, load)
             <el-table-column prop="type" label="类型" width="80" />
             <el-table-column prop="value" label="Value" min-width="200" show-overflow-tooltip />
             <el-table-column label="更新时间" width="170">
-              <template #default="{ row }">{{ new Date(row.updatedAt).toLocaleString() }}</template>
+              <template #default="{ row }">{{ formatDateTime(row.updatedAt) }}</template>
             </el-table-column>
             <el-table-column label="操作" width="120">
               <template #default="{ row }">
@@ -435,7 +436,7 @@ watch(() => route.params.nsId, load)
               <template #default="{ row }">{{ snapshotEntries(row.snapshot).length }}</template>
             </el-table-column>
             <el-table-column label="发布时间" width="180">
-              <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
+              <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
             </el-table-column>
             <el-table-column label="操作" width="90">
               <template #default="{ row }">
@@ -463,7 +464,7 @@ watch(() => route.params.nsId, load)
               <template #default="{ row }"><span class="mono">{{ row.appNsName || row.appNsId }}</span></template>
             </el-table-column>
             <el-table-column label="引用时间" width="180">
-              <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
+              <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
             </el-table-column>
           </el-table>
         </section>

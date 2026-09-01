@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
+import { apiError } from '@/api'
 // PR 详情页（Code Review 核心）：meta + diff 渲染 + 整体评审 + merge。
 // 真源 Gitea；diff 自研轻量解析（utils/diff.ts）。
 import { computed, onMounted, ref } from 'vue'
@@ -31,7 +33,7 @@ const load = async () => {
   try {
     detail.value = await getPullDetail(appId, repoId, number)
   } catch (e) {
-    ElMessage.error('加载 PR 失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载 PR 失败'))
   } finally {
     loading.value = false
   }
@@ -58,7 +60,7 @@ const doReview = async (doAction: string, label: string) => {
     reviewBody.value = ''
     await load()
   } catch (e) {
-    ElMessage.error(`${label}失败：` + (e as Error).message)
+    ElMessage.error(`${label}失败：${apiError(e)}`)
   } finally {
     reviewBusy.value = false
   }
@@ -79,7 +81,7 @@ const doMerge = async () => {
     ElMessage.success('合并成功')
     await load()
   } catch (e) {
-    ElMessage.error('合并失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '合并失败'))
   } finally {
     mergeBusy.value = false
   }
@@ -111,7 +113,7 @@ v-if="detail?.pr.state === 'open'" size="small" type="primary"
       <div class="meta-card">
         <div class="kv"><span>分支</span><code class="mono">{{ detail.pr.head }} → {{ detail.pr.base }}</code></div>
         <div class="kv"><span>作者</span>{{ detail.pr.user }}</div>
-        <div class="kv"><span>创建</span>{{ new Date(detail.pr.createdAt).toLocaleString() }}</div>
+        <div class="kv"><span>创建</span>{{ formatDateTime(detail.pr.createdAt) }}</div>
         <div v-if="detail.pr.body" class="kv"><span>说明</span>{{ detail.pr.body }}</div>
       </div>
 

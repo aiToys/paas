@@ -79,6 +79,15 @@ export function installInterceptors(instance: AxiosInstance): void {
           .catch(() => {
             const problem = parseProblem(status, error.response?.data)
             notifyProblem(problem, { silent: cfg._silent })
+            // refresh 失败=会话终结：跳登录页（R9-4，此前仅 notify 用户滞留原页逐一报错）。
+            // 路由经 window.location 跳转（http 层不宜 import router 造成循环依赖），
+            // 已在 /login 则不重复跳。守卫会补 authService.logout 清理。
+            if (!window.location.pathname.includes('/login')) {
+              window.location.assign(
+                window.location.pathname.split('/').slice(0, 2).join('/') + '/login?redirect=' +
+                  encodeURIComponent(window.location.pathname + window.location.search),
+              )
+            }
             return Promise.reject(
               new HttpError(problem, error.response as unknown as Response)
             )

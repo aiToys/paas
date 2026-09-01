@@ -1,11 +1,12 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
 // 应用详情 - 发布 tab：创建发布（选镜像+环境+策略）+ 历史记录 + 回滚。
 // 生产发布/回滚受 prod:write 保护（后端）；前端回滚走 confirmDangerous（生产输入名称确认）。
 // 环境列表自加载；默认环境取全局 env store（顶栏当前环境）。
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { fetchAuth } from '@/api'
+import { fetchAuth, apiError } from '@/api'
 import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import { imageLink, releaseLink } from '@/composables/useDevopsLinks'
@@ -156,7 +157,7 @@ async function rollback(r: Release) {
       ElMessage.error(err.error || '回滚失败')
     }
   } catch (e) {
-    ElMessage.error('回滚失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '回滚失败'))
   }
 }
 
@@ -200,7 +201,7 @@ watch(() => props.pickedImageId, (id) => {
       </el-table-column>
       <el-table-column prop="strategy" label="策略" width="90" />
       <el-table-column label="发布时间" width="160">
-        <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
+        <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
       </el-table-column>
       <el-table-column label="操作" width="140">
         <template #default="{ row }">

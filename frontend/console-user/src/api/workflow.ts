@@ -56,7 +56,7 @@ export interface WorkflowRun {
 }
 
 const unwrap = async <T>(resp: Response): Promise<T> => {
-  const j = await resp.json()
+  const j = await resp.json().catch(() => null)
   if (!resp.ok) throw new Error(j?.error || `HTTP ${resp.status}`)
   return j?.data ?? j as T
 }
@@ -69,9 +69,6 @@ const unwrapNoContent = async (resp: Response): Promise<void> => {
 
 export const listWorkflows = () =>
   fetchAuth('/api/workflows').then(r => unwrap<WorkflowDef[]>(r))
-
-export const getWorkflow = (id: string) =>
-  fetchAuth(`/api/workflows/${id}`).then(r => unwrap<WorkflowDef>(r))
 
 export const createWorkflow = (body: Omit<WorkflowDef, 'id'>) =>
   fetchAuth('/api/workflows', {

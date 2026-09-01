@@ -52,6 +52,7 @@
 </template>
 
 <script lang="ts" setup>
+import { visibleTick } from '@/app/composables/useAdminPolling'
 import { ref, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { tableTimeFormatter } from "@/lib/format"
@@ -87,9 +88,10 @@ const loadAudits = async () => {
   audits.value = (res.records ?? []).filter((a) => a.resourceId === props.id)
 }
 const loadAll = () => {
+  if (timer) clearInterval(timer) // 防重复打开叠加（R3-9）
   loadDetail()
   loadAudits()
-  timer = window.setInterval(loadDetail, 10000)
+  timer = window.setInterval(visibleTick(loadDetail), 10000)
 }
 const onClose = () => {
   if (timer) clearInterval(timer)

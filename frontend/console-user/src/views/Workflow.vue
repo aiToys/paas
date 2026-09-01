@@ -3,7 +3,7 @@
 // 表单化节点编辑（同 PipelineDesigner 模式，非画布——首刀取舍）；运行视图独立抽屉。
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchJSON } from '@/api'
+import { fetchJSON, apiError } from '@/api'
 import {
   listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow,
   type WorkflowDef, type NodeDef,
@@ -42,7 +42,7 @@ async function load() {
     agents.value = a
     tools.value = t
   } catch (e) {
-    ElMessage.error('加载工作流失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载工作流失败'))
   } finally {
     loading.value = false
   }
@@ -191,7 +191,7 @@ async function save() {
     showForm.value = false
     await load()
   } catch (e) {
-    ElMessage.error((e as Error).message)
+    ElMessage.error(apiError(e))
   } finally {
     saving.value = false
   }
@@ -207,7 +207,7 @@ async function remove(w: WorkflowDef) {
     ElMessage.success('已删除')
     load()
   } catch (e) {
-    if (e !== 'cancel') ElMessage.error((e as Error).message)
+    if (e !== 'cancel') ElMessage.error(apiError(e))
   }
 }
 

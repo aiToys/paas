@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
 // 流水线运行详情独立页（三层结构）：
 //   ① 流水线 tab（该应用的 CI/CD 流水线切换）
 //   ② 运行列表（选中流水线的历史运行，点选切换）
@@ -31,7 +32,7 @@ const runs = ref<PipelineRun[]>([])
 const runsLoading = ref(false)
 
 function shortCommit(c?: string): string { return c ? c.slice(0, 8) : '-' }
-function fmtTime(t?: string): string { return t ? new Date(t).toLocaleString() : '' }
+const fmtTime = (t?: string) => (t ? formatDateTime(t) : '-')
 
 async function loadPipelines() {
   if (!appId.value) return

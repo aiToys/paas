@@ -1,7 +1,8 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
 import { ref, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchJSON } from '@/api'
+import { fetchJSON, apiError } from '@/api'
 
 // API Key 真实模型（core identity.APIKey，列表 key 已掩码）。
 interface ApiKey {
@@ -26,7 +27,7 @@ async function load() {
   try {
     keys.value = (await fetchJSON<ApiKey[]>('/api/api-keys')) ?? []
   } catch (e) {
-    ElMessage.error((e as Error).message || '加载失败')
+    ElMessage.error(apiError(e, '加载失败'))
   } finally {
     loading.value = false
   }
@@ -51,7 +52,7 @@ async function create() {
     ElMessage.success('密钥已创建，请立即复制保存')
     load()
   } catch (e) {
-    ElMessage.error((e as Error).message || '创建失败')
+    ElMessage.error(apiError(e, '创建失败'))
   } finally {
     creating.value = false
   }
@@ -82,7 +83,7 @@ async function revoke(k: ApiKey) {
     ElMessage.success('已吊销')
     load()
   } catch (e) {
-    ElMessage.error((e as Error).message || '吊销失败')
+    ElMessage.error(apiError(e, '吊销失败'))
   }
 }
 
@@ -128,7 +129,7 @@ onMounted(load)
         <div class="key-meta">
           <div>归属 <span class="mono">{{ k.userId }}</span></div>
           <div v-if="k.appId" class="key-app">应用级 <span class="mono">{{ k.appId }}</span>（模型推理归因）</div>
-          <div>创建 <span class="mono">{{ k.createdAt ? new Date(k.createdAt).toLocaleString() : '—' }}</span></div>
+          <div>创建 <span class="mono">{{ k.createdAt ? formatDateTime(k.createdAt) : '—' }}</span></div>
         </div>
         <div class="key-actions">
           <button class="act danger" @click="revoke(k)">吊销</button>

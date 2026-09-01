@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
 // 应用详情 - 流水线 tab（变更驱动发布，参考 cicd.png / OnePaaS deploy 页）：
 // ① 顶部：默认「测试环境发布流水线」卡（CI 流水线 stages + 最近运行状态 + 集成发车按钮）
 // ② 集成区（上）：当前收集中的批次及其变更（可移除）——集成区非空才能运行流水线
@@ -242,7 +243,7 @@ async function confirmCdRun() {
   }
 }
 
-const fmtTime = (t?: string) => (t ? new Date(t).toLocaleString() : '-')
+const fmtTime = (t?: string) => (t ? formatDateTime(t) : '-')
 </script>
 
 <template>

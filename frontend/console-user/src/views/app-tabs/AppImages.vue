@@ -1,10 +1,11 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
 // 应用详情 - 镜像 tab：构建产物列表。digest 不可变真源，生产部署锁定。
 // 「发布」按钮通知父组件切到发布 tab 并预选该镜像；支持 ?image= 深链自动展开定位行。
 import { ref, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { fetchAuth } from '@/api'
+import { fetchAuth, apiError } from '@/api'
 import { buildLink, repoLink } from '@/composables/useDevopsLinks'
 
 const props = defineProps<{ appId: string; focusImageId?: string }>()
@@ -37,7 +38,7 @@ async function load() {
     if (resp.ok) images.value = (await resp.json()).data ?? []
     else ElMessage.error(`加载镜像列表失败：HTTP ${resp.status}`)
   } catch (e) {
-    ElMessage.error('加载镜像列表失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载镜像列表失败'))
   } finally {
     loading.value = false
   }
@@ -97,7 +98,7 @@ ref="tableRef" :data="images" v-loading="loading" size="small" row-key="id"
         </template>
       </el-table-column>
       <el-table-column label="构建时间" width="160">
-        <template #default="{ row }">{{ new Date(row.builtAt).toLocaleString() }}</template>
+        <template #default="{ row }">{{ formatDateTime(row.builtAt) }}</template>
       </el-table-column>
       <el-table-column label="操作" width="130">
         <template #default="{ row }">

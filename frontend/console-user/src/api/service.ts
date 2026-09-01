@@ -24,18 +24,9 @@ export interface ServiceEntity {
 export const listServices = (appId: string) =>
   fetchJSON<ServiceEntity[]>(`/api/applications/${appId}/services`)
 
-export const getService = (appId: string, id: string) =>
-  fetchJSON<ServiceEntity>(`/api/applications/${appId}/services/${id}`)
-
 export const createService = (appId: string, body: Partial<ServiceEntity>) =>
   fetchJSON<ServiceEntity>(`/api/applications/${appId}/services`, {
     method: 'POST',
-    body: JSON.stringify(body),
-  })
-
-export const updateService = (appId: string, id: string, body: Partial<ServiceEntity>) =>
-  fetchJSON<ServiceEntity>(`/api/applications/${appId}/services/${id}`, {
-    method: 'PUT',
     body: JSON.stringify(body),
   })
 

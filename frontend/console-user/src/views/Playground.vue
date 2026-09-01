@@ -3,7 +3,7 @@ import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
-import { fetchAuth } from '@/api'
+import { fetchAuth, apiError } from '@/api'
 
 // Playground：聊天式交互推理，直连 Platform Core Gateway（OpenAI 兼容 SSE）。
 // 模型列表来自 /api/models（富信息：id + 供应商 + 描述）；支持 ?model=<id> 预选。
@@ -168,8 +168,8 @@ async function send() {
   } catch (e) {
     // abort（被新请求接管或组件卸载）静默；其它错误提示。
     if (!ctrl.signal.aborted) {
-      assistant.content = '请求失败：' + (e as Error).message
-      ElMessage.error('请求失败：' + (e as Error).message)
+      assistant.content = apiError(e, '请求失败')
+      ElMessage.error(apiError(e, '请求失败'))
     }
   } finally {
     if (activeCtrl === ctrl) {

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { statusOf, DATASERVICE_STATUS } from '@/composables/useStatus'
 // 资源中心 → 数据服务（DB/缓存/MQ/存储/向量/搜索）。
 // 6 种 kind 共用此组件，由路由 props.kind 区分。KindMeta 从 /api/dataservices/meta 拉取（表单字段元数据），
 // 引擎目录从 /api/engines 拉取（enabled，按 kind 过滤）——用户选 engine 决定 mode（平台托管/共享集群/独占外部）。
@@ -6,12 +7,11 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { fetchAuth } from '@/api'
+import { fetchAuth, apiError } from '@/api'
 import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import { useUrlState } from '@/composables/useUrlState'
 
-type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
 
 interface SpecField { key: string; label: string; type: string; options?: string[]; default: string }
 interface KindMeta { kind: string; label: string; icon: string; fields: SpecField[] }
@@ -45,8 +45,7 @@ const meta = computed(() => metas.value.find((m) => m.kind === props.kind))
 const kindEngines = computed(() => engines.value.filter((e) => e.kind === props.kind))
 const envLabel = (id: string) => envStore.envs.find((e) => e.id === id)?.name ?? id
 
-const STATUS_LABEL: Record<string, string> = { running: '运行中', stopped: '已停止', creating: '创建中' }
-const STATUS_TYPE: Record<string, TagType> = { running: 'success', stopped: 'info', creating: 'warning' }
+// 状态字典收编 useStatus.DATASERVICE_STATUS（R1-C1：与 DataServiceDetail 统一单一真源）
 const MODE_LABEL: Record<string, string> = {
   'managed': '平台托管',
   'external-shared': '共享集群',
@@ -104,7 +103,7 @@ async function create() {
     if (resp.ok) { ElMessage.success('已创建'); showCreate.value = false; load() }
     else { const err = await resp.json().catch(() => ({})); ElMessage.error(err.error || '创建失败') }
   } catch (e) {
-    ElMessage.error('创建失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '创建失败'))
   } finally {
     submitting.value = false
   }
@@ -123,7 +122,7 @@ async function toggle(row: DataService) {
     if (resp.ok) { ElMessage.success(stop ? '已停止' : '已启动'); load() }
     else { const err = await resp.json().catch(() => ({})); ElMessage.error(err.error || '操作失败') }
   } catch (e) {
-    ElMessage.error('操作失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '操作失败'))
   }
 }
 
@@ -138,7 +137,7 @@ async function remove(row: DataService) {
     if (resp.ok) { ElMessage.success('已删除'); load() }
     else { const err = await resp.json().catch(() => ({})); ElMessage.error(err.error || '删除失败') }
   } catch (e) {
-    ElMessage.error('删除失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '删除失败'))
   }
 }
 
@@ -216,8 +215,8 @@ onMounted(load)
         </el-table-column>
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
-            <el-tag :type="(STATUS_TYPE[row.status]) || 'info'" size="small">
-              {{ STATUS_LABEL[row.status] || row.status }}
+            <el-tag :type="statusOf(DATASERVICE_STATUS, row.status).type" size="small">
+              {{ statusOf(DATASERVICE_STATUS, row.status).label }}
             </el-tag>
           </template>
         </el-table-column>

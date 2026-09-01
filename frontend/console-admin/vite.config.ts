@@ -57,8 +57,8 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks: {
-          // 将 Element Plus 相关代码单独打包
-          'element-plus': ['element-plus'],
+          // Element Plus 已按需引入（R8）：不再把整库强制为单一 chunk——
+          // 手动分组会把 resolver 按需引入重新聚合回整包，让组件随路由 chunk 走。
           // 将 Vue 相关代码单独打包
           vue: ['vue', 'vue-router', 'pinia'],
           // 将其他第三方库单独打包

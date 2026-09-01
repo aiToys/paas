@@ -4,7 +4,7 @@
 // （app-developer 不可发布等）——「测试人员无发布权限」的落地面。
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchJSON } from '@/api'
+import { fetchJSON, apiError } from '@/api'
 
 interface Member { id: string; appId: string; userId: string; userName?: string; role: string; createdAt?: string }
 interface AppInfo { id: string; name: string; restricted?: boolean }
@@ -78,7 +78,7 @@ async function toggleRestricted(v: boolean | string | number) {
     restricted.value = !!updated.restricted
     ElMessage.success(want ? '已开启应用级权限' : '已关闭应用级权限')
   } catch (e) {
-    ElMessage.error('切换失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '切换失败'))
   } finally {
     switching.value = false
   }
@@ -100,7 +100,7 @@ async function add() {
     showAdd.value = false
     await load()
   } catch (e) {
-    ElMessage.error('添加失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '添加失败'))
   } finally {
     submitting.value = false
   }
@@ -115,7 +115,7 @@ async function changeRole(m: Member, role: string) {
     ElMessage.success('角色已更新')
     await load()
   } catch (e) {
-    ElMessage.error('更新失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '更新失败'))
   }
 }
 
@@ -128,7 +128,7 @@ async function remove(m: Member) {
     ElMessage.success('已移除')
     await load()
   } catch (e) {
-    ElMessage.error('移除失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '移除失败'))
   }
 }
 </script>

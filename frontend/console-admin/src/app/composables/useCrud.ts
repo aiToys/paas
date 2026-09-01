@@ -33,7 +33,10 @@ export function useCrud<T extends { id: string }>(options: UseCrudOptions<T>) {
   const searchForm = reactive<Record<string, unknown>>({ ...defaultSearchForm })
   const selectedRows = ref<T[]>([]) as Ref<T[]>
 
+  // 请求序号守卫（R3-2）：快速翻页/搜索时旧响应晚返回不得覆盖新数据
+  let seq = 0
   const fetchList = async () => {
+    const my = ++seq
     loading.value = true
     try {
       const params = {
@@ -42,12 +45,13 @@ export function useCrud<T extends { id: string }>(options: UseCrudOptions<T>) {
         ...searchForm
       }
       const res = await fetch(params)
+      if (my !== seq) return
       listData.value = res.records
       pagination.total = res.total
     } catch {
       // 错误由 http 拦截器提示，这里不重复处理
     } finally {
-      loading.value = false
+      if (my === seq) loading.value = false
     }
   }
 

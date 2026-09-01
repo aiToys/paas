@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
 // AI 编排 -> Agent（P3）：组装 system prompt + skill 能力 + 工具 + KB RAG 调底层 LLM。
 // 虚拟模型 agent:{id} 经 /v1/chat/completions 调用；此处提供 CRUD + 试运行 + 评估入口。
 // 绑定资源（工具/知识库/Skill）用「名称+描述+类型」富选择器展示（非裸 ID）。
@@ -69,7 +70,7 @@ async function load() {
     const seen = new Set<string>()
     prompts.value = p.filter((pr) => pr.active && !seen.has(pr.name) && seen.add(pr.name))
   } catch (e) {
-    ElMessage.error('加载 Agent 失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载 Agent 失败'))
   } finally {
     loading.value = false
   }
@@ -243,7 +244,7 @@ async function doRun() {
       }
     }
   } catch (e) {
-    ElMessage.error('运行异常：' + (e as Error).message)
+    ElMessage.error(apiError(e, '运行异常'))
   } finally {
     runLoading.value = false
   }
@@ -533,7 +534,7 @@ onUnmounted(() => runAbort?.abort())
         <div class="out-label" style="margin-top: 20px">评估历史</div>
         <el-table :data="evalRuns" size="small" @row-click="(run: EvalRun) => { evalResults = run.results || [] }">
           <el-table-column label="时间" width="170">
-            <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
+            <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
           </el-table-column>
           <el-table-column label="通过率" width="120">
             <template #default="{ row }">

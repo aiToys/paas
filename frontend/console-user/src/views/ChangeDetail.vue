@@ -83,6 +83,7 @@
 </template>
 
 <script setup lang="ts">
+import { copyText } from '@/utils/clipboard'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
@@ -122,10 +123,7 @@ const stepActive = computed(() => {
   return 0
 })
 
-function copyClone() {
-  navigator.clipboard?.writeText(cloneCmd.value)
-  ElMessage.success('已复制')
-}
+const copyClone = () => copyText(cloneCmd.value)
 
 async function abandon() {
   if (!change.value) return

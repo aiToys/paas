@@ -51,6 +51,7 @@
 </template>
 
 <script lang="ts" setup>
+import { visibleTick } from '@/app/composables/useAdminPolling'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import { SearchTable } from '@/app/components'
@@ -104,7 +105,7 @@ const columns = computed<ColumnDef[]>(() => [
 let timer: ReturnType<typeof setInterval> | undefined
 onMounted(() => {
   fetchList()
-  timer = setInterval(fetchList, 10000)
+  timer = setInterval(visibleTick(fetchList), 10000)
 })
 onUnmounted(() => {
   if (timer) clearInterval(timer)

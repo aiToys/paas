@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
+import { apiError } from '@/api'
 // 工作流运行视图：节点时间线（状态着色 + 输出查看）+ 触发（inputs KV）+ approve/abort。
 // 复用 PipelineRunView 的视觉模式；运行中 5s 轮询（终态自停）。
 import { computed, onMounted, onUnmounted, ref } from 'vue'
@@ -39,7 +41,7 @@ async function loadRuns() {
     runs.value = await listRuns(props.workflow.id)
     if (!cur.value && runs.value.length) cur.value = runs.value[0]
   } catch (e) {
-    ElMessage.error('加载运行历史失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载运行历史失败'))
   }
 }
 
@@ -69,7 +71,7 @@ async function trigger() {
     if (typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('须为对象')
     inputs = Object.fromEntries(Object.entries(parsed).map(([k, v]) => [k, String(v)]))
   } catch (e) {
-    ElMessage.error('输入 JSON 无效：' + (e as Error).message)
+    ElMessage.error(apiError(e, '输入 JSON 无效'))
     return
   }
   try {
@@ -78,7 +80,7 @@ async function trigger() {
     cur.value = run
     await loadRuns()
   } catch (e) {
-    ElMessage.error((e as Error).message)
+    ElMessage.error(apiError(e))
   }
 }
 
@@ -94,7 +96,7 @@ async function approve() {
     ElMessage.success('已确认，继续执行')
     await refreshCur()
   } catch (e) {
-    if (e !== 'cancel') ElMessage.error((e as Error).message)
+    if (e !== 'cancel') ElMessage.error(apiError(e))
   }
 }
 
@@ -107,7 +109,7 @@ async function doAbort() {
     await refreshCur()
     emit('changed')
   } catch (e) {
-    if (e !== 'cancel') ElMessage.error((e as Error).message)
+    if (e !== 'cancel') ElMessage.error(apiError(e))
   }
 }
 
@@ -120,7 +122,7 @@ onMounted(async () => {
 })
 onUnmounted(() => window.clearInterval(timer))
 
-function fmtTime(s?: string) { return s ? new Date(s).toLocaleString() : '' }
+const fmtTime = (t?: string) => (t ? formatDateTime(t) : '-')
 function dur(nr: NodeRun) {
   if (!nr.finishedAt) return ''
   const ms = new Date(nr.finishedAt).getTime() - new Date(nr.startedAt).getTime()

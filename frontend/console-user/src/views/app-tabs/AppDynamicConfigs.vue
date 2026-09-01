@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
 // 应用详情 - 动态配置（热更新）区块：应用维度动态配置（scope=app，按环境隔离）。
 // 与上方 AppConfigs（工作负载级静态 env/Secret，重启注入）正交：本区块是
 // 版本化动态配置——draft 编辑 → 发布出不可变快照 → 客户端按版本发现 → 可回滚。
@@ -558,7 +559,7 @@ watch(selEnv, () => { load(); loadLanes() })
           <template #default="{ row }">{{ snapshotEntries(row.snapshot).length }}</template>
         </el-table-column>
         <el-table-column label="发布时间" width="180">
-          <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
+          <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
         </el-table-column>
         <el-table-column label="操作" width="100">
           <template #default="{ row }">
@@ -592,7 +593,7 @@ watch(selEnv, () => { load(); loadLanes() })
           <template #default="{ row }">{{ row.sharedKeys ?? 0 }}</template>
         </el-table-column>
         <el-table-column label="引用时间" width="180">
-          <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
+          <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
         </el-table-column>
         <el-table-column label="操作" width="90">
           <template #default="{ row }">

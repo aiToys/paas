@@ -975,6 +975,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	mux.Handle("/api/notifications", auth(globalChanges))
 	// admin 跨租户 PipelineRun 总览（super_admin，handler 内 platformAdmin 判定，与 admin 模板同款）。
 	mux.Handle("/api/admin/pipelineruns", auth(pipelineHandler))
+	mux.Handle("/api/admin/pipelineruns/", auth(pipelineHandler)) // {id} 详情（深度审计 R4：漏注册致 admin 运行详情 404）
 	// webhook 触发端点（无 auth 中间件，token 鉴权）：Gitea push event -> 触发 pipeline run。
 	// 用户在 Gitea 配 webhook URL = <baseURL>/api/webhooks/pipeline/<pid>?token=<token>。
 	mux.Handle("/api/webhooks/pipeline/", pipelineHandler)

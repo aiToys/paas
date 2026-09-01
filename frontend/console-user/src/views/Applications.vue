@@ -6,7 +6,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
-import { fetchAuth } from '@/api'
+import { fetchAuth, apiError } from '@/api'
 import { useEnvStore } from '@/stores/env'
 import { useUrlState } from '@/composables/useUrlState'
 
@@ -55,7 +55,7 @@ async function createFromTemplate() {
       load()
     }
   } catch (e) {
-    ElMessage.error('创建失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '创建失败'))
   } finally {
     creating.value = false
   }
@@ -92,7 +92,7 @@ async function createApp() {
     createVisible.value = false
     load()
   } catch (e) {
-    ElMessage.error('创建失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '创建失败'))
   } finally {
     creating.value = false
   }
@@ -145,7 +145,7 @@ async function load() {
     if (aResp.ok) apps.value = (await aResp.json()).data ?? []
     if (wResp.ok) workloads.value = (await wResp.json()).data ?? []
   } catch (e) {
-    ElMessage.error('加载应用失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载应用失败'))
   } finally {
     loading.value = false
   }

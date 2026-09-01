@@ -1,11 +1,13 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
+import { statusOf as statusOfCore, tagTypeToCls, POD_STATUS } from '@/composables/useStatus'
 // 应用详情 - 服务 tab（服务模型 Phase 1）：服务卡片 grid + 新建服务 + 实例抽屉聚合。
 // 服务是应用的组成单元（web/backend/agent/static/cron）；「查看实例」按 serviceId 过滤
 // 该服务工作负载，复用 Workloads 详情抽屉模式（实例表 + Pod 日志）。
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
-import { fetchJSON } from '@/api'
+import { fetchJSON, apiError } from '@/api'
 import { listPipelines, triggerRun, type Pipeline } from '@/api/pipeline'
 import { createService, deleteService, listServices, type ServiceEntity, type ServiceType } from '@/api/service'
 import { getWorkload, getWorkloadLogs, type Workload, type WorkloadDetail } from '@/api/workload'
@@ -32,7 +34,7 @@ async function load() {
   try {
     services.value = await listServices(props.appId)
   } catch (e) {
-    ElMessage.error('加载服务失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载服务失败'))
   } finally {
     loading.value = false
   }
@@ -88,7 +90,7 @@ async function submitCreate() {
     showCreate.value = false
     load()
   } catch (e) {
-    ElMessage.error('创建失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '创建失败'))
   } finally {
     submitting.value = false
   }
@@ -106,7 +108,7 @@ async function onDeploy(s: ServiceEntity) {
     ElMessage.success(`已触发「${s.name}」部署`)
     router.push(`/devops/runs/${r.id}`)
   } catch (e) {
-    ElMessage.error('触发部署失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '触发部署失败'))
   } finally {
     deployingId.value = ''
   }
@@ -121,7 +123,7 @@ async function onDelete(s: ServiceEntity) {
     ElMessage.success(`服务「${s.name}」已删除`)
     load()
   } catch (e) {
-    ElMessage.error('删除失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '删除失败'))
   }
 }
 
@@ -141,20 +143,15 @@ const logsPod = ref('')
 const logsText = ref('')
 const logsPrevious = ref(false)
 
-const POD_STATUS_META: Record<string, { label: string; cls: string }> = {
-  Running: { label: '运行中', cls: 'ok' },
-  Pending: { label: '等待', cls: 'warn' },
-  Failed: { label: '失败', cls: 'err' },
-  Succeeded: { label: '成功', cls: 'done' },
-  Unknown: { label: '未知', cls: 'idle' },
-}
+// 状态字典收编 useStatus.POD_STATUS（R1-C1），dot 色经 tagTypeToCls 映射
 function podStatusOf(s: string): { label: string; cls: string } {
-  return POD_STATUS_META[s] ?? { label: s || '未知', cls: 'idle' }
+  const m = statusOfCore(POD_STATUS, s)
+  return { label: m.label, cls: tagTypeToCls(m.type) }
 }
-function fmtTime(t?: string): string {
+const fmtTime = (t?: string) => {
   if (!t) return '-'
   const d = new Date(t)
-  return Number.isNaN(d.getTime()) ? '-' : d.toLocaleString()
+  return Number.isNaN(d.getTime()) ? '-' : formatDateTime(d)
 }
 
 async function openInstances(s: ServiceEntity) {
@@ -165,7 +162,7 @@ async function openInstances(s: ServiceEntity) {
     const wls = await fetchJSON<Workload[]>(`/api/applications/${props.appId}/workloads`)
     svcWorkloads.value = wls.filter((w) => w.serviceId === s.id)
   } catch (e) {
-    ElMessage.error('加载工作负载失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载工作负载失败'))
     svcWorkloads.value = []
   } finally {
     instancesLoading.value = false
@@ -179,7 +176,7 @@ async function openDetail(w: Workload) {
   try {
     detail.value = await getWorkload(w.id)
   } catch (e) {
-    ElMessage.error('加载详情失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载详情失败'))
   } finally {
     detailLoading.value = false
   }
@@ -198,7 +195,7 @@ async function viewLogs(pod: string) {
     logsText.value = await resp.text()
     if (!logsText.value) logsText.value = '（暂无日志输出）'
   } catch (e) {
-    logsText.value = '日志加载失败：' + (e as Error).message + '\n（非集群部署或 Pod 已清理时不可用）'
+    logsText.value = apiError(e, '日志加载失败') + '\n（非集群部署或 Pod 已清理时不可用）'
   } finally {
     logsLoading.value = false
   }

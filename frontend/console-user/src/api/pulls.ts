@@ -11,7 +11,7 @@ export interface PullDetail { pr: PullRequest; diff: string; truncated: boolean 
 export interface GlobalPull { repoId: string; repoName: string; appId: string; pr: PullRequest }
 
 const unwrap = async <T>(resp: Response): Promise<T> => {
-  const j = await resp.json()
+  const j = await resp.json().catch(() => null)
   if (!resp.ok) throw new Error(j?.error || `HTTP ${resp.status}`)
   return j?.data ?? j as T
 }

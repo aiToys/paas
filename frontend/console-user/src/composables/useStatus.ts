@@ -68,3 +68,41 @@ export const BATCH_STATUS: Record<string, StatusMeta> = {
 export function statusOf(dict: Record<string, StatusMeta>, s: string): StatusMeta {
   return dict[s] ?? def(s, 'info')
 }
+
+// 数据服务（DataServices/DataServiceDetail 此前各自复制同一份字典——R1-C1 收编）
+export const DATASERVICE_STATUS: Record<string, StatusMeta> = {
+  running: def('运行中', 'success'),
+  stopped: def('已停止', 'info'),
+  creating: def('创建中', 'warning'),
+  failed: def('失败', 'danger'),
+}
+
+// 知识库文档（KnowledgeBases）
+export const DOC_STATUS: Record<string, StatusMeta> = {
+  parsing: def('解析中', 'warning'),
+  indexed: def('已索引', 'success'),
+  failed: def('失败', 'danger'),
+}
+
+// 工作负载（Workloads；cls 是页内 dot 色体系，经 tagTypeToCls 映射）
+export const WORKLOAD_STATUS: Record<string, StatusMeta> = {
+  running: def('运行中', 'warning'), // running=进行中语义（黄），绿仅留给完全就绪的「已完成」
+  deploying: def('部署中', 'warning'),
+  failed: def('异常', 'danger'),
+  succeeded: def('已完成', 'success'),
+  pending: def('等待', 'info'),
+}
+
+// Pod 实例（K8s Phase，首字母大写）
+export const POD_STATUS: Record<string, StatusMeta> = {
+  Running: def('运行中', 'success'),
+  Pending: def('等待', 'warning'),
+  Failed: def('失败', 'danger'),
+  Succeeded: def('成功', 'success'),
+  Unknown: def('未知', 'info'),
+}
+
+// tagTypeToCls 把 el-tag type 映射到 dot 色 class（Workloads/AppServices 页内视觉体系）。
+export function tagTypeToCls(t: TagType): string {
+  return { success: 'ok', warning: 'warn', danger: 'err', info: 'idle', primary: 'ok' }[t] ?? 'idle'
+}

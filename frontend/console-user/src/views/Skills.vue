@@ -42,7 +42,7 @@ async function load() {
     skills.value = s
     agents.value = a
   } catch (e) {
-    ElMessage.error('加载 Skill 失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载 Skill 失败'))
   } finally {
     loading.value = false
   }

@@ -96,8 +96,6 @@ export const addSharedRef = (appId: string, sharedNsId: string, envId?: string) 
   fetchAuth(`/api/applications/${appId}/dynamic-configs/shared-refs${qs(envId)}`, { method: 'POST', body: JSON.stringify({ sharedNsId }) }).then(r => unwrap<SharedRef>(r))
 export const deleteSharedRef = (appId: string, refId: string, envId?: string) =>
   fetchAuth(`/api/applications/${appId}/dynamic-configs/shared-refs/${refId}${qs(envId)}`, { method: 'DELETE' }).then(r => unwrap<unknown>(r))
-export const fetchRefUsers = (nsId: string) =>
-  fetchAuth(`/api/configcenter/namespaces/${nsId}/ref-users`).then(r => unwrap<RefUser[]>(r))
 
 // 租户内 shared ns 列表（引用选择器数据源；app 派生 ns 归应用详情管理，不在此返回）
 export interface ConfigNamespace { id: string; name: string; scope: string }

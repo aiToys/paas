@@ -40,6 +40,7 @@ import { reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useSessionStore, type DemoAccount } from '@/stores/session'
+import { resetSessionExpiredFlag } from '@/api'
 
 const session = useSessionStore()
 const router = useRouter()
@@ -59,6 +60,7 @@ async function submit() {
   }
   loading.value = true
   try {
+    resetSessionExpiredFlag()
     await session.login(form.username, form.password)
     router.push((route.query.redirect as string) || '/applications')
   } catch (e) {

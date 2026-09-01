@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
+import { statusOf as statusOfCore, tagTypeToCls, WORKLOAD_STATUS, POD_STATUS } from '@/composables/useStatus'
 // 工作负载视图：跨应用列表，按类型分 Tab（服务/Job/CronJob）。
 // 数据来自 /api/workloads?type=；扩缩容 PUT、删除 DELETE。换 Key（租户）自动重载。
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
@@ -6,7 +8,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import EmptyState from '@/components/EmptyState.vue'
-import { fetchAuth } from '@/api'
+import { fetchAuth, apiError } from '@/api'
 import {
   listWorkloads, updateWorkload, updateSchedule, deleteWorkload,
   getWorkload, getWorkloadLogs, createWorkload,
@@ -47,8 +49,8 @@ watch(
 )
 // 环境来自全局 store（顶栏环境选择器，唯一环境切换入口）；页面不再有环境切换控件
 const activeEnv = computed(() => envStore.currentEnv)
-// 切环境自动重载（顶栏 scope 切换后数据跟随，不留旧环境数据）。
-watch(activeEnv, () => { load() })
+// 切环境自动重载走下方 paas:env-changed 事件（switchEnv 与生产超时回退均派发），
+// 不再叠 watch(activeEnv)——两者并存时同一次切换触发两次 load（深度审计 R7-3）。
 const items = ref<Workload[]>([])
 const loading = ref(true)
 // 应用上下文过滤（从应用详情「部署 tab」跳来带 ?app=）：只显示该应用工作负载，保留上下文。
@@ -60,18 +62,11 @@ const scaling = ref<string>('') // 正在扩缩容的 id
 
 // statusMeta 仅覆盖已知枚举值；后端返回空串/未知状态时必须兜底，否则
 // statusMeta[status] 为 undefined，模板访问 .cls 崩溃整个工作负载列表（与 Applications 同款）。
-const STATUS_META: Record<string, { label: string; cls: string }> = {
-  // running=进行中语义（黄），与 DevOps/流水线一致；绿仅留给完全就绪的「已完成」。
-  // 此前 running=绿与 succeeded=灰并存，同状态跨页两种色。
-  running: { label: '运行中', cls: 'ok' },
-  deploying: { label: '部署中', cls: 'warn' },
-  failed: { label: '异常', cls: 'err' },
-  succeeded: { label: '已完成', cls: 'done' },
-  pending: { label: '等待', cls: 'idle' },
-}
-const STATUS_UNKNOWN = { label: '未知', cls: 'idle' }
+// 状态字典收编 useStatus（R1-C1：label/type 单一真源），页内 dot 色经 tagTypeToCls 映射。
+// running=进行中语义（黄），与 DevOps/流水线一致；绿仅留给完全就绪的「已完成」。
 function statusOf(s: string): { label: string; cls: string } {
-  return STATUS_META[s] ?? STATUS_UNKNOWN
+  const m = statusOfCore(WORKLOAD_STATUS, s)
+  return { label: m.label, cls: tagTypeToCls(m.type) }
 }
 
 const envName = computed(() => (id: string) => envStore.envs.find((e) => e.id === id)?.name ?? id)
@@ -83,7 +78,7 @@ async function load() {
     if (activeEnv.value) params.envId = activeEnv.value.id
     items.value = await listWorkloads(params)
   } catch (e) {
-    ElMessage.error('加载工作负载失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载工作负载失败'))
   } finally {
     loading.value = false
   }
@@ -114,7 +109,7 @@ async function scale(w: Workload) {
     await load()
   } catch (e) {
     if (e !== 'cancel' && e !== 'close') {
-      ElMessage.error('扩缩容失败：' + (e as Error).message)
+      ElMessage.error(apiError(e, '扩缩容失败'))
     }
   } finally {
     scaling.value = ''
@@ -156,7 +151,7 @@ async function editSchedule(w: Workload) {
     await load()
   } catch (e) {
     if (e !== 'cancel' && e !== 'close') {
-      ElMessage.error('改调度失败：' + (e as Error).message)
+      ElMessage.error(apiError(e, '改调度失败'))
     }
   } finally {
     editingSchedule.value = ''
@@ -178,7 +173,7 @@ async function remove(w: Workload) {
     ElMessage.success('已删除')
     await load()
   } catch (e) {
-    ElMessage.error('删除失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '删除失败'))
   }
 }
 
@@ -201,20 +196,14 @@ const logsPod = ref('')
 const logsText = ref('')
 const logsPrevious = ref(false)
 
-const POD_STATUS_META: Record<string, { label: string; cls: string }> = {
-  Running: { label: '运行中', cls: 'ok' },
-  Pending: { label: '等待', cls: 'warn' },
-  Failed: { label: '失败', cls: 'err' },
-  Succeeded: { label: '成功', cls: 'done' },
-  Unknown: { label: '未知', cls: 'idle' },
-}
 function podStatusOf(s: string): { label: string; cls: string } {
-  return POD_STATUS_META[s] ?? { label: s || '未知', cls: 'idle' }
+  const m = statusOfCore(POD_STATUS, s)
+  return { label: m.label, cls: tagTypeToCls(m.type) }
 }
-function fmtTime(t?: string): string {
+const fmtTime = (t?: string) => {
   if (!t) return '-'
   const d = new Date(t)
-  return Number.isNaN(d.getTime()) ? '-' : d.toLocaleString()
+  return Number.isNaN(d.getTime()) ? '-' : formatDateTime(d)
 }
 
 async function openDetail(w: Workload) {
@@ -224,7 +213,7 @@ async function openDetail(w: Workload) {
   try {
     detail.value = await getWorkload(w.id)
   } catch (e) {
-    ElMessage.error('加载详情失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载详情失败'))
   } finally {
     detailLoading.value = false
   }
@@ -243,7 +232,7 @@ async function viewLogs(pod: string) {
     logsText.value = await resp.text()
     if (!logsText.value) logsText.value = '（暂无日志输出）'
   } catch (e) {
-    logsText.value = '日志加载失败：' + (e as Error).message + '\n（非集群部署或 Pod 已清理时不可用）'
+    logsText.value = apiError(e, '日志加载失败') + '\n（非集群部署或 Pod 已清理时不可用）'
   } finally {
     logsLoading.value = false
   }
@@ -340,7 +329,9 @@ async function watchDeploy(id: string) {
     } catch { /* 短暂网络错误继续轮询 */ }
   }, 2000)
 }
-onUnmounted(() => { if (deployWatchTimer) window.clearInterval(deployWatchTimer) })
+// 停部署观察轮询：抽屉关闭/组件卸载均停（R3-6：pending/deploying 卡住时此前会永久轮询）。
+function stopDeployWatch() { if (deployWatchTimer) { window.clearInterval(deployWatchTimer); deployWatchTimer = undefined } }
+onUnmounted(stopDeployWatch)
 
 async function submitCreate() {
   const f = createForm.value
@@ -369,7 +360,7 @@ async function submitCreate() {
     await load()
     watchDeploy(created.id)
   } catch (e) {
-    ElMessage.error('创建失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '创建失败'))
   } finally {
     submitting.value = false
   }
@@ -488,7 +479,7 @@ v-if="w.domain" class="link domain-link" :href="`http://${w.domain}`" target="_b
               </span>
             </td>
             <td>
-              <span class="deploy-time">{{ w.createdAt ? new Date(w.createdAt).toLocaleString() : '—' }}</span>
+              <span class="deploy-time">{{ w.createdAt ? formatDateTime(w.createdAt) : '—' }}</span>
             </td>
             <td class="col-act">
               <button class="act" @click="openDetail(w)">详情</button>
@@ -558,7 +549,7 @@ v-if="!imageOptions.length || !imageRef" v-model="createForm.image"
     </el-dialog>
 
     <!-- 工作负载详情：期望态 + 运行实例（Pod 级）+ 实例日志 -->
-    <el-drawer v-model="showDetail" title="工作负载详情" size="640px" direction="rtl">
+    <el-drawer v-model="showDetail" title="工作负载详情" size="640px" direction="rtl" @close="stopDeployWatch">
       <div v-loading="detailLoading">
         <template v-if="detail">
           <div class="detail-info">

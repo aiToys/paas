@@ -5,6 +5,9 @@ import { ElMessage } from 'element-plus'
 // API Key 通道（Authorization: Bearer sk-...）仍可用于程序化调用，但浏览器登录态走 cookie。
 
 let refreshing: Promise<boolean> | null = null
+// 会话过期事件去重 flag：并发 401 只派发一次；登录成功后由 Login 页复位（见 resetSessionExpiredFlag）。
+let sessionExpiredDispatched = false
+export function resetSessionExpiredFlag() { sessionExpiredDispatched = false }
 function refreshSession(): Promise<boolean> {
   if (refreshing) return refreshing
   refreshing = fetch('/api/auth/tokens/refresh', { method: 'POST', credentials: 'include' })
@@ -28,7 +31,11 @@ export async function fetchAuth(path: string, opts: RequestInit = {}): Promise<R
   if (resp.status === 401 && !path.includes('/api/auth/tokens/refresh')) {
     const ok = await refreshSession()
     if (ok) return fetch(path, { ...opts, headers, credentials: 'include' })
-    window.dispatchEvent(new CustomEvent('paas:session-expired'))
+    // 并发请求同时 401 时只派发一次（登录成功后复位），避免重复弹「登录已过期」+多次跳转
+    if (!sessionExpiredDispatched) {
+      sessionExpiredDispatched = true
+      window.dispatchEvent(new CustomEvent('paas:session-expired'))
+    }
   } else if (resp.status === 429) {
     ElMessage.warning('请求过多，请稍后再试')
   }
@@ -43,11 +50,18 @@ export async function fetchAuth(path: string, opts: RequestInit = {}): Promise<R
 // 否则原样返回，兼容两种契约。
 export async function fetchJSON<T>(path: string, opts?: RequestInit): Promise<T> {
   const resp = await fetchAuth(path, opts)
-  const json = await resp.json().catch(() => ({}))
   if (!resp.ok) {
-    const msg = (json && typeof json === 'object' && 'error' in json ? json.error : null) || `HTTP ${resp.status}`
-    throw new Error(msg as string)
+    // 失败路径容错：网关 502 返回 HTML 时 json() 会 throw，降级到 HTTP 状态码文案
+    const json = await resp.json().catch(() => null)
+    const msg = (json && typeof json === 'object' && 'error' in json && typeof (json as { error: unknown }).error === 'string'
+      ? (json as { error: string }).error : null) || `HTTP ${resp.status}`
+    throw new Error(msg)
   }
+  // 成功路径解析失败必须 throw：200+HTML（网关异常/缓存污染）静默成空对象会把
+  // 错误伪装成「无数据」误导用户（深度审计 R9-2）
+  const json = await resp.json().catch(() => {
+    throw new Error('响应格式错误（非 JSON）')
+  })
   if (json && typeof json === 'object' && 'data' in json) {
     return (json as { data: T }).data
   }

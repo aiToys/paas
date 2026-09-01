@@ -1,10 +1,11 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import DetailShell from '@/components/DetailShell.vue'
-import { fetchAuth, fetchJSON } from '@/api'
+import { fetchAuth, fetchJSON, apiError } from '@/api'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import AppServices from './app-tabs/AppServices.vue'
 import AppMembers from './app-tabs/AppMembers.vue'
@@ -71,7 +72,7 @@ async function saveResTemplate() {
     })
     ElMessage.success('资源规格默认值已保存')
   } catch (e) {
-    ElMessage.error((e as Error).message)
+    ElMessage.error(apiError(e))
   } finally {
     resSaving.value = false
   }
@@ -210,12 +211,12 @@ async function load() {
     latestBuild.value = blds.status === 'fulfilled' && blds.value.length ? blds.value[0] : null
   } catch (e) {
     // 已删实体（书签/外链 404）：明确引导返回应用列表，不留静默半空页。
-    if ((e as Error).message?.includes('not found') || (e as Error).message?.includes('404')) {
+    if (apiError(e).includes('not found') || apiError(e).includes('404')) {
       ElMessage.error('应用不存在或已删除')
       router.push('/applications')
       return
     }
-    ElMessage.error('加载应用失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载应用失败'))
   } finally {
     loading.value = false
   }
@@ -276,7 +277,7 @@ async function submitBind() {
       ElMessage.success(`已绑定 ${typeMeta[form.value.type].label}：${name}`)
     }
   } catch (e) {
-    ElMessage.error('绑定失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '绑定失败'))
   } finally {
     submitting.value = false
   }
@@ -300,7 +301,7 @@ async function unbind(b: Binding) {
     )
     ElMessage.success(`已解绑：${b.name}` + (isDsUnbind ? '（连接信息将同步清除）' : ''))
   } catch (e) {
-    ElMessage.error('解绑失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '解绑失败'))
   }
 }
 
@@ -425,7 +426,7 @@ async function deleteApp() {
     ElMessage.success('应用已删除')
     router.push('/applications')
   } catch (e) {
-    ElMessage.error('删除失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '删除失败'))
   }
 }
 </script>
@@ -585,7 +586,7 @@ v-for="e in accessEntries" :key="e.workload"
               <div class="side-label">最新发布</div>
               <div v-if="latestRelease" class="side-body">
                 <el-tag size="small" :type="statusOf(RELEASE_STATUS, latestRelease.status).type">{{ statusOf(RELEASE_STATUS, latestRelease.status).label }}</el-tag>
-                <span class="side-time">{{ new Date(latestRelease.createdAt).toLocaleString() }}</span>
+                <span class="side-time">{{ formatDateTime(latestRelease.createdAt) }}</span>
               </div>
               <div v-else class="side-empty">暂无发布</div>
             </div>
@@ -593,7 +594,7 @@ v-for="e in accessEntries" :key="e.workload"
               <div class="side-label">最新构建</div>
               <div v-if="latestBuild" class="side-body">
                 <el-tag size="small" :type="statusOf(BUILD_STATUS, latestBuild.status).type">{{ statusOf(BUILD_STATUS, latestBuild.status).label }}</el-tag>
-                <span class="side-time">{{ new Date(latestBuild.startedAt).toLocaleString() }}</span>
+                <span class="side-time">{{ formatDateTime(latestBuild.startedAt) }}</span>
               </div>
               <div v-else class="side-empty">暂无构建</div>
             </div>

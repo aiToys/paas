@@ -5,7 +5,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { fetchAuth } from '@/api'
+import { fetchAuth, apiError } from '@/api'
 import { useEnvStore } from '@/stores/env'
 
 type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
@@ -70,7 +70,7 @@ async function load() {
     instancesBySvc.value = {}
     expanded.value = {}
   } catch (e) {
-    ElMessage.error('加载服务治理数据失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载服务治理数据失败'))
   } finally {
     loading.value = false
   }

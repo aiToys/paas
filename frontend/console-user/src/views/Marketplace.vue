@@ -3,7 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
-import { fetchAuth } from '@/api'
+import { fetchAuth, apiError } from '@/api'
 
 interface Channel {
   id: string
@@ -66,7 +66,7 @@ async function load() {
     const json = await resp.json()
     models.value = (json.data ?? []) as Model[]
   } catch (e) {
-    ElMessage.error('加载模型失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载模型失败'))
   } finally {
     loading.value = false
   }

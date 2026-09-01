@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
 // 流水线运行视图（横向阶段轨道版）：运行摘要条 + 横向 stage 轨道 + 选中阶段详情面板。
 // 轨道节点圆图标 + 连线表达「流」：已完成实线着色（绿/红）、未到灰虚线——一眼看出走到哪、卡在哪。
 // 点节点切换下方详情面板（错误/输出物/日志）；build 日志保留 SSE 实时流 + 终态全量。
@@ -125,9 +126,10 @@ watch(canaryStage, (s) => {
 })
 
 // canary 决策：确认放量（生产走输入名称二次确认）/ 终止（普通确认）
+const deciding = ref(false)
 async function canaryDecide(action: 'promote' | 'terminate') {
   const r = run.value
-  if (!r) return
+  if (!r || deciding.value) return
   const cur = r.stageRuns[r.currentStage]
   try {
     if (action === 'promote') {
@@ -142,12 +144,15 @@ async function canaryDecide(action: 'promote' | 'terminate') {
       )
     }
   } catch { return }
+  deciding.value = true
   try {
     await canaryDecision(r.id, cur.index, action)
     ElMessage.success(action === 'promote' ? '已放量，基线滚动中' : '已终止，金丝雀负载回收中')
     await load()
   } catch (e) {
     ElMessage.error(apiError(e, '操作失败'))
+  } finally {
+    deciding.value = false
   }
 }
 
@@ -218,8 +223,10 @@ function startPolling() {
     if (isTerminal.value) { stopPolling(); return }
     if (pollBusy) return
     pollBusy = true
+    const myGen = runGen
     try {
-      run.value = await getRun(props.runId)
+      const r = await getRun(props.runId)
+      if (myGen === runGen) run.value = r
     } catch { /* 静默重试 */ } finally {
       pollBusy = false
     }
@@ -230,7 +237,11 @@ function stopPolling() {
   closeBuildLogStream() // 轮询停时一并关实时流（run 终态/组件卸载）
 }
 
+// 世代计数（R3-4）：runId 快速切换时旧请求晚返回不得覆盖新 run 的数据
+let runGen = 0
+
 watch(() => props.runId, async () => {
+  runGen++ // 使旧 runId 的在途 tick 失效
   closeBuildLogStream()
   selectedIdx.value = null
   logCache.value = {}
@@ -434,13 +445,13 @@ watch(() => run.value?.id, autoSelect)
           <span v-if="run.version" class="version">v{{ run.version }}</span>
         </div>
         <div class="summary-right">
-          <span class="time">{{ new Date(run.createdAt).toLocaleString() }}</span>
+          <span class="time">{{ formatDateTime(run.createdAt) }}</span>
           <el-button v-if="canAbort" size="small" type="danger" plain @click="abort">中止</el-button>
           <el-button v-if="canRetry" size="small" type="warning" plain @click="retry">重试失败阶段</el-button>
           <el-button v-if="canApprove" size="small" type="primary" @click="approve">批准继续</el-button>
           <template v-if="canCanary">
-            <el-button size="small" type="danger" plain @click="canaryDecide('terminate')">终止</el-button>
-            <el-button size="small" type="primary" @click="canaryDecide('promote')">✅ 确认放量</el-button>
+            <el-button size="small" type="danger" plain :loading="deciding" @click="canaryDecide('terminate')">终止</el-button>
+            <el-button size="small" type="primary" :loading="deciding" @click="canaryDecide('promote')">✅ 确认放量</el-button>
           </template>
         </div>
       </div>

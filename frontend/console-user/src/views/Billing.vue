@@ -1,5 +1,6 @@
 <script setup lang="ts">
 
+import { formatDateTime } from '@/utils/format'
 import { useRouter } from 'vue-router'
 const router = useRouter()
 // 设置 → 配额与账单（租户级资源配额 + 用量 + 账单，多租户商业化根基）。
@@ -7,7 +8,7 @@ const router = useRouter()
 // 独立于物理环境，不接 prod:write。
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchAuth } from '@/api'
+import { fetchAuth, apiError } from '@/api'
 
 interface UsageLine {
   resource: string; count: number; limit: number; over: boolean
@@ -84,7 +85,7 @@ async function saveQuota() {
       ElMessage.error(err.error || '更新失败')
     }
   } catch (e) {
-    ElMessage.error('更新失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '更新失败'))
   }
 }
 
@@ -145,7 +146,7 @@ async function pay(bill: Bill) {
       ElMessage.error(err.error || '支付失败')
     }
   } catch (e) {
-    ElMessage.error('支付失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '支付失败'))
   }
 }
 
@@ -189,7 +190,7 @@ onMounted(load)
             <el-tag v-else-if="line.limit === unlimited" type="info" size="small">无限</el-tag>
           </div>
           <div class="qc-value">
-            <span class="qc-count mono">{{ line.count.toLocaleString() }}</span>
+            <span class="qc-count mono">{{ line.count.toLocaleString('zh-CN') }}</span>
             <span class="qc-limit" v-if="line.limit !== unlimited">/ {{ line.limit }}</span>
           </div>
           <el-progress
@@ -216,7 +217,7 @@ onMounted(load)
         </el-table-column>
         <el-table-column label="Token 用量（千）" width="180">
           <template #default="{ row }">
-            <span class="mono">{{ row.tokens.toLocaleString() }}</span>
+            <span class="mono">{{ row.tokens.toLocaleString('zh-CN') }}</span>
           </template>
         </el-table-column>
         <el-table-column label="占比" width="160">
@@ -274,10 +275,10 @@ onMounted(load)
           </template>
         </el-table-column>
         <el-table-column label="生成时间" width="180">
-          <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
+          <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
         </el-table-column>
         <el-table-column label="支付时间" width="180">
-          <template #default="{ row }">{{ row.paidAt ? new Date(row.paidAt).toLocaleString() : '—' }}</template>
+          <template #default="{ row }">{{ row.paidAt ? formatDateTime(row.paidAt) : '—' }}</template>
         </el-table-column>
         <el-table-column label="操作" width="90">
           <template #default="{ row }">

@@ -5,7 +5,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchAuth } from '@/api'
+import { fetchAuth, apiError } from '@/api'
 import RepoBrowser from './RepoBrowser.vue'
 
 const router = useRouter()
@@ -131,7 +131,7 @@ async function bind() {
       ElMessage.error(err.error || '操作失败')
     }
   } catch (e) {
-    ElMessage.error('操作失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '操作失败'))
   }
 }
 
@@ -152,7 +152,7 @@ async function unbind(r: Repo) {
       ElMessage.error(err.error || '解绑失败')
     }
   } catch (e) {
-    ElMessage.error('解绑失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '解绑失败'))
   }
 }
 

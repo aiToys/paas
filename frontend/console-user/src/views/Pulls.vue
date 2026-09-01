@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
+import { apiError } from '@/api'
 // 单仓库 PR 列表（应用内「代码评审」入口）。真源 Gitea。
 import { onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
@@ -26,7 +28,7 @@ const load = async () => {
   } catch (e) {
     if (cur === seq) {
       pulls.value = []
-      ElMessage.error('加载 PR 列表失败：' + (e as Error).message)
+      ElMessage.error(apiError(e, '加载 PR 列表失败'))
     }
   } finally {
     if (cur === seq) loading.value = false
@@ -72,7 +74,7 @@ watch(state, load)
         <template #default="{ row }"><el-tag size="small" :type="stateType(row)">{{ stateLabel(row) }}</el-tag></template>
       </el-table-column>
       <el-table-column label="创建时间" width="170">
-        <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
+        <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
       </el-table-column>
       <el-table-column label="操作" width="90">
         <template #default="{ row }">

@@ -33,8 +33,10 @@ export const useEnvStore = defineStore('env', () => {
     inflight = (async () => {
       const resp = await fetchAuth('/api/environments')
       if (resp.ok) {
-        const json = await resp.json()
-        envs.value = (json.data ?? []) as Env[]
+        // JSON 防护：网关 502 返回 HTML 时 json() throw 会沿 inflight 拒绝，
+        // 所有 await loadEnvs() 的调用点均无 catch → unhandledrejection（R9-1）
+        const json = await resp.json().catch(() => null)
+        envs.value = ((json?.data as Env[]) ?? [])
       }
     })().finally(() => { inflight = null })
     return inflight

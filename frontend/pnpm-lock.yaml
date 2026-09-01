@@ -183,6 +183,12 @@ importers:
       typescript:
         specifier: ^5.6.0
         version: 5.9.3
+      unplugin-auto-import:
+        specifier: ^21.0.0
+        version: 21.0.0(@vueuse/core@14.3.0(vue@3.5.40(typescript@5.9.3)))
+      unplugin-vue-components:
+        specifier: ^32.1.0
+        version: 32.1.0(esbuild@0.28.1)(rollup@4.62.2)(vite@5.4.21(@types/node@22.20.1)(sass@1.102.0)(terser@5.49.0))(vue@3.5.40(typescript@5.9.3))(webpack@5.109.0(esbuild@0.28.1))
       vite:
         specifier: ^5.4.0
         version: 5.4.21(@types/node@22.20.1)(sass@1.102.0)(terser@5.49.0)
@@ -8641,10 +8647,44 @@ snapshots:
     optionalDependencies:
       '@vueuse/core': 11.3.0(vue@3.5.40(typescript@5.9.3))
 
+  unplugin-auto-import@21.0.0(@vueuse/core@14.3.0(vue@3.5.40(typescript@5.9.3))):
+    dependencies:
+      local-pkg: 1.2.1
+      magic-string: 0.30.21
+      picomatch: 4.0.5
+      unimport: 5.7.0
+      unplugin: 2.3.11
+      unplugin-utils: 0.3.2
+    optionalDependencies:
+      '@vueuse/core': 14.3.0(vue@3.5.40(typescript@5.9.3))
+
   unplugin-utils@0.3.2:
     dependencies:
       pathe: 2.0.3
       picomatch: 4.0.5
+
+  unplugin-vue-components@32.1.0(esbuild@0.28.1)(rollup@4.62.2)(vite@5.4.21(@types/node@22.20.1)(sass@1.102.0)(terser@5.49.0))(vue@3.5.40(typescript@5.9.3))(webpack@5.109.0(esbuild@0.28.1)):
+    dependencies:
+      chokidar: 5.0.0
+      local-pkg: 1.2.1
+      magic-string: 0.30.21
+      mlly: 1.8.2
+      obug: 2.1.4
+      picomatch: 4.0.5
+      tinyglobby: 0.2.17
+      unplugin: 3.3.0(esbuild@0.28.1)(rollup@4.62.2)(vite@5.4.21(@types/node@22.20.1)(sass@1.102.0)(terser@5.49.0))(webpack@5.109.0(esbuild@0.28.1))
+      unplugin-utils: 0.3.2
+      vue: 3.5.40(typescript@5.9.3)
+    transitivePeerDependencies:
+      - '@farmfe/core'
+      - '@rspack/core'
+      - bun-types-no-globals
+      - esbuild
+      - rolldown
+      - rollup
+      - unloader
+      - vite
+      - webpack
 
   unplugin-vue-components@32.1.0(esbuild@0.28.1)(rollup@4.62.2)(vite@7.3.6(@types/node@22.20.1)(jiti@2.6.1)(sass@1.102.0)(terser@5.49.0)(yaml@2.9.0))(vue@3.5.40(typescript@5.9.3))(webpack@5.109.0(esbuild@0.28.1)):
     dependencies:
@@ -8675,6 +8715,17 @@ snapshots:
       acorn: 8.17.0
       picomatch: 4.0.5
       webpack-virtual-modules: 0.6.2
+
+  unplugin@3.3.0(esbuild@0.28.1)(rollup@4.62.2)(vite@5.4.21(@types/node@22.20.1)(sass@1.102.0)(terser@5.49.0))(webpack@5.109.0(esbuild@0.28.1)):
+    dependencies:
+      '@jridgewell/remapping': 2.3.5
+      picomatch: 4.0.5
+      webpack-virtual-modules: 0.6.2
+    optionalDependencies:
+      esbuild: 0.28.1
+      rollup: 4.62.2
+      vite: 5.4.21(@types/node@22.20.1)(sass@1.102.0)(terser@5.49.0)
+      webpack: 5.109.0(esbuild@0.28.1)
 
   unplugin@3.3.0(esbuild@0.28.1)(rollup@4.62.2)(vite@7.3.6(@types/node@22.20.1)(jiti@2.6.1)(sass@1.102.0)(terser@5.49.0)(yaml@2.9.0))(webpack@5.109.0(esbuild@0.28.1)):
     dependencies:

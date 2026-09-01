@@ -396,6 +396,23 @@ func (h *Handler) serveAdminRuns(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	// /api/admin/pipelineruns/{id}：跨租户单条详情（admin 运行详情页；GetRun 是租户
+	// 过滤语义不能直接用，从 ListAllRuns 定位——总量 LIMIT 1000，内存过滤够用）。
+	if rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/admin/pipelineruns"), "/"); rest != "" {
+		list, err := h.runs.ListAllRuns(r.Context(), "")
+		if err != nil {
+			httputil.WriteInternalError(w, err)
+			return
+		}
+		for _, run := range list {
+			if run.ID == rest {
+				httputil.WriteData(w, run)
+				return
+			}
+		}
+		httputil.WriteError(w, http.StatusNotFound, "运行不存在: "+rest)
+		return
+	}
 	list, err := h.runs.ListAllRuns(r.Context(), r.URL.Query().Get("status"))
 	if err != nil {
 		httputil.WriteInternalError(w, err)

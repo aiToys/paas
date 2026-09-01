@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
+import { apiError } from '@/api'
 // 泳道详情页（一等实体）：单泳道的深度视图。
 // 服务部署表（就绪比/镜像）+ 最近 run（跳运行详情）+ trace 入口（带 lane 过滤跳可观测）+ 关闭泳道。
 // 关闭 = 标记 closed + 后端同步回收该泳道全部工作负载（confirmDangerous 二次确认）。
@@ -32,7 +34,7 @@ async function load() {
   try {
     detail.value = await getLane(route.params.id as string)
   } catch (e) {
-    ElMessage.error((e as Error).message)
+    ElMessage.error(apiError(e))
   } finally {
     loading.value = false
   }
@@ -63,14 +65,16 @@ async function onClose() {
     ElMessage.success('泳道已关闭，工作负载已回收')
     router.back()
   } catch (e) {
-    ElMessage.error((e as Error).message)
+    ElMessage.error(apiError(e))
   } finally {
     closing.value = false
   }
 }
 
-function fmtTime(s?: string) {
-  return s ? new Date(s).toLocaleString() : '-'
+const fmtTime = (t?: string) => {
+  if (!t) return '-'
+  const d = new Date(t)
+  return Number.isNaN(d.getTime()) ? '-' : formatDateTime(d)
 }
 </script>
 

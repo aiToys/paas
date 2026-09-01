@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
+import { copyText } from '@/utils/clipboard'
 // 应用详情 - 变更 tab（火车发车模型）：变更列表（创建/放弃）+ 集成批次（发车：collecting→integrate→testing→tested→approve→released）。
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
@@ -87,9 +89,7 @@ async function abandon(c: Change) {
   }
 }
 
-function copyText(t: string) {
-  navigator.clipboard.writeText(t).then(() => ElMessage.success('已复制'))
-}
+// 统一走 utils/clipboard（含非 secure context 降级 + 失败反馈，R10-2/3）
 
 const batchById = (id: string) => batches.value.find((b) => b.id === id)
 const changeById = (id: string) => changes.value.find((c) => c.id === id)
@@ -233,7 +233,7 @@ async function doCreateBatch() {
   }
 }
 
-const fmtTime = (t?: string) => (t ? new Date(t).toLocaleString() : '-')
+const fmtTime = (t?: string) => (t ? formatDateTime(t) : '-')
 </script>
 
 <template>

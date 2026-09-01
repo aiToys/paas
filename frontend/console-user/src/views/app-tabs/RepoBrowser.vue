@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
 // 内置 Gitea 仓库浏览器：文件树 + 最近提交（一站式--不跳转 Gitea Web UI）。
 // 调 PaaS API（后端代理 Gitea），仅 source=internal 仓库可用。
 import { ref, onMounted, computed } from 'vue'
@@ -83,7 +84,7 @@ async function load() {
 function fmtDate(s: string) {
   if (!s) return ''
   try {
-    return new Date(s).toLocaleString()
+    return formatDateTime(s)
   } catch {
     return s
   }

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
 // 应用详情 - 可观测 tab：聚合应用全部相关监控，内部 tab 分类型。
 //   - 应用实例：计算（CPU/内存）+ 流量健康（RPS/延迟）+ 副本就绪 + 日志 + 链路
 //   - 依赖资源：应用绑定的数据服务（DB/cache/mq/vector）各自 CPU/内存负载
@@ -280,7 +281,7 @@ watch(() => props.bindings, () => loadDeps(), { deep: true })
           <div class="sub-title">最近日志</div>
           <el-table :data="logs" size="small" height="260" empty-text="暂无日志">
             <el-table-column label="时间" width="170">
-              <template #default="{ row }">{{ new Date(row.timestamp).toLocaleString() }}</template>
+              <template #default="{ row }">{{ formatDateTime(row.timestamp) }}</template>
             </el-table-column>
             <el-table-column label="级别" width="80">
               <template #default="{ row }">
@@ -360,7 +361,7 @@ v-for="node in spanRows(row)" :key="node.span.id"
               </template>
             </el-table-column>
             <el-table-column label="开始" width="170">
-              <template #default="{ row }">{{ new Date(row.startedAt).toLocaleString() }}</template>
+              <template #default="{ row }">{{ formatDateTime(row.startedAt) }}</template>
             </el-table-column>
             <el-table-column label="服务" min-width="140">
               <template #default="{ row }">

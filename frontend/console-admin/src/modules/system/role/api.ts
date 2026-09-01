@@ -75,35 +75,12 @@ export const fetchRoleList = async (params: RoleSearchRequest): Promise<RoleSear
 }
 
 // 获取角色详情（本地从列表派生，core 无单角色端点）。
-export const fetchRoleDetail = async (id: string): Promise<RoleInfo> => {
-  const list = await api.get<CoreRole[]>('/api/admin/roles')
-  const r = (list ?? []).find((x) => x.name === id)
-  if (!r) throw new Error('角色不存在')
-  return mapRole(r)
-}
-
 // 内置角色不可创建/修改/删除（core BuiltinRoles 固定）。保留函数签名以兼容 useCrud，抛明确错误。
 const unsupported = (op: string) => Promise.reject(new Error(`内置角色不支持${op}`))
 
 export const createRole = (_data: RoleCreateRequest) => unsupported('创建')
 export const updateRole = (_id: string, _data: Partial<RoleCreateRequest>) => unsupported('修改')
-export const deleteRole = (_id: string) => unsupported('删除')
-export const batchDeleteRoles = (_ids: string[]) => unsupported('批量删除')
 
 // 导出角色列表（CSV 本地生成）。
-export const exportRoles = async (): Promise<string> => {
-  const list = await api.get<CoreRole[]>('/api/admin/roles')
-  const rows = (list ?? []).map((r) => mapRole(r))
-  const header = 'id,name,code,description,status'
-  const lines = rows.map((r) => [r.id, r.name, r.code, `"${r.description}"`, r.status].join(','))
-  return [header, ...lines].join('\n')
-}
-
 // 获取角色权限（从列表派生）。
-export const fetchRolePermissions = async (roleId: string): Promise<string[]> => {
-  const list = await api.get<CoreRole[]>('/api/admin/roles')
-  return (list ?? []).find((x) => x.name === roleId)?.permissions ?? []
-}
-
 // 设置角色权限（内置角色只读）。
-export const setRolePermissions = (_roleId: string, _permissions: string[]) => unsupported('权限修改')

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
 // 应用详情 - 配置 tab：工作负载级 env/Secret 键值（静态，改了重启注入）。
 // 与服务治理的「配置中心」（运行时动态、跨实例、版本灰度）严格区分。
 // 依赖顶栏 scope（当前环境）：列表按当前环境过滤，增删改作用于该环境。
@@ -159,7 +160,7 @@ watch(() => props.appId, load)
           <template #default="{ row }"><span class="mono">{{ row.value }}</span></template>
         </el-table-column>
         <el-table-column label="更新时间" width="160">
-          <template #default="{ row }">{{ new Date(row.updatedAt).toLocaleString() }}</template>
+          <template #default="{ row }">{{ formatDateTime(row.updatedAt) }}</template>
         </el-table-column>
         <el-table-column label="操作" width="120">
           <template #default="{ row }">
@@ -184,7 +185,7 @@ watch(() => props.appId, load)
           <template #default="{ row }"><span class="mono masked">{{ row.value }}</span></template>
         </el-table-column>
         <el-table-column label="更新时间" width="160">
-          <template #default="{ row }">{{ new Date(row.updatedAt).toLocaleString() }}</template>
+          <template #default="{ row }">{{ formatDateTime(row.updatedAt) }}</template>
         </el-table-column>
         <el-table-column label="操作" width="120">
           <template #default="{ row }">

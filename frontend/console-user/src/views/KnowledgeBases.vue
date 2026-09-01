@@ -1,10 +1,12 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
+import { statusOf, DOC_STATUS } from '@/composables/useStatus'
 // 资源中心 → 知识库（RAG）：文档上传->切片->embedding->向量检索。
 // KB 引用 dataservice vector(qdrant)+storage(minio) 实例（不自建），复用 MaaS embedding 模型。
 // 租户私有；不绑物理环境（无 prod:write）。文档上传异步解析+索引，状态轮询 parsing->indexed/failed。
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchJSON, fetchAuth } from '@/api'
+import { fetchJSON, fetchAuth, apiError } from '@/api'
 
 interface KnowledgeBase {
   id: string; name: string
@@ -38,8 +40,7 @@ const usage = computed(() => {
 const vectorDS = ref<DSItem[]>([])
 const storageDS = ref<DSItem[]>([])
 
-const DOC_STATUS_LABEL: Record<string, string> = { parsing: '解析中', indexed: '已索引', failed: '失败' }
-const DOC_STATUS_TYPE: Record<string, string> = { parsing: 'warning', indexed: 'success', failed: 'danger' }
+// 状态字典收编 useStatus.DOC_STATUS（R1-C1）
 
 async function load() {
   loading.value = true
@@ -51,7 +52,7 @@ async function load() {
     kbs.value = k
     agents.value = a
   } catch (e) {
-    ElMessage.error('加载知识库失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载知识库失败'))
   } finally {
     loading.value = false
   }
@@ -106,7 +107,7 @@ async function create() {
     showCreate.value = false
     await load()
   } catch (e) {
-    ElMessage.error('创建失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '创建失败'))
   } finally {
     submitting.value = false
   }
@@ -123,7 +124,7 @@ async function remove(kb: KnowledgeBase) {
     ElMessage.success('已删除')
     await load()
   } catch (e) {
-    ElMessage.error('删除失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '删除失败'))
   }
 }
 
@@ -151,7 +152,7 @@ async function loadDocs() {
   } catch (e) {
     // 首次失败提示；轮询连续失败静默（防 3s 间隔错误 toast 刷屏），成功后复位
     if (!pollErrShown) {
-      ElMessage.error('加载文档失败：' + (e as Error).message)
+      ElMessage.error(apiError(e, '加载文档失败'))
       pollErrShown = true
     }
   } finally {
@@ -198,7 +199,7 @@ async function onUpload(file: File) {
     await loadDocs()
     startPoll()
   } catch (e) {
-    ElMessage.error('上传失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '上传失败'))
   }
 }
 
@@ -208,7 +209,7 @@ async function removeDoc(doc: Document) {
     await fetchJSON(`/api/knowledgebases/${currentKB.value.id}/documents/${doc.id}`, { method: 'DELETE' })
     await loadDocs()
   } catch (e) {
-    ElMessage.error('删除文档失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '删除文档失败'))
   }
 }
 
@@ -225,7 +226,7 @@ async function retrieve() {
       body: JSON.stringify({ query: query.value }),
     })
   } catch (e) {
-    ElMessage.error('检索失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '检索失败'))
     hits.value = []
   } finally {
     searching.value = false
@@ -262,7 +263,7 @@ onUnmounted(stopPoll)
       <el-table-column prop="embeddingModel" label="向量模型" width="180" />
       <el-table-column prop="embeddingDim" label="维度" width="90" />
       <el-table-column label="创建时间" width="180">
-        <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
+        <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
       </el-table-column>
       <el-table-column label="操作" width="220">
         <template #default="{ row }">
@@ -311,7 +312,7 @@ onUnmounted(stopPoll)
         <el-table-column prop="name" label="文件名" />
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
-            <el-tag :type="DOC_STATUS_TYPE[row.status]">{{ DOC_STATUS_LABEL[row.status] }}</el-tag>
+            <el-tag :type="statusOf(DOC_STATUS, row.status).type">{{ statusOf(DOC_STATUS, row.status).label }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="chunkCount" label="切片数" width="80" />

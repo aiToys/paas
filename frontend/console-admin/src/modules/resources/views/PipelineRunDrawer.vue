@@ -95,8 +95,10 @@ const load = async () => {
 }
 // 打开即加载 + 10s 轮询（与列表页同款；run 终态后停轮询）。
 const start = () => {
+  if (timer) clearInterval(timer) // 防重复打开叠加（R3-9）
   load()
   timer = window.setInterval(() => {
+    if (document.hidden) return // 后台 tab 暂停（R3-1）
     if (detail.value && ['succeeded', 'failed', 'aborted'].includes(detail.value.status)) {
       if (timer) clearInterval(timer)
       return

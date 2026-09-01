@@ -1,12 +1,20 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import AutoImport from 'unplugin-auto-import/vite'
+import Components from 'unplugin-vue-components/vite'
+import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 import { fileURLToPath, URL } from 'node:url'
 
 // 用户控制台 Vite 配置；@ 别名指向 src。
 // base='/console/'：生产部署到 paas.example.local/console/ 子路径（core 单镜像同域反代，无 CORS）。
 export default defineConfig({
   base: '/console/',
-  plugins: [vue()],
+  plugins: [
+    vue(),
+    // Element Plus 按需引入（R8-1：此前全量引入 923KB JS + 376KB CSS）
+    AutoImport({ resolvers: [ElementPlusResolver()] }),
+    Components({ resolvers: [ElementPlusResolver()] }),
+  ],
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
@@ -29,7 +37,6 @@ export default defineConfig({
         // vendor 分包：稳定的第三方库独立 chunk，长效缓存（业务迭代不重下 vendor）。
         manualChunks: {
           vue: ['vue', 'vue-router', 'pinia'],
-          'element-plus': ['element-plus'],
         },
       },
     },

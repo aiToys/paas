@@ -32,7 +32,7 @@ export interface LaneDetail {
 }
 
 const unwrap = async <T>(resp: Response): Promise<T> => {
-  const j = await resp.json()
+  const j = await resp.json().catch(() => null)
   if (!resp.ok) throw new Error(j?.error || `HTTP ${resp.status}`)
   return j?.data ?? j as T
 }
@@ -46,11 +46,6 @@ export const getLane = (id: string) =>
 export const createLane = (body: Pick<Lane, 'envId' | 'name' | 'mode'> & Partial<Pick<Lane, 'description' | 'externalLink'>>) =>
   fetchAuth('/api/lanes', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-  }).then(r => unwrap<Lane>(r))
-
-export const updateLane = (id: string, body: Partial<Pick<Lane, 'mode' | 'description' | 'externalLink'>>) =>
-  fetchAuth(`/api/lanes/${id}`, {
-    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   }).then(r => unwrap<Lane>(r))
 
 export const closeLane = (id: string) =>

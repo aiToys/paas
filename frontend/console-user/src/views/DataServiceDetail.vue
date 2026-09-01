@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
+import { statusOf, DATASERVICE_STATUS } from '@/composables/useStatus'
 // 资源中心 -> 数据服务详情。
 // 基本信息 + 连接信息（敏感字段后端掩码，前端不可 reveal）+ 监控指标（4 指标卡 + sparkline，10s 轮询）
 // + 告警规则（针对该数据服务，targetType=dataservice）。
@@ -14,7 +16,6 @@ import { confirmDangerous } from '@/composables/useDangerConfirm'
 import DetailShell from '@/components/DetailShell.vue'
 import type { ShellTag } from '@/components/DetailShell.vue'
 
-type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
 
 interface SpecField { key: string; label: string; type: string; options?: string[]; default: string }
 interface KindMeta { kind: string; label: string; icon: string; fields: SpecField[] }
@@ -56,8 +57,7 @@ const errorMsg = ref('') // 加载失败提示（404/网络错误），避免静
 
 interface AppLite { id: string; name: string; bindings?: { type: string; name: string }[] }
 
-const STATUS_LABEL: Record<string, string> = { running: '运行中', stopped: '已停止', creating: '创建中' }
-const STATUS_TYPE: Record<string, TagType> = { running: 'success', stopped: 'info', creating: 'warning' }
+// 状态字典收编 useStatus.DATASERVICE_STATUS（R1-C1）
 
 // 按 kind 定义连接字段顺序与标签（敏感字段标记 secret）。
 // 任务约束：host/port 通用；db=user/database/password/uri；cache=password/uri；
@@ -441,7 +441,7 @@ async function upgrade() {
   <DetailShell
     :crumbs="[{ label: kindLabel, to: `/resources/${kind}` }, { label: ds?.name ?? id }]"
     :tags="ds ? [
-      { label: STATUS_LABEL[ds.status] || ds.status, type: STATUS_TYPE[ds.status] as ShellTag['type'] || 'info' },
+      { label: statusOf(DATASERVICE_STATUS, ds.status).label, type: statusOf(DATASERVICE_STATUS, ds.status).type as ShellTag['type'] },
       { label: envLabel(ds.envId) },
     ] : []"
     :loading="loading"
@@ -482,13 +482,13 @@ async function upgrade() {
           <span class="mono">{{ ds?.name }}</span>
         </el-descriptions-item>
         <el-descriptions-item label="状态">
-          <el-tag v-if="ds" :type="(STATUS_TYPE[ds.status]) || 'info'" size="small">
-            {{ STATUS_LABEL[ds?.status] || ds?.status }}
+          <el-tag v-if="ds" :type="statusOf(DATASERVICE_STATUS, ds.status).type" size="small">
+            {{ statusOf(DATASERVICE_STATUS, ds.status).label }}
           </el-tag>
         </el-descriptions-item>
         <el-descriptions-item label="环境">{{ envLabel(ds?.envId ?? '') }}</el-descriptions-item>
         <el-descriptions-item label="创建时间">
-          {{ ds ? new Date(ds.createdAt).toLocaleString() : '-' }}
+          {{ ds ? formatDateTime(ds.createdAt) : '-' }}
         </el-descriptions-item>
         <el-descriptions-item label="ID">
           <span class="mono faint">{{ ds?.id }}</span>

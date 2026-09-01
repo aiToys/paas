@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
 // 平台能力 → 服务治理 → 注册中心。
 // 服务定义列表（租户私有，按顶栏 scope 过滤）+ 注册/注销服务 + 进入详情（实例发现）。
 // 生产注册/注销受 prod:write 保护（后端）；前端注销走 confirmDangerous（生产输入名称确认）。
@@ -6,7 +7,7 @@
 import { onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { fetchAuth } from '@/api'
+import { fetchAuth, apiError } from '@/api'
 import { useEnvStore } from '@/stores/env'
 
 type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
@@ -133,7 +134,7 @@ async function createRoute() {
     if (resp.ok) { ElMessage.success('路由已创建'); showRoute.value = false; loadRoutes() }
     else { const e = await resp.json().catch(() => ({})); ElMessage.error(e.error || '创建失败') }
   } catch (e) {
-    ElMessage.error('创建失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '创建失败'))
   } finally {
     routeSubmitting.value = false
   }
@@ -148,7 +149,7 @@ async function toggleRoute(row: Route) {
     if (resp.ok) loadRoutes()
     else { const e = await resp.json().catch(() => ({})); ElMessage.error(e.error || '操作失败') }
   } catch (e) {
-    ElMessage.error('操作失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '操作失败'))
   }
 }
 
@@ -160,7 +161,7 @@ async function deleteRoute(row: Route) {
     if (resp.ok) { ElMessage.success('已删除'); loadRoutes() }
     else { const e = await resp.json().catch(() => ({})); ElMessage.error(e.error || '删除失败') }
   } catch (e) {
-    ElMessage.error('删除失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '删除失败'))
   }
 }
 
@@ -187,7 +188,7 @@ async function createBreaker() {
     if (resp.ok) { ElMessage.success('熔断器已创建'); showBreaker.value = false; loadBreakers() }
     else { const e = await resp.json().catch(() => ({})); ElMessage.error(e.error || '创建失败') }
   } catch (e) {
-    ElMessage.error('创建失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '创建失败'))
   } finally {
     breakerSubmitting.value = false
   }
@@ -202,7 +203,7 @@ async function toggleBreaker(row: Breaker) {
     if (resp.ok) loadBreakers()
     else { const e = await resp.json().catch(() => ({})); ElMessage.error(e.error || '操作失败') }
   } catch (e) {
-    ElMessage.error('操作失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '操作失败'))
   }
 }
 
@@ -214,7 +215,7 @@ async function deleteBreaker(row: Breaker) {
     if (resp.ok) { ElMessage.success('已删除'); loadBreakers() }
     else { const e = await resp.json().catch(() => ({})); ElMessage.error(e.error || '删除失败') }
   } catch (e) {
-    ElMessage.error('删除失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '删除失败'))
   }
 }
 
@@ -309,7 +310,7 @@ watch(() => envStore.currentEnvId, load)
       <el-table-column prop="appId" label="归属应用" width="140" />
       <el-table-column prop="desc" label="描述" min-width="140" show-overflow-tooltip />
       <el-table-column label="更新时间" width="160">
-        <template #default="{ row }">{{ new Date(row.updatedAt).toLocaleString() }}</template>
+        <template #default="{ row }">{{ formatDateTime(row.updatedAt) }}</template>
       </el-table-column>
       <el-table-column label="操作" width="120">
         <template #default="{ row }">

@@ -6,7 +6,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
-import { fetchAuth } from '@/api'
+import { fetchAuth, apiError } from '@/api'
 import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 
@@ -45,7 +45,7 @@ async function load() {
     if (eResp.ok) envs.value = (await eResp.json()).data ?? []
     if (wResp.ok) workloads.value = (await wResp.json()).data ?? []
   } catch (e) {
-    ElMessage.error('加载环境失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载环境失败'))
   } finally {
     loading.value = false
   }
@@ -133,7 +133,7 @@ async function create() {
       ElMessage.error(err.error || '创建失败（生产环境需管理员权限）')
     }
   } catch (e) {
-    ElMessage.error('创建失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '创建失败'))
   } finally {
     submitting.value = false
   }

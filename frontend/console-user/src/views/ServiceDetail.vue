@@ -1,10 +1,11 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
 // 服务治理 → 服务详情：实例列表（发现）+ 注册/注销实例 + 心跳。
 // 生产注册/注销实例受 prod:write 保护（后端）；前端注销走 confirmDangerous（生产输入地址确认）。
 import { onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { fetchAuth } from '@/api'
+import { fetchAuth, apiError } from '@/api'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import DetailShell from '@/components/DetailShell.vue'
 
@@ -73,7 +74,7 @@ async function load() {
     }
     await loadConfigNs()
   } catch (e) {
-    ElMessage.error('加载服务详情失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载服务详情失败'))
   } finally {
     loading.value = false
   }
@@ -137,7 +138,7 @@ async function heartbeat(row: Instance) {
       ElMessage.error(err.error || '心跳失败')
     }
   } catch (e) {
-    ElMessage.error('心跳失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '心跳失败'))
   }
 }
 
@@ -159,7 +160,7 @@ async function remove(row: Instance) {
       ElMessage.error(err.error || '注销失败')
     }
   } catch (e) {
-    ElMessage.error('注销失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '注销失败'))
   }
 }
 
@@ -197,7 +198,7 @@ watch(() => route.params.id, load)
       </el-table-column>
       <el-table-column prop="laneId" label="泳道" width="110" />
       <el-table-column label="最后心跳" width="180">
-        <template #default="{ row }">{{ new Date(row.updatedAt).toLocaleString() }}</template>
+        <template #default="{ row }">{{ formatDateTime(row.updatedAt) }}</template>
       </el-table-column>
       <el-table-column label="操作" width="150">
         <template #default="{ row }">

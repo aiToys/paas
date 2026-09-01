@@ -7,7 +7,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import DetailShell from '@/components/DetailShell.vue'
-import { fetchAuth } from '@/api'
+import { fetchAuth, apiError } from '@/api'
 import { listLanes, createLane, closeLane, type Lane as LaneEntity } from '@/api/lane'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import { useEnvStore } from '@/stores/env'
@@ -91,7 +91,7 @@ async function goLane(name: string) {
       const created = await createLane({ envId: route.params.id as string, name, mode: 'standard' })
       router.push(`/lanes/${created.id}`)
     } catch (e) {
-      ElMessage.error(`该泳道尚未实体化，实体化失败（可能无写权限）：${(e as Error).message}`)
+      ElMessage.error(`该泳道尚未实体化，实体化失败（可能无写权限）：${apiError(e)}`)
     }
   }
 }
@@ -104,7 +104,7 @@ async function onCreateLane() {
     laneForm.value = { name: '', mode: 'standard', description: '' }
     await loadLanes()
   } catch (e) {
-    ElMessage.error((e as Error).message)
+    ElMessage.error(apiError(e))
   }
 }
 
@@ -116,7 +116,7 @@ async function onCloseLane(l: LaneEntity) {
     ElMessage.success('泳道已关闭')
     await loadLanes()
   } catch (e) {
-    ElMessage.error((e as Error).message)
+    ElMessage.error(apiError(e))
   }
 }
 
@@ -142,7 +142,7 @@ async function load() {
       dataServices.value = all.filter((d) => d.envId === id)
     }
   } catch (e) {
-    ElMessage.error('加载环境详情失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载环境详情失败'))
   } finally {
     loading.value = false
   }

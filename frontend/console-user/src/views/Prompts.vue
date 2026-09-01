@@ -22,7 +22,7 @@ async function load() {
   try {
     prompts.value = await fetchJSON<Prompt[]>('/api/prompts')
   } catch (e) {
-    ElMessage.error('加载提示词失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载提示词失败'))
   } finally {
     loading.value = false
   }

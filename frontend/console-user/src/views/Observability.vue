@@ -1,15 +1,16 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
 // 平台能力 → 可观测（综合大屏，多维度）。
 // 设计原则（对标 Datadog/Grafana/Jaeger）：入口全局，维度是过滤器不是门槛。
 // 漏斗式：告警总览（置顶入口）→ 实体健康矩阵（全部视图）→ 指标/日志/trace 下钻。
 // 维度过滤器：全部（租户总览）/ 环境 / 应用 / 数据服务；空参数=后端租户全局查询。
 // 惰性时序：每次加载后端补点；前端 10s 轮询刷新（页面不可见自动暂停）。
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { usePolling } from '@/composables/usePolling'
 import { fmtMetric, sparkHeights as sparkHeightsRaw } from '@/composables/useMetricFormat'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
-import { fetchAuth } from '@/api'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { fetchAuth, apiError } from '@/api'
 import {
   listMetrics, listAlertRules, createAlertRule, deleteAlertRule, listAlerts, listAlertEvents, listLogs,
   listTraces, getTrace,
@@ -19,7 +20,7 @@ import { listLanes } from '@/api/workload'
 import {
   type Trace,
   buildSpanTree, flattenSpanTree, spanWidth, spanLeft, spanChips, errSpanCount,
-  firstErrSpan, traceErrSummary,
+  traceErrSummary,
   spanKindBadge, spanServiceLabel, spanLane, traceHasLane,
 } from '@/composables/useSpanTree'
 import { useEnvStore } from '@/stores/env'
@@ -234,8 +235,10 @@ async function loadAlertEvents() {
   }
 }
 
-function fmtTime(iso: string): string {
-  return new Date(iso).toLocaleString('zh-CN', { hour12: false })
+const fmtTime = (t?: string) => {
+  if (!t) return '-'
+  const d = new Date(t)
+  return Number.isNaN(d.getTime()) ? '-' : formatDateTime(d)
 }
 
 async function loadLogs() {
@@ -346,13 +349,20 @@ function drillRow(r: HealthRow) {
   loadAll()
 }
 
+// 请求序号守卫（R3-3）：连续切维度/筛选时旧请求晚返回不覆盖新数据
+let loadSeq = 0
 async function loadAll(silent = false) {
+  const my = ++loadSeq
   // 首次加载设 loading（骨架）；10s 轮询 silent=true 不设 loading，避免 v-loading 闪烁。
   if (!silent) loading.value = true
   try {
     await Promise.all([loadMetrics(), loadRules(), loadAlerts(), loadLogs(), loadTraces(), loadAlertEvents()])
+    if (my !== loadSeq) {
+      // 过期响应：本轮数据已废，避免 finally 里关掉更新一轮的 loading
+      return
+    }
   } finally {
-    if (!silent) loading.value = false
+    if (!silent && my === loadSeq) loading.value = false
   }
 }
 
@@ -427,13 +437,19 @@ async function saveRule() {
     loadRules()
     loadAlerts()
   } catch (e) {
-    ElMessage.error((e as Error).message || '创建失败')
+    ElMessage.error(apiError(e, '创建失败'))
   } finally {
     ruleSubmitting.value = false
   }
 }
 
 async function deleteRule(r: AlertRule) {
+  // 不可逆删除统一确认（R5-1：此前全站唯一无确认的删除入口）
+  try {
+    await ElMessageBox.confirm(`删除告警规则「${r.name}」？删除后立即生效且不可恢复。`, '删除告警规则', {
+      type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消',
+    })
+  } catch { return }
   try {
     const resp = await deleteAlertRule(r.id)
     if (resp.ok) {
@@ -445,14 +461,27 @@ async function deleteRule(r: AlertRule) {
       ElMessage.error(err.error || '删除失败')
     }
   } catch (e) {
-    ElMessage.error('删除失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '删除失败'))
   }
 }
 
 onMounted(async () => {
   // 各加载独立 catch：单项网络失败不拖垮整页（Promise.all 一个 reject 会让其余结果丢失）
   await Promise.allSettled([loadApps(), envStore.loadEnvs(), loadLanes()])
+  // 默认维度跟随顶栏环境（进页即呈现当前 scope 数据，而非全租户混合）
+  if (!route.query.dim && envStore.currentEnvId) {
+    dim.value = 'env'
+    dimEnv.value = envStore.currentEnvId
+  }
   await loadAll()
+})
+// 顶栏切环境联动（R7-1：此前本页完全无视全局环境切换）：环境维度跟随 + 数据重拉。
+watch(() => envStore.currentEnvId, (id) => {
+  if (id) {
+    dim.value = 'env'
+    dimEnv.value = id
+    loadAll(true)
+  }
 })
 // 10s 轮询刷新指标/告警（silent 不闪烁；页面不可见自动暂停）
 usePolling(() => loadAll(true), 10000)
@@ -658,7 +687,7 @@ v-model="logLane" placeholder="泳道" size="small" style="width: 150px" clearab
       </div>
       <el-table :data="logs" size="small" height="360" empty-text="暂无日志">
         <el-table-column label="时间" width="180">
-          <template #default="{ row }">{{ new Date(row.timestamp).toLocaleString() }}</template>
+          <template #default="{ row }">{{ formatDateTime(row.timestamp) }}</template>
         </el-table-column>
         <el-table-column label="级别" width="80">
           <template #default="{ row }">
@@ -769,7 +798,7 @@ v-for="node in spanRows(row)" :key="node.span.id"
           </template>
         </el-table-column>
         <el-table-column label="开始时间" width="180">
-          <template #default="{ row }">{{ new Date(row.startedAt).toLocaleString() }}</template>
+          <template #default="{ row }">{{ formatDateTime(row.startedAt) }}</template>
         </el-table-column>
         <el-table-column label="操作" min-width="200">
           <template #default="{ row }"><span class="mono">{{ row.operation }}</span></template>

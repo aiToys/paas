@@ -1,8 +1,9 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
 // 平台能力 → 安全（密钥/证书 + 审计日志）。
 // Secret/证书是租户级平台资产（区别于 appconfig 应用级 Secret）。
 // 值后端明文存储、API 掩码返回；写操作（创建/删除）自动记审计，删除走二次确认。
-import { onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
@@ -114,6 +115,8 @@ const actionType: Record<string, TagType> = {
 }
 
 onMounted(load)
+// 顶栏切环境联动（R7-5：secrets/audits 按 envId 查询，切环境重拉）
+watch(() => envStore.currentEnvId, () => load())
 </script>
 
 <template>
@@ -151,7 +154,7 @@ onMounted(load)
         </el-table-column>
         <el-table-column prop="desc" label="描述" min-width="160" show-overflow-tooltip />
         <el-table-column label="更新时间" width="170">
-          <template #default="{ row }">{{ new Date(row.updatedAt).toLocaleString() }}</template>
+          <template #default="{ row }">{{ formatDateTime(row.updatedAt) }}</template>
         </el-table-column>
         <el-table-column label="操作" width="80">
           <template #default="{ row }">
@@ -171,7 +174,7 @@ onMounted(load)
       </div>
       <el-table :data="audits" size="small" empty-text="暂无审计记录">
         <el-table-column label="时间" width="170">
-          <template #default="{ row }">{{ new Date(row.at).toLocaleString() }}</template>
+          <template #default="{ row }">{{ formatDateTime(row.at) }}</template>
         </el-table-column>
         <el-table-column label="动作" width="90">
           <template #default="{ row }">

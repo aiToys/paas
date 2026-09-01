@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
 // DevOps 中心：值班台 + 档案室。
 // 默认 tab=值班台（聚合「需要我关注」的进行中/失败/待审批三列，通知驱动，点击直达详情）——
 // 打开就知道该干什么。其余六 tab 是档案室（排障视角的全量单据）：运行/变更/批次/构建/镜像/发布，
@@ -7,7 +8,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { fetchAuth } from '@/api'
+import { fetchAuth, apiError } from '@/api'
 import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import { usePolling } from '@/composables/usePolling'
@@ -167,7 +168,7 @@ async function rebuild(row: BuildRun) {
     if (resp.ok) { ElMessage.success('已触发重新构建'); loadBuilds() }
     else { const err = await resp.json().catch(() => ({})); ElMessage.error(err.error || '触发失败') }
   } catch (e) {
-    ElMessage.error('触发失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '触发失败'))
   } finally {
     busy.value = false
   }
@@ -187,7 +188,7 @@ async function rollback(row: Release) {
     if (resp.ok) { ElMessage.success('已回滚'); loadReleases() }
     else { const err = await resp.json().catch(() => ({})); ElMessage.error(err.error || '回滚失败') }
   } catch (e) {
-    ElMessage.error('回滚失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '回滚失败'))
   }
 }
 
@@ -200,6 +201,8 @@ function shortDigest(d: string) {
 
 // 环境列表一次性加载（此前嵌在轮询的 load() 里，环境为空/失败时每 10s 重发）
 onMounted(async () => { await envStore.loadEnvs(); load() })
+// 顶栏切环境联动（R7-2：build/release/run 均带 envId，切环境必须重拉）
+watch(() => envStore.currentEnvId, () => load())
 </script>
 
 <template>
@@ -290,7 +293,7 @@ v-for="p in boardPulls" :key="p.repoId + ':' + p.pr.number" class="board-item"
             </template>
           </el-table-column>
           <el-table-column label="开始时间" width="170">
-            <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
+            <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
           </el-table-column>
           <el-table-column label="操作" width="110">
             <template #default="{ row }">
@@ -325,7 +328,7 @@ v-for="p in boardPulls" :key="p.repoId + ':' + p.pr.number" class="board-item"
             </template>
           </el-table-column>
           <el-table-column label="创建时间" width="170">
-            <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
+            <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
           </el-table-column>
           <el-table-column label="操作" width="90">
             <template #default="{ row }">
@@ -353,7 +356,7 @@ v-for="p in boardPulls" :key="p.repoId + ':' + p.pr.number" class="board-item"
           </el-table-column>
           <el-table-column prop="pr.user" label="作者" width="100" />
           <el-table-column label="创建时间" width="170">
-            <template #default="{ row }">{{ new Date(row.pr.createdAt).toLocaleString() }}</template>
+            <template #default="{ row }">{{ formatDateTime(row.pr.createdAt) }}</template>
           </el-table-column>
           <el-table-column label="操作" width="90">
             <template #default="{ row }">
@@ -391,7 +394,7 @@ text type="primary" size="small"
             </template>
           </el-table-column>
           <el-table-column label="创建时间" width="170">
-            <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
+            <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
           </el-table-column>
           <el-table-column label="操作" width="90">
             <template #default="{ row }">
@@ -426,7 +429,7 @@ text type="primary" size="small"
           </el-table-column>
           <el-table-column prop="message" label="说明" min-width="180" show-overflow-tooltip />
           <el-table-column label="开始时间" width="170">
-            <template #default="{ row }">{{ new Date(row.startedAt).toLocaleString() }}</template>
+            <template #default="{ row }">{{ formatDateTime(row.startedAt) }}</template>
           </el-table-column>
           <el-table-column label="操作" width="150">
             <template #default="{ row }">
@@ -493,7 +496,7 @@ text type="primary" size="small"
             </template>
           </el-table-column>
           <el-table-column label="发布时间" width="170">
-            <template #default="{ row }">{{ new Date(row.createdAt).toLocaleString() }}</template>
+            <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
           </el-table-column>
           <el-table-column label="操作" width="150">
             <template #default="{ row }">

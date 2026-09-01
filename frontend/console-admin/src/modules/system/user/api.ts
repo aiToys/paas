@@ -112,13 +112,6 @@ export const fetchUserList = async (params: UserSearchRequest): Promise<UserSear
 }
 
 // 获取用户详情（从列表派生，core 无单用户 GET）。
-export const fetchUserDetail = async (id: string): Promise<UserInfo> => {
-  const list = await api.get<CoreUser[]>('/api/admin/users')
-  const u = (list ?? []).find((x) => x.id === id)
-  if (!u) throw new Error('用户不存在')
-  return mapUser(u)
-}
-
 // 创建用户（对接 core POST /api/admin/users；id 由 username 派生，默认租户 t-acme）。
 export const createUser = async (data: UserCreateRequest): Promise<UserInfo> => {
   const body: CoreUserCreate = {
@@ -177,12 +170,3 @@ export const batchDeleteUsers = async (ids: string[]): Promise<boolean> => {
 }
 
 // 导出用户列表（CSV 本地生成）。
-export const exportUsers = async (params: UserSearchRequest): Promise<string> => {
-  const res = await fetchUserList(params)
-  const header = 'id,username,email,roles,status'
-  const lines = res.records.map((u) =>
-    [u.id, u.username, u.email, `"${u.roles.join(',')}"`, u.status].join(',')
-  )
-  return [header, ...lines].join('\n')
-}
-

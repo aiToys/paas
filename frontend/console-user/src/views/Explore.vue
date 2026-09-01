@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { apiError } from '@/api'
 // AI 编排广场：跨租户共享能力市场（对标 Dify Explore / Coze 商店）。
 // 浏览（类型 tab + 分类 pill + 搜索）→ 卡片网格 → 详情抽屉（snapshot 预览）→ 安装 fork 到本租户。
 import { onMounted, ref } from 'vue'
@@ -30,7 +31,7 @@ async function load() {
     items.value = res
   } catch (e) {
     if (my !== loadSeq) return
-    ElMessage.error('加载广场失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载广场失败'))
   } finally {
     if (my === loadSeq) loading.value = false
   }
@@ -114,7 +115,7 @@ async function install(it: MarketItem) {
     detail.value = null
     router.push(entityTypeRoute[res.entityType] ?? '/ai/explore')
   } catch (e) {
-    ElMessage.error('安装失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '安装失败'))
   } finally {
     installing.value = false
   }

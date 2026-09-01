@@ -43,7 +43,7 @@ async function load() {
     tools.value = t
     agents.value = a
   } catch (e) {
-    ElMessage.error('加载工具失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '加载工具失败'))
   } finally {
     loading.value = false
   }

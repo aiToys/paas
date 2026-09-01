@@ -1,10 +1,11 @@
 <script setup lang="ts">
+import { formatDateTime } from '@/utils/format'
 // 应用详情 - 构建 tab：触发构建 + 列表 + 状态轮询 + 日志展开。
 // mock CI runner 异步流转 pending->running->success，前端轮询直到全部终态。
 import { ref, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { fetchAuth } from '@/api'
+import { fetchAuth, apiError } from '@/api'
 import { buildLink, imageLink, repoLink } from '@/composables/useDevopsLinks'
 import { usePolling } from '@/composables/usePolling'
 import { BUILD_STATUS, statusOf } from '@/composables/useStatus'
@@ -84,7 +85,7 @@ async function trigger() {
       ElMessage.error(err.error || '触发失败')
     }
   } catch (e) {
-    ElMessage.error('触发失败：' + (e as Error).message)
+    ElMessage.error(apiError(e, '触发失败'))
   }
 }
 
@@ -151,7 +152,7 @@ usePolling(() => load(true), 2000, {
         </template>
       </el-table-column>
       <el-table-column label="开始时间" width="160">
-        <template #default="{ row }">{{ new Date(row.startedAt).toLocaleString() }}</template>
+        <template #default="{ row }">{{ formatDateTime(row.startedAt) }}</template>
       </el-table-column>
     </el-table>
 
