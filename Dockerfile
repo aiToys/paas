@@ -33,6 +33,7 @@ COPY frontend/package.json frontend/pnpm-workspace.yaml frontend/pnpm-lock.yaml 
 COPY frontend/console-user/package.json ./console-user/package.json
 COPY frontend/console-admin/package.json ./console-admin/package.json
 COPY frontend/landing/package.json ./landing/package.json
+COPY frontend/docs/package.json ./docs/package.json
 RUN pnpm install --frozen-lockfile
 # 拷源码（含已配置的 base path）
 COPY frontend/ ./
@@ -40,7 +41,8 @@ COPY frontend/ ./
 # console-admin 传 VITE_BASE='/admin/'（子路径）；console-user 已在 vite.config 固定 '/console/'；landing 默认 '/'
 RUN pnpm --filter ./console-user build && \
     VITE_BASE='/admin/' pnpm --filter ./console-admin build && \
-    pnpm --filter ./landing build
+    pnpm --filter ./landing build && \
+    pnpm --filter paas-docs build
 
 # ---------- 2. Go 构建阶段 ----------
 # builder 跑本地架构（$BUILDPLATFORM，如 arm64 Mac）避 QEMU 全栈模拟——Go http2/TLS 在
@@ -60,6 +62,7 @@ COPY . .
 COPY --from=frontend /fe/console-user/dist ./internal/web/dist/console-user
 COPY --from=frontend /fe/console-admin/dist ./internal/web/dist/console-admin
 COPY --from=frontend /fe/landing/dist ./internal/web/dist/landing
+COPY --from=frontend /fe/docs/.vitepress/dist ./internal/web/dist/docs
 # 静态编译（CGO 禁用，适配 distroless）。
 # GOARCH 跟随目标平台：buildkit multi-platform build 自动按目标平台注入 TARGETARCH
 # （amd64 平台→amd64，arm64 平台→arm64）。builder 始终跑 $BUILDPLATFORM（amd64 host）避 QEMU，

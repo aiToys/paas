@@ -10,7 +10,9 @@
     "build:user": "pnpm --filter ./console-user build",
     "build:landing": "pnpm --filter ./landing build",
     "build": "pnpm -r build",
-    "install:all": "pnpm install --recursive"
+    "install:all": "pnpm install --recursive",
+    "dev:docs": "pnpm --filter ./docs dev",
+    "build:docs": "pnpm --filter ./docs build"
   },
   "packageManager": "pnpm@9.12.3"
 }

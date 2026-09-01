@@ -1294,8 +1294,14 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 
 	// /openapi.json：公开契约，无鉴权。
 	mux.Handle("/openapi.json", apiroute.ServeSpec(reg))
-	// /docs：Scalar 交互文档（拉 /openapi.json 渲染），公开无鉴权。
-	mux.Handle("/docs", apiroute.ServeDocs("/openapi.json", "PaaS API"))
+	// /api-docs：Scalar 交互 API 文档（拉 /openapi.json 渲染），公开无鉴权。
+	// /docs：VitePress 用户文档站（go:embed，见 internal/web）。
+	mux.Handle("/api-docs", apiroute.ServeDocs("/openapi.json", "PaaS API"))
+	mux.Handle("/docs/", web.ServeDocs())
+	// /docs 无尾斜杠 302 到 /docs/（FileServer 目录语义）。
+	mux.HandleFunc("/docs", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/docs/", http.StatusFound)
+	})
 
 	// 未知 /api/* 与 /v1/* 返回 404 JSON，而非兜底到 SPA 的 index.html。
 	// 前端 axios 收到 HTML（200）会把字符串当响应数据，下游 .filter/.map 在非数组上崩溃白屏；
@@ -1802,7 +1808,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 func skipTelemetryPaths(r *http.Request) bool {
 	path := r.URL.Path
 	switch path {
-	case "/livez", "/openapi.json", "/docs", "/metrics":
+	case "/livez", "/openapi.json", "/api-docs", "/metrics":
 		return false // 跳过（不建 span）
 	}
 	// /api/observability/ 前缀的只读查询全跳过（metrics/logs/traces/alert-rules/alerts）

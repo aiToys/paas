@@ -55,3 +55,16 @@ func ServeStatic(prefix, subDir string) http.Handler {
 	}
 	return http.StripPrefix(prefix, fileServer)
 }
+
+// ServeDocs 服务 VitePress 文档站产物（多页静态 HTML，非 SPA）。
+// 与 spaFS 不同：未命中路径返回 404（不 fallback index.html——文档站无前端路由），
+// 目录路径（如 /docs/guide/）由 http.FileServer 自动补 index.html。
+func ServeDocs() http.Handler {
+	sub, err := fs.Sub(distFS, "dist/docs")
+	if err != nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "docs not built (dev mode)", http.StatusNotFound)
+		})
+	}
+	return http.StripPrefix("/docs/", http.FileServer(http.FS(sub)))
+}

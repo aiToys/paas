@@ -304,7 +304,8 @@ func TestCreatePublishVersionMonotonicAndActiveUnique(t *testing.T) {
 		t.Fatalf("ActivePublish 应返回 p2, got %s", active.ID)
 	}
 
-	// 第 3 次发布 → v3 active；p2 翻 rolled-back。验证连续单调。
+	// 第 3 次发布 → v3 active；p2 翻 rolled-back。验证连续单调。发布前再改值（空发布闸门）。
+	s.UpsertItem(ctx, sampleItem("i2", ns.ID, "rate.limit", "200"))
 	p3, err := s.CreatePublish(ctx, ns.ID)
 	if err != nil {
 		t.Fatalf("CreatePublish #3: %v", err)

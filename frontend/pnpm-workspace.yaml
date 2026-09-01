@@ -2,3 +2,4 @@ packages:
   - console-admin
   - console-user
   - landing
+  - docs
