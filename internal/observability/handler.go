@@ -131,7 +131,7 @@ func (h *Handler) serveLogs(w http.ResponseWriter, r *http.Request) {
 			limit = n
 		}
 	}
-	logs, err := h.repo.ListLogs(WithRange(r.Context(), ParseRange(q.Get("range"))), q.Get("appId"), q.Get("targetType"), q.Get("targetId"), q.Get("level"), q.Get("q"), q.Get("lane"), limit)
+	logs, err := h.repo.ListLogs(WithRange(r.Context(), ParseRange(q.Get("range"))), q.Get("appId"), q.Get("targetType"), q.Get("targetId"), q.Get("level"), q.Get("q"), q.Get("lane"), q.Get("traceId"), limit)
 	if err != nil {
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return

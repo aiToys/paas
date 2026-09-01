@@ -200,7 +200,8 @@ func (s *Store) ListAlerts(ctx context.Context, targetType, targetId string) ([]
 
 // ListLogs 应用日志查询（过滤，不补点）。降级模式返空。按时间倒序返回。
 // targetType 非空走 TargetType/TargetID 维度（dataservice/env/workload 通用）；否则走 appID 维度（向后兼容）。
-func (s *Store) ListLogs(ctx context.Context, appID, targetType, targetID, level, q, lane string, limit int) ([]observability.LogEntry, error) {
+// traceID 非空时按日志关联 trace 过滤（trace 展开关联日志）。
+func (s *Store) ListLogs(ctx context.Context, appID, targetType, targetID, level, q, lane, traceID string, limit int) ([]observability.LogEntry, error) {
 	_ = lane // mock 数据无 lane 维度（真实 Loki 路径消费）
 	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
@@ -234,6 +235,9 @@ func (s *Store) ListLogs(ctx context.Context, appID, targetType, targetID, level
 			continue
 		}
 		if qlower != "" && !strings.Contains(strings.ToLower(l.Message), qlower) {
+			continue
+		}
+		if traceID != "" && l.TraceID != traceID {
 			continue
 		}
 		out = append(out, l)

@@ -144,6 +144,26 @@ export function errSpanCount(row: Trace): number {
 }
 
 /**
+ * firstErrSpan：trace 中第一个错误 span（列表行摘要真源）。
+ * 取「原因」的聚合口径： errorMessage > errorType > operation（异常原因展开前一眼可读）。
+ */
+export function firstErrSpan(row: Trace): Span | null {
+  return (row.spans || []).find((s) => s.isError) || null
+}
+
+/** traceErrSummary：列表行异常摘要（`type: message`，无 message 降级 type/operation）。 */
+export function traceErrSummary(row: Trace): string {
+  const sp = firstErrSpan(row)
+  if (!sp) return ''
+  if (sp.errorMessage) {
+    // {error:msg} JSON 契约剥离，直出业务消息
+    const m = sp.errorMessage.match(/^\{"error":"(.*)"\}$/)
+    return m ? m[1] : sp.errorMessage
+  }
+  return sp.errorType || sp.operation
+}
+
+/**
  * spanKindBadge：span.kind 徽标（区分入口/出站调用，Jaeger UI 同款语义）。
  * server ⇅ 入口 / client → 出站 / producer ◀ 生产 / consumer ▶ 消费 / internal 省略。
  */

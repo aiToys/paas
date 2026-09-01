@@ -40,8 +40,8 @@ func (r *Repo) ListMetrics(ctx context.Context, targetType, targetID, name strin
 	return r.metrics.ListMetrics(ctx, targetType, targetID, name)
 }
 
-func (r *Repo) ListLogs(ctx context.Context, appID, targetType, targetID, level, q, lane string, limit int) ([]observability.LogEntry, error) {
-	return r.logs.ListLogs(ctx, appID, targetType, targetID, level, q, lane, limit)
+func (r *Repo) ListLogs(ctx context.Context, appID, targetType, targetID, level, q, lane, traceID string, limit int) ([]observability.LogEntry, error) {
+	return r.logs.ListLogs(ctx, appID, targetType, targetID, level, q, lane, traceID, limit)
 }
 
 func (r *Repo) ListTraces(ctx context.Context, appID, status string, limit int) ([]observability.Trace, error) {

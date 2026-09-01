@@ -53,15 +53,27 @@ type lokiResponse struct {
 // （`|~ "(?i)\berror\b"` 等），非严格——仅缩小范围，不保证命中所有该级别日志。
 //
 // Loki 按时间倒序返回；截断 limit。后端不可达 / lister 未注入降级返空。
-func (s *LogsStore) ListLogs(ctx context.Context, appID, targetType, targetID, level, q, lane string, limit int) ([]observability.LogEntry, error) {
+func (s *LogsStore) ListLogs(ctx context.Context, appID, targetType, targetID, level, q, lane, traceID string, limit int) ([]observability.LogEntry, error) {
 	// 无租户 ctx（测试/内部调用）跳过缓存直查，保持原降级语义。
 	tid, tidErr := tenant.IDOrErr(ctx)
 	if tidErr != nil {
 		return s.listLogs(ctx, appID, targetType, targetID, level, q, lane, limit)
 	}
-	key := "l:" + tid + ":" + appID + ":" + targetType + ":" + targetID + ":" + level + ":" + q + ":" + lane + ":" + observability.RangeFrom(ctx).String()
+	key := "l:" + tid + ":" + appID + ":" + targetType + ":" + targetID + ":" + level + ":" + q + ":" + lane + ":" + traceID + ":" + observability.RangeFrom(ctx).String()
 	return s.cache.do(ctx, key, func(c context.Context) ([]observability.LogEntry, error) {
-		return s.listLogs(c, appID, targetType, targetID, level, q, lane, limit)
+		logs, err := s.listLogs(c, appID, targetType, targetID, level, q, lane, limit)
+		if err != nil || traceID == "" {
+			return logs, err
+		}
+		// traceId 过滤（trace 展开关联日志）：trace_id 非 Loki label 无法 query 下推，
+		// 查回后内存过滤（TraceID 来自 stream label；日志行内嵌 trace id 的 best-effort 匹配）。
+		out := make([]observability.LogEntry, 0, len(logs))
+		for _, l := range logs {
+			if l.TraceID == traceID || strings.Contains(l.Message, traceID) {
+				out = append(out, l)
+			}
+		}
+		return out, nil
 	})
 }
 

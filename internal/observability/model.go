@@ -221,7 +221,8 @@ func ValidTraceStatus(s string) bool {
 // Tags 是 OTel span attributes 的全量透传（http.* / client.address / exception.stacktrace /
 // 应用自定义任意属性），前端按 key-value 表展示，便于排障定位。
 // IsError 标识错误 span（OTLP status=ERROR 或 http.response.status_code>=500），
-// ErrorType/ErrorMessage 取自 exception.type / exception.message（otelhttp 5xx 自动打）。
+// ErrorType/ErrorMessage 取自 exception.type / exception.message
+// （由 tracing.ErrorTraceMiddleware 在 4xx/5xx 响应/panic 时写入；otelhttp 只设 status 不记原因）。
 type Span struct {
 	ID           string            `json:"id"`
 	ParentID     string            `json:"parentId,omitempty"`

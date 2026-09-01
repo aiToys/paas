@@ -63,7 +63,7 @@ func TestLogsStoreSuccess(t *testing.T) {
 	defer srv.Close()
 	s := NewLogsStore(srv.URL, &fakeLister{ids: []string{"wl-wl1", "wl-wl2"}})
 	ctx := tenant.WithTenant(context.Background(), "t-acme")
-	out, err := s.ListLogs(ctx, "app-cs", "", "", "error", "timeout", "", 50)
+	out, err := s.ListLogs(ctx, "app-cs", "", "", "error", "timeout", "", "", 50)
 	if err != nil || len(out) != 1 {
 		t.Fatalf("解析错误: %v len=%d", err, len(out))
 	}
@@ -74,7 +74,7 @@ func TestLogsStoreSuccess(t *testing.T) {
 
 func TestLogsStoreBackendDown(t *testing.T) {
 	s := NewLogsStore("http://127.0.0.1:1", &fakeLister{ids: []string{"wl-x"}})
-	out, err := s.ListLogs(context.Background(), "app-cs", "", "", "", "", "", 10)
+	out, err := s.ListLogs(context.Background(), "app-cs", "", "", "", "", "", "", 10)
 	if err != nil || len(out) != 0 {
 		t.Fatalf("后端不可达应降级返空非报错: %v len=%d", err, len(out))
 	}
@@ -83,7 +83,7 @@ func TestLogsStoreBackendDown(t *testing.T) {
 // TestLogsStoreNoListerReturnsEmpty 验证 lister 未注入时应用级查询降级返空（不 panic）。
 func TestLogsStoreNoListerReturnsEmpty(t *testing.T) {
 	s := NewLogsStore("http://127.0.0.1:1", nil)
-	out, err := s.ListLogs(context.Background(), "app-cs", "", "", "", "", "", 10)
+	out, err := s.ListLogs(context.Background(), "app-cs", "", "", "", "", "", "", 10)
 	if err != nil || len(out) != 0 {
 		t.Fatalf("无 lister 应降级返空: %v len=%d", err, len(out))
 	}

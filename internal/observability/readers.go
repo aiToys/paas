@@ -17,7 +17,7 @@ type MetricsReader interface {
 type LogsReader interface {
 	// ListLogs 应用日志查询。targetType=dataservice 时按 TargetType/TargetID 维度过滤；
 	// 否则按 appID 维度（向后兼容历史 app 日志）。level/q 为空表示不限；limit<=0 用默认上限。
-	ListLogs(ctx context.Context, appID, targetType, targetID, level, q, lane string, limit int) ([]LogEntry, error)
+	ListLogs(ctx context.Context, appID, targetType, targetID, level, q, lane, traceID string, limit int) ([]LogEntry, error)
 }
 
 // TracesReader 是链路读取能力。

@@ -61,16 +61,16 @@ var builtinTemplates = []templateApp{{
 
 // templateBootstrapHandler 「从模板新建应用」复合端点。
 type templateBootstrapHandler struct {
-	apps     *application.Handler // 复用 Create 的配额/hook 路径（经 ServeHTTP 内部调用不可行，直接复用 repo 路径）
-	appRepo  application.Repository
-	repos    devops.CodeRepoRepository
-	svcRepo  service.Repository
-	pipes    pipeline.Repository
+	apps        *application.Handler // 复用 Create 的配额/hook 路径（经 ServeHTTP 内部调用不可行，直接复用 repo 路径）
+	appRepo     application.Repository
+	repos       devops.CodeRepoRepository
+	svcRepo     service.Repository
+	pipes       pipeline.Repository
 	gitea       *gitea.Client
 	imageReg    string // 模板 Dockerfile 基础镜像 {REGISTRY} 替换值（集群内 registry，builder 可拉）
 	coreBaseURL string // core 集群内地址（如 http://paas-core.paas.svc:8080，webhook 回调）
-	trigger  func(r *http.Request, appID, pid, branch string) (pipeline.PipelineRun, error)
-	allow    func(r *http.Request, perm string) bool
+	trigger     func(r *http.Request, appID, pid, branch string) (pipeline.PipelineRun, error)
+	allow       func(r *http.Request, perm string) bool
 }
 
 // ServeHTTP POST /api/applications/from-template
@@ -259,6 +259,7 @@ func (r *internalRecorder) Write(b []byte) (int, error) {
 	r.body += string(b)
 	return len(b), nil
 }
+
 // WriteHeader 保留首个显式状态码（真实 server 语义：二次 WriteHeader no-op；
 // application Create 先 201 再经 WriteData 写 200，首个 201 才是真实状态）。
 func (r *internalRecorder) WriteHeader(code int) {

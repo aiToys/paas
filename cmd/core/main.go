@@ -1464,7 +1464,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("POST", "/api/observability/alert-rules", apiroute.Tags("可观测"), apiroute.Summary("创建告警规则"), apiroute.Perm("observability:write"), apiroute.WithReqBody(observability.AlertRule{}), apiroute.WithResp(observability.AlertRule{}))
 	reg.Operation("DELETE", "/api/observability/alert-rules/{id}", apiroute.Tags("可观测"), apiroute.Summary("删除告警规则"), apiroute.Perm("observability:write"))
 	reg.Operation("GET", "/api/observability/alerts", apiroute.Tags("可观测"), apiroute.Summary("当前告警（即时评估）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.Alert{}))
-	reg.Operation("GET", "/api/observability/logs", apiroute.Tags("可观测"), apiroute.Summary("日志聚合（?lane= 泳道过滤，真实 Loki 模式生效）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.LogEntry{}))
+	reg.Operation("GET", "/api/observability/logs", apiroute.Tags("可观测"), apiroute.Summary("日志聚合（?lane= 泳道过滤、?traceId= 按 trace 关联日志，真实 Loki 模式生效）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.LogEntry{}))
 	reg.Operation("GET", "/api/observability/traces", apiroute.Tags("可观测"), apiroute.Summary("链路追踪（惰性生成）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.Trace{}))
 	reg.Operation("GET", "/api/observability/traces/{traceID}", apiroute.Tags("可观测"), apiroute.Summary("按 traceId 直查单条链路（排障入口）"), apiroute.Perm("observability:read"), apiroute.WithResp(observability.Trace{}))
 	// 安全（密钥/证书 + 审计）
@@ -1749,8 +1749,10 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Register("DELETE", "/api/api-keys/{id}", auth(http.HandlerFunc(idmHandler.DeleteAPIKey)),
 		apiroute.Tags("API 密钥"), apiroute.Summary("删除本租户 API Key"))
 
-	// 中间件链（内→外）：mux → csrf → recovery → metrics → otelhttp → securityHeaders。
-	// recovery 包 mux 最内层（捕获 handler panic 写 500，防单请求挂掉进程，SSE 流式也保护）；
+	// 中间件链（内→外）：mux → errorTrace → csrf → recovery → metrics → otelhttp → securityHeaders。
+	// errorTrace 紧贴 mux（otelhttp 内层、recovery 内层）：4xx/5xx 响应体 {error:msg} 与 panic
+	//   写入当前 span（exception.*），Jaeger 异常 trace 可见原因（此前只标 error 无原因）。
+	// recovery 包 mux 内层（捕获 handler panic 写 500，防单请求挂掉进程，SSE 流式也保护）；
 	// csrf 在 recovery 外（写操作 Origin/Referer 同源校验，cookie 会话防 CSRF 纵深）；
 	// metrics 在 recovery 外（statusRecorder 在 recovery 之外才能捕获 panic 写的 500；记
 	//   http_requests_total{method,route,status} + 耗时，route 经 reg.RegisteredPaths() 归一化防高基数）；
@@ -1758,7 +1760,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// spanNameFormatter：HTTP semconv——span 名 = "{method} {route}"（route 用注册模板归一化）。
 	// 修复此前全部 span 固定字面量 "http.server"，Jaeger 服务聚合/按端点找慢请求完全失效。
 	registeredPaths := reg.RegisteredPaths()
-	rootHandler := metrics.HTTPMiddleware(metricsReg, registeredPaths)(recoveryMiddleware(csrfMiddleware(mux)))
+	rootHandler := metrics.HTTPMiddleware(metricsReg, registeredPaths)(recoveryMiddleware(tracing.ErrorTraceMiddleware(csrfMiddleware(mux))))
 	srv := &http.Server{
 		Addr: ":8080",
 		Handler: securityHeadersMiddleware(otelhttp.NewHandler(rootHandler, "http.server",

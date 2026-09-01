@@ -19,6 +19,7 @@ import { listLanes } from '@/api/workload'
 import {
   type Trace,
   buildSpanTree, flattenSpanTree, spanWidth, spanLeft, spanChips, errSpanCount,
+  firstErrSpan, traceErrSummary,
   spanKindBadge, spanServiceLabel, spanLane, traceHasLane,
 } from '@/composables/useSpanTree'
 import { useEnvStore } from '@/stores/env'
@@ -149,6 +150,32 @@ function spanRows(row: Trace) {
 // trace 行 class：错误 trace 整行红色高亮（el-table row-class-name 回调）。
 function traceRowClass({ row }: { row: Trace }): string {
   return row.status === 'error' || errSpanCount(row) ? 'trace-err-row' : ''
+}
+
+// trace 关联日志：展开时拉取（traceId 过滤），排障现场把日志异常与链路对齐。
+const traceLogsCache = ref<Record<string, LogEntry[]>>({})
+const traceLogsLoading = ref<Record<string, boolean>>({})
+async function loadTraceLogs(row: Trace) {
+  if (traceLogsCache.value[row.id] || traceLogsLoading.value[row.id]) return
+  traceLogsLoading.value[row.id] = true
+  try {
+    const params: Record<string, string> = { range: rangeSel.value, traceId: row.id, limit: '20' }
+    if (logsAppId.value) params.appId = logsAppId.value
+    traceLogsCache.value[row.id] = await listLogs(params)
+  } catch {
+    traceLogsCache.value[row.id] = [] // 拉取失败静默降级（日志非主链路）
+  } finally {
+    traceLogsLoading.value[row.id] = false
+  }
+}
+// 复制 traceID（排障现场贴到日志/告警上下文）
+async function copyTraceId(id: string) {
+  try {
+    await navigator.clipboard.writeText(id)
+    ElMessage.success('traceID 已复制')
+  } catch {
+    ElMessage.warning('复制失败，请手动选择')
+  }
 }
 
 // sparkline 高度（公共 composable：基线钉 0 防平坦线 min-max 拉伸失真）
@@ -639,11 +666,21 @@ v-model="logLane" placeholder="泳道" size="small" style="width: 150px" clearab
       </div>
       <el-table
 :data="traces" size="small" row-key="id" empty-text="暂无链路"
-            :row-class-name="traceRowClass"
+            :row-class-name="traceRowClass" @expand-change="(row: Trace, expanded: Trace[]) => { if (expanded.includes(row)) loadTraceLogs(row) }"
 >
         <el-table-column type="expand">
           <template #default="{ row }">
             <div class="span-list">
+              <!-- 关联日志（traceId 过滤）：排障现场把日志异常与链路对齐 -->
+              <div v-if="traceLogsLoading[row.id]" class="trace-logs-hint">日志加载中…</div>
+              <details v-else-if="traceLogsCache[row.id]?.length" class="trace-logs">
+                <summary>相关日志 ({{ traceLogsCache[row.id]!.length }})</summary>
+                <div v-for="l in traceLogsCache[row.id]" :key="l.id" class="trace-log-row">
+                  <span class="mono tl-time">{{ new Date(l.timestamp).toLocaleTimeString() }}</span>
+                  <el-tag :type="l.level === 'error' ? 'danger' : l.level === 'warn' ? 'warning' : 'info'" size="small">{{ l.level }}</el-tag>
+                  <span class="mono tl-msg">{{ l.message.slice(0, 300) }}</span>
+                </div>
+              </details>
               <!-- 时间轴刻度（相对 0 → trace.durationMs），让瀑布条左右位置可读 -->
               <div class="span-axis">
                 <span class="span-mono">0</span>
@@ -698,8 +735,14 @@ v-for="node in spanRows(row)" :key="node.span.id"
         <el-table-column label="开始时间" width="180">
           <template #default="{ row }">{{ new Date(row.startedAt).toLocaleString() }}</template>
         </el-table-column>
-        <el-table-column label="操作" min-width="220">
+        <el-table-column label="操作" min-width="200">
           <template #default="{ row }"><span class="mono">{{ row.operation }}</span></template>
+        </el-table-column>
+        <el-table-column label="traceID" width="150">
+          <template #default="{ row }">
+            <span class="mono trace-link" :title="row.id" @click="clickTraceId(row.id)">{{ row.id.slice(0, 12) }}…</span>
+            <span class="mono trace-link tid-copy" title="复制完整 traceID" @click.stop="copyTraceId(row.id)">⧉</span>
+          </template>
         </el-table-column>
         <el-table-column label="应用" width="120">
           <template #default="{ row }">
@@ -710,14 +753,17 @@ v-for="node in spanRows(row)" :key="node.span.id"
         <el-table-column label="时长" width="90">
           <template #default="{ row }"><span class="mono">{{ row.durationMs }}ms</span></template>
         </el-table-column>
-        <el-table-column label="状态" width="110">
+        <el-table-column label="状态" min-width="160">
           <template #default="{ row }">
             <el-tag :type="(traceStatusType[row.status]) || 'info'" size="small">
               {{ traceStatusLabel[row.status] || row.status }}
             </el-tag>
-            <el-tag v-if="errSpanCount(row)" type="danger" size="small" effect="dark" style="margin-left:4px">
-              异常 {{ errSpanCount(row) }}/{{ row.spans.length }}
-            </el-tag>
+            <el-tooltip v-if="errSpanCount(row)" :content="traceErrSummary(row)" placement="top">
+              <el-tag type="danger" size="small" effect="dark" style="margin-left:4px">
+                异常 {{ errSpanCount(row) }}/{{ row.spans.length }}
+              </el-tag>
+            </el-tooltip>
+            <div v-if="errSpanCount(row)" class="err-summary" :title="traceErrSummary(row)">{{ traceErrSummary(row).slice(0, 60) }}</div>
           </template>
         </el-table-column>
         <el-table-column label="Span 数" width="80">
@@ -796,6 +842,15 @@ v-for="node in spanRows(row)" :key="node.span.id"
 .dim-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .trace-link { color: var(--brand); cursor: pointer; }
 .trace-link:hover { text-decoration: underline; }
+.tid-copy { margin-left: 4px; opacity: 0.6; }
+.tid-copy:hover { opacity: 1; }
+.err-summary { font-size: 11px; color: var(--danger); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 220px; }
+.trace-logs { margin: 0 6px 8px; }
+.trace-logs summary { font-size: 12px; color: var(--brand); cursor: pointer; margin-bottom: 4px; }
+.trace-log-row { display: flex; gap: 6px; align-items: baseline; padding: 2px 0; font-size: 11.5px; }
+.tl-time { color: var(--text-faint); flex-shrink: 0; }
+.tl-msg { word-break: break-all; }
+.trace-logs-hint { font-size: 12px; color: var(--text-faint); margin: 0 6px 8px; }
 .traces-anchor { scroll-margin-top: 20px; }
 .clickable { cursor: pointer; transition: border-color 0.15s; }
 .clickable:hover { border-color: var(--brand); }
