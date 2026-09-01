@@ -18,7 +18,6 @@ type memberHandlerEnv struct {
 	apps    *Store
 	members *MemberStore
 	h       *application.MemberHandler
-	admin   bool // 模拟租户管理员身份
 }
 
 func newMemberHandlerEnv(t *testing.T) *memberHandlerEnv {

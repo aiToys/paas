@@ -14,18 +14,18 @@ import (
 
 // Skill 指令能力包（租户私有）。
 type Skill struct {
-	ID           string    `json:"id"`
-	TenantID     string    `json:"tenantId"`
-	Name         string    `json:"name"`        // 租户内唯一
-	Description  string    `json:"description"` // 一句话用途（给管理员看）
-	Instructions string    `json:"instructions"` // 指令正文（注入 system prompt，给 LLM 看）
-	Category     string    `json:"category,omitempty"`     // 广场分类（writing/coding/data/service/general）
-	UseCases     string    `json:"useCases,omitempty"`     // 适用场景说明（给人看，降低试用门槛）
-	Examples     string    `json:"examples,omitempty"`     // 使用示例 markdown（输入→期望输出）
-	InstalledFrom string   `json:"installedFrom,omitempty"` // 来源 marketplace item ID（空=自建）
-	Enabled      bool      `json:"enabled"`
-	CreatedAt    time.Time `json:"createdAt"`
-	UpdatedAt    time.Time `json:"updatedAt"`
+	ID            string    `json:"id"`
+	TenantID      string    `json:"tenantId"`
+	Name          string    `json:"name"`                    // 租户内唯一
+	Description   string    `json:"description"`             // 一句话用途（给管理员看）
+	Instructions  string    `json:"instructions"`            // 指令正文（注入 system prompt，给 LLM 看）
+	Category      string    `json:"category,omitempty"`      // 广场分类（writing/coding/data/service/general）
+	UseCases      string    `json:"useCases,omitempty"`      // 适用场景说明（给人看，降低试用门槛）
+	Examples      string    `json:"examples,omitempty"`      // 使用示例 markdown（输入→期望输出）
+	InstalledFrom string    `json:"installedFrom,omitempty"` // 来源 marketplace item ID（空=自建）
+	Enabled       bool      `json:"enabled"`
+	CreatedAt     time.Time `json:"createdAt"`
+	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
 // Validate 校验。

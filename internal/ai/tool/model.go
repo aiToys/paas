@@ -27,10 +27,10 @@ const (
 type Tool struct {
 	ID            string            `json:"id"`
 	TenantID      string            `json:"tenantId"`
-	Name          string            `json:"name"`        // 租户内唯一
-	Description   string            `json:"description"` // 给 LLM 看的用途说明
-	Type          string            `json:"type"`        // mcp | http | builtin
-	Config        map[string]string `json:"config"`      // 类型相关配置
+	Name          string            `json:"name"`                    // 租户内唯一
+	Description   string            `json:"description"`             // 给 LLM 看的用途说明
+	Type          string            `json:"type"`                    // mcp | http | builtin
+	Config        map[string]string `json:"config"`                  // 类型相关配置
 	Category      string            `json:"category,omitempty"`      // 广场分类
 	InstalledFrom string            `json:"installedFrom,omitempty"` // 来源 marketplace item ID（空=自建）
 	Enabled       bool              `json:"enabled"`
@@ -113,7 +113,7 @@ func isSensitiveKey(k string) bool {
 //   - 拒环回（localhost/127.0.0.0/8/0.0.0.0/::1）+ 链路本地（169.254.0.0/16）+ 云元数据 host
 //
 // 与 CodeRepo 不同：不拒私网段与 *.svc.cluster.local——MCP server 可合法部署在集群内
-//（dev 集群 gitea.paas.svc 同款场景），只拦「借用平台身份探本机/云元数据」的高敏目标。
+// （dev 集群 gitea.paas.svc 同款场景），只拦「借用平台身份探本机/云元数据」的高敏目标。
 func validateMCPServerURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {

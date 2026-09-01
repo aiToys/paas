@@ -42,8 +42,8 @@ func newGC(items []Workload, last map[string]time.Time) (*LaneGC, *gcFakeRepo) {
 	repo := &gcFakeRepo{items: items}
 	g := &LaneGC{
 		Repos: repo, Runs: gcFakeRuns{last: last},
-		EnvType:  func(context.Context, string) (string, error) { return "test", nil },
-		TTL:      72 * time.Hour, MaxSweep: 20,
+		EnvType: func(context.Context, string) (string, error) { return "test", nil },
+		TTL:     72 * time.Hour, MaxSweep: 20,
 		Now: func() time.Time { return time.Date(2026, 8, 25, 0, 0, 0, 0, time.UTC) },
 	}
 	return g, repo
@@ -203,8 +203,8 @@ func TestReclaimLaneDeletesAndMarksClosed(t *testing.T) {
 	// ReclaimLane 走 List（stubRepo.List 忽略过滤参数返全量），fake 需按 lane 过滤——重写 List。
 	repo.list = repo.items
 	g := &LaneGC{
-		Repos: &laneFilterRepo{gcFakeRepo: repo, lane: "feature-x"},
-		Runs:  gcFakeRuns{},
+		Repos:   &laneFilterRepo{gcFakeRepo: repo, lane: "feature-x"},
+		Runs:    gcFakeRuns{},
 		EnvType: func(context.Context, string) (string, error) { return "test", nil },
 	}
 	ls := &fakeLaneStatus{modes: map[string]string{"e1/feature-x": "standard"}}

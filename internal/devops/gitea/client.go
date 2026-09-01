@@ -589,11 +589,11 @@ type PullRequest struct {
 
 // giteaPull wire 结构（Gitea API 原生嵌套形状）。
 type giteaPull struct {
-	Number    int    `json:"number"`
-	Title     string `json:"title"`
-	Body      string `json:"body"`
-	State     string `json:"state"`
-	Head      struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+	State  string `json:"state"`
+	Head   struct {
 		Ref string `json:"ref"`
 	} `json:"head"`
 	Base struct {

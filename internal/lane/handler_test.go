@@ -325,7 +325,9 @@ func TestHandlerProdLaneDeletePutDenied(t *testing.T) {
 	if w.Code != 201 {
 		t.Fatalf("admin 建生产泳道应 201, got %d: %s", w.Code, w.Body.String())
 	}
-	var created struct{ ID string `json:"id"` }
+	var created struct {
+		ID string `json:"id"`
+	}
 	decodeData(t, w.Body.Bytes(), &created)
 
 	dev := lane.NewHandler(store, lane.WithEnvResolver(envmemory.NewStore()))

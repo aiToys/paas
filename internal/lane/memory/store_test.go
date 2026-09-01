@@ -109,7 +109,9 @@ func TestEnsureByName(t *testing.T) {
 		t.Fatalf("懒建失败: %+v err=%v", got, err)
 	}
 	// 已存在（含 permanent）不覆盖
-	s.Update(ctxT("t1"), got.ID, lane.Lane{Mode: lane.ModePermanent})
+	if _, err := s.Update(ctxT("t1"), got.ID, lane.Lane{Mode: lane.ModePermanent}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
 	got2, err := s.EnsureByName(ctxT("t1"), "env-1", "feature-x")
 	if err != nil || got2.Mode != lane.ModePermanent || got2.ID != got.ID {
 		t.Fatalf("Ensure 不应覆盖 permanent: %+v err=%v", got2, err)

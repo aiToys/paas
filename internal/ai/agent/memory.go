@@ -20,8 +20,8 @@ const (
 type convKey struct{ agentID, convID string }
 
 type conversationStore struct {
-	mu     sync.Mutex
-	hist   map[convKey][]provider.Message
+	mu      sync.Mutex
+	hist    map[convKey][]provider.Message
 	appends int
 }
 

@@ -47,15 +47,15 @@ func (s *Store) List(ctx context.Context, entityType, category, q string) ([]mar
 	args := []any{}
 	if entityType != "" {
 		args = append(args, entityType)
-		sb.WriteString(fmt.Sprintf(` AND entity_type=$%d`, len(args)))
+		fmt.Fprintf(&sb, ` AND entity_type=$%d`, len(args))
 	}
 	if category != "" {
 		args = append(args, category)
-		sb.WriteString(fmt.Sprintf(` AND category=$%d`, len(args)))
+		fmt.Fprintf(&sb, ` AND category=$%d`, len(args))
 	}
 	if kw := marketplace.NormalizeQuery(q); kw != "" {
 		args = append(args, "%"+kw+"%")
-		sb.WriteString(fmt.Sprintf(` AND LOWER(name || ' ' || description) LIKE $%d`, len(args)))
+		fmt.Fprintf(&sb, ` AND LOWER(name || ' ' || description) LIKE $%d`, len(args))
 	}
 	sb.WriteString(` ORDER BY installs DESC, created_at DESC LIMIT 1000`)
 	rows, err := s.db.Pool().Query(ctx, sb.String(), args...)

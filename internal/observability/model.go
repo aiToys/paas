@@ -176,8 +176,8 @@ type AlertEvent struct {
 	Threshold  float64   `json:"threshold"`
 	Operator   string    `json:"operator"`
 	Severity   string    `json:"severity"`
-	Status     string    `json:"status"`    // firing | resolved（转变事件，pending 不落）
-	FiredAt    time.Time `json:"firedAt"`   // 告警首次 firing 时间
+	Status     string    `json:"status"`     // firing | resolved（转变事件，pending 不落）
+	FiredAt    time.Time `json:"firedAt"`    // 告警首次 firing 时间
 	OccurredAt time.Time `json:"occurredAt"` // 本转变发生时间
 }
 

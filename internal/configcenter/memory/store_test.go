@@ -206,13 +206,17 @@ func TestFindAppNamespace(t *testing.T) {
 	if _, ok, _ := s.FindAppNamespace(ctx, "app-1"); ok {
 		t.Fatal("未创建时不应找到")
 	}
-	s.EnsureByApp(ctx, "app-1")
+	if _, err := s.EnsureByApp(ctx, "app-1"); err != nil {
+		t.Fatalf("EnsureByApp: %v", err)
+	}
 	ns, ok, err := s.FindAppNamespace(ctx, "app-1")
 	if err != nil || !ok || ns.AppID != "app-1" {
 		t.Fatalf("创建后应找到: ok=%v err=%v", ok, err)
 	}
 	// 手工 shared ns 不被 FindAppNamespace 命中
-	s.CreateNamespace(ctx, configcenter.Namespace{Name: "manual-ns"})
+	if _, err := s.CreateNamespace(ctx, configcenter.Namespace{Name: "manual-ns"}); err != nil {
+		t.Fatalf("CreateNamespace: %v", err)
+	}
 	if _, ok, _ := s.FindAppNamespace(ctx, "app-1"); !ok {
 		t.Fatal("app ns 仍应找到（shared 不干扰）")
 	}
@@ -400,9 +404,15 @@ func TestLaneOverrideUpsertDeleteList(t *testing.T) {
 		t.Fatalf("upsert 应覆盖原行: %+v vs %+v", o2, o1)
 	}
 	// 另一 key + 另一 lane + 另一 env。
-	s.UpsertLaneOverride(ctx, configcenter.LaneOverride{AppID: "app-1", EnvID: "env-t", LaneID: "feat-x", Key: "k2", Value: "v"})
-	s.UpsertLaneOverride(ctx, configcenter.LaneOverride{AppID: "app-1", EnvID: "env-t", LaneID: "feat-y", Key: "k3", Value: "v"})
-	s.UpsertLaneOverride(ctx, configcenter.LaneOverride{AppID: "app-1", EnvID: "", LaneID: "feat-x", Key: "k4", Value: "v"})
+	for _, o := range []configcenter.LaneOverride{
+		{AppID: "app-1", EnvID: "env-t", LaneID: "feat-x", Key: "k2", Value: "v"},
+		{AppID: "app-1", EnvID: "env-t", LaneID: "feat-y", Key: "k3", Value: "v"},
+		{AppID: "app-1", EnvID: "", LaneID: "feat-x", Key: "k4", Value: "v"},
+	} {
+		if _, err := s.UpsertLaneOverride(ctx, o); err != nil {
+			t.Fatalf("UpsertLaneOverride %s: %v", o.Key, err)
+		}
+	}
 
 	list, err := s.ListLaneOverrides(ctx, "app-1", "env-t", "feat-x")
 	if err != nil {

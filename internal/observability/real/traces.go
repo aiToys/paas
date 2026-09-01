@@ -247,23 +247,6 @@ func (s *TracesStore) queryServices(ctx context.Context, services []string, star
 	return out
 }
 
-// listServices 调 Jaeger /api/services 拿全部服务名（业务 + 平台）。失败降级返空。
-func (s *TracesStore) listServices(ctx context.Context) []string {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.jaegerURL+"/api/services", nil)
-	if err != nil {
-		log.Printf("observability real traces: 构造 /api/services 请求失败: %v", err)
-		return nil
-	}
-	resp, err := fetchJSON[struct {
-		Data []string `json:"data"`
-	}](s.client, req)
-	if err != nil {
-		log.Printf("observability real traces: 调 Jaeger /api/services 失败: %v", err)
-		return nil
-	}
-	return resp.Data
-}
-
 // tenantServices 返回本租户可见的服务名集合（含控制面 paas-core）。
 // 未注入 entities 或列举失败返 nil（fail-closed——调用方据此拒查/返空，不跨租户泄漏）。
 func (s *TracesStore) tenantServices(ctx context.Context) (map[string]struct{}, error) {
@@ -299,7 +282,7 @@ func validTraceID(id string) bool {
 		return false
 	}
 	for _, c := range id {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') {
 			return false
 		}
 	}

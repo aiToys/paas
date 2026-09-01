@@ -7,12 +7,12 @@ import (
 	"testing"
 
 	"github.com/aitoys/paas/internal/ai/agent"
-	"github.com/aitoys/paas/internal/ai/prompt"
-	"github.com/aitoys/paas/internal/ai/skill"
-	"github.com/aitoys/paas/internal/ai/tool"
 	agentmemory "github.com/aitoys/paas/internal/ai/agent/memory"
+	"github.com/aitoys/paas/internal/ai/prompt"
 	promptmemory "github.com/aitoys/paas/internal/ai/prompt/memory"
+	"github.com/aitoys/paas/internal/ai/skill"
 	skillmemory "github.com/aitoys/paas/internal/ai/skill/memory"
+	"github.com/aitoys/paas/internal/ai/tool"
 	toolmemory "github.com/aitoys/paas/internal/ai/tool/memory"
 	"github.com/aitoys/paas/pkg/tenant"
 )

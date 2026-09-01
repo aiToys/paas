@@ -51,7 +51,7 @@ func envDuration(key string, def time.Duration) time.Duration {
 	}
 	d, err := time.ParseDuration(v)
 	if err != nil || d < 0 {
-		log.Printf("[laneGC] env %s=%q 无效，回落默认 %s", key, v, def)
+		log.Printf("[laneGC] env %s=%q 无效，回落默认 %s", key, v, def) //nolint:gosec // G706:env 值由部署者控制且 %q 已定界
 		return def
 	}
 	return d

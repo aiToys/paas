@@ -46,23 +46,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	switch {
-	case path == "/api/admin/ai/agents":
+	switch path {
+	case "/api/admin/ai/agents":
 		list, err := h.agents.ListAll(r.Context())
 		h.write(w, list, err)
-	case path == "/api/admin/ai/tools":
+	case "/api/admin/ai/tools":
 		list, err := h.tools.ListAll(r.Context())
 		h.write(w, list, err)
-	case path == "/api/admin/ai/knowledgebases":
+	case "/api/admin/ai/knowledgebases":
 		list, err := h.kbs.ListAll(r.Context())
 		h.write(w, list, err)
-	case path == "/api/admin/ai/prompts":
+	case "/api/admin/ai/prompts":
 		list, err := h.prompts.ListAll(r.Context())
 		h.write(w, list, err)
-	case path == "/api/admin/ai/skills":
+	case "/api/admin/ai/skills":
 		list, err := h.skills.ListAll(r.Context())
 		h.write(w, list, err)
-	case path == "/api/admin/ai/marketplace":
+	case "/api/admin/ai/marketplace":
 		// 广场总览（admin 可发现违规内容；下架走 DELETE /api/marketplace/{id} + IsAdmin）
 		list, err := h.market.ListAll(r.Context())
 		h.write(w, list, err)

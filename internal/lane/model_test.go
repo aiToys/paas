@@ -13,10 +13,10 @@ func TestValidateName(t *testing.T) {
 		{"feature-x", nil},
 		{"a", nil},
 		{"", ErrLaneNameInvalid},
-		{"9abc", ErrLaneNameInvalid},  // 首字符数字
-		{"ab_c", ErrLaneNameInvalid},  // 下划线
-		{"ab/", ErrLaneNameInvalid},   // 斜杠（分支名原始形态）
-		{"Abc", ErrLaneNameInvalid},   // 大写
+		{"9abc", ErrLaneNameInvalid}, // 首字符数字
+		{"ab_c", ErrLaneNameInvalid}, // 下划线
+		{"ab/", ErrLaneNameInvalid},  // 斜杠（分支名原始形态）
+		{"Abc", ErrLaneNameInvalid},  // 大写
 	}
 	for _, c := range cases {
 		if err := ValidateName(c.name); !errors.Is(err, c.err) {

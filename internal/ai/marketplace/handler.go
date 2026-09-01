@@ -31,7 +31,7 @@ type PublishRequest struct {
 type InstallResult struct {
 	EntityType string `json:"entityType"`
 	EntityID   string `json:"entityId"` // fork 到本租户的新实体 ID
-	Name       string `json:"name"`    // 可能带同名后缀
+	Name       string `json:"name"`     // 可能带同名后缀
 }
 
 // EntityForker 各实体模块实现的 fork 编排（依赖倒置，避免 marketplace → 各实体包 import）。
@@ -53,10 +53,10 @@ type EntityForker interface {
 //	DELETE /api/marketplace/{id}            下架（仅发布者）
 //	POST   /api/marketplace/{id}/install    安装 fork 到本租户
 type Handler struct {
-	repo           Repository
-	forkers        map[string]EntityForker // entityType → forker
-	Authorize      func(r *http.Request, perm string) bool
-	IsAdmin        func(r *http.Request) bool   // super_admin（admin 下架违规内容）
+	repo            Repository
+	forkers         map[string]EntityForker // entityType → forker
+	Authorize       func(r *http.Request, perm string) bool
+	IsAdmin         func(r *http.Request) bool   // super_admin（admin 下架违规内容）
 	PublisherNameFn func(r *http.Request) string // 发布者显示名（cmd/core 桥接 UserIDFrom）
 }
 

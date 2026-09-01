@@ -633,9 +633,9 @@ func dns1035(name string) string {
 	for _, r := range name {
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
-			b = append(b, byte(r))
+			b = append(b, byte(r)) //nolint:gosec // G115:分支条件保证 r<128
 		case r >= 'A' && r <= 'Z':
-			b = append(b, byte(r-'A'+'a'))
+			b = append(b, byte(r-'A'+'a')) //nolint:gosec // G115:分支条件保证 r<128
 		default:
 			b = append(b, '-')
 		}

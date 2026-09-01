@@ -208,7 +208,7 @@ func (h *Handler) recordAudit(r *http.Request, action, resourceType, resourceID,
 		tid = "platform"
 	}
 	if err := h.audit.Record(r.Context(), tid, h.userID(r.Context()), action, resourceType, resourceID, detail); err != nil {
-		log.Printf("[devops] 审计记录失败 %s %s: %v", action, resourceID, err)
+		log.Printf("[devops] 审计记录失败 %s %s: %v", action, resourceID, err) //nolint:gosec // G706:resourceID 为平台内 ID 非自由文本
 	}
 }
 

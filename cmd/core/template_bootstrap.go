@@ -62,7 +62,6 @@ var builtinTemplates = []templateApp{{
 // templateBootstrapHandler 「从模板新建应用」复合端点。
 type templateBootstrapHandler struct {
 	apps        *application.Handler // 复用 Create 的配额/hook 路径（经 ServeHTTP 内部调用不可行，直接复用 repo 路径）
-	appRepo     application.Repository
 	repos       devops.CodeRepoRepository
 	svcRepo     service.Repository
 	pipes       pipeline.Repository

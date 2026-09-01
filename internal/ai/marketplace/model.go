@@ -29,20 +29,20 @@ const (
 
 // Item 广场条目（平台级公开）。Snapshot 按 EntityType 反序列化。
 type Item struct {
-	ID             string          `json:"id"`
-	EntityType     string          `json:"entityType"`
-	Name           string          `json:"name"`
-	Description    string          `json:"description"`
-	Category       string          `json:"category"`
-	Snapshot       json.RawMessage `json:"snapshot"`
-	PublisherTenant string         `json:"publisherTenant"`
-	PublisherName  string          `json:"publisherName"`
-	Installs       int             `json:"installs"`
-	CreatedAt      time.Time       `json:"createdAt"`
+	ID              string          `json:"id"`
+	EntityType      string          `json:"entityType"`
+	Name            string          `json:"name"`
+	Description     string          `json:"description"`
+	Category        string          `json:"category"`
+	Snapshot        json.RawMessage `json:"snapshot"`
+	PublisherTenant string          `json:"publisherTenant"`
+	PublisherName   string          `json:"publisherName"`
+	Installs        int             `json:"installs"`
+	CreatedAt       time.Time       `json:"createdAt"`
 }
 
 // AgentSnapshot Agent 整包快照（安装时全部 fork + 重写引用）。payload 是 JSON 透传
-//（agent/skill/prompt/tool 实体字段以原始 JSON 存，安装侧反序列化回实体——forker.go）。
+// （agent/skill/prompt/tool 实体字段以原始 JSON 存，安装侧反序列化回实体——forker.go）。
 type AgentSnapshot struct {
 	Agent  json.RawMessage   `json:"agent"`
 	Skills []json.RawMessage `json:"skills,omitempty"`

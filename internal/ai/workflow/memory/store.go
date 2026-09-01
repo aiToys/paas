@@ -15,10 +15,9 @@ import (
 )
 
 type Store struct {
-	mu     sync.RWMutex
-	defs   map[string]workflow.WorkflowDef
-	runs   map[string]workflow.WorkflowRun
-	runSeq int // 运行历史环形上界（防滥用增长）
+	mu   sync.RWMutex
+	defs map[string]workflow.WorkflowDef
+	runs map[string]workflow.WorkflowRun
 }
 
 func NewStore() *Store {

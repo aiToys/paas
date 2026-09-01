@@ -31,8 +31,8 @@ var metricNameToPromQL = map[string]string{
 type MetricsStore struct {
 	promURL  string
 	client   *http.Client
-	lister   observability.AppWorkloadLister  // 应用级查询：解析 app→工作负载 ID（pod 名正则）
-	entities observability.TenantEntityLister // 全局查询：列出租户全部应用/数据服务（健康矩阵）
+	lister   observability.AppWorkloadLister           // 应用级查询：解析 app→工作负载 ID（pod 名正则）
+	entities observability.TenantEntityLister          // 全局查询：列出租户全部应用/数据服务（健康矩阵）
 	cache    *queryCache[[]observability.MetricSeries] // singleflight + 短 TTL（R8-I1 轮询 QPS 削峰）
 }
 

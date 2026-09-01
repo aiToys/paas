@@ -60,8 +60,8 @@ type Workload struct {
 	Domain string `json:"domain,omitempty"`
 	// Resources 是容器资源规格（CPU/内存 requests/limits，K8s Quantity 字符串如 "500m"/"1"/"512Mi"）。
 	// 空 = BestEffort（不设 requests/limits）；生产环境创建时 handler 强制要求非空（禁 BestEffort）。
-	Resources  ResourceSpec `json:"resources,omitempty"`
-	CreatedAt  time.Time    `json:"createdAt"`
+	Resources ResourceSpec `json:"resources,omitempty"`
+	CreatedAt time.Time    `json:"createdAt"`
 }
 
 // ResourceSpec 是工作负载容器资源规格（K8s Quantity 字符串）。

@@ -47,8 +47,8 @@ func (h *MemberHandler) audit(r *http.Request, tenantID, action, resourceID, det
 }
 
 // allowManage 成员管理权限：受限应用需 app-owner（Guard.manage）；非受限应用仅租户管理员
-//（IsAdmin）——非受限时成员表无治理意义，若放行任意 application:write 持有者会形成
-//「自封 owner → 开 restrict → 锁死他人」的权限提升链。
+// （IsAdmin）——非受限时成员表无治理意义，若放行任意 application:write 持有者会形成
+// 「自封 owner → 开 restrict → 锁死他人」的权限提升链。
 func (h *MemberHandler) allowManage(w http.ResponseWriter, r *http.Request, appID string) bool {
 	a, err := h.apps.Get(r.Context(), appID)
 	if err != nil {

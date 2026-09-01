@@ -336,7 +336,9 @@ func (e *Engine) postWebhook(a observability.Alert, url string) {
 		log.Printf("alert engine: webhook 出站失败 url=%s: %v", url, err)
 		return
 	}
-	resp.Body.Close()
+	if err := resp.Body.Close(); err != nil {
+		log.Printf("alert engine: 关闭 webhook 响应体失败: %v", err)
+	}
 }
 
 // ListAlerts 返回引擎告警快照（按租户过滤；firing 优先、severity critical 优先、时间倒序）。

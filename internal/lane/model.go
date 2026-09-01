@@ -36,28 +36,28 @@ const (
 )
 
 var validStatus = map[string]struct{}{
-	StatusActive:  {},
-	StatusClosed:  {},
+	StatusActive: {},
+	StatusClosed: {},
 }
 
 // Weight 上限（入口流量权重百分比，本期留位不实现切流，恒 0）。
 const WeightMax = 100
 
 var (
-	ErrLaneNotFound     = errors.New("lane not found")
-	ErrLaneExists       = errors.New("lane already exists")
-	ErrLaneNameInvalid  = errors.New("lane name invalid")
+	ErrLaneNotFound    = errors.New("lane not found")
+	ErrLaneExists      = errors.New("lane already exists")
+	ErrLaneNameInvalid = errors.New("lane name invalid")
 )
 
 // Lane 是租户×环境内的一条泳道。
 type Lane struct {
 	ID           string    `json:"id"`
-	TenantID     string    `json:"tenantId,omitempty"` // ctx 写入，请求体忽略
-	EnvID        string    `json:"envId"`              // 归属环境
-	Name         string    `json:"name"`               // 租户×环境内唯一，DNS-1035 合法（作 K8s 资源名后缀）
-	Mode         string    `json:"mode"`               // standard | permanent
-	Status       string    `json:"status"`             // active | closed
-	Weight       int       `json:"weight"`             // 入口流量权重 0-100（留位，本期恒 0）
+	TenantID     string    `json:"tenantId,omitempty"`     // ctx 写入，请求体忽略
+	EnvID        string    `json:"envId"`                  // 归属环境
+	Name         string    `json:"name"`                   // 租户×环境内唯一，DNS-1035 合法（作 K8s 资源名后缀）
+	Mode         string    `json:"mode"`                   // standard | permanent
+	Status       string    `json:"status"`                 // active | closed
+	Weight       int       `json:"weight"`                 // 入口流量权重 0-100（留位，本期恒 0）
 	ExternalLink string    `json:"externalLink,omitempty"` // 外部关联（如 Jira issue key），仅展示
 	Description  string    `json:"description,omitempty"`
 	CreatedAt    time.Time `json:"createdAt"`

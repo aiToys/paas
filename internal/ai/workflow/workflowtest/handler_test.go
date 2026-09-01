@@ -58,12 +58,16 @@ func TestHandlerCRUD(t *testing.T) {
 		t.Fatalf("create = %d: %s", w.Code, w.Body.String())
 	}
 	var created struct{ Data workflow.WorkflowDef }
-	json.Unmarshal(w.Body.Bytes(), &created)
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("解析 create 响应: %v", err)
+	}
 	// 列表
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req(t, "GET", "/api/workflows", nil))
 	var list struct{ Data []workflow.WorkflowDef }
-	json.Unmarshal(w.Body.Bytes(), &list)
+	if err := json.Unmarshal(w.Body.Bytes(), &list); err != nil {
+		t.Fatalf("解析 list 响应: %v", err)
+	}
 	if len(list.Data) != 1 {
 		t.Fatalf("list = %d", len(list.Data))
 	}
@@ -122,7 +126,9 @@ func TestHandlerRunLifecycle(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req(t, "POST", "/api/workflows", ticketBody()))
 	var created struct{ Data workflow.WorkflowDef }
-	json.Unmarshal(w.Body.Bytes(), &created)
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("解析 create 响应: %v", err)
+	}
 	// 触发
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req(t, "POST", fmt.Sprintf("/api/workflows/%s/runs", created.Data.ID), map[string]string{"q": "x"}))
@@ -130,7 +136,9 @@ func TestHandlerRunLifecycle(t *testing.T) {
 		t.Fatalf("trigger = %d: %s", w.Code, w.Body.String())
 	}
 	var run struct{ Data workflow.WorkflowRun }
-	json.Unmarshal(w.Body.Bytes(), &run)
+	if err := json.Unmarshal(w.Body.Bytes(), &run); err != nil {
+		t.Fatalf("解析 run 响应: %v", err)
+	}
 	// 详情
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req(t, "GET", "/api/workflows/runs/"+run.Data.ID, nil))
@@ -162,7 +170,9 @@ func TestHandlerDisabledWorkflowRejectsRun(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req(t, "POST", "/api/workflows", body))
 	var created struct{ Data workflow.WorkflowDef }
-	json.Unmarshal(w.Body.Bytes(), &created)
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("解析 create 响应: %v", err)
+	}
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req(t, "POST", fmt.Sprintf("/api/workflows/%s/runs", created.Data.ID), map[string]string{}))
 	if w.Code != 409 {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -129,7 +130,9 @@ func (h *Handler) audit(r *http.Request, action, resourceID, detail string) {
 			actor = uid
 		}
 	}
-	h.auditLog.Record(r.Context(), tid, actor, action, "lane", resourceID, detail)
+	if err := h.auditLog.Record(r.Context(), tid, actor, action, "lane", resourceID, detail); err != nil {
+		log.Printf("lane 审计记录失败 %s: %v", action, err)
+	}
 }
 
 func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) bool {

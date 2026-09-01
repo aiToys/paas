@@ -81,7 +81,7 @@ func (r *ApplyRepo) SetResources(ctx context.Context, id string, res ResourceSpe
 		return err
 	}
 	if r.applier != nil {
-		if w, err := r.Repository.Get(ctx, id); err == nil {
+		if w, err := r.Repository.Get(ctx, id); err == nil { //nolint:staticcheck // QF1008:装饰器显式转发嵌入实现
 			w = withTenant(ctx, w)
 			r.applyLog("set-resources", w.ID, r.applier.Apply(ctx, w))
 		}

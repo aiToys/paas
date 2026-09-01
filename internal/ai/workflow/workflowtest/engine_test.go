@@ -30,7 +30,7 @@ func (f *fakeAgents) RunNode(ctx context.Context, agentID, prompt string) (strin
 	return "ok: " + prompt, nil
 }
 
-type fakeTools struct{ resp string }
+type fakeTools struct{}
 
 func (f *fakeTools) Invoke(ctx context.Context, toolID, toolName string, args map[string]string) (string, error) {
 	return `{"query":"` + args["q"] + `","result":"mock"}`, nil

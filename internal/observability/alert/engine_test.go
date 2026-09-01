@@ -27,7 +27,7 @@ func (f *fakeRules) ListAllAlertRules(ctx context.Context) ([]observability.Aler
 
 // fakeMetrics 可控 metrics reader（按租户返 series）。
 type fakeMetrics struct {
-	mu      sync.Mutex
+	mu       sync.Mutex
 	byTenant map[string][]observability.MetricSeries
 }
 

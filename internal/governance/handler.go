@@ -3,6 +3,7 @@ package governance
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -96,7 +97,9 @@ func (h *Handler) audit(r *http.Request, action, resourceID, detail string) {
 			actor = uid
 		}
 	}
-	h.auditLog.Record(r.Context(), tid, actor, action, "governance", resourceID, detail)
+	if err := h.auditLog.Record(r.Context(), tid, actor, action, "governance", resourceID, detail); err != nil {
+		log.Printf("governance 审计记录失败 %s: %v", action, err)
+	}
 }
 
 // WithEnvResolver 注入环境类型解析器，启用生产写权限校验。

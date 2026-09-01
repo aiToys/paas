@@ -20,7 +20,7 @@ import (
 type LogsStore struct {
 	lokiURL string
 	client  *http.Client
-	lister  observability.AppWorkloadLister // 应用级查询：解析 app→工作负载 ID（pod 名正则）
+	lister  observability.AppWorkloadLister       // 应用级查询：解析 app→工作负载 ID（pod 名正则）
 	cache   *queryCache[[]observability.LogEntry] // singleflight + 短 TTL（R8-I1 轮询 QPS 削峰）
 }
 

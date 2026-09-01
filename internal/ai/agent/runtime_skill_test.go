@@ -28,8 +28,8 @@ func (p *echoFakeProvider) Chat(_ context.Context, req provider.ChatRequest) (<-
 // stubSkillRepo 仅实现 Get（含启用/禁用分支）。
 type stubSkillRepo struct{ m map[string]skill.Skill }
 
-func (s *stubSkillRepo) List(context.Context) ([]skill.Skill, error)        { panic("unused") }
-func (s *stubSkillRepo) ListAll(context.Context) ([]skill.Skill, error)     { panic("unused") }
+func (s *stubSkillRepo) List(context.Context) ([]skill.Skill, error)    { panic("unused") }
+func (s *stubSkillRepo) ListAll(context.Context) ([]skill.Skill, error) { panic("unused") }
 func (s *stubSkillRepo) Get(_ context.Context, id string) (skill.Skill, error) {
 	sk, ok := s.m[id]
 	if !ok {
@@ -39,14 +39,14 @@ func (s *stubSkillRepo) Get(_ context.Context, id string) (skill.Skill, error) {
 }
 func (s *stubSkillRepo) Create(context.Context, skill.Skill) (skill.Skill, error) { panic("unused") }
 func (s *stubSkillRepo) Update(context.Context, skill.Skill) (skill.Skill, error) { panic("unused") }
-func (s *stubSkillRepo) Delete(context.Context, string) error                   { panic("unused") }
-func (s *stubSkillRepo) SkillsCount(context.Context) (int, error)               { panic("unused") }
+func (s *stubSkillRepo) Delete(context.Context, string) error                     { panic("unused") }
+func (s *stubSkillRepo) SkillsCount(context.Context) (int, error)                 { panic("unused") }
 
 // Skill 指令注入 system prompt：启用的 skill 内容出现，禁用/缺失的静默跳过。
 func TestBuildSystemInjectsSkills(t *testing.T) {
 	rt := &Runtime{skills: &stubSkillRepo{m: map[string]skill.Skill{
-		"sk-on":   {ID: "sk-on", Name: "写周报", Instructions: "每周五输出 markdown 周报", Enabled: true},
-		"sk-off":  {ID: "sk-off", Name: "禁用项", Instructions: "不应出现", Enabled: false},
+		"sk-on":  {ID: "sk-on", Name: "写周报", Instructions: "每周五输出 markdown 周报", Enabled: true},
+		"sk-off": {ID: "sk-off", Name: "禁用项", Instructions: "不应出现", Enabled: false},
 	}}}
 	fp := &echoFakeProvider{}
 	a := Agent{
