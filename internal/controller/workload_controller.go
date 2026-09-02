@@ -48,6 +48,10 @@ type WorkloadReconciler struct {
 	// Configs 应用配置查找（依赖倒置）：注入应用×环境级 appconfig（含数据服务连接 + 模型 LLM 凭证）
 	// 到 Pod env，让"绑定资源"真正生效。nil 则不注入（dev/无 K8s 场景）。桥接在 cmd/core。
 	Configs AppConfigLookup
+	// Platform 平台侧 workload 查找（依赖倒置）：孤儿 CR 回收用——CR 在平台侧已不存在时
+	// 级联删除（防「平台删了 K8s 残留」的僵尸资源抢占 Service 名，chat 503 元凶）。
+	// nil 则不回收（dev/无 stores 场景，不误删）。桥接在 cmd/core，与 Configs 同款延迟注入。
+	Platform PlatformWorkloadLookup
 }
 
 // AppConfigLookup 是应用配置查找接口（依赖倒置，破除 controller→appconfig 业务包依赖）。
@@ -449,6 +453,9 @@ func (r *WorkloadReconciler) applyJob(ctx context.Context, w *v1alpha1.Workload)
 		job.SetLabels(labels)
 		job.Spec.Parallelism = ptrInt32(w.Spec.Replicas)
 		// Job 完成后 1 天自动清理（与 devops builder.K8sJob 一致），减少 etcd 存储 + list/watch 噪音。
+		// 注意：TTL 仅对「完成」（Succeeded/Failed 终态）的 Job 生效；BackoffLimit=0 保证失败
+		// 一次即进终态，镜像拉不动等失败 Job 也会在 1 天后被 GC（否则 ImagePullBackOff 的
+		// Pod 连同 Job 永久残留——dev 集群 wl-acme-report 实测）。
 		job.Spec.TTLSecondsAfterFinished = ptrInt32(86400)
 		// 失败不重试（与 devops builder.K8sJob 对齐）：BackoffLimit=0 让 Job 失败一次即终止，
 		// 这样 status 回写「Failed>0→failed」与 K8s 实际状态一致（默认 6 次重试期间会误判）。

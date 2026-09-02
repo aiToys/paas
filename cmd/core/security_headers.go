@@ -53,9 +53,17 @@ func securityHeadersMiddleware(next http.Handler) http.Handler {
 		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		// CSP：script-src 含 'unsafe-eval' —— ECharts（dashboard 图表，zrender 引擎）用
 		// new Function 解析 SVG/坐标系，是合法依赖；同源 SPA + JSON API，eval 风险可控。
-		// cdn.jsdelivr.net 供 /docs 的 Scalar 文档用。
-		h.Set("Content-Security-Policy",
-			"default-src 'self'; script-src 'self' 'unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'")
+		// Scalar 文档 JS 已 vendored 同源（/api-docs/scalar.js），零第三方源（离线交付友好）。
+		//
+		// /docs/*（VitePress 文档站）单独放宽 script-src 'unsafe-inline'：VitePress SSR 产物
+		// 含内联脚本（暗色模式检测 + Vue hydration），CSP 拦截内联脚本会致水合失败、整站
+		// 不可交互（链接点击无响应）。内联脚本是构建产物非用户输入，且文档站只读无敏感
+		// 操作，风险可控；SPA/API 路径维持严格 CSP 不放宽。
+		csp := "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'"
+		if strings.HasPrefix(r.URL.Path, "/docs/") || r.URL.Path == "/docs" {
+			csp = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'"
+		}
+		h.Set("Content-Security-Policy", csp)
 		if r.Header.Get("X-Forwarded-Proto") == "https" {
 			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}

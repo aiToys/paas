@@ -129,6 +129,10 @@ func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, metrics
 	// 启动初期无 CRD 事件，赋值与首条 reconcile 间无实际并发（best-effort + 单 worker）。
 	if appliers.wlReconciler != nil {
 		appliers.wlReconciler.Configs = appConfigLookup{repo: stores.AppConfig}
+		// 孤儿 CR 回收：平台侧查无此 ID 的 Workload CR 周期级联删除（防僵尸资源抢占
+		// Service 名——chat 503 元凶）。ListAll 跨租户（回收需全局视角），查询失败本轮跳过不误删。
+		appliers.wlReconciler.Platform = platformWorkloadLookup{repo: stores.Workload}
+		appliers.wlReconciler.StartOrphanGC(ctx)
 	}
 	// CredentialResolver 桥接 security store：注入 MaaS 插件解析平台级凭证。
 	// security.SecretStore 接口含 Resolve（PG/memory 透明）。
@@ -1296,8 +1300,11 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// /openapi.json：公开契约，无鉴权。
 	mux.Handle("/openapi.json", apiroute.ServeSpec(reg))
 	// /api-docs：Scalar 交互 API 文档（拉 /openapi.json 渲染），公开无鉴权。
+	// 前缀注册（非精确匹配）：/api-docs/scalar.js（vendored JS）是子路径，精确注册会被
+	// SPA fallback 抢去返回 HTML（ServeMux 最长前缀匹配 + 顶层 mux 只认 /api-docs 本体）。
 	// /docs：VitePress 用户文档站（go:embed，见 internal/web）。
 	mux.Handle("/api-docs", apiroute.ServeDocs("/openapi.json", "PaaS API"))
+	mux.Handle("/api-docs/", apiroute.ServeDocs("/openapi.json", "PaaS API"))
 	mux.Handle("/docs/", web.ServeDocs())
 	// /docs 无尾斜杠 302 到 /docs/（FileServer 目录语义）。
 	mux.HandleFunc("/docs", func(w http.ResponseWriter, r *http.Request) {
