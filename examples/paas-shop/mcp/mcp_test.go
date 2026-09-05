@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -23,11 +24,29 @@ func fakeProduct(t *testing.T) *httptest.Server {
 	return httptest.NewServer(mux)
 }
 
+// fakeOrder 服务：查询 + 退款两端点（响应形态对齐 examples/paas-shop/order）。
+func fakeOrder(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/orders/ORD-1001", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"ORD-1001","userId":"u1","status":"shipped","totalCents":29900,"items":[{"productId":1,"name":"机械键盘 X1","qty":1,"priceCents":29900}]}`))
+	})
+	mux.HandleFunc("/orders/ORD-1001/refund", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"ORD-1001","userId":"u1","status":"refunded","totalCents":29900,"items":[{"productId":1,"name":"机械键盘 X1","qty":1,"priceCents":29900}]}`))
+	})
+	// completed 订单退款被状态机拒绝（order 服务映射 409）
+	mux.HandleFunc("/orders/ORD-2002/refund", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "当前状态不允许退款: completed", http.StatusConflict)
+	})
+	// 其余订单号（如 NOPE）走 mux 默认 404
+	return httptest.NewServer(mux)
+}
+
 func TestCallToolQueryProduct(t *testing.T) {
 	srv := fakeProduct(t)
 	defer srv.Close()
 	productURL = srv.URL
-	out := callTool("query_product", map[string]any{"productId": "1"})
+	out := callTool(context.Background(), "query_product", map[string]any{"productId": "1"})
 	if want := "商品详情"; !contains(out, want) {
 		t.Fatalf("query_product 应含 %q，got %s", want, out)
 	}
@@ -40,37 +59,59 @@ func TestCallToolSearchProducts(t *testing.T) {
 	srv := fakeProduct(t)
 	defer srv.Close()
 	productURL = srv.URL
-	out := callTool("search_products", map[string]any{"q": "键"})
+	out := callTool(context.Background(), "search_products", map[string]any{"q": "键"})
 	if !contains(out, "机械键盘") {
 		t.Fatalf("search 应返回匹配商品，got %s", out)
 	}
 	// 参数全空 = 全量
-	out = callTool("search_products", map[string]any{})
+	out = callTool(context.Background(), "search_products", map[string]any{})
 	if !contains(out, `"id":2`) && !contains(out, "2") {
 		t.Fatalf("空参数应返回全量，got %s", out)
 	}
 }
 
 func TestCallToolQueryOrder(t *testing.T) {
-	out := callTool("query_order", map[string]any{"orderId": "ORD-1001"})
+	srv := fakeOrder(t)
+	defer srv.Close()
+	t.Setenv("ORDER_URL", srv.URL)
+	out := callTool(context.Background(), "query_order", map[string]any{"orderId": "ORD-1001"})
 	if !contains(out, "shipped") {
 		t.Fatalf("query_order 应含状态，got %s", out)
 	}
-	out = callTool("query_order", map[string]any{"orderId": "NOPE"})
+	out = callTool(context.Background(), "query_order", map[string]any{"orderId": "NOPE"})
 	if !contains(out, "不存在") {
 		t.Fatalf("未知订单应提示不存在，got %s", out)
 	}
 }
 
 func TestCallToolRefundOrder(t *testing.T) {
-	out := callTool("refund_order", map[string]any{"orderId": "ORD-1001", "reason": "质量问题"})
-	if !contains(out, "退款") {
-		t.Fatalf("refund_order 应受理，got %s", out)
+	srv := fakeOrder(t)
+	defer srv.Close()
+	t.Setenv("ORDER_URL", srv.URL)
+	out := callTool(context.Background(), "refund_order", map[string]any{"orderId": "ORD-1001", "reason": "质量问题"})
+	if !contains(out, "refunded") {
+		t.Fatalf("refund_order 应返回退款后订单，got %s", out)
 	}
-	// 受理后 query_order 应带 refundStatus
-	out = callTool("query_order", map[string]any{"orderId": "ORD-1001"})
-	if !contains(out, "refunding") {
-		t.Fatalf("受理后查询应带退款状态，got %s", out)
+	// 状态机拒绝（409）透出原因
+	out = callTool(context.Background(), "refund_order", map[string]any{"orderId": "ORD-2002", "reason": "质量问题"})
+	if !contains(out, "退款被拒绝") {
+		t.Fatalf("非法状态应提示退款被拒绝，got %s", out)
+	}
+}
+
+// TestRefundForwardsActionToken 变更动作应携带 X-Action-Token（env 配置时）。
+func TestRefundForwardsActionToken(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("X-Action-Token")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	t.Setenv("ORDER_URL", srv.URL)
+	t.Setenv("PAAS_ORDER_ACTION_TOKEN", "tok-123")
+	_ = callTool(context.Background(), "refund_order", map[string]any{"orderId": "ORD-1001", "reason": "x"})
+	if got != "tok-123" {
+		t.Fatalf("refund_order 应携带 X-Action-Token，got %q", got)
 	}
 }
 
@@ -97,7 +138,7 @@ func TestCallToolQueryProductNumericID(t *testing.T) {
 	srv := fakeProduct(t)
 	defer srv.Close()
 	productURL = srv.URL
-	out := callTool("query_product", map[string]any{"productId": float64(1)})
+	out := callTool(context.Background(), "query_product", map[string]any{"productId": float64(1)})
 	if !contains(out, "机械键盘") {
 		t.Fatalf("数字形态 productId 应正常查询，got %s", out)
 	}

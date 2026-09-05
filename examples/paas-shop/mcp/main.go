@@ -1,18 +1,17 @@
 // Command mcp 是 paas-shop 示例的 MCP（Model Context Protocol）server。
 //
-// 提供四个工具供 Agent FunctionCalling 调用：
+// 提供四个工具供 Agent FunctionCalling 调用（均 HTTP 直调 paas-shop 后端微服务，自身无业务状态）：
 //   - query_product：按商品 ID 查详情（调 product 服务 GET /products/{id}）
 //   - search_products：按关键字/分类搜索商品（调 product 服务 GET /products?q=&category=&limit=）
-//   - query_order：查询订单状态（订单号 -> 详情）
-//   - refund_order：对订单发起退款（演示：标记为处理中）
+//   - query_order：查询订单状态（调 order 服务 GET /orders/{id}）
+//   - refund_order：对订单发起退款（调 order 服务 POST /orders/{id}/refund）
 //
 // 协议：JSON-RPC 2.0 over HTTP（POST /mcp），实现 initialize / tools/list / tools/call。
 // 与 internal/ai/tool/mcp/client.go 的客户端协议匹配（Streamable HTTP 简化形态）。
-//
-// 数据为内存演示（重启丢失）；生产应接真实订单/退款系统。
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,7 +19,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"sync"
 
 	"github.com/aitoys/paas-examples/paas-shop/internal/observ"
 )
@@ -79,14 +77,14 @@ var toolSchemas = map[string]map[string]any{
 		"inputSchema": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"orderId": map[string]any{"type": "string", "description": "订单号，如 ORD-1001"},
+				"orderId": map[string]any{"type": "string", "description": "订单号，如 ORD-0123456789"},
 			},
 			"required": []string{"orderId"},
 		},
 	},
 	"refund_order": {
 		"name":        "refund_order",
-		"description": "对指定订单发起退款（演示：标记为退款处理中）",
+		"description": "对指定订单发起退款（真实调用订单服务；订单状态机不允许时被拒绝）",
 		"inputSchema": map[string]any{
 			"type": "object",
 			"properties": map[string]any{
@@ -98,19 +96,8 @@ var toolSchemas = map[string]map[string]any{
 	},
 }
 
-// 订单内存存储（演示用；生产接真实订单系统）。
-var (
-	mu     sync.Mutex
-	orders = map[string]map[string]any{
-		"ORD-1001": {"orderId": "ORD-1001", "status": "shipped", "amount": 299.0, "items": []string{"无线鼠标", "机械键盘"}},
-		"ORD-1002": {"orderId": "ORD-1002", "status": "pending", "amount": 1599.0, "items": []string{"27寸显示器"}},
-		"ORD-1003": {"orderId": "ORD-1003", "status": "delivered", "amount": 89.0, "items": []string{"蓝牙耳机"}},
-	}
-	refunds = map[string]string{} // orderId -> 退款状态
-
-	// productURL 是 product 服务地址（query_product/search_products 调用目标）。
-	productURL = "http://paas-shop-product:8081"
-)
+// productURL 是 product 服务地址（query_product/search_products 调用目标）。
+var productURL = "http://paas-shop-product:8081"
 
 func main() {
 	if v := os.Getenv("PRODUCT_SERVICE_URL"); v != "" {
@@ -165,7 +152,7 @@ func handleMCP(w http.ResponseWriter, r *http.Request) {
 			Arguments map[string]any `json:"arguments"`
 		}
 		_ = json.Unmarshal(req.Params, &p)
-		text := callTool(p.Name, p.Arguments)
+		text := callTool(r.Context(), p.Name, p.Arguments)
 		writeJSON(w, rpcResp{
 			JSONRPC: "2.0", ID: req.ID,
 			Result: map[string]any{
@@ -177,39 +164,69 @@ func handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func callTool(name string, args map[string]any) string {
-	// query_product/search_products 调外部 product 服务，不持 orders/refunds 锁。
-	if name == "query_product" {
-		return queryProduct(args)
-	}
-	if name == "search_products" {
-		return searchProducts(args)
-	}
-	mu.Lock()
-	defer mu.Unlock()
+func callTool(ctx context.Context, name string, args map[string]any) string {
 	switch name {
+	case "query_product":
+		return queryProduct(args)
+	case "search_products":
+		return searchProducts(args)
 	case "query_order":
-		oid := argString(args, "orderId")
-		o, ok := orders[oid]
-		if !ok {
-			return fmt.Sprintf("订单 %s 不存在", oid)
-		}
-		if status, ok := refunds[oid]; ok {
-			o["refundStatus"] = status
-		}
-		b, _ := json.Marshal(o)
-		return "订单详情: " + string(b)
+		return queryOrder(ctx, args)
 	case "refund_order":
-		oid := argString(args, "orderId")
-		reason := argString(args, "reason")
-		if _, ok := orders[oid]; !ok {
-			return fmt.Sprintf("订单 %s 不存在，无法退款", oid)
-		}
-		refunds[oid] = "refunding"
-		return fmt.Sprintf("订单 %s 已发起退款（原因：%s），状态：处理中", oid, reason)
+		return refundOrder(ctx, args)
 	default:
 		return "未知工具: " + name
 	}
+}
+
+// orderURL order 服务地址（默认集群内基线 Service；泳道无关——mcp 是平台 AI 层单实例，
+// 退款/query 演示走 test 订单，spec §6 环境边界）。
+func orderURL() string {
+	if v := os.Getenv("ORDER_URL"); v != "" {
+		return v
+	}
+	return "http://paas-shop-order:8084"
+}
+
+// callOrder 调 order 服务（GET 查询 / POST 动作带 X-Action-Token）。
+func callOrder(ctx context.Context, method, path string) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, orderURL()+path, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	if method != http.MethodGet {
+		if tok := os.Getenv("PAAS_ORDER_ACTION_TOKEN"); tok != "" {
+			req.Header.Set("X-Action-Token", tok)
+		}
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	return resp.StatusCode, body, err
+}
+
+// queryOrder 调 order 服务查真实订单（GET /orders/{id}；404 归一为工具消息非协议错误）。
+func queryOrder(ctx context.Context, args map[string]any) string {
+	code, body, err := callOrder(ctx, http.MethodGet, "/orders/"+argString(args, "orderId"))
+	if err != nil || code == http.StatusNotFound {
+		return "订单不存在或查询失败: " + argString(args, "orderId")
+	}
+	return "订单详情: " + string(body)
+}
+
+// refundOrder 调 order 服务退款（POST /orders/{id}/refund；状态机拒绝 409 时透出原因）。
+func refundOrder(ctx context.Context, args map[string]any) string {
+	code, body, err := callOrder(ctx, http.MethodPost, "/orders/"+argString(args, "orderId")+"/refund")
+	if err != nil {
+		return "退款请求失败: " + err.Error()
+	}
+	if code != http.StatusOK {
+		return "退款被拒绝: " + string(body)
+	}
+	return "退款结果: " + string(body)
 }
 
 // queryProduct 调 product 服务查商品详情（GET /products/{id}）。
