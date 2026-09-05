@@ -15,8 +15,12 @@
 #    handler decode 进 struct）——"trigger":"manual" 反序列化 400，改 "trigger":{"type":"manual"}。
 # 5. 模板 deploy stage 去 "strategy":"rolling"：engine deploy 只消费 envId/lane/service/serviceId/
 #    imageSource（engine.go execDeploy），strategy 静默忽略。
-# 6. workflow toolId 解析按 type=mcp + name 含 shop 优先（Tool 顶层无 serverUrl 字段，MCP 地址在
-#    Config["serverURL"]；防广场装了其他 mcp 工具时误绑首个）。
+# 6. workflow toolId 解析按 type=mcp + name=refund_order 精确匹配（mcp 工具实体名与 MCP 方法名
+#    逐字一致无前缀，spec stage2；miss 回退首个 mcp 工具并提示——toolName 才是方法名，功能不受影响）。
+# 7. 审查修复（R1-C1）：模板 admin 端点需 super_admin，默认 PAAS_TOKEN(sk-acme-admin) 仅
+#    tenant-admin 恒 403 且此前静默吞错——part3 前置登录 admin 换 JWT（唯一 super_admin 是
+#    密码用户，dev seed 演示凭证 123456，生产用 PAAS_ADMIN_USER/PAAS_ADMIN_PASS 覆盖；登录失败
+#    显式警告跳过模板+pipeline 块）；创建类 POST 检查响应含 data 才报成功（堵虚假成功）。
 set -euo pipefail
 
 PAAS_API="${PAAS_API:-http://paas.k8s.dd}"
@@ -277,13 +281,26 @@ echo "== setup part 2 完成 =="
 
 echo "== part 3: 演示流水线 + 退款审批 workflow =="
 
-# 1. 租户自定义模板（super_admin 经 admin 端点；带 tenantId）
-TPL_EXISTS=$(api "$PAAS_API/api/admin/pipeline-templates" | python3 -c "
+# 0. admin JWT：模板管理端点 /api/admin/pipeline-templates 需 super_admin（platformAdmin 门禁），
+#    默认 PAAS_TOKEN=sk-acme-admin 仅 tenant-admin 恒 403。唯一 super_admin 是密码用户 admin
+#    （dev seed 演示凭证 123456，PAAS_DISABLE_DEMO_SEED=true 时不 seed）——生产环境用
+#    PAAS_ADMIN_USER/PAAS_ADMIN_PASS 覆盖。admin 用户 tenant=t-acme，与模板 payload 租户一致。
+ADMIN_USER="${PAAS_ADMIN_USER:-admin}"
+ADMIN_PASS="${PAAS_ADMIN_PASS:-123456}"
+ADMIN_JWT=$(curl -sS -X POST "$PAAS_API/api/auth/sessions" -H "Content-Type: application/json" \
+  -d "{\"username\":\"$ADMIN_USER\",\"password\":\"$ADMIN_PASS\"}" | jget "['data']['accessToken']")
+if [ -z "$ADMIN_JWT" ]; then
+  echo "  [警告] admin 登录失败（用户 $ADMIN_USER）——跳过模板+pipeline 创建（admin 端点需 super_admin）"
+fi
+
+# 1. 租户自定义模板（super_admin 经 admin 端点；带 tenantId；创建后验响应含 data 堵虚假成功）
+if [ -n "$ADMIN_JWT" ]; then
+  TPL_EXISTS=$(curl -sS -H "Authorization: Bearer $ADMIN_JWT" "$PAAS_API/api/admin/pipeline-templates" | python3 -c "
 import sys,json
 for t in json.load(sys.stdin)['data']:
     if t['id']=='tpl-shop-release': print('yes'); break" 2>/dev/null || true)
-if [ "$TPL_EXISTS" != "yes" ]; then
-  api -X POST "$PAAS_API/api/admin/pipeline-templates" -H "Content-Type: application/json" -d @- <<'EOF' >/dev/null
+  if [ "$TPL_EXISTS" != "yes" ]; then
+    cat > /tmp/tpl-shop-release.json <<'EOF'
 {
   "id": "tpl-shop-release", "name": "商店发布流水线（test→prod 晋升演示）",
   "kind": "cd", "tenantId": "t-acme",
@@ -296,18 +313,28 @@ if [ "$TPL_EXISTS" != "yes" ]; then
   ]
 }
 EOF
-  echo "  已创建模板 tpl-shop-release"
-fi
+    RESP=$(curl -sS -X POST "$PAAS_API/api/admin/pipeline-templates" \
+      -H "Authorization: Bearer $ADMIN_JWT" -H "Content-Type: application/json" \
+      -d @/tmp/tpl-shop-release.json)
+    [ -n "$(echo "$RESP" | jget "['data']['id']")" ] \
+      && echo "  已创建模板 tpl-shop-release" \
+      || echo "  [警告] 模板创建失败: $RESP"
+  fi
 
-# 2. 绑定 pipeline（app 作用域；service 参数在 run 触发时经 paramOverrides/inputs 传）
-PIPE_EXISTS=$(api "$PAAS_API/api/applications/$APP_ID/pipelines" | python3 -c "
+  # 2. 绑定 pipeline（app 作用域；service 参数在 run 触发时经 paramOverrides/inputs 传）。
+  #    同用 ADMIN_JWT（admin 用户 tenant=t-acme，与模板同租户；模板缺失时此处 templateId 校验必 404）。
+  PIPE_EXISTS=$(curl -sS -H "Authorization: Bearer $ADMIN_JWT" "$PAAS_API/api/applications/$APP_ID/pipelines" | python3 -c "
 import sys,json
 for p in json.load(sys.stdin)['data']:
     if p['name']=='shop-release': print('yes'); break" 2>/dev/null || true)
-if [ "$PIPE_EXISTS" != "yes" ]; then
-  api -X POST "$PAAS_API/api/applications/$APP_ID/pipelines" -H "Content-Type: application/json" \
-    -d "{\"name\":\"shop-release\",\"kind\":\"cd\",\"templateId\":\"tpl-shop-release\",\"trigger\":{\"type\":\"manual\"}}" >/dev/null
-  echo "  已创建 pipeline shop-release（手动触发）"
+  if [ "$PIPE_EXISTS" != "yes" ]; then
+    RESP=$(curl -sS -X POST "$PAAS_API/api/applications/$APP_ID/pipelines" \
+      -H "Authorization: Bearer $ADMIN_JWT" -H "Content-Type: application/json" \
+      -d "{\"name\":\"shop-release\",\"kind\":\"cd\",\"templateId\":\"tpl-shop-release\",\"trigger\":{\"type\":\"manual\"}}")
+    [ -n "$(echo "$RESP" | jget "['data']['id']")" ] \
+      && echo "  已创建 pipeline shop-release（手动触发）" \
+      || echo "  [警告] pipeline 创建失败: $RESP"
+  fi
 fi
 
 # 3. 退款审批 workflow（spec §6：llm 建议 → approve 人工 → tool 真实退款）
@@ -315,14 +342,18 @@ AGENT_ID=$(api "$PAAS_API/api/agents" | python3 -c "
 import sys,json
 for a in json.load(sys.stdin)['data']:
     if a['name']=='shop-assistant': print(a['id']); break" 2>/dev/null || true)
-TOOL_ID=$(api "$PAAS_API/api/tools" | python3 -c "
+TOOL_INFO=$(api "$PAAS_API/api/tools" | python3 -c "
 import sys,json
 ts=json.load(sys.stdin)['data']
 for t in ts:
-    if t.get('type')=='mcp' and 'shop' in t.get('name',''): print(t['id']); break
+    if t.get('type')=='mcp' and t.get('name')=='refund_order': print(t['id']+' exact'); break
 else:
     for t in ts:
-        if t.get('type')=='mcp': print(t['id']); break" 2>/dev/null || true)
+        if t.get('type')=='mcp': print(t['id']+' fallback'); break" 2>/dev/null || true)
+TOOL_ID=${TOOL_INFO%% *}
+case "$TOOL_INFO" in
+  *" fallback") [ -n "$TOOL_ID" ] && echo "  [提示] 未找到名为 refund_order 的 mcp 工具，回退首个 mcp 工具 $TOOL_ID（toolName 才是方法名，功能不受影响）" ;;
+esac
 WF_EXISTS=$(api "$PAAS_API/api/workflows" | python3 -c "
 import sys,json
 for w in json.load(sys.stdin)['data']:
@@ -347,8 +378,10 @@ if [ "$WF_EXISTS" != "yes" ] && [ -n "$AGENT_ID" ] && [ -n "$TOOL_ID" ]; then
   ]
 }
 EOF
-  api -X POST "$PAAS_API/api/workflows" -H "Content-Type: application/json" -d @/tmp/wf.json >/dev/null
-  echo "  已创建 workflow shop-refund-approval"
+  RESP=$(api -X POST "$PAAS_API/api/workflows" -H "Content-Type: application/json" -d @/tmp/wf.json)
+  [ -n "$(echo "$RESP" | jget "['data']['id']")" ] \
+    && echo "  已创建 workflow shop-refund-approval" \
+    || echo "  [警告] workflow 创建失败: $RESP"
 fi
 [ -z "$AGENT_ID" ] && echo "  [警告] 未找到 agent shop-assistant，跳过 workflow 创建"
 [ -z "$TOOL_ID" ] && echo "  [警告] 未找到 mcp 类型工具，跳过 workflow 创建"
