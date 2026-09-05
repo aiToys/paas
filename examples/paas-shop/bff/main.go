@@ -222,9 +222,13 @@ type statsSnapshot struct {
 func newStatsAgg() *statsAgg { return &statsAgg{byStatus: map[string]int{}} }
 
 // consume 解析一条 shop-events 消息累计统计（解析失败静默跳过，统计不阻断通知链路）。
+// 只认 order.* 事件（防未来非订单事件带 status 字段误计 ByStatus）。
 func (a *statsAgg) consume(data []byte) {
 	var e shopEvent
 	if err := json.Unmarshal(data, &e); err != nil {
+		return
+	}
+	if !strings.HasPrefix(e.Type, "order.") {
 		return
 	}
 	a.mu.Lock()
