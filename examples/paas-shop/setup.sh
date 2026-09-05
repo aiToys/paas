@@ -11,6 +11,12 @@
 #    （sweeper 二进制 fallback 恰为 30，显式化语义）。
 # 3. 审查修复（R1）：应用绑定 bind type=具体 kind 非 "dataservice"（store 白名单+injector 只认
 #    具体 kind）；治理 Service 创建 payload 补必填 envId/protocol/port（Service.Validate）。
+# 4. pipeline 创建 trigger 是 PipelineTrigger 对象非字符串（model.go PipelineTrigger{type,...}；
+#    handler decode 进 struct）——"trigger":"manual" 反序列化 400，改 "trigger":{"type":"manual"}。
+# 5. 模板 deploy stage 去 "strategy":"rolling"：engine deploy 只消费 envId/lane/service/serviceId/
+#    imageSource（engine.go execDeploy），strategy 静默忽略。
+# 6. workflow toolId 解析按 type=mcp + name 含 shop 优先（Tool 顶层无 serverUrl 字段，MCP 地址在
+#    Config["serverURL"]；防广场装了其他 mcp 工具时误绑首个）。
 set -euo pipefail
 
 PAAS_API="${PAAS_API:-http://paas.k8s.dd}"
@@ -268,3 +274,87 @@ if [ -n "$DB_PROD_ID" ]; then
 fi
 
 echo "== setup part 2 完成 =="
+
+echo "== part 3: 演示流水线 + 退款审批 workflow =="
+
+# 1. 租户自定义模板（super_admin 经 admin 端点；带 tenantId）
+TPL_EXISTS=$(api "$PAAS_API/api/admin/pipeline-templates" | python3 -c "
+import sys,json
+for t in json.load(sys.stdin)['data']:
+    if t['id']=='tpl-shop-release': print('yes'); break" 2>/dev/null || true)
+if [ "$TPL_EXISTS" != "yes" ]; then
+  api -X POST "$PAAS_API/api/admin/pipeline-templates" -H "Content-Type: application/json" -d @- <<'EOF' >/dev/null
+{
+  "id": "tpl-shop-release", "name": "商店发布流水线（test→prod 晋升演示）",
+  "kind": "cd", "tenantId": "t-acme",
+  "description": "构建 → 部署测试基线 → 打版本 → 晋升生产（promote 自动找 -prod 显式基线）",
+  "stages": [
+    {"name": "构建", "type": "build"},
+    {"name": "部署测试", "type": "deploy", "params": {"envId": "{{app.env.test}}", "lane": "default", "imageSource": "priorBuild"}},
+    {"name": "发布版本", "type": "release", "params": {"versionStrategy": "auto-increment"}},
+    {"name": "晋升生产", "type": "promote"}
+  ]
+}
+EOF
+  echo "  已创建模板 tpl-shop-release"
+fi
+
+# 2. 绑定 pipeline（app 作用域；service 参数在 run 触发时经 paramOverrides/inputs 传）
+PIPE_EXISTS=$(api "$PAAS_API/api/applications/$APP_ID/pipelines" | python3 -c "
+import sys,json
+for p in json.load(sys.stdin)['data']:
+    if p['name']=='shop-release': print('yes'); break" 2>/dev/null || true)
+if [ "$PIPE_EXISTS" != "yes" ]; then
+  api -X POST "$PAAS_API/api/applications/$APP_ID/pipelines" -H "Content-Type: application/json" \
+    -d "{\"name\":\"shop-release\",\"kind\":\"cd\",\"templateId\":\"tpl-shop-release\",\"trigger\":{\"type\":\"manual\"}}" >/dev/null
+  echo "  已创建 pipeline shop-release（手动触发）"
+fi
+
+# 3. 退款审批 workflow（spec §6：llm 建议 → approve 人工 → tool 真实退款）
+AGENT_ID=$(api "$PAAS_API/api/agents" | python3 -c "
+import sys,json
+for a in json.load(sys.stdin)['data']:
+    if a['name']=='shop-assistant': print(a['id']); break" 2>/dev/null || true)
+TOOL_ID=$(api "$PAAS_API/api/tools" | python3 -c "
+import sys,json
+ts=json.load(sys.stdin)['data']
+for t in ts:
+    if t.get('type')=='mcp' and 'shop' in t.get('name',''): print(t['id']); break
+else:
+    for t in ts:
+        if t.get('type')=='mcp': print(t['id']); break" 2>/dev/null || true)
+WF_EXISTS=$(api "$PAAS_API/api/workflows" | python3 -c "
+import sys,json
+for w in json.load(sys.stdin)['data']:
+    if w['name']=='shop-refund-approval': print('yes'); break" 2>/dev/null || true)
+if [ "$WF_EXISTS" != "yes" ] && [ -n "$AGENT_ID" ] && [ -n "$TOOL_ID" ]; then
+  cat > /tmp/wf.json <<EOF
+{
+  "name": "shop-refund-approval",
+  "desc": "退款审批：LLM 分析理由 → 人工审批 → MCP 真实退款（spec §6）",
+  "enabled": true,
+  "nodes": [
+    {"id": "start", "type": "start", "name": "开始", "nextId": "analyze"},
+    {"id": "analyze", "type": "llm", "name": "分析退款理由", "nextId": "approve",
+     "config": {"agentId": "$AGENT_ID",
+       "inputTemplate": "订单 {{inputs.orderId}} 申请退款，理由：{{inputs.reason}}。请给出退款建议与金额摘要（50 字内）。"}},
+    {"id": "approve", "type": "approve", "name": "人工审批", "nextId": "refund",
+     "config": {"message": "确认退款订单 {{inputs.orderId}}？拒绝请中止运行（abort）"}},
+    {"id": "refund", "type": "tool", "name": "执行退款", "nextId": "end",
+     "config": {"toolId": "$TOOL_ID", "toolName": "refund_order",
+       "args": {"orderId": "{{inputs.orderId}}"}}},
+    {"id": "end", "type": "end", "name": "结束"}
+  ]
+}
+EOF
+  api -X POST "$PAAS_API/api/workflows" -H "Content-Type: application/json" -d @/tmp/wf.json >/dev/null
+  echo "  已创建 workflow shop-refund-approval"
+fi
+[ -z "$AGENT_ID" ] && echo "  [警告] 未找到 agent shop-assistant，跳过 workflow 创建"
+[ -z "$TOOL_ID" ] && echo "  [警告] 未找到 mcp 类型工具，跳过 workflow 创建"
+
+echo "== setup 完成 =="
+echo "  APP_ID=$APP_ID（tenant=$TENANT_ID）"
+echo "  演示域名: shop.test.example.com（test）/ shop.example.com（prod，本机 hosts 或 curl -H Host）"
+echo "  发布演示: DevOps → shop-release 手动触发（构建→部署测试→打版本→晋升生产）"
+echo "  退款演示: 智能体 → 工作流 shop-refund-approval 触发（LLM 分析→人工审批→MCP 退款）"
