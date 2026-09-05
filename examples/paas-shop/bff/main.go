@@ -30,6 +30,7 @@ var (
 		"product":   "http://paas-shop-product:8081",
 		"recommend": "http://paas-shop-recommend:8082",
 		"chatbot":   "http://paas-shop-chatbot:8083",
+		"order":     "http://paas-shop-order:8084",
 	}
 )
 
@@ -57,24 +58,33 @@ func main() {
 	if v := os.Getenv("CHATBOT_SERVICE_URL"); v != "" {
 		fallback["chatbot"] = v
 	}
+	if v := os.Getenv("ORDER_SERVICE_URL"); v != "" {
+		fallback["order"] = v
+	}
 	// 数据面服务发现（平台 /dp/instances；未配 PAAS_DP_URL 时纯静态兜底，行为与原版一致）。
 	dp = dpdisc.New()
 	slog.Info("bff 就绪", "fallback", fallback, "dpDiscovery", dp.Enabled())
 
 	events := newEventRing(100)
-	subscribeShopEvents(events)
+	stats := newStatsAgg()
+	subscribeShopEvents(events, stats)
 
 	// LaneMiddleware 在 Handler 内层（span 建立后提取 header 写 paas.lane 属性）；
 	// 转发透传：proxy* 的 copyHeaders 已复制全部 header（x-paas-lane 天然到下游）。
-	h := observ.Recover(observ.Handler("bff", observ.LaneMiddleware(buildMux(events))))
+	h := observ.Recover(observ.Handler("bff", observ.LaneMiddleware(buildMuxWithStats(events, stats))))
 	srv := &http.Server{Addr: ":8080", Handler: h, ReadHeaderTimeout: 10 * time.Second}
 	if err := srv.ListenAndServe(); err != nil {
 		slog.Error("server 退出", "err", err)
 	}
 }
 
-// buildMux 构造 bff 路由（events 注入供 /api/events 查询，测试可替换）。
+// buildMux 兼容入口（旧测试引用；stats 用空聚合器）。
 func buildMux(events *eventRing) *http.ServeMux {
+	return buildMuxWithStats(events, newStatsAgg())
+}
+
+// buildMuxWithStats 构造 bff 路由（events 通知中心 + stats 经营统计，测试可注入）。
+func buildMuxWithStats(events *eventRing, stats *statsAgg) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -99,12 +109,53 @@ func buildMux(events *eventRing) *http.ServeMux {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(events.latest(limit))
 	})
+	// 订单代理：/api/orders（列表/下单）与 /api/orders/{id}[/{action}]（查询/动作）统一转发。
+	mux.HandleFunc("/api/orders", proxyOrder)
+	mux.HandleFunc("/api/orders/", proxyOrder)
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSONStats(w, stats.snapshot())
+	})
 	return mux
 }
 
-// subscribeShopEvents 订阅 shop-events 主题（bff-consumer group），事件入环形缓冲。
+// proxyOrder 订单代理：路径后缀透传（/api/orders[...] → order /orders[...]），
+// 变更类 POST 注入 X-Action-Token（前端不感知，spec §3）；地址解析泳道感知同其他代理。
+func proxyOrder(w http.ResponseWriter, r *http.Request) {
+	target := svcURL(r, "order") + "/orders" + strings.TrimPrefix(r.URL.Path, "/api/orders")
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, r.Body)
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	req.URL.RawQuery = r.URL.RawQuery // 透传 query（GET /orders?status=pending 过滤）
+	copyHeaders(req.Header, r.Header)
+	if tok := os.Getenv("PAAS_ORDER_ACTION_TOKEN"); tok != "" && r.Method != http.MethodGet {
+		req.Header.Set("X-Action-Token", tok)
+	}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		slog.Error("order 转发失败", "target", target, "err", err)
+		http.Error(w, "order unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer resp.Body.Close()
+	copyHeaders(w.Header(), resp.Header)
+	// 泳道演示可见性：响应带请求实际泳道 + bff 实例指纹（下游经 X-Paas-Service 透传）。
+	w.Header().Set("X-Paas-Lane", observ.LaneOrBase(r.Context()))
+	w.Header().Set("X-Paas-Bff", observ.ServiceFingerprint())
+	w.WriteHeader(resp.StatusCode)
+	_, _ = io.Copy(w, resp.Body)
+}
+
+func writeJSONStats(w http.ResponseWriter, s statsSnapshot) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(s)
+}
+
+// subscribeShopEvents 双消费组订阅 shop-events：bff-consumer 入环形缓冲（通知中心）、
+// stats-consumer 累计经营统计（独立 group，各自 at-most-once 互不影响）。
 // NATS 不可达仅告警不阻断（/api/events 返回空数组，BFF 其余转发不受影响）。
-func subscribeShopEvents(events *eventRing) {
+func subscribeShopEvents(events *eventRing, stats *statsAgg) {
 	natsURL := os.Getenv("NATS_URL")
 	if natsURL == "" {
 		return
@@ -126,18 +177,75 @@ func subscribeShopEvents(events *eventRing) {
 		slog.Warn("NATS 订阅失败", "err", err)
 		return
 	}
+	if _, err = nc.QueueSubscribe("shop-events", "stats-consumer", func(msg *nats.Msg) {
+		stats.consume(msg.Data)
+	}); err != nil {
+		slog.Warn("NATS stats 订阅失败", "err", err)
+		return
+	}
 	nc.Flush()
-	slog.Info("bff 已订阅 shop-events（bff-consumer group）")
+	slog.Info("bff 已订阅 shop-events（bff-consumer + stats-consumer 双消费组）")
 }
 
-// shopEvent 是 shop-events 主题的一条事件（product 服务发布的商品变更）。
+// shopEvent 是 shop-events 主题的一条事件（product 商品变更 / order 订单生命周期）。
+// 订单事件 payload：{type,orderId,userId,status,amount,at}（order 服务 publishEvent）。
 type shopEvent struct {
 	Type       string    `json:"type"`
 	ProductID  int       `json:"productId"`
 	Name       string    `json:"name"`
 	Category   string    `json:"category"`
+	OrderID    string    `json:"orderId,omitempty"`
+	UserID     string    `json:"userId,omitempty"`
+	Status     string    `json:"status,omitempty"`
+	Amount     int       `json:"amount,omitempty"`
 	At         time.Time `json:"at"`
 	ReceivedAt time.Time `json:"receivedAt"`
+}
+
+// statsAgg 经营统计（stats-consumer 消费组累计，内存态重启清零）：
+// 订单数只计 order.created（去重口径=创建事件），GMV 同口径；ByStatus 按事件快照状态分布。
+// 含锁实体不出包：对外一律经 snapshot() 转无锁 DTO（copylocks）。
+type statsAgg struct {
+	mu       sync.Mutex
+	orders   int
+	gmvCents int
+	byStatus map[string]int
+}
+
+// statsSnapshot 对外无锁快照（深拷贝，防外部读与 consume 并发写 race）。
+type statsSnapshot struct {
+	Orders   int            `json:"orders"`
+	GMVCents int            `json:"gmvCents"`
+	ByStatus map[string]int `json:"byStatus"`
+}
+
+func newStatsAgg() *statsAgg { return &statsAgg{byStatus: map[string]int{}} }
+
+// consume 解析一条 shop-events 消息累计统计（解析失败静默跳过，统计不阻断通知链路）。
+func (a *statsAgg) consume(data []byte) {
+	var e shopEvent
+	if err := json.Unmarshal(data, &e); err != nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if e.Type == "order.created" {
+		a.orders++
+		a.gmvCents += e.Amount
+	}
+	if e.Status != "" {
+		a.byStatus[e.Status]++
+	}
+}
+
+func (a *statsAgg) snapshot() statsSnapshot {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	byStatus := make(map[string]int, len(a.byStatus))
+	for k, v := range a.byStatus {
+		byStatus[k] = v
+	}
+	return statsSnapshot{Orders: a.orders, GMVCents: a.gmvCents, ByStatus: byStatus}
 }
 
 // eventRing 固定容量环形缓冲（mutex 保护），存最近 N 条事件供 /api/events 轮询。

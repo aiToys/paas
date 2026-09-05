@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -57,5 +58,45 @@ func TestEventsEndpoint(t *testing.T) {
 	}
 	if len(evs) != 1 || evs[0].Type != "product.updated" {
 		t.Fatalf("unexpected: %+v", evs)
+	}
+}
+
+// TestStatsEndpoint /api/stats 返回 stats-consumer 累计结构（初始零值也 200）。
+func TestStatsEndpoint(t *testing.T) {
+	stats := newStatsAgg()
+	ts := httptest.NewServer(buildMuxWithStats(newEventRing(10), stats))
+	defer ts.Close()
+	resp, err := http.Get(ts.URL + "/api/stats")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("/api/stats 应 200，got %d", resp.StatusCode)
+	}
+	var s map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"orders", "gmvCents", "byStatus"} {
+		if _, ok := s[key]; !ok {
+			t.Errorf("stats 应含 %s，got %v", key, s)
+		}
+	}
+}
+
+// TestStatsAggConsume order.created 事件累计订单数/GMV/状态分布。
+func TestStatsAggConsume(t *testing.T) {
+	a := newStatsAgg()
+	a.consume([]byte(`{"type":"order.created","orderId":"ORD-1","amount":9900,"status":"pending"}`))
+	a.consume([]byte(`{"type":"order.paid","orderId":"ORD-1","amount":9900,"status":"paid"}`))
+	if a.snapshot().Orders != 1 {
+		t.Fatalf("order.created 应 +1，got %d", a.snapshot().Orders)
+	}
+	if a.snapshot().GMVCents != 9900 {
+		t.Fatalf("GMV 应 9900，got %d", a.snapshot().GMVCents)
+	}
+	if a.snapshot().ByStatus["paid"] != 1 {
+		t.Fatalf("状态分布应 paid=1，got %v", a.snapshot().ByStatus)
 	}
 }
