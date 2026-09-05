@@ -23,18 +23,26 @@ function fmtDate(s: string) {
 const orderMsg = ref('')
 async function buy() {
   if (!props.product) return
-  const resp = await laneFetch('/api/orders', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ userId: 'guest', items: [{ productId: props.product.id, qty: 1 }] }),
-  })
-  orderMsg.value = resp.ok ? '下单成功，请在运营视图或订单列表支付' : `下单失败：${await resp.text()}`
+  try {
+    const resp = await laneFetch('/api/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: 'guest', items: [{ productId: props.product.id, qty: 1 }] }),
+    })
+    orderMsg.value = resp.ok ? '下单成功，请在运营视图或订单列表支付' : `下单失败：${await resp.text()}`
+  } catch {
+    orderMsg.value = '下单失败：网络错误，请重试'
+  }
 }
 async function payLatest() {
-  const list: Order[] = await laneFetch('/api/orders?status=pending').then(r => r.json())
-  if (!list.length) { orderMsg.value = '无待支付订单'; return }
-  const resp = await laneFetch(`/api/orders/${list[0].id}/pay`, { method: 'POST' })
-  orderMsg.value = resp.ok ? `订单 ${list[0].id} 已支付` : `支付失败：${await resp.text()}`
+  try {
+    const list: Order[] = await laneFetch('/api/orders?status=pending').then(r => r.json() as Promise<Order[]>)
+    if (!list.length) { orderMsg.value = '无待支付订单'; return }
+    const resp = await laneFetch(`/api/orders/${list[0].id}/pay`, { method: 'POST' })
+    orderMsg.value = resp.ok ? `订单 ${list[0].id} 已支付` : `支付失败：${await resp.text()}`
+  } catch {
+    orderMsg.value = '支付失败：网络错误，请重试'
+  }
 }
 </script>
 

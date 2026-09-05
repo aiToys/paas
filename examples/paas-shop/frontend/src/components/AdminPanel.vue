@@ -2,6 +2,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
 import { laneFetch } from '../lane'
+import { fmtPrice } from '../format'
 import type { Order, ShopStats, Product } from '../types'
 
 const tab = ref<'overview' | 'orders' | 'products'>('overview')
@@ -15,8 +16,8 @@ let timer: number | undefined
 async function refresh() {
   try {
     const [s, o] = await Promise.all([
-      laneFetch('/api/stats').then(r => r.json()),
-      laneFetch('/api/orders' + (statusFilter.value ? `?status=${statusFilter.value}` : '')).then(r => r.json()),
+      laneFetch('/api/stats').then(r => r.json() as Promise<ShopStats>),
+      laneFetch('/api/orders' + (statusFilter.value ? `?status=${statusFilter.value}` : '')).then(r => r.json() as Promise<Order[]>),
     ])
     stats.value = s
     orders.value = o
@@ -27,10 +28,13 @@ async function refresh() {
 }
 
 const actErr = ref('')
-async function act(id: string, action: 'ship' | 'close') {
-  const resp = await laneFetch(`/api/orders/${id}/${action}`, { method: 'POST' })
-  if (!resp.ok) actErr.value = `${action} 失败：${await resp.text()}`
-  else actErr.value = ''
+async function act(id: string, action: 'ship' | 'close' | 'confirm') {
+  try {
+    const resp = await laneFetch(`/api/orders/${id}/${action}`, { method: 'POST' })
+    actErr.value = resp.ok ? '' : `${action} 失败：${await resp.text()}`
+  } catch {
+    actErr.value = `${action} 失败：网络错误，请重试`
+  }
   await refresh()
 }
 
@@ -43,7 +47,7 @@ function copyRefund(id: string) {
 
 async function loadProducts() {
   try {
-    products.value = await laneFetch('/api/products?limit=100').then(r => r.json())
+    products.value = await laneFetch('/api/products?limit=100').then(r => r.json() as Promise<Product[]>)
   } catch {
     loadErr.value = '商品加载失败'
   }
@@ -53,17 +57,21 @@ async function loadProducts() {
 const np = ref({ name: '', price: 0, stock: 0, category: '' })
 const productMsg = ref('')
 async function createProduct() {
-  const resp = await laneFetch('/api/products', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(np.value),
-  })
-  if (resp.ok) {
-    productMsg.value = `已上新：${np.value.name}`
-    np.value = { name: '', price: 0, stock: 0, category: '' }
-    await loadProducts()
-  } else {
-    productMsg.value = `上新失败：${await resp.text()}`
+  try {
+    const resp = await laneFetch('/api/products', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(np.value),
+    })
+    if (resp.ok) {
+      productMsg.value = `已上新：${np.value.name}`
+      np.value = { name: '', price: 0, stock: 0, category: '' }
+      await loadProducts()
+    } else {
+      productMsg.value = `上新失败：${await resp.text()}`
+    }
+  } catch {
+    productMsg.value = '上新失败：网络错误，请重试'
   }
 }
 
@@ -107,6 +115,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
           <td>{{ o.items.map(i => `${i.name}×${i.qty}`).join('、') }}</td>
           <td>
             <button v-if="o.status === 'paid'" @click="act(o.id, 'ship')">发货</button>
+            <button v-if="o.status === 'shipped'" @click="act(o.id, 'confirm')">确认收货</button>
             <button v-if="o.status === 'pending'" @click="act(o.id, 'close')">关单</button>
             <button v-if="o.status === 'paid' || o.status === 'shipped'" @click="copyRefund(o.id)">退款</button>
           </td>
@@ -119,7 +128,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
       <table>
         <tr><th>商品</th><th>价格</th><th>库存</th><th>分类</th></tr>
         <tr v-for="p in products" :key="p.id">
-          <td>{{ p.name }}</td><td>¥{{ p.price }}</td><td>{{ p.stock }}</td><td>{{ p.category }}</td>
+          <td>{{ p.name }}</td><td>{{ fmtPrice(p.price) }}</td><td>{{ p.stock }}</td><td>{{ p.category }}</td>
         </tr>
       </table>
       <div class="new-product">

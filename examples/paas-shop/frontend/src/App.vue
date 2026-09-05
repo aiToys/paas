@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import type { Product } from './types'
 import { fmtPrice } from './format'
-import { lane, setLane, laneFetch, detectEnv } from './lane'
+import { lane, setLane, laneFetch, detectEnv, currentLane } from './lane'
 import SearchBar from './components/SearchBar.vue'
 import ProductCard from './components/ProductCard.vue'
 import DetailDrawer from './components/DetailDrawer.vue'
@@ -32,7 +32,8 @@ const chatRef = ref<InstanceType<typeof ChatWindow> | null>(null)
 // 泳道演示：header 输入 lane 名（如 feature-x），所有请求自动染色 x-paas-lane；
 // 留空 = 基线。切换后需重载列表才走新泳道（下次请求即生效）。
 const laneInput = ref(lane.value)
-const laneActive = computed(() => lane.value !== '')
+// 徽标按「当前生效泳道」显示（currentLane：hostname 域名优先于手动输入，与出站染色一致）。
+const laneActive = computed(() => currentLane() !== '')
 // 最近一次请求的实例指纹（bff/product 响应头）：泳道切换后可见「实际命中实例/版本」变化
 const servedBy = ref('')
 const servedLane = ref('')
@@ -101,7 +102,7 @@ onMounted(() => {
       <div class="lane-box" title="泳道演示：输入 lane 名（如 feature-x）使请求带 x-paas-lane 染色，走对应泳道实例；留空 = 基线">
         <span class="lane-label">🚧 泳道</span>
         <input v-model="laneInput" class="lane-input" placeholder="基线（default）" @keyup.enter="applyLane" />
-        <span v-if="laneActive" class="lane-badge">染色中：{{ lane }}</span>
+        <span v-if="laneActive" class="lane-badge">染色中：{{ currentLane() }}</span>
         <button class="lane-btn" @click="applyLane">切换</button>
       </div>
       <div v-if="servedBy" class="served" title="最近一次请求实际命中的实例（Pod 名），泳道切换后此值变化即验证流量走了不同实例">
