@@ -27,7 +27,7 @@ paas-shop 是平台的完整能力演示应用（电商域）：一份代码、�
 curl -H 'Host: shop.test.example.com' http://<集群入口>/api/orders
 ```
 
-**停留点**：控制台「应用」→ paas-shop → 「部署」看 order 服务实例；「平台能力 → 可观测」链路追踪看 bff → order 调用链（瀑布树展开每跳 span）。
+**停留点**：控制台「应用」→ paas-shop → 「部署」看 order 服务实例；「平台能力 → 可观测」链路追踪看 bff → order 调用链（瀑布树展开每跳 span），应用监控看 order RED 指标（请求率 / 错误 / 延迟）。
 
 ### 2. 事件流（3 分钟）
 
@@ -41,7 +41,7 @@ curl -H 'Host: shop.test.example.com' http://<集群入口>/api/orders
 
 ### 4. 超时关单（3 分钟）
 
-下一笔单但不支付。测试环境订单 TTL 为 2 分钟（`ORDER_TTL_MINUTES`：测试 2 分钟立等可取，生产环境 30 分钟），sweeper 定时任务（CronJob，每 2 分钟调度）扫出超时单：置 `closed` + 回补库存 + 发 `order.closed`。
+下一笔单但不支付。测试环境订单 TTL 为 2 分钟（`ORDER_TTL_MINUTES`：测试 2 分钟立等可取，生产环境 30 分钟），sweeper 定时任务（CronJob，测试侧每 2 分钟、生产侧每 5 分钟调度）扫出超时单：置 `closed` + 回补库存 + 发 `order.closed`。
 
 **停留点**：「工作负载 → 定时」看 sweeper——CronJob 类型工作负载、Pod 周期创建与完成、点开看本次执行实时日志。
 
@@ -63,7 +63,7 @@ curl -H 'Host: shop.test.example.com' http://<集群入口>/api/orders
 泳道（全链路灰度）是**环境内的流量染色**，不是环境复制——只部署变更服务，未命中请求自动降级基线。
 
 1. 控制台「环境」→ 测试环境详情创建泳道 `feat-order-v2`（standard 联调泳道，TTL 自动回收）；
-2. 把 order v2（新行为：下单响应带「预计送达」+ 页面横幅）部署到泳道——**只部署 order**；
+2. 把 order v2 部署到泳道——**只部署 order**（v2 为演示用自制变更：给下单响应加「预计送达」字段并在页面横幅展示）；
 3. 访问 `feat-order-v2.shop.test.example.com` 下单：请求自动带 `x-paas-lane` 染色，bff 经数据面发现 API 按泳道查 order 命中 v2 副本；product / recommend 未命中降级基线；
 4. 对比：回到 `shop.test.example.com` 同操作 → v1 响应无新字段。
 
@@ -82,7 +82,7 @@ curl -H 'Host: shop.test.example.com' http://<集群入口>/api/orders
 ### 8. 收尾（3 分钟）
 
 - **对账**：`./scripts/reconcile.sh` 全绿——部署引用 ↔ 平台记录 ↔ registry 实物三方比对，无孤儿引用 / 幽灵记录 / 配额漂移；
-- **静态加密**：app 级 Secret `PAAS_ORDER_ACTION_TOKEN` 落库即密文（`enc:v1:` 前缀，AES-256-GCM），经应用配置注入 bff / order / sweeper / mcp 四个服务共享——「应用 → 配置」看注入条目；
+- **静态加密**：app 级 Secret `PAAS_ORDER_ACTION_TOKEN` 落库即密文（`enc:v1:` 前缀，AES-256-GCM），经应用配置注入环境内全部工作负载，由 bff / order / mcp 三个服务共享消费——「应用 → 配置」看注入条目；
 - **备份**：「资源中心 → 数据库」shop-db-prod 详情的备份记录。
 
 ## 进阶指南
