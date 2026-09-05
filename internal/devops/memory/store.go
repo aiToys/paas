@@ -132,7 +132,8 @@ func (s *Store) CreateRepo(ctx context.Context, r devops.CodeRepo) error {
 		r.ID = newID("repo")
 	}
 	if _, exists := s.repos[r.ID]; exists {
-		return fmt.Errorf("仓库已存在: %s", r.ID)
+		// sentinel 化（错误契约审计 I8）：与 PG 版一致映射 409。
+		return fmt.Errorf("%w: %s", devops.ErrRepoExists, r.ID)
 	}
 	r.TenantID = tid
 	if r.CreatedAt.IsZero() {
@@ -224,11 +225,26 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) (devops.B
 		s.mu.Unlock()
 		return devops.BuildRun{}, fmt.Errorf("仓库不存在或不属于本应用: %s", b.RepoID)
 	}
+	// 并发闸（可观测审计 C1，与 PG 版同款）：per-tenant 活跃构建上限。
+	// 计数由 runBuild defer 释放（memory 版 s.mu 已覆盖并发，复用同锁）。
+	active := 0
+	for _, br := range s.buildruns {
+		if br.TenantID == tid && (br.Status == devops.BuildPending || br.Status == devops.BuildRunning) {
+			active++
+		}
+	}
+	if active >= devops.MaxActiveBuildsPerTenant {
+		s.mu.Unlock()
+		return devops.BuildRun{}, devops.ErrTooManyActiveBuilds
+	}
 	b.ID = newID("build")
 	b.TenantID = tid
 	b.Status = devops.BuildPending
 	b.StartedAt = time.Now()
-	b.Branch = repo.Branch
+	// 仅缺省回落 repo 默认分支（与 PG 版同步修：调用方 branch 是构建真源，无条件覆盖致特性分支失真）。
+	if b.Branch == "" {
+		b.Branch = repo.Branch
+	}
 	if b.Commit == "" {
 		b.Commit = mockCommit()
 	}
@@ -261,7 +277,7 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) (devops.B
 	}
 	go s.runBuild(s.baseCtxOrBg(), builder.Params{
 		TenantID: tid, AppID: b.AppID, BuildID: b.ID, Commit: b.Commit, Branch: b.Branch,
-		GitURL: gitURL, Dockerfile: df, BuildContext: bctx,
+		GitURL: gitURL, Dockerfile: df, BuildContext: bctx, BuildArgs: b.BuildArgs,
 	}) //nolint:gosec // G118 误报：后台构建须脱离请求生命周期，不持 request ctx 是有意为之
 	return b, nil
 }
@@ -314,8 +330,10 @@ func (s *Store) runBuild(ctx context.Context, p builder.Params) {
 	s.mu.Unlock()
 
 	// 执行流水线（clone→build→push 或 mock 派生）。
+	// 脱敏 + 截断对齐 PG 版（一致性审计 I4）：token 防泄漏，CapLog 防无界日志
+	//（memory+Real 组合同样产出真实构建日志，无 cap 进程内存无界增长）。
 	res, err := pipe.Build(ctx, p)
-	res.Log = builder.MaskToken(res.Log) // 脱敏日志中的 Git token（防泄漏给 build:read 权限者）
+	res.Log = builder.CapLog(builder.MaskToken(res.Log))
 	if err != nil {
 		err = builder.MaskErr(err) // err 可能含 git clone 失败 stderr（含 token URL）
 	}
@@ -325,7 +343,7 @@ func (s *Store) runBuild(ctx context.Context, p builder.Params) {
 	b.FinishedAt = time.Now()
 	if err != nil {
 		b.Status = devops.BuildFailed
-		b.Log = err.Error() + "\n" + res.Log
+		b.Log = builder.CapLog(err.Error() + "\n" + res.Log)
 		s.buildruns[p.BuildID] = b
 		return
 	}
@@ -703,6 +721,12 @@ func (s *Store) RollbackRelease(ctx context.Context, releaseID string) (devops.R
 		s.mu.Unlock()
 		return devops.Release{}, fmt.Errorf("发布不存在: %s", releaseID)
 	}
+	// 状态守卫（并发审计 Minor，与 PG 版 CAS 对齐）：仅 succeeded 可回滚——双击/并发
+	// 第二次回滚拒绝（否则再翻转一次 workload 镜像 + 产生第二条回滚记录）。
+	if orig.Status != devops.ReleaseSucceeded {
+		s.mu.Unlock()
+		return devops.Release{}, fmt.Errorf("发布 %s 当前状态不可回滚（仅 succeeded 可回滚，可能已回滚过）", releaseID)
+	}
 	if orig.PreviousImageID == "" {
 		s.mu.Unlock()
 		return devops.Release{}, fmt.Errorf("发布 %s 无上一镜像，无法回滚", releaseID)
@@ -757,13 +781,22 @@ func (s *Store) PromoteRelease(ctx context.Context, srcReleaseID, targetEnvID st
 	if !ok || src.TenantID != tid {
 		return devops.Release{}, fmt.Errorf("发布不存在: %s", srcReleaseID)
 	}
-	rel, err := s.CreateRelease(ctx, devops.ReleaseInput{
+	// 继承源 workload 的服务定位（promote=同服务晋升到下一环境）。Release 记录不持久化
+	// Service——经 src.WorkloadID 反查；不继承时 CreateRelease 的基线匹配退化为
+	// (app,env,lane) 全列表取首个，多服务应用会把镜像错配到无关服务。
+	input := devops.ReleaseInput{
 		AppID:     src.AppID,
 		EnvID:     targetEnvID,
 		ImageID:   src.ImageID,
 		Strategy:  src.Strategy,
 		CreatedBy: src.CreatedBy,
-	})
+	}
+	if src.WorkloadID != "" {
+		if swl, err := s.workload.Get(ctx, src.WorkloadID); err == nil {
+			input.Service, input.ServiceID, input.LaneID = swl.Service, swl.ServiceID, swl.LaneID
+		}
+	}
+	rel, err := s.CreateRelease(ctx, input)
 	if err != nil {
 		return devops.Release{}, err
 	}

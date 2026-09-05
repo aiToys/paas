@@ -40,17 +40,25 @@ type Store struct {
 	pipeline  builder.Pipeline     // 构建流水线（nil=Mock）；cmd/core 按 PAAS_DEVOPS_REAL 注入 Real
 	pipeMu    sync.RWMutex         // 专管 pipeline 字段读写（防 SetPipeline/runBuild race）
 	baseCtx   context.Context      // 进程级 ctx（cmd/core 注入）；构建 goroutine 派生之，nil=Background 兼容
+	// buildSlots per-tenant 活跃构建计数（可观测审计 C1：构建入口并发闸，防脚本化
+	// 触发打爆节点 docker daemon——DooD 全部经同一 daemon，磁盘/CPU 失控无 GC）。
+	buildSlots map[string]int
+	slotMu     sync.Mutex
 }
 
 // NewStore 创建 devops PG 仓储。db 必须已完成迁移；wlRepo 为 Release 编排提供 Workload 能力。
 // 与内存版 memory.NewStore(wlRepo) 同构——对 workload 存储后端完全透明。
 func NewStore(db *pg.DB, wlRepo workload.Repository, opts ...StoreOpt) *Store {
-	s := &Store{db: db, workload: wlRepo}
+	s := &Store{db: db, workload: wlRepo, buildSlots: map[string]int{}}
 	for _, o := range opts {
 		o(s)
 	}
 	return s
 }
+
+// maxActiveBuildsPerTenant 租户并发构建上限（DooD 共享节点 docker daemon 的保护值；
+// 超限 429 排队重试语义——Gitea/Jenkins 类 CI 的标准做法）。
+const maxActiveBuildsPerTenant = devops.MaxActiveBuildsPerTenant
 
 // StoreOpt 配置 Store。
 type StoreOpt func(*Store)
@@ -205,7 +213,9 @@ func (s *Store) CreateRepo(ctx context.Context, r devops.CodeRepo) error {
 		r.ID, r.TenantID, r.AppID, r.GitURL, r.Branch, r.Dockerfile, r.BuildContext, r.Status, r.CreatedAt,
 		r.Source, r.GiteaOwner, r.GiteaRepo, r.CloneURL)
 	if pg.IsUniqueViolation(err) {
-		return fmt.Errorf("仓库已存在: %s", r.ID)
+		// sentinel 化（错误契约审计 I8）：handler 按 ErrRepoExists 映射 409，
+		// 与 gitea.ErrRepoExists 语义一致（此前裸文案落 400）。
+		return fmt.Errorf("%w: %s", devops.ErrRepoExists, r.ID)
 	}
 	return err
 }
@@ -354,12 +364,25 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) (devops.B
 	if repo.AppID != b.AppID {
 		return devops.BuildRun{}, fmt.Errorf("仓库不存在或不属于本应用: %s", b.RepoID)
 	}
+	// 并发闸（可观测审计 C1）：per-tenant 活跃构建上限，超限 429（handler 映射）。
+	// 计数在 runBuild 结束释放；进程重启由 SweepInterrupted 收口（计数归零重建）。
+	s.slotMu.Lock()
+	if s.buildSlots[tid] >= maxActiveBuildsPerTenant {
+		s.slotMu.Unlock()
+		return devops.BuildRun{}, devops.ErrTooManyActiveBuilds
+	}
+	s.buildSlots[tid]++
+	s.slotMu.Unlock()
 
 	b.ID = newID("build")
 	b.TenantID = tid
 	b.Status = devops.BuildPending
 	b.StartedAt = time.Now()
-	b.Branch = repo.Branch
+	// 仅缺省回落 repo 默认分支：webhook/特性分支触发时调用方传入的 branch 是构建真源，
+	// 无条件覆盖会把 feature 分支构建错写成默认分支（buildTag 去重随之失真）。
+	if b.Branch == "" {
+		b.Branch = repo.Branch
+	}
 	if b.Commit == "" {
 		b.Commit = mockCommit()
 	}
@@ -403,6 +426,14 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) (devops.B
 // runBuild 执行构建流水线并持久化状态。pipeline nil 时用 Mock。
 // 流转用 UPDATE build_runs + INSERT images；panic/错误兜底标 failed。
 func (s *Store) runBuild(ctx context.Context, p builder.Params) {
+	// 并发闸释放（可观测审计 C1）：所有退出路径（成功/失败/panic）统一归还租户槽位。
+	defer func() {
+		s.slotMu.Lock()
+		if s.buildSlots[p.TenantID] > 0 {
+			s.buildSlots[p.TenantID]--
+		}
+		s.slotMu.Unlock()
+	}()
 	s.pipeMu.RLock()
 	pipe := s.pipeline
 	s.pipeMu.RUnlock()
@@ -416,24 +447,31 @@ func (s *Store) runBuild(ctx context.Context, p builder.Params) {
 			// WithoutCancel：baseCtx cancel 后仍需落库失败状态（与 markBuildFailed 同理）。
 			_, _ = s.db.Pool().Exec(context.WithoutCancel(ctx),
 				`UPDATE build_runs SET status=$2, finished_at=$3, log=$4 WHERE id=$1`,
-				p.BuildID, devops.BuildFailed, time.Now(), builder.MaskToken(fmt.Sprintf("构建异常: %v", rec)))
+				p.BuildID, devops.BuildFailed, time.Now(), builder.CapLog(builder.MaskToken(fmt.Sprintf("构建异常: %v", rec))))
 		}
 	}()
 	// pending -> running
 	if _, err := s.db.Pool().Exec(ctx,
 		`UPDATE build_runs SET status=$2 WHERE id=$1`, p.BuildID, devops.BuildRunning); err != nil {
+		// 状态推进失败必须落终态：静默 return 会让 build 永久 pending（engine 的
+		// PollBuildRun 无限轮询跟着永卡，占死流水线串行槽位）。
+		_, _ = s.db.Pool().Exec(context.WithoutCancel(ctx),
+			`UPDATE build_runs SET status=$2, finished_at=$3, log=$4 WHERE id=$1`,
+			p.BuildID, devops.BuildFailed, time.Now(),
+			builder.MaskToken(fmt.Sprintf("构建状态推进失败: %v", err)))
 		return
 	}
 
 	// 执行流水线（clone→build→push 或 mock 派生）。
 	res, err := pipe.Build(ctx, p)
-	res.Log = builder.MaskToken(res.Log) // 脱敏日志中的 Git token（防泄漏给 build:read 权限者）
+	// 脱敏 + 截断：token 防泄漏（build:read 权限者），cap 防无界日志打爆 DB（集成审计 I6）。
+	res.Log = builder.CapLog(builder.MaskToken(res.Log))
 	if err != nil {
 		err = builder.MaskErr(err) // err 可能含 git clone 失败 stderr（含 token URL）
 		// WithoutCancel：ctx 可能因 SIGTERM 已 cancel（pipe.Build 返 err），但失败状态仍需落库。
 		_, _ = s.db.Pool().Exec(context.WithoutCancel(ctx),
 			`UPDATE build_runs SET status=$2, finished_at=$3, log=$4 WHERE id=$1`,
-			p.BuildID, devops.BuildFailed, time.Now(), err.Error()+"\n"+res.Log)
+			p.BuildID, devops.BuildFailed, time.Now(), builder.CapLog(err.Error()+"\n"+res.Log))
 		return
 	}
 	img := devops.Image{
@@ -485,10 +523,12 @@ func (s *Store) runBuild(ctx context.Context, p builder.Params) {
 // markBuildFailed 回写构建失败状态 + 日志（best-effort，错误不再向上传播因 runBuild 无返回值）。
 // 用 WithoutCancel ctx：SIGTERM 时 baseCtx 已 cancel，但失败状态必须落库（否则 build_run 永久卡 running，
 // 只能等下次启动 SweepInterrupted 兜底）。pipe.Build 仍用原 ctx 响应取消，仅落库路径脱离请求生命周期。
-func (s *Store) markBuildFailed(ctx context.Context, buildID, log string) {
+func (s *Store) markBuildFailed(ctx context.Context, buildID, logText string) {
+	// 服务端日志留痕（可观测审计 M12）：SIGTERM/集群故障类失败此前只落 DB，容器日志零痕迹。
+	log.Printf("[devops] build %s 失败: %.200s", buildID, logText) //nolint:gosec // buildID 平台生成
 	_, _ = s.db.Pool().Exec(context.WithoutCancel(ctx),
 		`UPDATE build_runs SET status=$2, finished_at=$3, log=$4 WHERE id=$1`,
-		buildID, devops.BuildFailed, time.Now(), log)
+		buildID, devops.BuildFailed, time.Now(), logText)
 }
 
 // ---------- ImageRepository ----------
@@ -988,9 +1028,16 @@ func (s *Store) RollbackRelease(ctx context.Context, releaseID string) (devops.R
 			}
 		}
 	}()
-	if _, err = tx.Exec(ctx,
-		`UPDATE releases SET status=$2 WHERE id=$1`, releaseID, devops.ReleaseRolledBack); err != nil {
+	// 状态守卫（并发审计 Minor）：仅 succeeded 可回滚，CAS 条件更新——双击/并发第二次
+	// 回滚 0 行命中即拒绝（否则再翻转一次 workload 镜像 + 产生第二条回滚记录）。
+	tag, err := tx.Exec(ctx,
+		`UPDATE releases SET status=$2 WHERE id=$1 AND status=$3`,
+		releaseID, devops.ReleaseRolledBack, devops.ReleaseSucceeded)
+	if err != nil {
 		return devops.Release{}, err
+	}
+	if tag.RowsAffected() == 0 {
+		return devops.Release{}, fmt.Errorf("发布 %s 当前状态不可回滚（仅 succeeded 可回滚，可能已回滚过）", releaseID)
 	}
 	if _, err = tx.Exec(ctx,
 		`INSERT INTO releases (`+releaseCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
@@ -1015,13 +1062,22 @@ func (s *Store) PromoteRelease(ctx context.Context, srcReleaseID, targetEnvID st
 	if err != nil {
 		return devops.Release{}, err
 	}
-	rel, err := s.CreateRelease(ctx, devops.ReleaseInput{
+	// 继承源 workload 的服务定位（promote=同服务晋升到下一环境）。Release 记录不持久化
+	// Service——经 src.WorkloadID 反查；不继承时 CreateRelease 的基线匹配退化为
+	// (app,env,lane) 全列表取首个，多服务应用会把镜像错配到无关服务。
+	input := devops.ReleaseInput{
 		AppID:     src.AppID,
 		EnvID:     targetEnvID,
 		ImageID:   src.ImageID,
 		Strategy:  src.Strategy,
 		CreatedBy: src.CreatedBy,
-	})
+	}
+	if src.WorkloadID != "" {
+		if swl, err := s.workload.Get(ctx, src.WorkloadID); err == nil {
+			input.Service, input.ServiceID, input.LaneID = swl.Service, swl.ServiceID, swl.LaneID
+		}
+	}
+	rel, err := s.CreateRelease(ctx, input)
 	if err != nil {
 		return devops.Release{}, err
 	}
