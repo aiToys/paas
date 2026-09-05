@@ -42,7 +42,7 @@ async function act(id: string, action: 'ship' | 'close' | 'confirm') {
 const refundHint = ref('')
 function copyRefund(id: string) {
   navigator.clipboard?.writeText(id)
-  refundHint.value = `订单号 ${id} 已复制——请到平台控制台「智能体 → 工作流」运行 shop-refund-approval 完成退款审批`
+  refundHint.value = `订单号 ${id} 已复制——请到平台控制台「AI 服务 → 工作流」运行 shop-refund-approval 完成退款审批`
 }
 
 async function loadProducts() {
