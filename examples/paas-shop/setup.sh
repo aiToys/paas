@@ -49,15 +49,21 @@ resolve_app_id() {
 }
 
 # ensure_data_service 幂等建数据服务（同名跳过）。
-ensure_data_service() { # kind name engine envId extra_spec_json
+# 契约（handler resolveFromEngine 实证）：顶层 engineId 必填（引擎目录真源，kind/engine 由
+# 平台从 Engine 派生写回 spec.engine）——brief 原文 spec.engine=postgres 是无效字段（missing
+# engineId 400 被 || true 吞成虚假成功）。spec 仅放 size_gb/version 等容量参数。
+ensure_data_service() { # kind name engineId envId extra_spec_json
   local exists
   exists=$(api "$PAAS_API/api/dataservices?kind=$1" | python3 -c "
 import sys,json
 for d in json.load(sys.stdin)['data']:
     if d['name']=='$2': print(d['id']); break" 2>/dev/null || true)
   if [ -n "$exists" ]; then echo "  已存在 $2 ($exists)"; return 0; fi
-  api -X POST "$PAAS_API/api/dataservices" -H "Content-Type: application/json" \
-    -d "{\"kind\":\"$1\",\"name\":\"$2\",\"envId\":\"$4\",\"spec\":{\"engine\":\"$3\"$5}}" | jget "['data']['id']" >/dev/null && echo "  已创建 $2"
+  local resp
+  resp=$(api -X POST "$PAAS_API/api/dataservices" -H "Content-Type: application/json" \
+    -d "{\"engineId\":\"$3\",\"name\":\"$2\",\"envId\":\"$4\",\"spec\":{$5}}")
+  [ -n "$(echo "$resp" | jget "['data']['id']")" ] && echo "  已创建 $2" \
+    || { echo "  [警告] $2 创建失败: $resp"; return 1; }
 }
 
 # ensure_workload 幂等建 workload（按 app+env+lane+service 查重）。
@@ -141,10 +147,10 @@ fi
 
 echo "== part 2: prod 全套（spec §9）=="
 
-# ① prod 数据服务（环境级数据隔离）
-ensure_data_service db shop-db-prod postgres "$ENV_PROD" ',"version":"15","size_gb":"20"'
-ensure_data_service cache shop-redis-prod redis "$ENV_PROD" ',"size_gb":"1"'
-ensure_data_service mq shop-nats-prod nats "$ENV_PROD" ',"size_gb":"1"'
+# ① prod 数据服务（环境级数据隔离）。engineId=平台引擎目录（managed 模式，平台生成凭证）。
+ensure_data_service db shop-db-prod pg-managed "$ENV_PROD" '"version":"15","size_gb":"20"'
+ensure_data_service cache shop-redis-prod redis-managed "$ENV_PROD" '"size_gb":"1"'
+ensure_data_service mq shop-nats-prod nats-managed "$ENV_PROD" '"size_gb":"1"'
 
 # 应用双绑定。bind type=具体 kind（db/cache/mq/...）非 "dataservice" 大类：
 # memory store 白名单不含 dataservice（400 吞错）；BindingInjector 只认具体 kind
@@ -165,11 +171,22 @@ echo "  双绑定完成（BindingInjector 自动注入 prod 桶 appconfig）"
 # ② prod baseline workload：6 服务 + 2 CronJob（显式命名 -prod 后缀规避 Service 撞名，事实 1）
 #    image 取自 test 同 Service workload 的 imageRef（同源复用）。
 prod_svc_image() { # svc_name
+  # image 优先（完整 registry:tag 或 registry@digest 可拉）；imageRef 经 Release 滚动后是
+  # 裸 digest（sha256:... 无 registry 前缀，kubelet 拉不动 → ImagePullBackOff 卡 deploying）。
+  # image 也是裸 digest 时，借同 app 任一完整引用（...@sha256:...）拼 registry 前缀。
   api "$PAAS_API/api/applications/$APP_ID/workloads" | python3 -c "
 import sys,json
-for w in json.load(sys.stdin)['data']:
+ws=json.load(sys.stdin)['data']
+img=''
+for w in ws:
     if w.get('service')=='$1' and w.get('envId')=='$ENV_TEST' and w.get('type')=='service':
-        print(w.get('imageRef') or w['image']); break" 2>/dev/null || true
+        img=w.get('image') or w.get('imageRef') or ''; break
+if img.startswith('sha256:'):
+    for x in ws:
+        xi=x.get('image') or ''
+        if '@' in xi and not xi.startswith('sha256:'):
+            img=xi.split('@')[0]+'@'+img; break
+print(img)" 2>/dev/null || true
 }
 for svc in product recommend order chatbot bff frontend; do
   IMG=$(prod_svc_image "$svc")
@@ -261,6 +278,14 @@ ensure_appconfig "$ENV_PROD" "RECOMMEND_SERVICE_URL" "http://paas-shop-recommend
 ensure_appconfig "$ENV_PROD" "CHATBOT_SERVICE_URL" "http://paas-shop-chatbot-prod:8083" "env"
 ensure_appconfig "$ENV_PROD" "ORDER_SERVICE_URL" "http://paas-shop-order-prod:8084" "env"
 ensure_appconfig "$ENV_PROD" "PAAS_ORDER_ACTION_TOKEN" "$ACTION_TOKEN" "secret"
+# chatbot 必需：平台 Agent 虚拟模型（agent:<id>，缺则起动即退；agent 实体租户级无环境维度，
+# test/prod 同 ID）。从 test 桶自动发现，避免硬编码 agent ID 随 seed 漂移。
+AGENT_MODEL=$(api "$PAAS_API/api/applications/$APP_ID/configs?envId=$ENV_TEST" | python3 -c "
+import sys,json
+for c in json.load(sys.stdin)['data']:
+    if c['key']=='PAAS_AGENT_MODEL': print(c['value']); break" 2>/dev/null || true)
+[ -n "$AGENT_MODEL" ] && ensure_appconfig "$ENV_PROD" "PAAS_AGENT_MODEL" "$AGENT_MODEL" "env"
+[ -z "$AGENT_MODEL" ] && echo "  [警告] test 桶无 PAAS_AGENT_MODEL，chatbot-prod 将起动失败（先在 test 配置后重跑）"
 
 # ③' sweeper TTL 按环境注入（brief 核对点③；sweeper 读 ORDER_TTL_MINUTES，分钟数）：
 # test=2 演示立等可取 / prod=30 语义化显式（fallback 恰为 30）。
