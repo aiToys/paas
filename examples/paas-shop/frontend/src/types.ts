@@ -8,3 +8,25 @@ export interface Product {
   description: string
   created_at?: string
 }
+
+// 订单行项与订单（bff /api/orders 返回结构；金额一律分（cents））
+export interface OrderItem {
+  productId: number
+  name: string
+  qty: number
+  priceCents: number
+}
+export interface Order {
+  id: string
+  userId: string
+  status: 'pending' | 'paid' | 'shipped' | 'completed' | 'refunded' | 'closed'
+  totalCents: number
+  items: OrderItem[]
+  createdAt: string
+  updatedAt: string
+}
+export interface ShopStats {
+  orders: number
+  gmvCents: number
+  byStatus: Record<string, number>
+}

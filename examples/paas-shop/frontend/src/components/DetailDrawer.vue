@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted } from 'vue'
-import type { Product } from '../types'
+import { ref, onMounted, onUnmounted } from 'vue'
+import type { Product, Order } from '../types'
 import { fmtPrice } from '../format'
+import { laneFetch } from '../lane'
 
 const props = defineProps<{ product: Product | null }>()
 const emit = defineEmits<{ close: []; ask: [product: Product] }>()
@@ -16,6 +17,24 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
 function fmtDate(s: string) {
   const d = new Date(s)
   return isNaN(d.getTime()) ? s : d.toLocaleString('zh-CN')
+}
+
+// 下单/支付（经 laneFetch 自动带泳道；bff 注入 X-Action-Token，前端不感知）
+const orderMsg = ref('')
+async function buy() {
+  if (!props.product) return
+  const resp = await laneFetch('/api/orders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ userId: 'guest', items: [{ productId: props.product.id, qty: 1 }] }),
+  })
+  orderMsg.value = resp.ok ? '下单成功，请在运营视图或订单列表支付' : `下单失败：${await resp.text()}`
+}
+async function payLatest() {
+  const list: Order[] = await laneFetch('/api/orders?status=pending').then(r => r.json())
+  if (!list.length) { orderMsg.value = '无待支付订单'; return }
+  const resp = await laneFetch(`/api/orders/${list[0].id}/pay`, { method: 'POST' })
+  orderMsg.value = resp.ok ? `订单 ${list[0].id} 已支付` : `支付失败：${await resp.text()}`
 }
 </script>
 
@@ -38,7 +57,12 @@ function fmtDate(s: string) {
           </div>
         </div>
         <div class="drawer-foot">
-          <button class="ask-btn" @click="emit('ask', props.product)">💬 问客服</button>
+          <div class="actions">
+            <button class="ask-btn" @click="emit('ask', props.product)">💬 问客服</button>
+            <button class="buy-btn" @click="buy">立即下单</button>
+            <button class="pay-btn" @click="payLatest">支付最新订单</button>
+          </div>
+          <p v-if="orderMsg" class="order-msg">{{ orderMsg }}</p>
         </div>
       </div>
     </div>
@@ -57,8 +81,14 @@ function fmtDate(s: string) {
 .drawer-price { color: #e74c3c; font-weight: 700; font-size: 28px; margin-bottom: 14px; }
 .drawer-meta { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #5a6a7a; }
 .drawer-foot { padding: 12px 18px; border-top: 1px solid #eee; }
-.ask-btn { width: 100%; background: #667eea; color: #fff; border: none; border-radius: 10px; padding: 10px 0; font-size: 14px; cursor: pointer; }
+.actions { display: flex; gap: 8px; }
+.ask-btn { flex: 1; background: #667eea; color: #fff; border: none; border-radius: 10px; padding: 10px 0; font-size: 14px; cursor: pointer; }
 .ask-btn:hover { background: #5a72d8; }
+.buy-btn { flex: 1; background: #e74c3c; color: #fff; border: none; border-radius: 10px; padding: 10px 0; font-size: 14px; cursor: pointer; }
+.buy-btn:hover { background: #d34532; }
+.pay-btn { flex: 1; background: #30a46c; color: #fff; border: none; border-radius: 10px; padding: 10px 0; font-size: 14px; cursor: pointer; }
+.pay-btn:hover { background: #2a9162; }
+.order-msg { margin-top: 10px; font-size: 13px; color: #5a6a7a; line-height: 1.5; }
 
 /* 右侧滑出过渡 */
 .drawer-enter-active, .drawer-leave-active { transition: opacity .2s; }

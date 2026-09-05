@@ -2,12 +2,18 @@
 import { ref, computed, onMounted } from 'vue'
 import type { Product } from './types'
 import { fmtPrice } from './format'
-import { lane, setLane, laneFetch } from './lane'
+import { lane, setLane, laneFetch, detectEnv } from './lane'
 import SearchBar from './components/SearchBar.vue'
 import ProductCard from './components/ProductCard.vue'
 import DetailDrawer from './components/DetailDrawer.vue'
 import ChatWindow from './components/ChatWindow.vue'
 import NotificationCenter from './components/NotificationCenter.vue'
+import AdminPanel from './components/AdminPanel.vue'
+
+// 环境推断（spec §10 三套域名）：hostname 定环境，红生产/绿测试/蓝泳道（spec §11）
+const env = detectEnv(window.location.hostname)
+// 商店/运营视图切换（AdminPanel：订单管理 + 经营统计 + 商品上新）
+const view = ref<'shop' | 'admin'>('shop')
 
 const products = ref<Product[]>([])
 const recommends = ref<Product[]>([])
@@ -90,6 +96,7 @@ onMounted(() => {
   <div class="app">
     <header class="hdr">
       <div class="logo">🛍️ PaasShop</div>
+      <span class="env-badge" :class="env.kind">{{ env.kind === 'lane' ? `泳道 ${env.lane}` : env.kind === 'prod' ? '生产' : '测试' }}</span>
       <div class="tag">智能商品服务 · 演示微服务 + AI 客服 + 全链路可观测</div>
       <div class="lane-box" title="泳道演示：输入 lane 名（如 feature-x）使请求带 x-paas-lane 染色，走对应泳道实例；留空 = 基线">
         <span class="lane-label">🚧 泳道</span>
@@ -102,10 +109,20 @@ onMounted(() => {
         <span class="served-svc">{{ servedBy }}</span>
       </div>
       <NotificationCenter />
+      <button class="chat-btn" @click="view = view === 'shop' ? 'admin' : 'shop'">
+        {{ view === 'shop' ? '运营视图' : '返回商店' }}
+      </button>
       <button class="chat-btn" @click="chatRef?.open()">💬 智能客服</button>
     </header>
 
-    <main class="main">
+    <!-- 泳道横幅（仅 lane 环境）：hostname 染色生效提示 -->
+    <div v-if="env.kind === 'lane'" class="lane-banner">泳道演示环境 {{ env.lane }} —— 流量已染色</div>
+
+    <main v-if="view === 'admin'" class="main main-admin">
+      <AdminPanel />
+    </main>
+
+    <main v-else class="main">
       <section class="products">
         <h2>全部商品（bff → product → postgres）</h2>
         <SearchBar :categories="allCategories" @search="onSearch" />
@@ -164,4 +181,12 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
 .rec-price { color: #e74c3c; font-weight: 600; }
 .empty { color: #95a5a6; font-size: 14px; padding: 20px; }
 .err { color: #e74c3c; }
+/* 环境徽标（spec §11：红生产/绿测试/蓝泳道）+ 泳道横幅（仅 lane 环境） */
+.env-badge { padding: 2px 10px; border-radius: 10px; font-size: 12px; color: #fff; white-space: nowrap; }
+.env-badge.prod { background: #e5484d; }
+.env-badge.test { background: #30a46c; }
+.env-badge.lane { background: #3e63dd; }
+.lane-banner { background: #eef4ff; color: #3e63dd; padding: 6px 16px; font-size: 13px; }
+/* 运营视图单列（商店主体是 1fr+320px 两列，AdminPanel 占满） */
+.main-admin { grid-template-columns: 1fr; }
 </style>
