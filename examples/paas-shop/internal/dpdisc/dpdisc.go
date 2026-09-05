@@ -5,8 +5,9 @@
 // bff 经本包发现下游 product/recommend/chatbot，替代硬编码 Service URL，
 // 演示「控制面只存期望态、数据面读真实运行态」的解耦。
 //
-// 端点：{PAAS_API_BASE}/dp/instances?service=<name>&lane=<lane>（Bearer dp token = API Key）。
-// PAAS_DP_URL 未配 -> 不启用（调用方用静态 URL 兜底）。
+// 端点：{PAAS_DP_ENDPOINT}/instances?service=<name>&lane=<lane>（Bearer dp token = API Key）。
+// /dp/* 是平台裸 JSON 契约例外（无 {data} 包裹；instance 字段为 ip/port 而非 addr）。
+// PAAS_DP_ENDPOINT 未配 -> 不启用（调用方用静态 URL 兜底）。
 package dpdisc
 
 import (
@@ -15,17 +16,30 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
-// Instance 一个 ready 实例（Addr=ip:port）。
+// Instance 一个 ready 实例（/dp/instances 裸 JSON 字段：ip/port/laneId）。
 type Instance struct {
-	Addr   string            `json:"addr"`
-	Status string            `json:"status"`
-	Meta   map[string]string `json:"meta,omitempty"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	IP   string `json:"ip"`
+	Port int    `json:"port"`
+	Lane string `json:"laneId"`
+}
+
+// addr 拼访问地址（ip:port）。
+func (i Instance) addr() string {
+	if i.IP == "" || i.Port == 0 {
+		return ""
+	}
+	return net.JoinHostPort(i.IP, strconv.Itoa(i.Port))
 }
 
 // Discoverer 封装 /dp/instances 查询 + 短缓存（10s，防每请求打平台）。
@@ -44,15 +58,18 @@ type cacheEnt struct {
 	instances []Instance
 }
 
-// New 从 env 构造：PAAS_DP_URL（如 http://paas-core.paas.svc.cluster.local）+ PAAS_DP_TOKEN（API Key）。
-// url 空 -> nil（不启用）。
+// New 从 env 构造：PAAS_DP_ENDPOINT（平台 controller 注入，如 http://paas-core.paas.svc.cluster.local/dp）
+// + PAAS_DP_TOKEN（API Key）。endpoint 空 -> nil（不启用）。
 func New() *Discoverer {
-	u := os.Getenv("PAAS_DP_URL")
+	u := os.Getenv("PAAS_DP_ENDPOINT")
+	if u == "" {
+		u = os.Getenv("PAAS_DP_URL") // 兼容旧名（本地 dev 直连）
+	}
 	if u == "" {
 		return nil
 	}
 	return &Discoverer{
-		base:    u,
+		base:    strings.TrimRight(u, "/"),
 		token:   os.Getenv("PAAS_DP_TOKEN"),
 		http:    &http.Client{Timeout: 3 * time.Second},
 		cache:   map[string]cacheEnt{},
@@ -84,21 +101,18 @@ func (d *Discoverer) Instances(ctx context.Context, service, lane string) []Inst
 }
 
 // Addr 取一个可用地址（http://ip:port）。无实例返空（调用方兜底静态 URL）。
+// 平台侧仅返回 ready 实例，此处直接取首个有地址的。
 func (d *Discoverer) Addr(ctx context.Context, service, lane string) string {
-	ins := d.Instances(ctx, service, lane)
-	for _, i := range ins {
-		if i.Status == "healthy" && i.Addr != "" {
-			return "http://" + i.Addr
+	for _, i := range d.Instances(ctx, service, lane) {
+		if a := i.addr(); a != "" {
+			return "http://" + a
 		}
-	}
-	if len(ins) > 0 && ins[0].Addr != "" { // 无 healthy 标记也取首个（平台侧均为 ready 才返回）
-		return "http://" + ins[0].Addr
 	}
 	return ""
 }
 
 func (d *Discoverer) fetch(ctx context.Context, service, lane string) []Instance {
-	u := fmt.Sprintf("%s/dp/instances?service=%s", d.base, service)
+	u := fmt.Sprintf("%s/instances?service=%s", d.base, service)
 	if lane != "" {
 		u += "&lane=" + lane
 	}
@@ -118,14 +132,12 @@ func (d *Discoverer) fetch(ctx context.Context, service, lane string) []Instance
 	if resp.StatusCode != http.StatusOK {
 		return nil
 	}
-	// {data:T} 包裹契约（与平台 API 统一）。
+	// /dp/* 裸 JSON 契约（平台例外，无 {data} 包裹）。
 	var out struct {
-		Data struct {
-			Instances []Instance `json:"instances"`
-		} `json:"data"`
+		Instances []Instance `json:"instances"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
 		return nil
 	}
-	return out.Data.Instances
+	return out.Instances
 }
