@@ -206,6 +206,12 @@ func handleCreate(db *pgxpool.Pool, np *natspub.Publisher) http.HandlerFunc {
 				http.Error(w, "productId/qty 必须为正", http.StatusBadRequest)
 				return
 			}
+			// qty 上限防 total_cents 溢出（INT 上限 ~21.4 亿分；单价 299 万分 × qty 超限即
+			// PG integer out of range → 500 脱敏）。业务上限 400 而非 500。
+			if it.Qty > 10000 {
+				http.Error(w, "qty 超出单笔上限 10000", http.StatusBadRequest)
+				return
+			}
 		}
 		o, err := createOrder(r.Context(), db, np, req)
 		if err != nil {
