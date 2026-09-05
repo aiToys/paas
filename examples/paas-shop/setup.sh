@@ -2,6 +2,13 @@
 # setup.sh —— paas-shop 演示资源初始化（spec §9 七步 + 演示编排）。
 # 幂等：先查后建，重复执行安全。域名统一 *.example.com（对外演示材料不泄漏内网地址）；
 # 本机访问演示域名：curl -H 'Host: shop.example.com' http://<集群入口>/ 或 hosts 解析。
+#
+# 对 brief 的实测偏差（openapi/handler 实证，2026-09-05）：
+# 1. cron_image 不按 tag 子串匹配（Image.Tag=<branch>-<commit8>[-<argsHash8>]，buildArgs 只进
+#    sha256 哈希不含 SERVICE 名）——改走 buildruns 列表按 buildArgs.SERVICE 取最近成功构建的
+#    imageId，再查 /api/images/{id} 拼 registry:tag；支持 SWEEPER_IMG env 手工覆盖。
+# 2. sweeper TTL 按环境显式注入 appconfig ORDER_TTL_MINUTES：test=2（演示立等可取）/prod=30
+#    （sweeper 二进制 fallback 恰为 30，显式化语义）。
 set -euo pipefail
 
 PAAS_API="${PAAS_API:-http://paas.k8s.dd}"
@@ -115,3 +122,131 @@ for g in json.load(sys.stdin)['data']:
 else
   echo "  [跳过] test 环境无 mq 实例（shop-nats）——请先确认数据服务"
 fi
+
+echo "== part 2: prod 全套（spec §9）=="
+
+# ① prod 数据服务（环境级数据隔离）
+ensure_data_service db shop-db-prod postgres "$ENV_PROD" ',"version":"15","size_gb":"20"'
+ensure_data_service cache shop-redis-prod redis "$ENV_PROD" ',"size_gb":"1"'
+ensure_data_service mq shop-nats-prod nats "$ENV_PROD" ',"size_gb":"1"'
+
+# 应用双绑定（bind type 按平台契约：dataservice/<id>）
+for ds in shop-db-prod shop-redis-prod shop-nats-prod; do
+  DS_ID=$(api "$PAAS_API/api/dataservices" | python3 -c "
+import sys,json
+for d in json.load(sys.stdin)['data']:
+    if d['name']=='$ds': print(d['id']); break" 2>/dev/null || true)
+  if [ -n "$DS_ID" ]; then
+    api -X POST "$PAAS_API/api/applications/$APP_ID/bindings" -H "Content-Type: application/json" \
+      -d "{\"type\":\"dataservice\",\"name\":\"$ds\"}" >/dev/null 2>&1 || true
+  fi
+done
+echo "  双绑定完成（BindingInjector 自动注入 prod 桶 appconfig）"
+
+# ② prod baseline workload：6 服务 + 2 CronJob（显式命名 -prod 后缀规避 Service 撞名，事实 1）
+#    image 取自 test 同 Service workload 的 imageRef（同源复用）。
+prod_svc_image() { # svc_name
+  api "$PAAS_API/api/applications/$APP_ID/workloads" | python3 -c "
+import sys,json
+for w in json.load(sys.stdin)['data']:
+    if w.get('service')=='$1' and w.get('envId')=='$ENV_TEST' and w.get('type')=='service':
+        print(w.get('imageRef') or w['image']); break" 2>/dev/null
+}
+for svc in product recommend order chatbot bff frontend; do
+  IMG=$(prod_svc_image "$svc")
+  [ -z "$IMG" ] && { echo "  [警告] $svc 无 test 镜像可复用，跳过"; continue; }
+  cat > /tmp/wl-prod.json <<EOF
+{
+  "appId": "$APP_ID", "envId": "$ENV_PROD", "laneId": "default",
+  "service": "$svc", "type": "service", "name": "paas-shop-$svc-prod",
+  "image": "$IMG", "replicas": 1,
+  "port": $( [ "$svc" = "bff" ] && echo 8080 || ([ "$svc" = "frontend" ] && echo 80 || ([ "$svc" = "product" ] && echo 8081 || ([ "$svc" = "recommend" ] && echo 8082 || ([ "$svc" = "chatbot" ] && echo 8083 || echo 8084))))),
+  "resources": {"cpuRequest": "100m", "cpuLimit": "500m", "memRequest": "128Mi", "memLimit": "256Mi"}
+}
+EOF
+  ensure_workload /tmp/wl-prod.json
+done
+
+# CronJob：sweeper-prod（TTL=30min）+ statsworker-prod（恢复部署）
+# cron_image 解析某 SERVICE 最近一次成功构建的镜像全量引用（registry:tag）。
+# 实测偏差（见文件头注释 1）：tag 只含 buildArgs 哈希不含 SERVICE 名，改走 buildruns 列表
+# （两 Store 实现均 StartedAt 降序，首个匹配=该 SERVICE 最近成功构建）。
+cron_image() { # buildArgs SERVICE
+  local bid
+  bid=$(api "$PAAS_API/api/applications/$APP_ID/buildruns" | python3 -c "
+import sys,json
+for b in json.load(sys.stdin)['data']:
+    if b.get('status')=='success' and (b.get('buildArgs') or {}).get('SERVICE')=='$1' and b.get('imageId'):
+        print(b['imageId']); break" 2>/dev/null || true)
+  [ -z "$bid" ] && return 0
+  api "$PAAS_API/api/images/$bid" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)['data']
+print(d['registry']+':'+d['tag'])" 2>/dev/null || true
+}
+SWEEPER_IMG="${SWEEPER_IMG:-$(cron_image sweeper)}"
+[ -n "$SWEEPER_IMG" ] && cat > /tmp/wl-sweeper-prod.json <<EOF
+{"appId":"$APP_ID","envId":"$ENV_PROD","laneId":"default","service":"sweeper","type":"cronjob",
+ "name":"paas-shop-sweeper-prod","image":"$SWEEPER_IMG","schedule":"*/5 * * * *",
+ "resources":{"cpuRequest":"50m","cpuLimit":"200m","memRequest":"64Mi","memLimit":"128Mi"}}
+EOF
+[ -n "$SWEEPER_IMG" ] && ensure_workload /tmp/wl-sweeper-prod.json
+
+# ③ prod 域名 Route：shop.example.com / → frontend-prod、/api → bff-prod（先建治理 Service 再 Route）
+ensure_gov_service() { # name
+  local exists
+  exists=$(api "$PAAS_API/api/services" | python3 -c "
+import sys,json
+for s in json.load(sys.stdin)['data']:
+    if s['name']=='$1': print(s['id']); break" 2>/dev/null || true)
+  if [ -n "$exists" ]; then echo "$exists"; return 0; fi
+  api -X POST "$PAAS_API/api/services" -H "Content-Type: application/json" \
+    -d "{\"name\":\"$1\"}" | jget "['data']['id']"
+}
+SVC_FE=$(ensure_gov_service paas-shop-frontend-prod)
+SVC_BFF=$(ensure_gov_service paas-shop-bff-prod)
+ensure_route() { # name host path serviceId
+  local exists
+  exists=$(api "$PAAS_API/api/routes" | python3 -c "
+import sys,json
+for r in json.load(sys.stdin)['data']:
+    if r['name']=='$1': print('yes'); break" 2>/dev/null || true)
+  [ "$exists" = "yes" ] && { echo "  已存在 Route $1"; return 0; }
+  api -X POST "$PAAS_API/api/routes" -H "Content-Type: application/json" \
+    -d "{\"name\":\"$1\",\"host\":\"$2\",\"path\":\"$3\",\"serviceId\":\"$4\",\"methods\":[\"ANY\"],\"enabled\":true}" >/dev/null
+  echo "  已创建 Route $1（$2$3）"
+}
+ensure_route shop-prod-root shop.example.com / "$SVC_FE"
+ensure_route shop-prod-api shop.example.com /api "$SVC_BFF"
+# test 域名同构（对齐三套域名方案 spec §10）
+SVC_FE_T=$(ensure_gov_service paas-shop-frontend)
+SVC_BFF_T=$(ensure_gov_service paas-shop-bff)
+ensure_route shop-test-root shop.test.example.com / "$SVC_FE_T"
+ensure_route shop-test-api shop.test.example.com /api "$SVC_BFF_T"
+
+# ④ bff prod 环境配置（按环境隔离，spec §9④）
+ensure_appconfig "$ENV_PROD" "PRODUCT_SERVICE_URL" "http://paas-shop-product-prod:8081" "env"
+ensure_appconfig "$ENV_PROD" "RECOMMEND_SERVICE_URL" "http://paas-shop-recommend-prod:8082" "env"
+ensure_appconfig "$ENV_PROD" "CHATBOT_SERVICE_URL" "http://paas-shop-chatbot-prod:8083" "env"
+ensure_appconfig "$ENV_PROD" "ORDER_SERVICE_URL" "http://paas-shop-order-prod:8084" "env"
+ensure_appconfig "$ENV_PROD" "PAAS_ORDER_ACTION_TOKEN" "$ACTION_TOKEN" "secret"
+
+# ③' sweeper TTL 按环境注入（brief 核对点③；sweeper 读 ORDER_TTL_MINUTES，分钟数）：
+# test=2 演示立等可取 / prod=30 语义化显式（fallback 恰为 30）。
+ensure_appconfig "$ENV_TEST" "ORDER_TTL_MINUTES" "2" "env"
+ensure_appconfig "$ENV_PROD" "ORDER_TTL_MINUTES" "30" "env"
+
+# ⑤ 发布顺序：无操作（事实 3：prod-bj 天然晋升目标，e2e 断言覆盖）
+
+# ⑥ 备份记录（backup 前端入口演示）
+DB_PROD_ID=$(api "$PAAS_API/api/dataservices" | python3 -c "
+import sys,json
+for d in json.load(sys.stdin)['data']:
+    if d['name']=='shop-db-prod': print(d['id']); break" 2>/dev/null || true)
+if [ -n "$DB_PROD_ID" ]; then
+  api -X POST "$PAAS_API/api/backups" -H "Content-Type: application/json" \
+    -d "{\"resourceId\":\"$DB_PROD_ID\",\"name\":\"shop-db-prod 每日备份\"}" >/dev/null 2>&1 || true
+  echo "  备份记录已建（shop-db-prod）"
+fi
+
+echo "== setup part 2 完成 =="
