@@ -5,7 +5,9 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -62,6 +64,26 @@ var (
 func init() { prometheus.MustRegister(orderCreated, orderAmount) }
 
 var actionToken string // env PAAS_ORDER_ACTION_TOKEN；空=不校验（本地 dev）
+
+// actionWhitelist 状态动作白名单（POST /orders/{id}/{action} 可用动作）。
+var actionWhitelist = map[string]bool{
+	"pay": true, "ship": true, "confirm": true, "refund": true, "close": true,
+}
+
+// eventNames 动作 → 事件类型（事件表事实用过去式，spec §4；显式枚举防拼接泄漏内部动作名）。
+// 注意 confirm → order.confirmed（动作过去式）而非状态值 order.completed。
+var eventNames = map[string]string{
+	"pay": "order.paid", "ship": "order.shipped", "confirm": "order.confirmed",
+	"refund": "order.refunded", "close": "order.closed",
+}
+
+// sentinel 错误：handler 经 errors.Is 分类映射 HTTP 状态码（禁中文子串匹配）。
+var (
+	ErrProductNotFound   = errors.New("商品不存在")
+	ErrOrderNotFound     = errors.New("订单不存在")
+	ErrInsufficientStock = errors.New("库存不足")
+	ErrIllegalTransition = errors.New("非法状态迁移")
+)
 
 // newOrderID 生成 ORD-<unixnano 后 10 位>（spec §3）。
 func newOrderID() string {
@@ -152,9 +174,11 @@ func buildMux(db *pgxpool.Pool, np *natspub.Publisher) *http.ServeMux {
 }
 
 // requireToken 变更类端点鉴权：X-Action-Token == env（env 空跳过，本地 dev）。
+// 常量时间比较防时序侧信道（与主仓 pipeline webhook trigger 同款先例）。
 func requireToken(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if actionToken != "" && r.Header.Get("X-Action-Token") != actionToken {
+		if actionToken != "" &&
+			subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Action-Token")), []byte(actionToken)) != 1 {
 			http.Error(w, "invalid action token", http.StatusUnauthorized)
 			return
 		}
@@ -185,12 +209,15 @@ func handleCreate(db *pgxpool.Pool, np *natspub.Publisher) http.HandlerFunc {
 		}
 		o, err := createOrder(r.Context(), db, np, req)
 		if err != nil {
-			if strings.Contains(err.Error(), "库存不足") {
+			switch {
+			case errors.Is(err, ErrProductNotFound):
+				http.Error(w, err.Error(), http.StatusBadRequest)
+			case errors.Is(err, ErrInsufficientStock):
 				http.Error(w, err.Error(), http.StatusConflict)
-				return
+			default:
+				slog.Error("下单失败", "err", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
 			}
-			slog.Error("下单失败", "err", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 		orderCreated.Inc()
@@ -215,7 +242,7 @@ func createOrder(ctx context.Context, db *pgxpool.Pool, np *natspub.Publisher, r
 		err := tx.QueryRow(ctx,
 			`SELECT name, price FROM products WHERE id=$1 FOR UPDATE`, it.ProductID).Scan(&name, &price)
 		if err != nil {
-			return Order{}, fmt.Errorf("商品不存在: %d", it.ProductID)
+			return Order{}, fmt.Errorf("%w: %d", ErrProductNotFound, it.ProductID)
 		}
 		cents := int(math.Round(price * 100))
 		items = append(items, Item{ProductID: it.ProductID, Name: name, Qty: it.Qty, PriceCents: cents})
@@ -224,9 +251,11 @@ func createOrder(ctx context.Context, db *pgxpool.Pool, np *natspub.Publisher, r
 
 	o := Order{ID: newOrderID(), UserID: req.UserID, Status: StatusPending, TotalCents: total, Items: items}
 	itemsJSON, _ := json.Marshal(items)
-	if _, err := tx.Exec(ctx,
-		`INSERT INTO orders(id,user_id,status,total_cents,items) VALUES($1,$2,$3,$4,$5)`,
-		o.ID, o.UserID, o.Status, o.TotalCents, itemsJSON); err != nil {
+	// RETURNING 读回 DB 生成的时间戳，create 响应与 GET 口径一致。
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO orders(id,user_id,status,total_cents,items) VALUES($1,$2,$3,$4,$5)
+		 RETURNING created_at, updated_at`,
+		o.ID, o.UserID, o.Status, o.TotalCents, itemsJSON).Scan(&o.CreatedAt, &o.UpdatedAt); err != nil {
 		return Order{}, err
 	}
 	for _, it := range items {
@@ -236,14 +265,13 @@ func createOrder(ctx context.Context, db *pgxpool.Pool, np *natspub.Publisher, r
 			return Order{}, err
 		}
 		if tag.RowsAffected() == 0 {
-			return Order{}, fmt.Errorf("库存不足: 商品 %s 剩余不足 %d", it.Name, it.Qty)
+			return Order{}, fmt.Errorf("%w: 商品 %s 剩余不足 %d", ErrInsufficientStock, it.Name, it.Qty)
 		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Order{}, err
 	}
 	publishEvent(np, "order.created", o)
-	// 记录行版本（GET 返回用 updated_at 由 DB 默认值生成，此处回读省略——create 响应够用）。
 	return o, nil
 }
 
@@ -251,18 +279,21 @@ func createOrder(ctx context.Context, db *pgxpool.Pool, np *natspub.Publisher, r
 // refund/close 回补库存 → 更新状态 → 提交后发事件。
 func handleAction(db *pgxpool.Pool, np *natspub.Publisher, id, action string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := map[string]bool{"pay": true, "ship": true, "confirm": true, "refund": true, "close": true}[action]; !ok {
+		if !actionWhitelist[action] {
 			http.Error(w, "unknown action", http.StatusNotFound)
 			return
 		}
 		o, err := applyAction(r.Context(), db, np, id, action)
 		if err != nil {
-			if strings.Contains(err.Error(), "不允许") || strings.Contains(err.Error(), "不存在") {
+			switch {
+			case errors.Is(err, ErrOrderNotFound):
+				http.Error(w, err.Error(), http.StatusNotFound)
+			case errors.Is(err, ErrIllegalTransition):
 				http.Error(w, err.Error(), http.StatusConflict)
-				return
+			default:
+				slog.Error("订单动作失败", "id", id, "action", action, "err", err)
+				http.Error(w, "internal error", http.StatusInternalServerError)
 			}
-			slog.Error("订单动作失败", "id", id, "action", action, "err", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
 			return
 		}
 		writeJSON(w, http.StatusOK, o)
@@ -283,13 +314,13 @@ func applyAction(ctx context.Context, db *pgxpool.Pool, np *natspub.Publisher, i
 		`SELECT id,user_id,status,total_cents,items,created_at,updated_at FROM orders WHERE id=$1 FOR UPDATE`,
 		id).Scan(&o.ID, &o.UserID, &o.Status, &o.TotalCents, &itemsJSON, &o.CreatedAt, &o.UpdatedAt)
 	if err != nil {
-		return Order{}, fmt.Errorf("订单不存在: %s", id)
+		return Order{}, fmt.Errorf("%w: %s", ErrOrderNotFound, id)
 	}
 	_ = json.Unmarshal(itemsJSON, &o.Items)
 
 	to, err := Transition(o.Status, action)
 	if err != nil {
-		return Order{}, err
+		return Order{}, fmt.Errorf("%w: %v", ErrIllegalTransition, err)
 	}
 	// 退款/关单回补库存（spec §3：refunded/closed 均回补）。
 	if action == "refund" || action == "close" {
@@ -308,7 +339,7 @@ func applyAction(ctx context.Context, db *pgxpool.Pool, np *natspub.Publisher, i
 		return Order{}, err
 	}
 	o.Status = to
-	publishEvent(np, "order."+action, o)
+	publishEvent(np, eventNames[action], o)
 	return o, nil
 }
 
@@ -326,15 +357,10 @@ func publishEvent(np *natspub.Publisher, typ string, o Order) {
 
 func handleList(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// 参数与占位符同步构造（pgx 要求严格匹配；与 product buildSearchQuery 同模式）。
-		status := r.URL.Query().Get("status")
-		args := []any{}
-		if status != "" {
-			args = append(args, status)
-		}
+		where, args := statusFilter(r.URL.Query().Get("status"))
 		rows, err := db.Query(r.Context(),
 			`SELECT id,user_id,status,total_cents,items,created_at,updated_at FROM orders`+
-				whereStatus(status)+` ORDER BY created_at DESC LIMIT 100`,
+				where+` ORDER BY created_at DESC LIMIT 100`,
 			args...)
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -349,15 +375,22 @@ func handleList(db *pgxpool.Pool) http.HandlerFunc {
 			}
 			list = append(list, o)
 		}
+		// 遍历中断（网络/服务端错误）必须显式感知，否则截断列表伪装成 200。
+		if err := rows.Err(); err != nil {
+			slog.Error("订单列表遍历失败", "err", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
 		writeJSON(w, http.StatusOK, list)
 	}
 }
 
-func whereStatus(status string) string {
-	if status != "" {
-		return ` WHERE status=$1`
+// statusFilter status 过滤条件与参数同步构造（pgx 要求占位符与参数严格匹配，空条件零参数）。
+func statusFilter(status string) (string, []any) {
+	if status == "" {
+		return "", nil
 	}
-	return ``
+	return ` WHERE status=$1`, []any{status}
 }
 
 // handleGet 返回三参闭包（路由层解出 id 后注入），非 http.HandlerFunc 签名。
