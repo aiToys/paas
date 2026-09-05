@@ -350,19 +350,31 @@ EOF
       || echo "  [警告] 模板创建失败: $RESP"
   fi
 
-  # 2. 绑定 pipeline（app 作用域；service 参数在 run 触发时经 paramOverrides/inputs 传）。
+  # 2. 绑定 pipeline（app 作用域）。
+  #    paramOverrides 必带（engine 契约：build stage 的 buildArgs 只来自模板静态 params，
+  #    SERVICE 必须走 pipeline 级覆盖，key 格式 "<stageIdx>.<paramKey>"；deploy stage 的
+  #    service 同理）——缺失则构建 "no Go files in /app/paas-shop"（SERVICE 空走全量构建）。
   #    同用 ADMIN_JWT（admin 用户 tenant=t-acme，与模板同租户；模板缺失时此处 templateId 校验必 404）。
-  PIPE_EXISTS=$(curl -sS -H "Authorization: Bearer $ADMIN_JWT" "$PAAS_API/api/applications/$APP_ID/pipelines" | python3 -c "
+  #    已存在也 PUT 一次 paramOverrides（幂等自愈，防手工/历史漂移）。
+  PIPE_INFO=$(curl -sS -H "Authorization: Bearer $ADMIN_JWT" "$PAAS_API/api/applications/$APP_ID/pipelines" | python3 -c "
 import sys,json
 for p in json.load(sys.stdin)['data']:
-    if p['name']=='shop-release': print('yes'); break" 2>/dev/null || true)
-  if [ "$PIPE_EXISTS" != "yes" ]; then
+    if p['name']=='shop-release': print(p['id']); break" 2>/dev/null || true)
+  PIPE_PAYLOAD='{"name":"shop-release","kind":"cd","templateId":"tpl-shop-release","trigger":{"type":"manual"},
+    "paramOverrides":{"0.buildArgs":{"SERVICE":"order"},"1.service":"order"}}'
+  if [ -z "$PIPE_INFO" ]; then
     RESP=$(curl -sS -X POST "$PAAS_API/api/applications/$APP_ID/pipelines" \
       -H "Authorization: Bearer $ADMIN_JWT" -H "Content-Type: application/json" \
-      -d "{\"name\":\"shop-release\",\"kind\":\"cd\",\"templateId\":\"tpl-shop-release\",\"trigger\":{\"type\":\"manual\"}}")
-    [ -n "$(echo "$RESP" | jget "['data']['id']")" ] \
-      && echo "  已创建 pipeline shop-release（手动触发）" \
+      -d "$PIPE_PAYLOAD")
+    PIPE_INFO=$(echo "$RESP" | jget "['data']['id']")
+    [ -n "$PIPE_INFO" ] \
+      && echo "  已创建 pipeline shop-release（手动触发，SERVICE=order）" \
       || echo "  [警告] pipeline 创建失败: $RESP"
+  else
+    curl -sS -X PUT "$PAAS_API/api/applications/$APP_ID/pipelines/$PIPE_INFO" \
+      -H "Authorization: Bearer $ADMIN_JWT" -H "Content-Type: application/json" \
+      -d "$PIPE_PAYLOAD" >/dev/null
+    echo "  已对齐 pipeline shop-release paramOverrides（SERVICE=order）"
   fi
 fi
 
