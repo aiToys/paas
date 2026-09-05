@@ -35,9 +35,15 @@ api() { curl -sS -H "Authorization: Bearer $PAAS_TOKEN" "$@"; }
 jget() { python3 -c "import sys,json;d=json.load(sys.stdin);print(d$1)" 2>/dev/null || true; }
 
 # resolve_app_id 按名解析应用 ID（APP_ID 未显式指定时）。
+# 响应形态 {data:[...]}——索引前必须先取 ['data']（brief 原文 "[0]['id']" 漏层：KeyError 被
+# jget 的 2>/dev/null 吞成空串，APP_ID 恒空 → part1 整段虚假成功）。
 resolve_app_id() {
   if [ -z "$APP_ID" ]; then
-    APP_ID=$(api "$PAAS_API/api/applications" | jget "[0]['id']") # 列表首项=paas-shop（单演示应用）
+    APP_ID=$(api "$PAAS_API/api/applications" | jget "['data'][0]['id']") # 列表首项=paas-shop（单演示应用）
+  fi
+  if [ -z "$APP_ID" ]; then
+    echo "  [错误] 应用 ID 解析失败（PAAS_API=$PAAS_API 不可达或列表为空）" >&2
+    exit 1
   fi
   echo "APP_ID=$APP_ID"
 }
@@ -45,8 +51,6 @@ resolve_app_id() {
 # ensure_data_service 幂等建数据服务（同名跳过）。
 ensure_data_service() { # kind name engine envId extra_spec_json
   local exists
-  exists=$(api "$PAAS_API/api/dataservices?kind=$1" | jget "[? \"$1\"=='x'][0]['id']" 2>/dev/null)
-  # 简化：按名过滤
   exists=$(api "$PAAS_API/api/dataservices?kind=$1" | python3 -c "
 import sys,json
 for d in json.load(sys.stdin)['data']:
@@ -290,7 +294,7 @@ ADMIN_PASS="${PAAS_ADMIN_PASS:-123456}"
 ADMIN_JWT=$(curl -sS -X POST "$PAAS_API/api/auth/sessions" -H "Content-Type: application/json" \
   -d "{\"username\":\"$ADMIN_USER\",\"password\":\"$ADMIN_PASS\"}" | jget "['data']['accessToken']")
 if [ -z "$ADMIN_JWT" ]; then
-  echo "  [警告] admin 登录失败（用户 $ADMIN_USER）——跳过模板+pipeline 创建（admin 端点需 super_admin）"
+  echo "  [警告] admin 登录失败（用户 ${ADMIN_USER}）——跳过模板+pipeline 创建（admin 端点需 super_admin）"
 fi
 
 # 1. 租户自定义模板（super_admin 经 admin 端点；带 tenantId；创建后验响应含 data 堵虚假成功）
@@ -352,7 +356,7 @@ else:
         if t.get('type')=='mcp': print(t['id']+' fallback'); break" 2>/dev/null || true)
 TOOL_ID=${TOOL_INFO%% *}
 case "$TOOL_INFO" in
-  *" fallback") [ -n "$TOOL_ID" ] && echo "  [提示] 未找到名为 refund_order 的 mcp 工具，回退首个 mcp 工具 $TOOL_ID（toolName 才是方法名，功能不受影响）" ;;
+  *" fallback") [ -n "$TOOL_ID" ] && echo "  [提示] 未找到名为 refund_order 的 mcp 工具，回退首个 mcp 工具 ${TOOL_ID}（toolName 才是方法名，功能不受影响）" ;;
 esac
 WF_EXISTS=$(api "$PAAS_API/api/workflows" | python3 -c "
 import sys,json
@@ -387,7 +391,7 @@ fi
 [ -z "$TOOL_ID" ] && echo "  [警告] 未找到 mcp 类型工具，跳过 workflow 创建"
 
 echo "== setup 完成 =="
-echo "  APP_ID=$APP_ID（tenant=$TENANT_ID）"
+echo "  APP_ID=${APP_ID}（tenant=${TENANT_ID}）"
 echo "  演示域名: shop.test.example.com（test）/ shop.example.com（prod，本机 hosts 或 curl -H Host）"
 echo "  发布演示: DevOps → shop-release 手动触发（构建→部署测试→打版本→晋升生产）"
 echo "  退款演示: AI 服务 → 工作流 shop-refund-approval 触发（LLM 分析→人工审批→MCP 退款）"
