@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -204,8 +205,8 @@ func startCacheInvalidator(natsURL string) {
 		if err := json.Unmarshal(msg.Data, &evt); err != nil {
 			return
 		}
-		// product.changed / product.bulk-seed 都触发全量失效（按 category 精细失效留后续）
-		if evt.Type == "product.changed" || evt.Type == "product.bulk-seed" {
+		// product.* 事件（created/changed/bulk-seed…）均触发全量失效（按 category 精细失效留后续）
+		if strings.HasPrefix(evt.Type, "product.") {
 			iter := rdb.Scan(context.Background(), 0, "recommend:*", 0).Iterator()
 			var deleted int64
 			for iter.Next(context.Background()) {

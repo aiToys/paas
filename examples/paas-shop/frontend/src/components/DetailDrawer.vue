@@ -55,13 +55,14 @@ async function payLatest() {
           <button class="drawer-close" @click="emit('close')">×</button>
         </div>
         <div class="drawer-body">
+          <img v-if="props.product.imageUrl" class="drawer-img" :src="props.product.imageUrl" :alt="props.product.name" />
           <div class="card-cat">{{ props.product.category }}</div>
           <div class="drawer-name">{{ props.product.name }}</div>
           <div class="drawer-desc">{{ props.product.description }}</div>
           <div class="drawer-price">{{ fmtPrice(props.product.price) }}</div>
           <div class="drawer-meta">
             <span>库存 {{ props.product.stock }}</span>
-            <span v-if="props.product.created_at">上架时间：{{ fmtDate(props.product.created_at) }}</span>
+            <span v-if="props.product.createdAt">上架时间：{{ fmtDate(props.product.createdAt) }}</span>
           </div>
         </div>
         <div class="drawer-foot">
@@ -83,6 +84,7 @@ async function payLatest() {
 .drawer-hdr { display: flex; justify-content: space-between; align-items: center; padding: 14px 18px; border-bottom: 1px solid #eee; font-weight: 600; }
 .drawer-close { background: none; border: none; font-size: 24px; cursor: pointer; color: #95a5a6; }
 .drawer-body { flex: 1; overflow-y: auto; padding: 20px 18px; }
+.drawer-img { width: 100%; height: 160px; object-fit: cover; border-radius: 10px; margin-bottom: 12px; display: block; }
 .card-cat { display: inline-block; background: #eef; color: #667eea; font-size: 11px; padding: 2px 8px; border-radius: 4px; margin-bottom: 10px; }
 .drawer-name { font-size: 20px; font-weight: 700; margin-bottom: 10px; }
 .drawer-desc { font-size: 14px; color: #8a9bae; line-height: 1.6; margin-bottom: 18px; }

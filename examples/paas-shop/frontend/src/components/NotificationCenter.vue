@@ -3,11 +3,16 @@ import { laneFetch } from '../lane'
 import { ref, onMounted, onUnmounted } from 'vue'
 
 // 事件结构（与后端 bff /api/events 返回的 shopEvent JSON 一致）
+// 商品事件带 name/category；订单事件带 orderId/userId/status/amount（amount 单位分）。
 interface Event {
   type: string
   productId: number
   name: string
   category: string
+  orderId?: string
+  userId?: string
+  status?: string
+  amount?: number
   at: string
   receivedAt: string
 }
@@ -40,9 +45,38 @@ function typeLabel(type: string): string {
   const map: Record<string, string> = {
     'product.created': '商品上新',
     'product.updated': '商品变更',
+    'product.changed': '商品变更',
     'product.bulk-seed': '批量导入',
+    'order.created': '下单成功',
+    'order.paid': '已支付',
+    'order.shipped': '已发货',
+    'order.confirmed': '已确认',
+    'order.refunded': '已退款',
+    'order.closed': '已关闭',
   }
   return map[type] || type
+}
+
+// 订单状态中文（事件 status 字段与订单状态机一致）
+const statusLabel: Record<string, string> = {
+  pending: '待支付',
+  paid: '已支付',
+  shipped: '已发货',
+  completed: '已完成',
+  refunded: '已退款',
+  closed: '已关闭',
+}
+
+// 是否订单生命周期事件（渲染分支：订单显示单号/金额/状态，商品显示名称/分类）
+function isOrderEvent(type: string): boolean {
+  return type.startsWith('order.')
+}
+
+// 订单事件正文：#单号 ¥金额 状态（金额分转元）
+function orderText(e: Event): string {
+  const amount = e.amount != null ? `¥${(e.amount / 100).toFixed(2)}` : ''
+  const status = statusLabel[e.status || ''] || e.status || ''
+  return `#${e.orderId || '-'} ${amount} ${status}`.trim()
 }
 
 // 相对时间：x 秒前 / x 分钟前（负数或非法时间显示空串）
@@ -105,7 +139,8 @@ onUnmounted(() => {
       <div v-if="events.length === 0" class="notification-empty">暂无消息</div>
       <div v-for="(e, i) in events" :key="i" class="notification-item">
         <span class="notification-badge">{{ typeLabel(e.type) }}</span>
-        <span class="notification-name">{{ e.name }} / {{ e.category }}</span>
+        <span v-if="isOrderEvent(e.type)" class="notification-name">{{ orderText(e) }}</span>
+        <span v-else class="notification-name">{{ e.name }} / {{ e.category }}</span>
         <span class="notification-time">{{ relTime(e.receivedAt) }}</span>
       </div>
     </div>

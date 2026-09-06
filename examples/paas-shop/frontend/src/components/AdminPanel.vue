@@ -41,8 +41,30 @@ async function act(id: string, action: 'ship' | 'close' | 'confirm') {
 // 退款引导层：运营动作发生在 PaaS 控制台工作流（spec §6 叙事），这里只复制订单号。
 const refundHint = ref('')
 function copyRefund(id: string) {
-  navigator.clipboard?.writeText(id)
+  // 集群入口走 http（非 secure context）时 navigator.clipboard 不存在——降级
+  // execCommand 保演示可用，两条路径都失败则提示手动选择。
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(id).catch(() => fallbackCopy(id))
+  } else {
+    fallbackCopy(id)
+  }
   refundHint.value = `订单号 ${id} 已复制——请到平台控制台「AI 服务 → 工作流」运行 shop-refund-approval 完成退款审批`
+}
+
+// execCommand 降级：临时 textarea + 选区复制（deprecated 但 http 环境唯一可用路径）。
+function fallbackCopy(text: string) {
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.opacity = '0'
+  document.body.appendChild(ta)
+  ta.select()
+  try {
+    document.execCommand('copy')
+  } catch {
+    /* 复制失败不阻断引导——订单号已在提示文案中展示 */
+  }
+  document.body.removeChild(ta)
 }
 
 async function loadProducts() {
@@ -165,6 +187,7 @@ td button:hover { background: #5a72d8; }
 .st.shipped { background: #3e63dd; }
 .st.completed { background: #7c8698; }
 .st.refunded { background: #e5484d; }
+.st.closed { background: #6b7280; }
 .empty { color: #95a5a6; font-size: 14px; text-align: center; padding: 20px; }
 .new-product { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
 .new-product input { flex: 1; min-width: 110px; padding: 7px 10px; border: 1px solid #e3e8ef; border-radius: 8px; font-size: 13px; }

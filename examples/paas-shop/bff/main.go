@@ -34,12 +34,18 @@ var (
 	}
 )
 
+// svcSuffix 下游查询名环境后缀（prod 桶注入 "-prod"）：dpdisc 查询名与治理 Service 名
+// 同源派生。不带后缀时 bff-prod 会经数据面发现查到 test 实例（同租户同 ns，/dp/instances
+// 无环境维度），跨环境串流量（R1 审计 C2）。
+var svcSuffix = os.Getenv("PAAS_SVC_SUFFIX")
+
 // svcURL 解析下游地址：数据面发现优先（/dp/instances，含泳道感知），静态 URL 兜底。
-// 平台 K8s Service 名与工作负载名一致（paas-shop-product 等），dpdisc 按此查询。
+// 平台 K8s Service 名与工作负载名一致（test=paas-shop-product，prod=paas-shop-product-prod），
+// dpdisc 按「基线名 + 环境后缀」查询。
 func svcURL(r *http.Request, service string) string {
 	if dp.Enabled() {
 		lane := r.Header.Get("x-paas-lane")
-		if u := dp.Addr(r.Context(), "paas-shop-"+service, lane); u != "" {
+		if u := dp.Addr(r.Context(), "paas-shop-"+service+svcSuffix, lane); u != "" {
 			return u
 		}
 	}
@@ -203,13 +209,18 @@ type shopEvent struct {
 }
 
 // statsAgg 经营统计（stats-consumer 消费组累计，内存态重启清零）：
-// 订单数只计 order.created（去重口径=创建事件），GMV 同口径；ByStatus 按事件快照状态分布。
+// 维护 orderId → 最新状态映射，快照口径=「当前各状态订单数」（订单状态转移不重复计数，
+// 区别于按事件累计）；GMV 只计已成交状态（paid/shipped/completed，pending/closed/refunded 不计）。
 // 含锁实体不出包：对外一律经 snapshot() 转无锁 DTO（copylocks）。
 type statsAgg struct {
-	mu       sync.Mutex
-	orders   int
-	gmvCents int
-	byStatus map[string]int
+	mu    sync.Mutex
+	state map[string]orderStat // orderId -> 最新状态与金额
+}
+
+// orderStat 订单最新快照（事件每次全量携带，直接覆盖）。
+type orderStat struct {
+	status string
+	amount int
 }
 
 // statsSnapshot 对外无锁快照（深拷贝，防外部读与 consume 并发写 race）。
@@ -219,37 +230,36 @@ type statsSnapshot struct {
 	ByStatus map[string]int `json:"byStatus"`
 }
 
-func newStatsAgg() *statsAgg { return &statsAgg{byStatus: map[string]int{}} }
+func newStatsAgg() *statsAgg { return &statsAgg{state: map[string]orderStat{}} }
 
-// consume 解析一条 shop-events 消息累计统计（解析失败静默跳过，统计不阻断通知链路）。
+// consume 解析一条 shop-events 消息更新订单状态映射（解析失败静默跳过，统计不阻断通知链路）。
 // 只认 order.* 事件（防未来非订单事件带 status 字段误计 ByStatus）。
 func (a *statsAgg) consume(data []byte) {
 	var e shopEvent
 	if err := json.Unmarshal(data, &e); err != nil {
 		return
 	}
-	if !strings.HasPrefix(e.Type, "order.") {
+	if !strings.HasPrefix(e.Type, "order.") || e.OrderID == "" {
 		return
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if e.Type == "order.created" {
-		a.orders++
-		a.gmvCents += e.Amount
-	}
-	if e.Status != "" {
-		a.byStatus[e.Status]++
-	}
+	a.state[e.OrderID] = orderStat{status: e.Status, amount: e.Amount}
 }
 
 func (a *statsAgg) snapshot() statsSnapshot {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	byStatus := make(map[string]int, len(a.byStatus))
-	for k, v := range a.byStatus {
-		byStatus[k] = v
+	byStatus := make(map[string]int, len(a.state))
+	gmv := 0
+	for _, os := range a.state {
+		byStatus[os.status]++
+		switch os.status {
+		case "paid", "shipped", "completed": // 已成交口径：退款/关单/待支付不计 GMV
+			gmv += os.amount
+		}
 	}
-	return statsSnapshot{Orders: a.orders, GMVCents: a.gmvCents, ByStatus: byStatus}
+	return statsSnapshot{Orders: len(a.state), GMVCents: gmv, ByStatus: byStatus}
 }
 
 // eventRing 固定容量环形缓冲（mutex 保护），存最近 N 条事件供 /api/events 轮询。

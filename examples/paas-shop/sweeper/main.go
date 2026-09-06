@@ -63,34 +63,39 @@ func sweep(ctx context.Context, db *pgxpool.Pool, np *natspub.Publisher, ttl tim
 
 	closed := 0
 	for _, id := range ids {
-		if err := closeOrder(ctx, db, np, id); err != nil {
+		ok, err := closeOrder(ctx, db, np, id)
+		if err != nil {
 			slog.Warn("单笔关单失败（跳过）", "id", id, "err", err)
 			continue
 		}
-		closed++
+		if ok { // 仅累计真关单（并发支付跳过不计，防计数虚高）
+			closed++
+		}
 	}
 	return closed, nil
 }
 
 // closeOrder 事务：锁订单校验 pending → 回补库存 → 置 closed → 提交后发事件。
+// 返回 closed=false 表示订单已被并发支付等变更，本轮跳过（非错误）。
 // （独立于 order 服务实现：CronJob 直连 DB，不经 HTTP/Action-Token。）
-func closeOrder(ctx context.Context, db *pgxpool.Pool, np *natspub.Publisher, id string) error {
+func closeOrder(ctx context.Context, db *pgxpool.Pool, np *natspub.Publisher, id string) (bool, error) {
 	tx, err := db.Begin(ctx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var status string
+	var userID string
 	var totalCents int
 	var itemsJSON []byte
 	if err := tx.QueryRow(ctx,
-		`SELECT status,total_cents,items FROM orders WHERE id=$1 FOR UPDATE`, id).
-		Scan(&status, &totalCents, &itemsJSON); err != nil {
-		return err
+		`SELECT status,user_id,total_cents,items FROM orders WHERE id=$1 FOR UPDATE`, id).
+		Scan(&status, &userID, &totalCents, &itemsJSON); err != nil {
+		return false, err
 	}
 	if status != "pending" { // 已被支付/退款并发变更，跳过
-		return nil
+		return false, nil
 	}
 	var items []struct {
 		ProductID int `json:"productId"`
@@ -100,20 +105,21 @@ func closeOrder(ctx context.Context, db *pgxpool.Pool, np *natspub.Publisher, id
 	for _, it := range items {
 		if _, err := tx.Exec(ctx,
 			`UPDATE products SET stock = stock + $1 WHERE id = $2`, it.Qty, it.ProductID); err != nil {
-			return err
+			return false, err
 		}
 	}
 	if _, err := tx.Exec(ctx,
 		`UPDATE orders SET status='closed', updated_at=now() WHERE id=$1`, id); err != nil {
-		return err
+		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return err
+		return false, err
 	}
+	// payload 字段形态与 order 服务 publishEvent 对齐（含 userId，防契约漂移）
 	payload, _ := json.Marshal(map[string]any{
-		"type": "order.closed", "orderId": id, "status": "closed",
+		"type": "order.closed", "orderId": id, "userId": userID, "status": "closed",
 		"amount": totalCents, "at": time.Now().Format(time.RFC3339),
 	})
 	np.Publish("shop-events", payload)
-	return nil
+	return true, nil
 }

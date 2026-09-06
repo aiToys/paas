@@ -8,6 +8,9 @@ COPY paas-shop/frontend/ ./
 RUN npm run build
 
 FROM docker.m.daocloud.io/library/nginx:1.27-alpine
-COPY paas-shop/frontend/nginx.conf /etc/nginx/conf.d/default.conf
+# 官方镜像启动脚本 envsubst 渲染 /etc/nginx/templates/*.template 到 conf.d：
+# ${BFF_UPSTREAM} 按环境注入（prod 桶 appconfig 注入 -prod 上游），默认 test。
+ENV BFF_UPSTREAM=paas-shop-bff:8080
+COPY paas-shop/frontend/nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=builder /app/dist /usr/share/nginx/html
 EXPOSE 80

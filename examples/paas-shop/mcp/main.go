@@ -89,7 +89,7 @@ var toolSchemas = map[string]map[string]any{
 			"type": "object",
 			"properties": map[string]any{
 				"orderId": map[string]any{"type": "string", "description": "订单号"},
-				"reason":  map[string]any{"type": "string", "description": "退款原因"},
+				"reason":  map[string]any{"type": "string", "description": "退款原因（供审批工作流 LLM 分析留痕，不传给订单服务）"},
 			},
 			"required": []string{"orderId", "reason"},
 		},

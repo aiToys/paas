@@ -277,6 +277,10 @@ ensure_appconfig "$ENV_PROD" "PRODUCT_SERVICE_URL" "http://paas-shop-product-pro
 ensure_appconfig "$ENV_PROD" "RECOMMEND_SERVICE_URL" "http://paas-shop-recommend-prod:8082" "env"
 ensure_appconfig "$ENV_PROD" "CHATBOT_SERVICE_URL" "http://paas-shop-chatbot-prod:8083" "env"
 ensure_appconfig "$ENV_PROD" "ORDER_SERVICE_URL" "http://paas-shop-order-prod:8084" "env"
+# 环境维度收口（R1 审计 C1/C2）：nginx 反代上游与 dpdisc 查询名后缀——
+# 不注入则 prod 前端 API 全落 test bff / bff-prod 经数据面发现查到 test 实例。
+ensure_appconfig "$ENV_PROD" "BFF_UPSTREAM" "paas-shop-bff-prod:8080" "env"
+ensure_appconfig "$ENV_PROD" "PAAS_SVC_SUFFIX" "-prod" "env"
 ensure_appconfig "$ENV_PROD" "PAAS_ORDER_ACTION_TOKEN" "$ACTION_TOKEN" "secret"
 # chatbot 必需：平台 Agent 虚拟模型（agent:<id>，缺则起动即退；agent 实体租户级无环境维度，
 # test/prod 同 ID）。从 test 桶自动发现，避免硬编码 agent ID 随 seed 漂移。
@@ -291,6 +295,44 @@ for c in json.load(sys.stdin)['data']:
 # test=2 演示立等可取 / prod=30 语义化显式（fallback 恰为 30）。
 ensure_appconfig "$ENV_TEST" "ORDER_TTL_MINUTES" "2" "env"
 ensure_appconfig "$ENV_PROD" "ORDER_TTL_MINUTES" "30" "env"
+
+# ⑦ 配置中心动态热更新链路（R1 审计 H1/M2/M3）：
+#    H1 chatbot dynconfig 按应用名发现（GET /api/configcenter/apps/{name}/published）：
+#       应用名=paas-shop（平台唯一应用）；PAAS_CONFIG_ENV 由 controller 注入（=workload EnvID），
+#       鉴权复用 chatbot 既有 LLM Key（发现端点是数据面消费契约，已认证即可）。
+#    M3 product ccpull 轮拉 ns 维度发现：ns 名平台派生 app-<APP_ID>-<ENV>；
+#       PAAS_API_BASE 默认集群内 core 地址无需注入。
+#    M2 statsworker 回写 appconfig：注入 URL/ENV_ID，Key 与 ccpull 共用 dev Key——
+#       回写需 config:write（仅 tenant-admin），dev Key 403 走 warn 跳过。
+#       偏差记录：环境级桶注入会广播到桶内全部服务，不注入 admin Key（安全底线）；
+#       完整回写链路依赖平台「服务身份/最小权限凭证」能力（遗留债务）。
+ensure_appconfig "$ENV_TEST" "PAAS_CONFIG_APP" "paas-shop" "env"
+ensure_appconfig "$ENV_PROD" "PAAS_CONFIG_APP" "paas-shop" "env"
+ensure_appconfig "$ENV_TEST" "PAAS_CONFIGCENTER_NS" "app-$APP_ID-$ENV_TEST" "env"
+ensure_appconfig "$ENV_PROD" "PAAS_CONFIGCENTER_NS" "app-$APP_ID-$ENV_PROD" "env"
+ensure_appconfig "$ENV_TEST" "PAAS_API_KEY" "sk-acme-dev" "secret"
+ensure_appconfig "$ENV_PROD" "PAAS_API_KEY" "sk-acme-dev" "secret"
+ensure_appconfig "$ENV_TEST" "PAAS_APPCONFIG_URL" "http://paas-core.paas.svc.cluster.local" "env"
+ensure_appconfig "$ENV_PROD" "PAAS_APPCONFIG_URL" "http://paas-core.paas.svc.cluster.local" "env"
+ensure_appconfig "$ENV_TEST" "PAAS_ENV_ID" "$ENV_TEST" "env"
+ensure_appconfig "$ENV_PROD" "PAAS_ENV_ID" "$ENV_PROD" "env"
+
+#    演示配置发布（热更新链路可验）：chatbot 欢迎语 + product 分页大小（默认 20 → 5 差异可见）。
+#    upsert 后查 active 快照，缺 key 才 publish（幂等：重跑不堆版本）。
+ensure_dynconf() { # envId key value
+  api -X POST "$PAAS_API/api/applications/$APP_ID/dynamic-configs?envId=$1" \
+    -H "Content-Type: application/json" -d "{\"key\":\"$2\",\"value\":\"$3\"}" >/dev/null
+  local snap
+  snap=$(api "$PAAS_API/api/configcenter/apps/paas-shop/published?env=$1")
+  if ! echo "$snap" | grep -q "\"$2\""; then
+    api -X POST "$PAAS_API/api/applications/$APP_ID/dynamic-configs/publish?envId=$1" >/dev/null \
+      && echo "  已发布动态配置 $2（env=$1）"
+  fi
+}
+ensure_dynconf "$ENV_TEST" "welcome_message" "您好，我是商店智能客服，可以帮您查商品、下单、推荐礼物～"
+ensure_dynconf "$ENV_TEST" "product_page_size" "5"
+ensure_dynconf "$ENV_PROD" "welcome_message" "您好，我是商店智能客服，可以帮您查商品、下单、推荐礼物～"
+ensure_dynconf "$ENV_PROD" "product_page_size" "5"
 
 # ⑤ 发布顺序：无操作（事实 3：prod-bj 天然晋升目标，e2e 断言覆盖）
 

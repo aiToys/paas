@@ -36,7 +36,7 @@ type Product struct {
 	Stock       int       `json:"stock"`
 	Description string    `json:"description"`
 	ImageURL    string    `json:"imageUrl,omitempty"` // minio 图片（storage 绑定，未绑为空）
-	CreatedAt   time.Time `json:"created_at"`
+	CreatedAt   time.Time `json:"createdAt"`
 }
 
 var db *sql.DB
@@ -272,8 +272,8 @@ func productsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		// 写路径同步三索引（best-effort：失败仅 log，主流程 PG 已成功）
 		syncSearchIndexes(r.Context(), p)
-		// 发商品变更事件到 shop-events（recommend 订阅失效缓存）
-		publishProductEvent("product.changed", p)
+		// 发商品上新事件到 shop-events（recommend 订阅失效缓存、前端通知中心映射中文徽标）
+		publishProductEvent("product.created", p)
 		writeJSON(w, http.StatusCreated, p)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

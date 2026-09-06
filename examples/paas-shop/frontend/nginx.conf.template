@@ -1,0 +1,35 @@
+# paas-shop frontend nginx：serve SPA + 反代 /api 到 bff（同源，无 CORS）。
+# 模板经 nginx 官方镜像 /etc/nginx/templates/*.template 启动时 envsubst 渲染——
+# ${BFF_UPSTREAM} 由环境注入（test 默认 paas-shop-bff:8080，prod 桶注入 paas-shop-bff-prod:8080，
+# R1 审计 C1：此前写死 test bff，prod 域名全量 API 落到 test 链路）。
+# nginx 自身变量（$host/$uri 等）不在 envsubst 替换列表，不受影响。
+# SSE 透传：proxy_buffering off + X-Accel-Buffering: no（bff 已设），确保 chunk 实时到达。
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    location /api/ {
+        proxy_pass http://${BFF_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;           # SSE 关键：禁缓冲
+        proxy_cache off;
+        proxy_read_timeout 300s;       # 长连接（SSE）
+    }
+
+    # 商品图片（product 上传后 image_url=/images/<bucket>/<key>，由 bff imageProxy 服务）。
+    # 缺此转发时落到 try_files 返回 SPA HTML（R1 审计 M4）。
+    location /images/ {
+        proxy_pass http://${BFF_UPSTREAM};
+        proxy_set_header Host $host;
+        proxy_read_timeout 60s;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

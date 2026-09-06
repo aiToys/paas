@@ -8,6 +8,7 @@ defineEmits<{ click: [] }>()
 
 <template>
   <div class="card" @click="$emit('click')">
+    <img v-if="product.imageUrl" class="card-img" :src="product.imageUrl" :alt="product.name" />
     <div class="card-cat">{{ product.category }}</div>
     <div class="card-name">{{ product.name }}</div>
     <div class="card-desc">{{ product.description }}</div>
@@ -20,6 +21,7 @@ defineEmits<{ click: [] }>()
 
 <style scoped>
 .card { background: #fff; border-radius: 12px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.08); transition: transform .2s; cursor: pointer; }
+.card-img { width: 100%; height: 140px; object-fit: cover; border-radius: 8px; margin-bottom: 10px; display: block; }
 .card:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,.12); }
 .card-cat { display: inline-block; background: #eef; color: #667eea; font-size: 11px; padding: 2px 8px; border-radius: 4px; margin-bottom: 8px; }
 .card-name { font-size: 16px; font-weight: 600; margin-bottom: 6px; }

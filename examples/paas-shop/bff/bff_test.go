@@ -85,18 +85,28 @@ func TestStatsEndpoint(t *testing.T) {
 	}
 }
 
-// TestStatsAggConsume order.created 事件累计订单数/GMV/状态分布。
+// TestStatsAggConsume 按订单最新状态统计（状态转移不重复计数）。
 func TestStatsAggConsume(t *testing.T) {
 	a := newStatsAgg()
 	a.consume([]byte(`{"type":"order.created","orderId":"ORD-1","amount":9900,"status":"pending"}`))
 	a.consume([]byte(`{"type":"order.paid","orderId":"ORD-1","amount":9900,"status":"paid"}`))
-	if a.snapshot().Orders != 1 {
-		t.Fatalf("order.created 应 +1，got %d", a.snapshot().Orders)
+	// 未支付订单不计 GMV（已成交口径）
+	a.consume([]byte(`{"type":"order.created","orderId":"ORD-2","amount":100,"status":"pending"}`))
+	if a.snapshot().Orders != 2 {
+		t.Fatalf("订单数=映射 size，got %d", a.snapshot().Orders)
 	}
 	if a.snapshot().GMVCents != 9900 {
-		t.Fatalf("GMV 应 9900，got %d", a.snapshot().GMVCents)
+		t.Fatalf("GMV 应只计已成交（9900），got %d", a.snapshot().GMVCents)
 	}
-	if a.snapshot().ByStatus["paid"] != 1 {
-		t.Fatalf("状态分布应 paid=1，got %v", a.snapshot().ByStatus)
+	if a.snapshot().ByStatus["paid"] != 1 || a.snapshot().ByStatus["pending"] != 1 {
+		t.Fatalf("状态分布应 paid=1 pending=1，got %v", a.snapshot().ByStatus)
+	}
+	// ORD-1 再转移 shipped：paid 不残留（按事件累计口径会虚高）
+	a.consume([]byte(`{"type":"order.shipped","orderId":"ORD-1","amount":9900,"status":"shipped"}`))
+	if a.snapshot().ByStatus["paid"] != 0 || a.snapshot().ByStatus["shipped"] != 1 {
+		t.Fatalf("转移后 paid 不应残留，got %v", a.snapshot().ByStatus)
+	}
+	if a.snapshot().Orders != 2 {
+		t.Fatalf("状态转移不应增加订单数，got %d", a.snapshot().Orders)
 	}
 }

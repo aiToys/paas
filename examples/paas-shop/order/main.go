@@ -213,6 +213,11 @@ func handleCreate(db *pgxpool.Pool, np *natspub.Publisher) http.HandlerFunc {
 				return
 			}
 		}
+		// 行数上限同防溢出（终审 M2：单行封顶不够——100 行 × 10000 × 高单价仍超 INT32）。
+		if len(req.Items) > 100 {
+			http.Error(w, "items 超出单笔上限 100 行", http.StatusBadRequest)
+			return
+		}
 		o, err := createOrder(r.Context(), db, np, req)
 		if err != nil {
 			switch {

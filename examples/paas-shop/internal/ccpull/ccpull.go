@@ -25,8 +25,8 @@ type Puller struct {
 	apiKey  string // 平台 API Key（governance:read）
 	http    *http.Client
 
-	version  string              // 当前版本（""=首次拉取也回调）
-	snapshot map[string]string   // 当前快照
+	version  string            // 当前版本（""=首次拉取也回调）
+	snapshot map[string]string // 当前快照
 	updated  time.Time
 }
 

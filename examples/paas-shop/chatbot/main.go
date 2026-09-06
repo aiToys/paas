@@ -162,7 +162,13 @@ func main() {
 		if redisURL == "" {
 			slog.Warn("PAAS_MEMORY_MODE=redis 但 REDIS_URL 为空，降级 memory 模式")
 		} else {
-			rdb := redis.NewClient(&redis.Options{Addr: redisURL})
+			// REDIS_URL 是 URL 形态（redis://:pass@host:port），须 ParseURL 后建客户端（与 recommend 同款）
+			opt, err := redis.ParseURL(redisURL)
+			if err != nil {
+				slog.Error("redis url 解析失败", "err", err)
+				os.Exit(1)
+			}
+			rdb := redis.NewClient(opt)
 			if err := rdb.Ping(context.Background()).Err(); err != nil {
 				slog.Error("redis 连接失败", "addr", redisURL, "err", err)
 				os.Exit(1)

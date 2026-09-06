@@ -6,7 +6,8 @@ export interface Product {
   category: string
   stock: number
   description: string
-  created_at?: string
+  imageUrl?: string
+  createdAt?: string
 }
 
 // 订单行项与订单（bff /api/orders 返回结构；金额一律分（cents））
