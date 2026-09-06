@@ -8,6 +8,7 @@ import (
 
 	"strings"
 
+	"github.com/aitoys/paas/internal/safego"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
@@ -246,6 +247,7 @@ func (g *LaneGC) logf(format string, args ...any) {
 
 // Start 启动周期回收（间隔 interval，<=0 用默认 30min）。返回停止函数。
 // ctx 取消即退出（cmd/core 用 baseCtx 派生，进程退出即停）。
+// 单轮 Sweep 经 safego.Loop 防 panic（R5 审计 I-3：本循环曾有 Now nil 生产 SIGSEGV 先例）。
 func (g *LaneGC) Start(ctx context.Context, interval time.Duration) (stop func()) {
 	if interval <= 0 {
 		interval = 30 * time.Minute
@@ -260,7 +262,7 @@ func (g *LaneGC) Start(ctx context.Context, interval time.Duration) (stop func()
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				g.Sweep(ctx)
+				safego.Loop("lane-gc:sweep", func() { g.Sweep(ctx) })
 			}
 		}
 	}()

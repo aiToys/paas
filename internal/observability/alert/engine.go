@@ -19,6 +19,7 @@ import (
 
 	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/internal/observability"
+	"github.com/aitoys/paas/internal/safego"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
@@ -118,11 +119,12 @@ func (e *Engine) Restore(ctx context.Context) {
 }
 
 // Start 启动后台评估循环（先跑一轮立即出结果，再按 interval tick）。
-// ctx 取消或 Stop 均退出。
+// ctx 取消或 Stop 均退出。单轮评估经 safego.Loop 防 panic（R5 审计 I-3：
+// 后台循环无 recovery 中间件兜底，一次 panic 即整进程崩）。
 func (e *Engine) Start(ctx context.Context) {
 	go func() {
 		defer close(e.done)
-		e.evaluate(ctx) // 启动先跑一轮（部署后无需等 30s 即有告警状态）
+		safego.Loop("alert:evaluate", func() { e.evaluate(ctx) }) // 启动先跑一轮（部署后无需等 30s 即有告警状态）
 		t := time.NewTicker(e.interval)
 		defer t.Stop()
 		for {
@@ -132,7 +134,7 @@ func (e *Engine) Start(ctx context.Context) {
 			case <-e.stop:
 				return
 			case <-t.C:
-				e.evaluate(ctx)
+				safego.Loop("alert:evaluate", func() { e.evaluate(ctx) })
 			}
 		}
 	}()

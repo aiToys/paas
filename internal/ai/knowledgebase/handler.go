@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -261,7 +263,16 @@ func (h *Handler) serveDocumentUpload(w http.ResponseWriter, r *http.Request, kb
 }
 
 // processDocument 异步：读原文 -> 解析 -> 切片 -> embedding -> 入向量库+PG。
+// panic 补偿标 failed（R5 审计 M-1）：后台 goroutine 无 recovery 中间件兜底，
+// panic 不捕获即杀进程且文档永久卡 processing。
 func (h *Handler) processDocument(kb KnowledgeBase, doc Document) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("[kb] 解析文档 %s panic: %v\n%s", doc.ID, rec, debug.Stack())
+			mctx := tenant.WithTenant(context.WithoutCancel(context.Background()), kb.TenantID)
+			_ = h.repo.UpdateDocumentStatus(mctx, doc.ID, DocStatusFailed, 0, "解析内部错误")
+		}
+	}()
 	parent := h.baseCtx
 	if parent == nil {
 		parent = context.Background()

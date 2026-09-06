@@ -59,6 +59,7 @@ import (
 	"github.com/aitoys/paas/internal/observability"
 	alertengine "github.com/aitoys/paas/internal/observability/alert"
 	"github.com/aitoys/paas/internal/observability/tracing"
+	"github.com/aitoys/paas/internal/safego"
 	"github.com/aitoys/paas/internal/security"
 	"github.com/aitoys/paas/internal/service"
 	"github.com/aitoys/paas/internal/web"
@@ -124,6 +125,9 @@ func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, metrics
 	if closeDB != nil {
 		defer closeDB() // 进程退出释放连接池
 	}
+	// 配额用量启动自愈：把计数型资源（applications/workloads/dataservices）对齐实际行数
+	// （seed 直插表与历史回收缺失造成的漂移，reconcile.sh C 节对账依据）。
+	recalcUsageIfDrift(ctx, stores)
 	// 延迟注入 AppConfigLookup 到 WorkloadReconciler（startManager 先于 stores 构造）。
 	// 让"绑定资源"（数据服务连接 + 模型 LLM 凭证）经 reconciler 真正注入 Pod env 生效。
 	// 启动初期无 CRD 事件，赋值与首条 reconcile 间无实际并发（best-effort + 单 worker）。
@@ -194,7 +198,7 @@ func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, metrics
 		defer stopGC()
 		log.Printf("[laneGC] 启动：间隔 %s TTL %s", v, gc.TTL)
 	}
-	srv := serveHTTP(gw, meter, stores, appliers, metricsReg, gc)
+	srv := serveHTTP(ctx, gw, meter, stores, appliers, metricsReg, gc)
 	// 告警评估引擎（R4-C2）：后台 30s tick 评估 + 状态机 + webhook 出站，随进程 ctx 退出。
 	// PG 路径先恢复状态机（migration 0042：重启不重置 pending/firing 计数），再启动评估。
 	if obsAlertEngine != nil {
@@ -355,6 +359,19 @@ func quotaCheckFn(bill billing.Repository) dataservice.QuotaCheckFunc {
 	}
 }
 
+// firstDataService 返回 ctx 租户下指定 kind 的第一个数据服务实例 ID
+// （广场安装知识库时的 vector/storage 重绑；无实例给引导性错误）。
+func firstDataService(ctx context.Context, repo dataservice.Repository, kind, label string) (string, error) {
+	list, err := repo.List(ctx, kind)
+	if err != nil {
+		return "", fmt.Errorf("查询%s实例失败: %w", label, err)
+	}
+	if len(list) == 0 {
+		return "", fmt.Errorf("本租户暂无%s实例，请先在资源中心创建后再安装", label)
+	}
+	return list[0].ID, nil
+}
+
 // resolveAPIKey 解析 API Key：环境变量 PAAS_API_KEY 优先，否则用开发默认值（sk-acme-admin）。
 // 返回值用于 seed 兼容（自定义 Key 追加为 t-acme admin）与日志展示。
 func resolveAPIKey() string {
@@ -414,7 +431,7 @@ var (
 	obsAlertEngine *alertengine.Engine
 )
 
-func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, appliers k8sAppliers, metricsReg *metrics.Registry, laneReclaimer *workload.LaneGC) *http.Server {
+func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, appliers k8sAppliers, metricsReg *metrics.Registry, laneReclaimer *workload.LaneGC) *http.Server {
 	apiKey := resolveAPIKey()
 	// P3-2 计量采集：推理 token 用量回写 billing（meter.OnTokens 钩子）。
 	// appID 来自应用级 Key（强制归因到应用）；user 是 agent 软标签（仅日志，不入 billing 聚合）。
@@ -478,10 +495,16 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	)
 	// messaging（MQ topic/消费组）：方法级权限 dataservice:read/write（MQ 属数据服务）。
 	msgHandler := messaging.NewHandler(stores.Messaging)
+	msgHandler.WithAudit(&identityAuditAdapter{store: stores.Security}, func(r *http.Request) string {
+		return gateway.UserIDFrom(r.Context())
+	}) // 写操作记审计（元审计 2026-09-04 补）
 	msgHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 	// backup（数据服务备份）：方法级权限 dataservice:read/write + 生产数据服务备份需 prod:write。
 	bkHandler := backup.NewHandler(stores.Backup,
-		backup.WithEnvResolver(stores.Environment, dsEnvLookup{repo: stores.DataService}))
+		backup.WithEnvResolver(stores.Environment, dsEnvLookup{repo: stores.DataService}),
+		backup.WithAudit(&identityAuditAdapter{store: stores.Security}, func(r *http.Request) string {
+			return gateway.UserIDFrom(r.Context())
+		})) // 写操作记审计（元审计 2026-09-04 补）
 	bkHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 	// apiroute Registry：路由 + OpenAPI 元数据单一真源，own 同一个 mux。
 	// Register 同时驱动 mux（Go 1.22 method-scoped）与 spec；Operation 仅记 spec（composite 子操作）。
@@ -608,6 +631,8 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		devops.WithGiteaClient(giteaClient),
 		devops.WithGiteaExternalURL(os.Getenv("PAAS_GITEA_EXTERNAL_URL")),
 		devops.WithRegistryClient(registryClient),
+		// registry catalog/tags 按租户应用过滤（仓库=应用，防跨租户镜像枚举）。
+		devops.WithAppIDLister(&appIDListAdapter{repo: stores.Application}),
 		devops.WithBuildLogStreamer(builder.NewK8sBuildLogStreamer(appliers.clientset)),
 		// 多服务发布 service 必填校验（app 已部署多服务时不传 service 会互相覆盖镜像）。
 		devops.WithWorkloadServiceLister(&wlServiceLister{repo: stores.Workload}),
@@ -644,6 +669,13 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		AppResourceLookup: appResourceLookupBridge{apps: stores.Application},
 		// 联调泳道副本降级的 prod 判定（复用 envTypeBridge，与 handler 校验同源）。
 		EnvType: envTypeBridge(stores.Environment),
+	}
+	// pipeline run 崩溃恢复（devops SweepInterrupted 同款）：running 孤儿 run 标 failed
+	// （kill -9 后串行槽位被 HasActiveRun + 部分唯一索引双重封锁、泳道 GC 视为活跃不可回收）；
+	// paused 保留由 Approve/CanaryResume 续跑。serveHTTP 无进程 ctx，用 Background
+	// （sweep 为启动一次性短动作）。
+	if err := pipeEngine.SweepInterrupted(context.Background()); err != nil {
+		log.Printf("[pipeline] 崩溃恢复 sweep 失败（继续启动）: %v", err)
 	}
 	pipelineHandler := pipeline.NewHandler(stores.Pipeline, stores.Pipeline, stores.Pipeline, pipeEngine,
 		pipeline.WithAuthorize(func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }),
@@ -691,13 +723,18 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 
 	// 存量收敛（异步，启动 3s 后）：internal 仓库应用的 CI pipeline 若仍 manual，升级 webhook +
 	// 注册 Gitea webhook（与新应用同体验——push 即自动构建部署）。幂等，失败仅日志下次启动重试。
-	go func() {
-		time.Sleep(3 * time.Second)
-		// 独立 ctx：serveHTTP 无进程生命周期 ctx 可取，收敛短平快（超时 2min 兜底防挂起）。
-		cctx, ccancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	// safego.Go 防 panic + ctx 感知 shutdown（R5 审计 I-3/M-2：裸 sleep 在 SIGTERM 窗口不退出）。
+	safego.Go("converge-ci-webhooks", func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(3 * time.Second):
+		}
+		// 收敛短平快（超时 2min 兜底防挂起）；ctx 已 cancel 时 WithTimeout 结果同样立即失效。
+		cctx, ccancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer ccancel()
 		convergeCIWebhooks(cctx, tplHandler, stores)
-	}()
+	})
 
 	changeLookup := changeRepoLookup(stores.DevOpsRepos)
 	changeSvc := change.NewService(stores.Change,
@@ -714,6 +751,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 		change.WithHandlerRepoLookup(changeLookup),
 		change.WithRunLister(changeRunBridge),
 		change.WithAlertLister(&changeAlertBridge{engine: obsAlertEngine}),
+		change.WithBuildLister(&changeBuildListerBridge{builds: stores.DevOpsBuilds}),
 		change.WithAppGuard(appGuard),
 	)
 
@@ -721,7 +759,10 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	// Secret 后端明文存储，API 返回固定掩码；与配置中心（服务治理，运行时动态）严格区分。
 	appconfigHandler := appconfig.NewHandler(stores.AppConfig,
 		appconfig.WithEnvResolver(stores.Environment),
-		appconfig.WithAppGuard(appGuard))
+		appconfig.WithAppGuard(appGuard),
+		appconfig.WithAudit(&identityAuditAdapter{store: stores.Security}, func(r *http.Request) string {
+			return gateway.UserIDFrom(r.Context())
+		})) // 写操作记审计（元审计 2026-09-04 补）
 	appconfigHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
 	// 服务实体（用户声明的服务定义，应用 → 服务 → 环境模型）：写操作记审计。
@@ -817,6 +858,11 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	dsOpts := []dataservice.HandlerOpt{
 		dataservice.WithEnvResolver(stores.Environment),
 		dataservice.WithEngineRepo(stores.Engine),
+		dataservice.WithQuotaCheck(quotaCheckFn(stores.Billing)),   // 创建前检查+递增（超限 429；失败回滚）——C1 漂移补
+		dataservice.WithQuotaRelease(quotaCheckFn(stores.Billing)), // 删除回收配额（与 admin 对齐）
+		dataservice.WithAudit(&identityAuditAdapter{store: stores.Security}, func(r *http.Request) string {
+			return gateway.UserIDFrom(r.Context())
+		}), // 写操作记审计
 	}
 	if appliers.client != nil { // 集群内注入 Pod reader（pods 端点）；集群外 nil 降级返空
 		dsOpts = append(dsOpts, dataservice.WithPodReader(controller.NewK8sPodReader(appliers.client)))
@@ -1201,6 +1247,15 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	marketHandler.PublisherNameFn = func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }
 	marketplace.RegisterAllForkers(marketHandler, &marketplace.Repos{
 		Agents: stores.Agent, Skills: stores.Skill, Prompts: stores.Prompt, Tools: stores.Tool,
+		KBs: stores.KnowledgeBase, Workflows: stores.Workflow,
+		// KB 安装时的数据服务重绑桥接：取安装者租户第一个 vector/storage 实例
+		//（marketplace 不 import dataservice，保持依赖单向——finder 是依赖倒置）。
+		FindVectorStore: func(ctx context.Context) (string, error) {
+			return firstDataService(ctx, stores.DataService, dataservice.KindVector, "向量数据库")
+		},
+		FindObjectStore: func(ctx context.Context) (string, error) {
+			return firstDataService(ctx, stores.DataService, dataservice.KindStorage, "对象存储")
+		},
 	})
 	mux.Handle("/api/marketplace", auth(marketHandler))
 	mux.Handle("/api/marketplace/", auth(marketHandler))
@@ -1352,6 +1407,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/applications/{id}/images", apiroute.Tags("DevOps"), apiroute.Summary("应用镜像"), apiroute.Perm("image:read"), apiroute.WithResp([]devops.Image{}))
 	reg.Operation("GET", "/api/applications/{id}/releases", apiroute.Tags("DevOps"), apiroute.Summary("应用发布记录"), apiroute.Perm("release:read"), apiroute.WithResp([]devops.Release{}))
 	reg.Operation("POST", "/api/applications/{id}/repositories", apiroute.Tags("DevOps"), apiroute.Summary("绑定代码仓库"), apiroute.Perm("repository:write"), apiroute.WithReqBody(devops.CodeRepo{}), apiroute.WithResp(devops.CodeRepo{}))
+	reg.Operation("DELETE", "/api/applications/{id}/repositories/{rid}", apiroute.Tags("DevOps"), apiroute.Summary("解绑并删除代码仓库（internal 级联删 Gitea 仓库）"), apiroute.Perm("repository:write"))
 	reg.Operation("POST", "/api/applications/{id}/buildruns", apiroute.Tags("DevOps"), apiroute.Summary("触发构建"), apiroute.Perm("build:write"), apiroute.WithReqBody(devops.BuildRun{}), apiroute.WithResp(devops.BuildRun{}))
 	reg.Operation("POST", "/api/applications/{id}/releases", apiroute.Tags("DevOps"), apiroute.Summary("创建发布（编排基线 Workload + 更新镜像）"), apiroute.Perm("release:write"), apiroute.WithReqBody(devops.ReleaseInput{}), apiroute.WithResp(devops.Release{}))
 	reg.Operation("GET", "/api/buildruns", apiroute.Tags("DevOps"), apiroute.Summary("跨应用构建列表"), apiroute.Perm("build:read"), apiroute.WithResp([]devops.BuildRun{}))
@@ -1364,6 +1420,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/images/{id}", apiroute.Tags("DevOps"), apiroute.Summary("镜像详情"), apiroute.Perm("image:read"), apiroute.WithResp(devops.Image{}))
 	reg.Operation("GET", "/api/applications/{id}/repositories/{rid}/tree", apiroute.Tags("DevOps"), apiroute.Summary("内置仓库文件树（Gitea）"), apiroute.Perm("repository:read"), apiroute.WithResp([]gitea.TreeNode{}))
 	reg.Operation("GET", "/api/applications/{id}/repositories/{rid}/commits", apiroute.Tags("DevOps"), apiroute.Summary("内置仓库提交历史（Gitea）"), apiroute.Perm("repository:read"), apiroute.WithResp([]gitea.Commit{}))
+	reg.Operation("GET", "/api/applications/{id}/repositories/{rid}/branches", apiroute.Tags("DevOps"), apiroute.Summary("内置仓库分支列表（Gitea，构建触发分支选择）"), apiroute.Perm("repository:read"), apiroute.WithResp([]gitea.Branch{}))
 	reg.Operation("GET", "/api/applications/{id}/repositories/{rid}/file", apiroute.Tags("DevOps"), apiroute.Summary("内置仓库文件内容（?path=）"), apiroute.Perm("repository:read"))
 	reg.Operation("GET", "/api/applications/{id}/repositories/{rid}/pulls", apiroute.Tags("DevOps"), apiroute.Summary("内置仓库 PR 列表（?state=，Gitea）"), apiroute.Perm("repository:read"), apiroute.WithResp([]gitea.PullRequest{}))
 	reg.Operation("GET", "/api/applications/{id}/repositories/{rid}/pulls/{number}", apiroute.Tags("DevOps"), apiroute.Summary("PR 详情 + diff 文本（Code Review）"), apiroute.Perm("repository:read"))
@@ -1376,8 +1433,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	reg.Operation("GET", "/api/releases", apiroute.Tags("DevOps"), apiroute.Summary("跨应用发布列表"), apiroute.Perm("release:read"), apiroute.WithResp([]devops.Release{}))
 	reg.Operation("POST", "/api/releases/{id}/rollback", apiroute.Tags("DevOps"), apiroute.Summary("回滚发布"), apiroute.Perm("release:write"), apiroute.WithResp(devops.Release{}))
 	reg.Operation("POST", "/api/releases/{id}/promote", apiroute.Tags("DevOps"), apiroute.Summary("提升到下一阶环境（发布流水线）"), apiroute.Perm("release:write"), apiroute.WithResp(devops.Release{}))
-	// 镜像库实时视图（registry v2）
-	reg.Operation("GET", "/api/registry/repositories", apiroute.Tags("DevOps"), apiroute.Summary("镜像仓库 catalog（registry v2 实时）"), apiroute.Perm("image:read"), apiroute.WithResp([]string{}))
+	// 镜像库实时视图（registry v2）。catalog 返回 []{name} 对象数组（handler 实际形状，
+	// 契约审计 I3：此前登记 []string 与实现漂移致前端生成类型错误）。
+	reg.Operation("GET", "/api/registry/repositories", apiroute.Tags("DevOps"), apiroute.Summary("镜像仓库 catalog（registry v2 实时，按租户应用过滤）"), apiroute.Perm("image:read"), apiroute.WithResp([]map[string]any{}))
 	reg.Operation("GET", "/api/registry/tags", apiroute.Tags("DevOps"), apiroute.Summary("镜像 tag+digest（?repository=）"), apiroute.Perm("image:read"))
 	// 流水线（变更→构建→发布→部署→测试→写基线，可自定义；每应用多条）
 	reg.Operation("GET", "/api/pipeline-templates", apiroute.Tags("流水线"), apiroute.Summary("流水线模板（平台预置 + 租户自定义）"), apiroute.Perm("pipeline:read"), apiroute.WithResp([]pipeline.PipelineTemplate{}))
@@ -1397,6 +1455,7 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 	}{}), apiroute.WithResp(pipeline.PipelineRun{}))
 	reg.Operation("GET", "/api/pipelineruns", apiroute.Tags("流水线"), apiroute.Summary("运行列表（?appId=&pipelineId=&status=）"), apiroute.Perm("pipeline:read"), apiroute.WithResp([]pipeline.PipelineRun{}))
 	reg.Operation("GET", "/api/admin/pipelineruns", apiroute.Tags("流水线"), apiroute.Summary("运行总览（管理员跨租户，?status=）"), apiroute.Perm("super_admin"), apiroute.WithResp([]pipeline.PipelineRun{}))
+	reg.Operation("GET", "/api/admin/pipelineruns/{id}", apiroute.Tags("流水线"), apiroute.Summary("运行详情（管理员跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp(pipeline.PipelineRun{}))
 	reg.Operation("GET", "/api/pipelineruns/{id}", apiroute.Tags("流水线"), apiroute.Summary("运行详情（含各 stage 状态/输入输出）"), apiroute.Perm("pipeline:read"), apiroute.WithResp(pipeline.PipelineRun{}))
 	reg.Operation("POST", "/api/pipelineruns/{id}/stages/{idx}/approve", apiroute.Tags("流水线"), apiroute.Summary("审批/人工确认通过（恢复 paused run）"), apiroute.Perm("pipeline:write"))
 	reg.Operation("POST", "/api/pipelineruns/{id}/stages/{idx}/canary", apiroute.Tags("流水线"), apiroute.Summary("金丝雀验证决策（promote 确认放量/terminate 终止）"), apiroute.Perm("pipeline:write"), apiroute.WithReqBody(struct {
@@ -1791,6 +1850,9 @@ func serveHTTP(gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, applie
 			}))),
 		ReadHeaderTimeout: 10 * time.Second, // 防 Slowloris 慢速头部攻击
 	}
+	// 优雅关闭时停 pipeline 推进（R9-I6）：cancel 进行中 run 的 advance ctx，防关闭窗口内
+	// 又推进新 stage（Deploy 半途被杀留脏数据）；已中断 run 由下次启动 SweepInterrupted 收口。
+	srv.RegisterOnShutdown(func() { pipeEngine.CancelAll() })
 	// 仅打印 Key 前缀，避免生产 API Key 明文进容器日志/日志聚合系统（运维确认用长度 + 前 6 字符）。
 	if apiKey != "" {
 		prefix := apiKey

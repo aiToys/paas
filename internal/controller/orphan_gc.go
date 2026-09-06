@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/aitoys/paas/api/core/v1alpha1"
+	"github.com/aitoys/paas/internal/safego"
 )
 
 // PlatformWorkloadLookup 平台侧 workload 查找接口（依赖倒置，破除 controller→workload 业务包依赖，
@@ -65,7 +66,7 @@ func (r *WorkloadReconciler) collectOrphans(ctx context.Context) {
 
 // StartOrphanGC 启动孤儿回收循环（周期全量扫描）。ctx cancel 时退出。
 // 周期取宽限期的 1/3：最坏情况下孤儿多活一个周期，可接受。
-// 由 cmd/core 在 Platform 注入后调用（导出方法，包外装配）。
+// 单轮扫描经 safego.Loop 防 panic（R5 审计 I-3）。由 cmd/core 在 Platform 注入后调用（导出方法，包外装配）。
 func (r *WorkloadReconciler) StartOrphanGC(ctx context.Context) {
 	go func() {
 		ticker := time.NewTicker(orphanGracePeriod / 3)
@@ -75,7 +76,7 @@ func (r *WorkloadReconciler) StartOrphanGC(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				r.collectOrphans(ctx)
+				safego.Loop("orphan-gc:collect", func() { r.collectOrphans(ctx) })
 			}
 		}
 	}()

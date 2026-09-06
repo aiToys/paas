@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -26,7 +27,8 @@ type ToolRunner interface {
 const (
 	nodeTimeout = 120 * time.Second // 单节点执行上限（LLM/工具）
 	maxSteps    = 100               // 推进步数上限（condition 环定义防死循环，节点数≤50 之外再兜底）
-	resumePoll  = 1 * time.Second   // paused 等待的 DB 轮询间隔（Approve/Abort 落库为唯一真源）
+	resumePoll  = 3 * time.Second   // paused 等待的 DB 轮询间隔（Approve/Abort 落库为唯一真源）
+	maxWait     = 30 * time.Minute  // paused 等待上限（R5 审计 I-1：超时撤等待者，Approve 无等待者拉起兜底）
 )
 
 // Engine 工作流执行引擎：goroutine 推进 + approve 暂停恢复。
@@ -61,8 +63,41 @@ func (e *Engine) Start(ctx context.Context, def WorkflowDef, inputs map[string]s
 	if err != nil {
 		return WorkflowRun{}, err
 	}
-	go e.advance(runTenant(ctx, tid), def, run)
+	e.goAdvance(runTenant(ctx, tid), def, run)
 	return run, nil
+}
+
+// goAdvance 起 goroutine 推进并带 panic 防护：goroutine panic 会杀掉整个 core 进程
+// （LLM/模板/条件求值/DB 读写 panic 面 nonzero），捕获后标 run failed 防卡 running
+// （pipeline engine.Start 同款先例，R5 审计 I-2）。
+func (e *Engine) goAdvance(ctx context.Context, def WorkflowDef, run WorkflowRun) {
+	tid, _ := tenant.TenantFrom(ctx)
+	go func() {
+		defer func() {
+			if p := recover(); p != nil {
+				log.Printf("[workflow] advance run %s panic: %v\n%s", run.ID, p, debug.Stack())
+				// 脱离取消的 ctx 补偿落库（进程 SIGTERM 窗口内也尽力收口终态）。
+				markCtx := tenant.WithTenant(context.WithoutCancel(ctx), tid)
+				fresh, err := e.repo.GetRun(markCtx, run.ID)
+				if err != nil {
+					return
+				}
+				if fresh.Status == StatusRunning || fresh.Status == StatusPaused {
+					fresh.Status = StatusFailed
+					fresh.FinishedAt = time.Now()
+					for i := range fresh.NodeRuns {
+						if fresh.NodeRuns[i].Status == StatusRunning || fresh.NodeRuns[i].Status == StatusPaused {
+							fresh.NodeRuns[i].Status = StatusFailed
+							fresh.NodeRuns[i].Error = fmt.Sprintf("内部错误: %v", p)
+							fresh.NodeRuns[i].FinishedAt = fresh.FinishedAt
+						}
+					}
+					_, _ = e.repo.UpdateRun(markCtx, fresh)
+				}
+			}
+		}()
+		e.advance(ctx, def, run)
+	}()
 }
 
 func runTenant(ctx context.Context, tid string) context.Context {
@@ -274,8 +309,14 @@ func (e *Engine) waitResume(ctx context.Context, run *WorkflowRun) bool {
 		delete(e.waiting, run.ID)
 		e.mu.Unlock()
 	}()
+	// 有界等待（R5 审计 I-1）：等待者轮询只是加速恢复的手段，Approve 的无等待者拉起
+	// 路径才是兜底——超时撤出防「用户 pause 后永不处理」的 goroutine 常驻 + 持续轮询 DB。
+	deadline := time.Now().Add(maxWait)
 	for {
 		time.Sleep(resumePoll)
+		if time.Now().After(deadline) {
+			return false // run 留 paused；后续 Approve 经 hasWaiter 检测无等待者拉起续跑
+		}
 		fresh, err := e.repo.GetRun(ctx, run.ID)
 		if err != nil {
 			return false // run 已删除（定义删除级联清 runs）
@@ -333,7 +374,7 @@ func (e *Engine) Approve(ctx context.Context, runID, nodeID string) error {
 	if err != nil {
 		return fmt.Errorf("恢复失败：工作流定义不存在: %w", err)
 	}
-	go e.advance(runTenant(ctx, run.TenantID), def, run)
+	e.goAdvance(runTenant(ctx, run.TenantID), def, run)
 	return nil
 }
 

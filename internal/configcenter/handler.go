@@ -404,12 +404,12 @@ func (h *Handler) servePublishHistory(w http.ResponseWriter, r *http.Request, ns
 }
 
 // servePublished GET 客户端发现（active 快照 + version）。
+// 发现端点是数据面消费契约（服务进程凭 API Key 拉运行时配置，与 /dp/* 同类低门槛）：
+// 只要求已认证（mux 层 auth 强制登录 + 租户注入），不要求 governance:read——
+// 服务级 Key 往往只有 model:infer 等窄权限，卡 read 会让配置热更新消费全断（R1 审计 H1/M3）。
 func (h *Handler) servePublished(w http.ResponseWriter, r *http.Request, nsID string) {
 	if r.Method != http.MethodGet {
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	if !h.allow(w, r, PermConfigCenterRead) {
 		return
 	}
 	active, ok, err := h.repo.ActivePublish(r.Context(), nsID)
@@ -429,12 +429,10 @@ func (h *Handler) servePublished(w http.ResponseWriter, r *http.Request, nsID st
 // serveAppPublished GET /api/configcenter/apps/{appName}/published 按应用名发现（active 快照）。
 // 与 ns 维度发现同契约（{published,version,snapshot}），不含 publishId——应用维度以应用为锚，
 // 客户端无需感知派生 ns 的 publish 记录 ID。未知应用名/未发布统一 {"published":false} 不泄漏。
+// 权限同 servePublished：数据面消费契约，已认证即可（R1 审计 H1）。
 func (h *Handler) serveAppPublished(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	if !h.allow(w, r, PermConfigCenterRead) {
 		return
 	}
 	if h.appLookup == nil {
