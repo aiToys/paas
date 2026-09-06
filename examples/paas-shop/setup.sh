@@ -308,8 +308,6 @@ ensure_appconfig "$ENV_PROD" "ORDER_TTL_MINUTES" "30" "env"
 #       完整回写链路依赖平台「服务身份/最小权限凭证」能力（遗留债务）。
 ensure_appconfig "$ENV_TEST" "PAAS_CONFIG_APP" "paas-shop" "env"
 ensure_appconfig "$ENV_PROD" "PAAS_CONFIG_APP" "paas-shop" "env"
-ensure_appconfig "$ENV_TEST" "PAAS_CONFIGCENTER_NS" "app-$APP_ID-$ENV_TEST" "env"
-ensure_appconfig "$ENV_PROD" "PAAS_CONFIGCENTER_NS" "app-$APP_ID-$ENV_PROD" "env"
 ensure_appconfig "$ENV_TEST" "PAAS_API_KEY" "sk-acme-dev" "secret"
 ensure_appconfig "$ENV_PROD" "PAAS_API_KEY" "sk-acme-dev" "secret"
 ensure_appconfig "$ENV_TEST" "PAAS_APPCONFIG_URL" "http://paas-core.paas.svc.cluster.local" "env"
@@ -319,6 +317,7 @@ ensure_appconfig "$ENV_PROD" "PAAS_ENV_ID" "$ENV_PROD" "env"
 
 #    演示配置发布（热更新链路可验）：chatbot 欢迎语 + product 分页大小（默认 20 → 5 差异可见）。
 #    upsert 后查 active 快照，缺 key 才 publish（幂等：重跑不堆版本）。
+#    先于 PAAS_CONFIGCENTER_NS 注入执行：upsert 懒建派生 ns，后续才能按名解析 ns 实体 ID。
 ensure_dynconf() { # envId key value
   api -X POST "$PAAS_API/api/applications/$APP_ID/dynamic-configs?envId=$1" \
     -H "Content-Type: application/json" -d "{\"key\":\"$2\",\"value\":\"$3\"}" >/dev/null
@@ -333,6 +332,21 @@ ensure_dynconf "$ENV_TEST" "welcome_message" "您好，我是商店智能客服�
 ensure_dynconf "$ENV_TEST" "product_page_size" "5"
 ensure_dynconf "$ENV_PROD" "welcome_message" "您好，我是商店智能客服，可以帮您查商品、下单、推荐礼物～"
 ensure_dynconf "$ENV_PROD" "product_page_size" "5"
+
+#    PAAS_CONFIGCENTER_NS 注入 ns 实体 ID（ns-xxx）非派生名——ccpull 打的
+#    /api/configcenter/namespaces/{ns}/published 按主键 ID 查，按名查恒 published:false。
+cc_ns_id() { # envId —— 按派生名 app-<APP_ID>-<envId> 查 ns 实体 ID
+  api "$PAAS_API/api/configcenter/namespaces" | python3 -c "
+import sys,json
+for n in json.load(sys.stdin)['data']:
+    if n['name']=='app-$APP_ID-$1': print(n['id']); break" 2>/dev/null || true
+}
+CC_NS_TEST=$(cc_ns_id "$ENV_TEST")
+CC_NS_PROD=$(cc_ns_id "$ENV_PROD")
+[ -n "$CC_NS_TEST" ] && ensure_appconfig "$ENV_TEST" "PAAS_CONFIGCENTER_NS" "$CC_NS_TEST" "env" \
+  || echo "  [警告] test 派生 ns 未找到（ensure_dynconf 应已懒建，重跑自愈）"
+[ -n "$CC_NS_PROD" ] && ensure_appconfig "$ENV_PROD" "PAAS_CONFIGCENTER_NS" "$CC_NS_PROD" "env" \
+  || echo "  [警告] prod 派生 ns 未找到（ensure_dynconf 应已懒建，重跑自愈）"
 
 # ⑤ 发布顺序：无操作（事实 3：prod-bj 天然晋升目标，e2e 断言覆盖）
 
