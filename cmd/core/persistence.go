@@ -183,8 +183,13 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto
 			wlRepo = workload.NewApplyRepo(wlRepo, appliers.workload) // K8s 启用：workload 写操作投影 CRD 期望状态
 		}
 		svcRepo := svcpg.NewStore(db)
-		devopsRepo := devopspg.NewStore(db, wlRepo, devopspg.WithServiceLookup(serviceLookupBridge{repos: svcRepo})) // Release 编排经 workload.Repository 接口透明
-		devopsRepo.SetPipeline(devopsPipeline)                                                                       // PAAS_DEVOPS_REAL=true 接真实 git/docker
+		billingRepo := billingpg.NewStore(db)
+		// WithQuotaInc：CreateRelease 新建基线 Workload 时经 billing 递增工作负载数配额
+		// （超限拒发）——堵 Release 内建基线绕过 handler QuotaCheck 的路径（对账审计 C1）。
+		devopsRepo := devopspg.NewStore(db, wlRepo,
+			devopspg.WithServiceLookup(serviceLookupBridge{repos: svcRepo}),
+			devopspg.WithQuotaInc(quotaIncBridge(billingRepo))) // Release 编排经 workload.Repository 接口透明
+		devopsRepo.SetPipeline(devopsPipeline) // PAAS_DEVOPS_REAL=true 接真实 git/docker
 		govRepo := govpg.NewStore(db)
 		// K8s 启用：governance Route 写投影聚合 Ingress（按 host 多 path，hermes/nginx 标准）。
 		// applier 持裸 govRepo（RouteStore+ServiceStore），ApplyRepo 包装后给 handler（无循环引用）。
@@ -194,7 +199,6 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto
 			govRepoWithApply = governance.NewApplyRepo(govRepo, routeApplier)
 		}
 		ccRepo := ccpg.NewStore(db)
-		billingRepo := billingpg.NewStore(db)
 		secRepo := secpg.NewStore(db, secpg.WithCipher(secCipher)) // seed 直连 SQL 路径加密（Task 3）
 		maasRepo := mapg.NewStore(db)
 		kbRepo := kbpg.NewStore(db)
@@ -299,7 +303,11 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto
 		wlRepo = workload.NewApplyRepo(wlRepo, appliers.workload) // K8s 启用：workload 写操作投影 CRD 期望状态
 	}
 	svcRepo0 := svcmemory.NewStore()
-	devopsRepo := devopsmemory.NewStore(wlRepo, devopsmemory.WithServiceLookup(serviceLookupBridge{repos: svcRepo0}))
+	billingRepo := billingmemory.NewStore()
+	// WithQuotaInc：CreateRelease 新建基线 Workload 时经 billing 递增工作负载数配额（PG 路径同款）。
+	devopsRepo := devopsmemory.NewStore(wlRepo,
+		devopsmemory.WithServiceLookup(serviceLookupBridge{repos: svcRepo0}),
+		devopsmemory.WithQuotaInc(quotaIncBridge(billingRepo)))
 	devopsRepo.SetPipeline(devopsPipeline) // PAAS_DEVOPS_REAL=true 接真实 git/docker
 	govRepo := govmemory.NewStore()
 	// K8s 启用：governance Route 写投影聚合 Ingress（内存路径同款，applier 持裸 govRepo）。
@@ -309,7 +317,6 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto
 		govRepoWithApply = governance.NewApplyRepo(govRepo, routeApplier)
 	}
 	ccRepo := ccmemory.NewStore()
-	billingRepo := billingmemory.NewStore()
 	secRepo := secmemory.NewStore()
 	maasRepo := maas.NewMemoryStore()
 	seedMaasCatalog(ctx, maasRepo, secRepo)

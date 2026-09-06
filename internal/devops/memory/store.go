@@ -29,8 +29,11 @@ type Store struct {
 	releases  map[string]devops.Release
 	workload  workload.Repository  // 注入；Release 编排找/建/更新基线 Workload
 	svcLookup devops.ServiceLookup // 注入（可选）；新建基线 Workload 时取服务定义（Port/Replicas 来源）
-	pipeline  builder.Pipeline     // 构建流水线（nil=Mock）；cmd/core 按 PAAS_DEVOPS_REAL 注入 Real
-	baseCtx   context.Context      // 进程级 ctx（cmd/core 注入）；构建 goroutine 派生之，nil=Background 兼容
+	// quotaInc 工作负载数配额（可选，nil 跳过）；CreateRelease 新建基线 Workload 时 +1（超限拒发，
+	// 与 workload handler QuotaCheck 同源——对账审计 C1：Release 内建基线曾绕过配额检查）。
+	quotaInc func(ctx context.Context, delta int) error
+	pipeline builder.Pipeline // 构建流水线（nil=Mock）；cmd/core 按 PAAS_DEVOPS_REAL 注入 Real
+	baseCtx  context.Context  // 进程级 ctx（cmd/core 注入）；构建 goroutine 派生之，nil=Background 兼容
 }
 
 // NewStore 创建仓储（空，不 seed mock 演示数据）。wlRepo 为 Release 编排提供 Workload 能力。
@@ -54,6 +57,13 @@ type StoreOpt func(*Store)
 
 // WithServiceLookup 注入服务定义查询（可选，未注入时 Release 编排行为不变）。
 func WithServiceLookup(l devops.ServiceLookup) StoreOpt { return func(s *Store) { s.svcLookup = l } }
+
+// WithQuotaInc 注入工作负载数配额检查（cmd/core 桥接 billing.CheckAndInc，可选）；
+// CreateRelease 新建基线 Workload 前 +1（超限拒发）、Create 失败 -1 回滚——
+// 与 workload handler QuotaCheck 同源，堵 Release 内建基线绕过配额的路径。
+func WithQuotaInc(f func(ctx context.Context, delta int) error) StoreOpt {
+	return func(s *Store) { s.quotaInc = f }
+}
 
 // ---------- CodeRepoRepository ----------
 
@@ -644,6 +654,13 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 		}
 	} else {
 		// 无基线 Workload -> 创建（基线 service）
+		// 配额拦截先于 Create（与 workload handler 同源：超限拒发，无副作用）；
+		// devops.mu → billing.mu 单向（billing 不调 devops），临界区内调用无死锁。
+		if s.quotaInc != nil {
+			if err := s.quotaInc(ctx, 1); err != nil {
+				return devops.Release{}, err
+			}
+		}
 		// Name 规则：多服务（service 非空）用 `<app>-<service>-svc[-<lane>]`，单服务（service 空）用 `<app>-svc[-<lane>]`。
 		svcName := input.Service
 		if svcName == "" && svcDef != nil {
@@ -692,6 +709,9 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 			CreatedAt: time.Now(),
 		}
 		if err := s.workload.Create(ctx, wl); err != nil {
+			if s.quotaInc != nil {
+				_ = s.quotaInc(ctx, -1) // Create 失败回滚已递增的配额（handler 同款）
+			}
 			return devops.Release{}, err
 		}
 	}

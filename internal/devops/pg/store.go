@@ -37,9 +37,12 @@ type Store struct {
 	db        *pg.DB
 	workload  workload.Repository  // 注入；Release 编排找/建/更新基线 Workload
 	svcLookup devops.ServiceLookup // 注入（可选）；新建基线 Workload 时取服务定义（Port/Replicas 来源）
-	pipeline  builder.Pipeline     // 构建流水线（nil=Mock）；cmd/core 按 PAAS_DEVOPS_REAL 注入 Real
-	pipeMu    sync.RWMutex         // 专管 pipeline 字段读写（防 SetPipeline/runBuild race）
-	baseCtx   context.Context      // 进程级 ctx（cmd/core 注入）；构建 goroutine 派生之，nil=Background 兼容
+	// quotaInc 工作负载数配额（可选，nil 跳过）；CreateRelease 新建基线 Workload 时 +1（超限拒发，
+	// 与 workload handler QuotaCheck 同源——对账审计 C1：Release 内建基线曾绕过配额检查）。
+	quotaInc func(ctx context.Context, delta int) error
+	pipeline builder.Pipeline // 构建流水线（nil=Mock）；cmd/core 按 PAAS_DEVOPS_REAL 注入 Real
+	pipeMu   sync.RWMutex     // 专管 pipeline 字段读写（防 SetPipeline/runBuild race）
+	baseCtx  context.Context  // 进程级 ctx（cmd/core 注入）；构建 goroutine 派生之，nil=Background 兼容
 	// buildSlots per-tenant 活跃构建计数（可观测审计 C1：构建入口并发闸，防脚本化
 	// 触发打爆节点 docker daemon——DooD 全部经同一 daemon，磁盘/CPU 失控无 GC）。
 	buildSlots map[string]int
@@ -65,6 +68,13 @@ type StoreOpt func(*Store)
 
 // WithServiceLookup 注入服务定义查询（可选，未注入时 Release 编排行为不变）。
 func WithServiceLookup(l devops.ServiceLookup) StoreOpt { return func(s *Store) { s.svcLookup = l } }
+
+// WithQuotaInc 注入工作负载数配额检查（cmd/core 桥接 billing.CheckAndInc，可选）；
+// CreateRelease 新建基线 Workload 前 +1（超限拒发）、Create 失败 -1 回滚——
+// 与 workload handler QuotaCheck 同源，堵 Release 内建基线绕过配额的路径。
+func WithQuotaInc(f func(ctx context.Context, delta int) error) StoreOpt {
+	return func(s *Store) { s.quotaInc = f }
+}
 
 // SetPipeline 注入构建流水线（cmd/core 按 PAAS_DEVOPS_REAL 注入 Real）；nil=Mock。
 // SetPipeline 注入构建流水线（cmd/core 按 PAAS_DEVOPS_REAL 注入 Real）；nil=Mock。
@@ -858,6 +868,12 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 		}
 	} else {
 		// 无基线 Workload -> 创建（基线 service）—— 对齐内存版
+		// 配额拦截先于 Create（与 workload handler 同源：超限拒发，无副作用）。
+		if s.quotaInc != nil {
+			if err := s.quotaInc(ctx, 1); err != nil {
+				return devops.Release{}, err
+			}
+		}
 		// Name 规则：多服务用 `<app>-<service>-svc[-<lane>]`，单服务用 `<app>-svc[-<lane>]`。
 		svcName := input.Service
 		if svcName == "" && svcDef != nil {
@@ -904,6 +920,9 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 			CreatedAt: time.Now(),
 		}
 		if err := s.workload.Create(ctx, wl); err != nil {
+			if s.quotaInc != nil {
+				_ = s.quotaInc(ctx, -1) // Create 失败回滚已递增的配额（handler 同款）
+			}
 			return devops.Release{}, err
 		}
 	}
@@ -947,6 +966,8 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 		} else {
 			if derr := s.workload.Delete(cctx, wl.ID); derr != nil { // 无基线时新建的 workload，删除
 				log.Printf("[devops] CreateRelease 补偿失败（删除新 workload）: release=%s workload=%s: %v", rel.ID, wl.ID, derr)
+			} else if s.quotaInc != nil {
+				_ = s.quotaInc(cctx, -1) // 补偿删除成功则回收新建时递增的配额
 			}
 		}
 		return devops.Release{}, err

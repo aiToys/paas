@@ -16,6 +16,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/aitoys/paas/internal/billing"
 	"github.com/aitoys/paas/internal/core/application"
 	"github.com/aitoys/paas/internal/devops"
 	"github.com/aitoys/paas/internal/devops/gitea"
@@ -477,6 +478,15 @@ func (b serviceLookupBridge) GetService(ctx context.Context, appID, serviceID st
 		return devops.ServiceDef{}, err
 	}
 	return devops.ServiceDef{ID: s.ID, Name: s.Name, Port: s.Port, Replicas: s.Replicas}, nil
+}
+
+// quotaIncBridge 桥接 billing.CheckAndInc -> devops WithQuotaInc（依赖倒置，
+// devops 不 import internal/billing；CreateRelease 新建基线 Workload 时配额 +1/-1）。
+func quotaIncBridge(b billing.Repository) func(ctx context.Context, delta int) error {
+	return func(ctx context.Context, delta int) error {
+		_, err := b.CheckAndInc(ctx, billing.ResWorkloads, delta)
+		return err
+	}
 }
 
 // laneEnsurerBridge 桥接 pipeline.LaneEnsurer -> lane.Repository.EnsureByName（依赖倒置）。

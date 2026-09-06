@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -253,6 +254,55 @@ func TestReleaseCreateWorkload(t *testing.T) {
 	img, _ := s.GetImage(ctx, "img-acme-001")
 	if w.ImageRef != img.Digest {
 		t.Fatalf("新 Workload.ImageRef 应为镜像 digest")
+	}
+}
+
+// TestReleaseCreateWorkloadQuota 验证 Release 内建基线 Workload 的配额接入：
+// 超限拒发（无副作用）、正常发布 +1、既有基线发布不重复计数。
+func TestReleaseCreateWorkloadQuota(t *testing.T) {
+	wl := wlmemory.NewStore()
+	var count int
+	s := NewStore(wl, WithQuotaInc(func(_ context.Context, delta int) error {
+		if count+delta > 1 {
+			return fmt.Errorf("工作负载数配额超限")
+		}
+		count += delta
+		return nil
+	}))
+	ctx := acmeCtx()
+	seedImage(s, "img-acme-001", "t-acme", "app-cs")
+	seedImage(s, "img-acme-002", "t-acme", "app-cs")
+
+	// 第 1 次：无基线 -> 新建（配额 0→1）
+	if _, err := s.CreateRelease(ctx, devops.ReleaseInput{
+		AppID: "app-cs", EnvID: "env-acme-prod-bj", ImageID: "img-acme-001",
+	}); err != nil {
+		t.Fatalf("首次发布失败: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("新建基线后配额应 +1，实际 %d", count)
+	}
+	// 第 2 次：同环境已有基线 -> 更新镜像，不重复计数
+	if _, err := s.CreateRelease(ctx, devops.ReleaseInput{
+		AppID: "app-cs", EnvID: "env-acme-prod-bj", ImageID: "img-acme-002",
+	}); err != nil {
+		t.Fatalf("二次发布失败: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("既有基线发布不应重复计数，实际 %d", count)
+	}
+	// 第 3 次：另一环境无基线 -> 超限拒发，无 workload 副作用
+	if _, err := s.CreateRelease(ctx, devops.ReleaseInput{
+		AppID: "app-cs", EnvID: "env-acme-dev", ImageID: "img-acme-001", Service: "api",
+	}); err == nil {
+		t.Fatal("配额超限应拒绝发布")
+	}
+	if count != 1 {
+		t.Fatalf("拒发后配额不应变动，实际 %d", count)
+	}
+	wls, _ := wl.List(ctx, "env-acme-dev", "app-cs", "", "", "")
+	if len(wls) != 0 {
+		t.Fatalf("拒发不应产生 workload，实际 %d 条", len(wls))
 	}
 }
 
