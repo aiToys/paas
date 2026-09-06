@@ -136,7 +136,7 @@ pnpm build                    # 构建三套
 
 ### 配额
 
-- `billing.CheckAndInc(ctx, resource, delta)` 原子「检查+递增」（PG `FOR UPDATE` 行锁）；application/workload Create 拦截 429，repo 失败回滚 -1，Delete 回收配额（admin 级联删同款）。
+- `billing.CheckAndInc(ctx, resource, delta)` 原子「检查+递增」（PG `FOR UPDATE` 行锁）；application/workload Create 拦截 429，repo 失败回滚 -1，Delete 回收配额（admin 级联删同款）；devops `CreateRelease` 内建基线 Workload 经 `WithQuotaInc` 同源接入（memory/pg 双实现，2026-09-06 对账审计 C1 修复）；启动自愈 `recalcUsageIfDrift` 对齐 applications/workloads/dataservices 行数计数。
 
 ### 并发与资源（踩坑沉淀）
 
