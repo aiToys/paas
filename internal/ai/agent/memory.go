@@ -28,12 +28,16 @@ type conversationStore struct {
 var conversations = &conversationStore{hist: map[convKey][]provider.Message{}}
 
 // loadHistory 取会话历史（返回副本，防调用方改入参污染）。
+// Message.ToolCalls 是切片：值拷贝共享底层数组，需逐条深拷（其余字段全值）。
 func (c *conversationStore) loadHistory(agentID, convID string) []provider.Message {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	h := c.hist[convKey{agentID, convID}]
 	out := make([]provider.Message, len(h))
 	copy(out, h)
+	for i := range out {
+		out[i].ToolCalls = append([]provider.ToolCall(nil), h[i].ToolCalls...)
+	}
 	return out
 }
 

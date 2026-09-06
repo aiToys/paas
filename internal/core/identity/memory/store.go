@@ -27,6 +27,18 @@ func NewStore() *Store {
 	}
 }
 
+// cloneUser 深拷贝用户（Roles 切片底层数组独立），防止返回值与 store 内部共享引发并发读写 race。
+func cloneUser(u identity.User) identity.User {
+	u.Roles = append([]string(nil), u.Roles...)
+	return u
+}
+
+// cloneAPIKey 深拷贝 API Key（Roles 同 cloneUser）。LookupAPIKey 是每请求热路径，仅拷一层。
+func cloneAPIKey(k identity.APIKey) identity.APIKey {
+	k.Roles = append([]string(nil), k.Roles...)
+	return k
+}
+
 func (s *Store) CreateTenant(_ context.Context, t identity.Tenant) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -63,7 +75,7 @@ func (s *Store) UsersByTenant(_ context.Context, tenantID string) ([]identity.Us
 	var out []identity.User
 	for _, u := range s.users {
 		if u.TenantID == tenantID {
-			out = append(out, u)
+			out = append(out, cloneUser(u))
 		}
 	}
 	return out, nil
@@ -75,7 +87,7 @@ func (s *Store) GetUserByName(_ context.Context, name string) (*identity.User, e
 	defer s.mu.RUnlock()
 	for _, u := range s.users {
 		if u.Name == name {
-			uu := u
+			uu := cloneUser(u)
 			return &uu, nil
 		}
 	}
@@ -90,7 +102,7 @@ func (s *Store) GetUser(_ context.Context, tenantID, userID string) (*identity.U
 	if !ok || u.TenantID != tenantID {
 		return nil, fmt.Errorf("用户不存在: %s", userID)
 	}
-	uu := u
+	uu := cloneUser(u)
 	return &uu, nil
 }
 
@@ -134,7 +146,7 @@ func (s *Store) ListUsers(_ context.Context, tenantID string) ([]identity.User, 
 	var out []identity.User
 	for _, u := range s.users {
 		if tenantID == "" || u.TenantID == tenantID {
-			out = append(out, u)
+			out = append(out, cloneUser(u))
 		}
 	}
 	return out, nil
@@ -179,7 +191,7 @@ func (s *Store) ListAPIKeys(_ context.Context, tenantID string) ([]identity.APIK
 	var out []identity.APIKey
 	for _, k := range s.apiKeys {
 		if tenantID == "" || k.TenantID == tenantID {
-			out = append(out, k)
+			out = append(out, cloneAPIKey(k))
 		}
 	}
 	return out, nil
@@ -223,5 +235,5 @@ func (s *Store) LookupAPIKey(_ context.Context, key string) (identity.APIKey, er
 	if !ok {
 		return identity.APIKey{}, fmt.Errorf("api key 不存在")
 	}
-	return k, nil
+	return cloneAPIKey(k), nil
 }

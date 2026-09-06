@@ -98,6 +98,7 @@ func (s *Store) SetQuota(ctx context.Context, q billing.ResourceQuota) (billing.
 	q.UpdatedAt = time.Now()
 	q.Limits = cloneIntMap(q.Limits) // 写入前深拷贝，隔离 caller 传入的 map
 	s.quotas[tid] = q
+	q.Limits = cloneIntMap(q.Limits) // 返回前再深拷贝（与 GetQuota 对称），防返回值与 store 内共享同一 map
 	return q, nil
 }
 
@@ -258,10 +259,14 @@ func (s *Store) GetBill(ctx context.Context, id string) (billing.BillingRecord, 
 	return billing.BillingRecord{}, fmt.Errorf("账单不存在: %s", id)
 }
 
-// cloneBill 深拷贝账单（Items 切片底层数组独立），防止返回值与 store 内部状态共享底层数组
-// 引发并发读写 race（与 cloneIntMap 同款防御）。
+// cloneBill 深拷贝账单（Items 切片底层数组 + PaidAt 指针独立），防止返回值与 store 内部状态
+// 共享底层引用引发并发读写 race（与 cloneIntMap 同款防御）。
 func cloneBill(b billing.BillingRecord) billing.BillingRecord {
 	b.Items = append([]billing.BillItem(nil), b.Items...)
+	if b.PaidAt != nil {
+		paidAt := *b.PaidAt
+		b.PaidAt = &paidAt
+	}
 	return b
 }
 
@@ -339,7 +344,7 @@ func (s *Store) PayBill(ctx context.Context, id string) (billing.BillingRecord, 
 		b.Status = billing.StatusPaid
 		b.PaidAt = &now
 		s.bills[i] = b
-		return b, nil
+		return cloneBill(b), nil // 深拷贝返回（含 PaidAt 指针），与 store 内独立
 	}
 	return billing.BillingRecord{}, fmt.Errorf("账单不存在: %s", id)
 }

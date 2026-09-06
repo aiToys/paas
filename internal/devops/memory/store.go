@@ -160,6 +160,19 @@ func (s *Store) DeleteRepo(ctx context.Context, id string) error {
 
 // ---------- BuildRunRepository ----------
 
+// cloneBuildRun 深拷贝构建（BuildArgs 单层 map 浅拷），防止返回值与 store 内部
+// 共享同一 map 引发并发读写 race（runBuild 后台 goroutine 与 API 读并发的窗口已存在）。
+func cloneBuildRun(b devops.BuildRun) devops.BuildRun {
+	if b.BuildArgs != nil {
+		m := make(map[string]string, len(b.BuildArgs))
+		for k, v := range b.BuildArgs {
+			m[k] = v
+		}
+		b.BuildArgs = m
+	}
+	return b
+}
+
 func (s *Store) ListBuildRuns(ctx context.Context, appID string) ([]devops.BuildRun, error) {
 	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
@@ -175,7 +188,7 @@ func (s *Store) ListBuildRuns(ctx context.Context, appID string) ([]devops.Build
 		if appID != "" && b.AppID != appID {
 			continue
 		}
-		out = append(out, b)
+		out = append(out, cloneBuildRun(b))
 	}
 	// 倒序：最新构建在前
 	sort.Slice(out, func(i, j int) bool { return out[i].StartedAt.After(out[j].StartedAt) })
@@ -188,7 +201,7 @@ func (s *Store) ListAllBuildRuns(ctx context.Context) ([]devops.BuildRun, error)
 	defer s.mu.Unlock()
 	out := make([]devops.BuildRun, 0, len(s.buildruns))
 	for _, b := range s.buildruns {
-		out = append(out, b)
+		out = append(out, cloneBuildRun(b))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].TenantID != out[j].TenantID {
@@ -210,7 +223,7 @@ func (s *Store) GetBuildRun(ctx context.Context, id string) (devops.BuildRun, er
 	if !ok || b.TenantID != tid {
 		return devops.BuildRun{}, fmt.Errorf("构建不存在: %s", id)
 	}
-	return b, nil
+	return cloneBuildRun(b), nil
 }
 
 // Create 触发一次构建。校验仓库归属后置 pending，启动 mock CI runner 异步流转并产出 Image。
@@ -254,7 +267,7 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) (devops.B
 	if b.Trigger == "" {
 		b.Trigger = devops.TriggerManual
 	}
-	s.buildruns[b.ID] = b
+	s.buildruns[b.ID] = cloneBuildRun(b) // 存与返回双向深拷贝（与 pipeline cloneRun 同款）：BuildArgs 与 store/调用方独立
 	s.mu.Unlock()
 
 	// CI runner：pending -> running -> success/failed（产出 Image）。
@@ -279,7 +292,7 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) (devops.B
 		TenantID: tid, AppID: b.AppID, BuildID: b.ID, Commit: b.Commit, Branch: b.Branch,
 		GitURL: gitURL, Dockerfile: df, BuildContext: bctx, BuildArgs: b.BuildArgs,
 	}) //nolint:gosec // G118 误报：后台构建须脱离请求生命周期，不持 request ctx 是有意为之
-	return b, nil
+	return cloneBuildRun(b), nil
 }
 
 // SetPipeline 注入构建流水线（cmd/core 按 PAAS_DEVOPS_REAL 注入 Real）；nil=Mock。
@@ -736,16 +749,23 @@ func (s *Store) RollbackRelease(ctx context.Context, releaseID string) (devops.R
 		s.mu.Unlock()
 		return devops.Release{}, fmt.Errorf("上一镜像不存在: %s", orig.PreviousImageID)
 	}
+	// 状态翻转并入守卫同一临界区（终审 M1，与 PG 版 CAS 语义对齐）：先置 rolled-back 再
+	// 放手做 UpdateImage——并发第二次回滚重进守卫即被拒，不会双翻转镜像/双回滚记录。
+	// UpdateImage 失败时恢复 succeeded（不留"已回滚"假状态）。
+	orig.Status = devops.ReleaseRolledBack
+	s.releases[releaseID] = orig
 	s.mu.Unlock()
 
 	display := prevImg.Registry + ":" + prevImg.Tag
 	if _, err := s.workload.UpdateImage(ctx, orig.WorkloadID, display, prevImg.Digest); err != nil {
+		s.mu.Lock()
+		orig.Status = devops.ReleaseSucceeded
+		s.releases[releaseID] = orig
+		s.mu.Unlock()
 		return devops.Release{}, err
 	}
 
 	s.mu.Lock()
-	orig.Status = devops.ReleaseRolledBack
-	s.releases[releaseID] = orig
 	rb := devops.Release{
 		ID:              newID("rel"),
 		TenantID:        tid,
@@ -792,9 +812,13 @@ func (s *Store) PromoteRelease(ctx context.Context, srcReleaseID, targetEnvID st
 		CreatedBy: src.CreatedBy,
 	}
 	if src.WorkloadID != "" {
-		if swl, err := s.workload.Get(ctx, src.WorkloadID); err == nil {
-			input.Service, input.ServiceID, input.LaneID = swl.Service, swl.ServiceID, swl.LaneID
+		swl, gerr := s.workload.Get(ctx, src.WorkloadID)
+		if gerr != nil {
+			// fail-closed（终审 I2）：promote 是低频高危写操作，源 workload 查不到（已删）
+			// 或瞬态 DB 错时静默降级=错配 bug 在边缘条件无感知复发（镜像推给生产无关服务）。
+			return devops.Release{}, fmt.Errorf("晋升失败：源工作负载不可用 %s: %w", src.WorkloadID, gerr)
 		}
+		input.Service, input.ServiceID, input.LaneID = swl.Service, swl.ServiceID, swl.LaneID
 	}
 	rel, err := s.CreateRelease(ctx, input)
 	if err != nil {

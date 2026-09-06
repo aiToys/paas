@@ -4,16 +4,21 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/aitoys/paas/internal/ai/agent"
 	agentmemory "github.com/aitoys/paas/internal/ai/agent/memory"
+	"github.com/aitoys/paas/internal/ai/knowledgebase"
+	kbmemory "github.com/aitoys/paas/internal/ai/knowledgebase/memory"
 	"github.com/aitoys/paas/internal/ai/prompt"
 	promptmemory "github.com/aitoys/paas/internal/ai/prompt/memory"
 	"github.com/aitoys/paas/internal/ai/skill"
 	skillmemory "github.com/aitoys/paas/internal/ai/skill/memory"
 	"github.com/aitoys/paas/internal/ai/tool"
 	toolmemory "github.com/aitoys/paas/internal/ai/tool/memory"
+	"github.com/aitoys/paas/internal/ai/workflow"
+	wfmemory "github.com/aitoys/paas/internal/ai/workflow/memory"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
@@ -219,6 +224,165 @@ func TestRepublishOverwritesAndDeleteKeepsCopies(t *testing.T) {
 	}
 	if _, err := store.Get(ctx, it1.ID); err != ErrItemNotFound {
 		t.Fatalf("it1 应已被覆盖删除: %v", err)
+	}
+}
+
+// TestKBPublishInstallRoundtrip KB 配置骨架发布-安装回路：
+// 快照剥离数据服务引用（租户数据），安装时经 finder 重绑安装者租户实例；无实例时引导性报错。
+func TestKBPublishInstallRoundtrip(t *testing.T) {
+	repos := newRepos()
+	repos.KBs = kbmemory.NewStore()
+	ctx := ctxTenant("t-a")
+	kb, err := repos.KBs.Create(ctx, knowledgebase.KnowledgeBase{
+		Name: "售后知识库", VectorStoreRef: "ds-vec-a", ObjectStoreRef: "ds-obj-a",
+		EmbeddingModel: "text-embedding-3", EmbeddingDim: 1536,
+		RetrieverConfig: knowledgebase.RetrieverConfig{TopK: 5},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := kbForker{repos}
+	name, desc, cat, snap, err := f.BuildSnapshot(ctx, kb.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cat != "general" {
+		t.Fatalf("KB 无 Category 应兜底 general，got %s", cat)
+	}
+	if name != "售后知识库" || !bytes.Contains(snap, []byte("text-embedding-3")) {
+		t.Fatalf("name/desc 不符: %s %s", name, desc)
+	}
+	var raw map[string]any
+	_ = json.Unmarshal(snap, &raw)
+	if raw["vectorStoreRef"] != "" || raw["objectStoreRef"] != "" {
+		t.Fatalf("数据服务引用不应进快照: %v", raw)
+	}
+
+	item := Item{ID: "mk-kb", EntityType: EntityKnowledgebase, Name: name, Snapshot: snap}
+	// 无实例 → 引导性错误（finder 桥接模拟租户无 vector 实例）
+	repos.FindVectorStore = func(ctx context.Context) (string, error) {
+		return "", fmt.Errorf("本租户暂无向量数据库实例，请先在资源中心创建后再安装")
+	}
+	repos.FindObjectStore = func(ctx context.Context) (string, error) { return "ds-obj-b", nil }
+	if _, err := f.InstallSnapshot(ctxTenant("t-b"), item); err == nil || !bytes.Contains([]byte(err.Error()), []byte("向量数据库")) {
+		t.Fatalf("无实例应报引导性错误，got %v", err)
+	}
+	// 注入 finder 重绑
+	repos.FindVectorStore = func(ctx context.Context) (string, error) { return "ds-vec-b", nil }
+	res, err := f.InstallSnapshot(ctxTenant("t-b"), item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := repos.KBs.Get(ctxTenant("t-b"), res.EntityID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.VectorStoreRef != "ds-vec-b" || got.ObjectStoreRef != "ds-obj-b" {
+		t.Fatalf("安装后引用应重绑安装者实例: %+v", got)
+	}
+	if got.EmbeddingModel != "text-embedding-3" || got.EmbeddingDim != 1536 {
+		t.Fatalf("配置骨架字段应保留: %+v", got)
+	}
+}
+
+// TestWorkflowPublishInstallRewritesNodeRefs 工作流整包发布-安装回路：
+// 节点引用的 Agent/Tool 全部内嵌，安装后引用重写为 fork 出的新实体 ID，且默认停用。
+func TestWorkflowPublishInstallRewritesNodeRefs(t *testing.T) {
+	repos := newRepos()
+	repos.Workflows = wfmemory.NewStore()
+	ctx := ctxTenant("t-a")
+	sk, _ := repos.Skills.Create(ctx, skill.Skill{Name: "售后话术", Instructions: "规范回复"})
+	a, err := repos.Agents.Create(ctx, agent.Agent{
+		Name: "分类员", Description: "意图分类", Model: "glm-5.2", SystemPrompt: "你是分类员", Skills: []string{sk.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tl, _ := repos.Tools.Create(ctx, tool.Tool{
+		Name: "工单创建", Description: "建工单", Type: tool.TypeHTTP,
+		Config: map[string]string{"endpoint": "http://tk/api", "token": "sk-leak"},
+	})
+	def := workflow.WorkflowDef{
+		Name: "售后工单流", Desc: "分类后建工单",
+		Nodes: []workflow.NodeDef{
+			{ID: "start", Type: workflow.NodeStart, NextID: "cls"},
+			{ID: "cls", Type: workflow.NodeLLM, Name: "分类", NextID: "mk",
+				Config: workflow.NodeConfig{AgentID: a.ID, InputTemplate: "分类：{{inputs.q}}"}},
+			{ID: "mk", Type: workflow.NodeTool, Name: "建单", NextID: "end",
+				Config: workflow.NodeConfig{ToolID: tl.ID, ToolName: "create_ticket"}},
+			{ID: "end", Type: workflow.NodeEnd},
+		},
+	}
+	d, err := repos.Workflows.Create(ctx, def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := workflowForker{repos}
+	name, _, cat, snap, err := f.BuildSnapshot(ctx, d.ID, "service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "售后工单流" || cat != "service" {
+		t.Fatalf("name/category 不符: %s %s", name, cat)
+	}
+	if bytes.Contains(snap, []byte("sk-leak")) {
+		t.Fatal("工具凭证不应进工作流快照")
+	}
+	var wfSnap WorkflowSnapshot
+	_ = json.Unmarshal(snap, &wfSnap)
+	if len(wfSnap.Agents) != 1 || len(wfSnap.Tools) != 1 {
+		t.Fatalf("内嵌实体数不符: agents=%d tools=%d", len(wfSnap.Agents), len(wfSnap.Tools))
+	}
+	if wfSnap.Agents[0].RefID != a.ID || wfSnap.Tools[0].RefID != tl.ID {
+		t.Fatal("RefID 应为发布者侧实体 ID")
+	}
+
+	item := Item{ID: "mk-wf", EntityType: EntityWorkflow, Name: name, Snapshot: snap}
+	ctxB := ctxTenant("t-b")
+	res, err := f.InstallSnapshot(ctxB, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := repos.Workflows.Get(ctxB, res.EntityID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Enabled {
+		t.Fatal("安装后应默认停用（凭证需补填确认后再启用）")
+	}
+	// 节点引用指向 t-b fork 出的新实体
+	var llmNode, toolNode *workflow.NodeDef
+	for i := range got.Nodes {
+		switch got.Nodes[i].ID {
+		case "cls":
+			llmNode = &got.Nodes[i]
+		case "mk":
+			toolNode = &got.Nodes[i]
+		}
+	}
+	if llmNode == nil || toolNode == nil {
+		t.Fatal("节点结构不完整")
+	}
+	if llmNode.Config.AgentID == a.ID {
+		t.Fatal("agent 引用未重写")
+	}
+	if _, err := repos.Agents.Get(ctxB, llmNode.Config.AgentID); err != nil {
+		t.Fatalf("agent 引用应指向 fork 副本: %v", err)
+	}
+	// 内嵌 agent 的 skill 一并 fork
+	ag, _ := repos.Agents.Get(ctxB, llmNode.Config.AgentID)
+	if len(ag.Skills) != 1 {
+		t.Fatalf("内嵌 skill 未 fork: %+v", ag)
+	}
+	if toolNode.Config.ToolID == tl.ID {
+		t.Fatal("tool 引用未重写")
+	}
+	newTool, err := repos.Tools.Get(ctxB, toolNode.Config.ToolID)
+	if err != nil {
+		t.Fatalf("tool 引用应指向 fork 副本: %v", err)
+	}
+	if newTool.Config["token"] != "" || newTool.Config["endpoint"] != "http://tk/api" {
+		t.Fatalf("工具凭证不应随安装带入: %v", newTool.Config)
 	}
 }
 

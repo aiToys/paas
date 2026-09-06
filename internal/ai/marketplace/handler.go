@@ -7,9 +7,11 @@ import (
 	"strings"
 
 	"github.com/aitoys/paas/internal/ai/agent"
+	"github.com/aitoys/paas/internal/ai/knowledgebase"
 	"github.com/aitoys/paas/internal/ai/prompt"
 	"github.com/aitoys/paas/internal/ai/skill"
 	"github.com/aitoys/paas/internal/ai/tool"
+	"github.com/aitoys/paas/internal/ai/workflow"
 	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/pkg/tenant"
 )
@@ -22,9 +24,9 @@ const (
 
 // PublishRequest 发布请求体。
 type PublishRequest struct {
-	EntityType string `json:"entityType"` // skill | prompt | tool | agent
+	EntityType string `json:"entityType"` // skill | prompt | tool | agent | knowledgebase | workflow
 	EntityID   string `json:"entityId"`   // 本租户实体 ID
-	Category   string `json:"category"`   // 广场分类（空则取实体自带 Category）
+	Category   string `json:"category"`   // 广场分类（空则取实体自带 Category；KB/工作流兜底 general）
 }
 
 // InstallResult 安装结果（fork 后的新实体）。
@@ -248,10 +250,11 @@ func (h *Handler) serveInstall(w http.ResponseWriter, r *http.Request, id string
 	httputil.WriteDataCreated(w, res)
 }
 
-// isExistsErr 判定各实体仓储的同名冲突 sentinel（skill/prompt/tool/agent 四类）。
+// isExistsErr 判定各实体仓储的同名冲突 sentinel（六类实体）。
 func isExistsErr(err error) bool {
 	return err == skill.ErrSkillExists || err == prompt.ErrPromptExists ||
-		err == tool.ErrToolExists || err == agent.ErrAgentExists
+		err == tool.ErrToolExists || err == agent.ErrAgentExists ||
+		err == knowledgebase.ErrKBExists || err == workflow.ErrWorkflowExists
 }
 
 // PublisherNameFn 发布者显示名提取（cmd/core 桥接 gateway.UserIDFrom；未注入时空串，展示侧回退租户名）。

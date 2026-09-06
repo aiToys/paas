@@ -41,6 +41,13 @@ func tenantOrErr(ctx context.Context) (string, error) {
 
 func clone(c eval.EvalCase) eval.EvalCase { return c }
 
+// cloneEvalRun 深拷贝评估记录（Results 切片底层数组独立；EvalResult 全值字段，拷一层即深拷），
+// 防止返回值与 store 内部共享引发并发读写 race。
+func cloneEvalRun(r eval.EvalRun) eval.EvalRun {
+	r.Results = append([]eval.EvalResult(nil), r.Results...)
+	return r
+}
+
 func (s *Store) List(ctx context.Context, agentID string) ([]eval.EvalCase, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {
@@ -147,7 +154,7 @@ func (s *Store) ListRuns(ctx context.Context, agentID string) ([]eval.EvalRun, e
 	out := make([]eval.EvalRun, 0)
 	for _, r := range s.runs {
 		if r.TenantID == tid && (agentID == "" || r.AgentID == agentID) {
-			out = append(out, r)
+			out = append(out, cloneEvalRun(r))
 		}
 	}
 	// 最近优先
@@ -166,7 +173,7 @@ func (s *Store) GetRun(ctx context.Context, id string) (eval.EvalRun, error) {
 	if !ok || r.TenantID != tid {
 		return eval.EvalRun{}, eval.ErrEvalRunNotFound
 	}
-	return r, nil
+	return cloneEvalRun(r), nil
 }
 
 func (s *Store) CreateRun(ctx context.Context, in eval.EvalRun) (eval.EvalRun, error) {
@@ -181,7 +188,7 @@ func (s *Store) CreateRun(ctx context.Context, in eval.EvalRun) (eval.EvalRun, e
 	in.CreatedAt = time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.runs[in.ID] = in
+	s.runs[in.ID] = cloneEvalRun(in) // 存与返回双向深拷贝（与 pipeline cloneRun 同款），隔离 caller 传入的 Results
 	// 环形截断：同 agent 仅保留最近 maxRunsPerAgent 次
 	var ids []string
 	for id, r := range s.runs {
@@ -195,5 +202,5 @@ func (s *Store) CreateRun(ctx context.Context, in eval.EvalRun) (eval.EvalRun, e
 			delete(s.runs, id)
 		}
 	}
-	return in, nil
+	return cloneEvalRun(in), nil
 }

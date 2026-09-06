@@ -1,5 +1,5 @@
 // Package marketplace 实现 AI 编排广场（跨租户共享能力市场）：
-// 任何租户可把 Skill / Prompt / Tool / Agent 整包发布到广场（脱敏快照，不可变），
+// 任何租户可把 Skill / Prompt / Tool / Agent 整包 / 知识库 / 工作流发布到广场（脱敏快照，不可变），
 // 其他租户浏览/搜索/按分类筛选后「安装 = fork 副本」到自己租户，之后独立演进。
 //
 // 设计要点：
@@ -9,6 +9,9 @@
 //   - Tool 凭证：发布时 SanitizeConfig 自动剔除敏感 key（apiKey/token/password/secret/authorization），
 //     安装者自行补填；快照不含任何凭证。
 //   - Agent 整包：snapshot 内嵌引用的 skills/prompt/tools，安装时全部 fork 并重写 Agent 引用 ID。
+//   - 知识库：只发配置骨架（嵌入模型/维度/检索参数）；文档与数据服务引用是租户数据不带走，
+//     安装时自动绑定安装者租户的 vector/storage 实例（无实例则报错引导先创建）。
+//   - 工作流：snapshot 内嵌节点引用的 Agent 整包与 Tool，安装时全部 fork 并重写节点引用 ID。
 package marketplace
 
 import (
@@ -21,10 +24,12 @@ import (
 
 // EntityType 广场条目类型。
 const (
-	EntitySkill  = "skill"
-	EntityPrompt = "prompt"
-	EntityTool   = "tool"
-	EntityAgent  = "agent"
+	EntitySkill         = "skill"
+	EntityPrompt        = "prompt"
+	EntityTool          = "tool"
+	EntityAgent         = "agent"
+	EntityKnowledgebase = "knowledgebase"
+	EntityWorkflow      = "workflow"
 )
 
 // Item 广场条目（平台级公开）。Snapshot 按 EntityType 反序列化。
@@ -50,12 +55,33 @@ type AgentSnapshot struct {
 	Tools  []json.RawMessage `json:"tools,omitempty"`
 }
 
+// WorkflowSnapshot 工作流整包快照：本体 + 节点引用的 Agent 整包 / Tool。
+// RefID 是发布者租户侧的实体 ID，安装 fork 后用于建立「旧 ID → 新 ID」映射重写节点引用；
+// 引用实体缺失时不进快照，节点引用保留原 ID（运行期 fail-fast 提示，不静默丢节点）。
+type WorkflowSnapshot struct {
+	Workflow json.RawMessage `json:"workflow"`
+	Agents   []EmbeddedAgent `json:"agents,omitempty"`
+	Tools    []EmbeddedTool  `json:"tools,omitempty"`
+}
+
+// EmbeddedAgent 带 RefID 的 Agent 整包快照。
+type EmbeddedAgent struct {
+	RefID string        `json:"refId"`
+	Snap  AgentSnapshot `json:"snap"`
+}
+
+// EmbeddedTool 带 RefID 的 Tool 快照（脱敏后 JSON）。
+type EmbeddedTool struct {
+	RefID string          `json:"refId"`
+	Tool  json.RawMessage `json:"tool"`
+}
+
 // Validate 校验。
 func (i Item) Validate() error {
 	switch i.EntityType {
-	case EntitySkill, EntityPrompt, EntityTool, EntityAgent:
+	case EntitySkill, EntityPrompt, EntityTool, EntityAgent, EntityKnowledgebase, EntityWorkflow:
 	default:
-		return fieldErr("entityType 必须是 skill/prompt/tool/agent")
+		return fieldErr("entityType 必须是 skill/prompt/tool/agent/knowledgebase/workflow")
 	}
 	if i.Name == "" {
 		return fieldErr("name 不能为空")

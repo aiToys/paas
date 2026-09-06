@@ -7,6 +7,9 @@ import (
 
 	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/httputil"
+	"github.com/aitoys/paas/pkg/tenant"
+
+	adminutil "github.com/aitoys/paas/internal/web/admin"
 
 	"github.com/aitoys/paas/internal/core/application"
 )
@@ -33,6 +36,8 @@ type EnvTypeResolver = environment.EnvTypeResolver
 type Handler struct {
 	repo        Repository
 	envResolver EnvTypeResolver
+	audit       adminutil.AuditRecorder // 写操作审计（配置注入影响运行行为，记 create/delete）；nil 跳过
+	actorFn     func(*http.Request) string
 	Authorize   func(r *http.Request, perm string) bool
 	// Guard 应用级权限 enforcement（受限应用配置写需成员角色）；nil 跳过。
 	Guard *application.AppGuard
@@ -53,6 +58,24 @@ type HandlerOpt func(*Handler)
 // WithEnvResolver 注入环境类型解析器，启用生产写权限校验。
 func WithEnvResolver(r EnvTypeResolver) HandlerOpt {
 	return func(h *Handler) { h.envResolver = r }
+}
+
+// WithAudit 注入审计 recorder + actor 解析（写操作记审计，元审计 2026-09-04 补）。
+func WithAudit(a adminutil.AuditRecorder, actor func(*http.Request) string) HandlerOpt {
+	return func(h *Handler) { h.audit = a; h.actorFn = actor }
+}
+
+// recordAudit best-effort 记审计（错误不影响主流程；nil 未注入时跳过）。
+func (h *Handler) recordAudit(r *http.Request, action, resourceID, detail string) {
+	if h.audit == nil {
+		return
+	}
+	tid, _ := tenant.TenantFrom(r.Context())
+	actor := ""
+	if h.actorFn != nil {
+		actor = h.actorFn(r)
+	}
+	_ = h.audit.Record(r.Context(), tid, actor, action, "appconfig", resourceID, detail)
 }
 
 // WithAppGuard 注入应用级权限 enforcement（受限应用配置写需成员角色）。
@@ -141,6 +164,7 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request, appID 
 			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
+		h.recordAudit(r, "appconfig_upsert", saved.ID, "app="+appID+" env="+item.EnvID+" key="+saved.Key)
 		httputil.WriteDataCreated(w, saved)
 		return
 	}
@@ -184,5 +208,6 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request, appID, cfgID
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
+	h.recordAudit(r, "appconfig_delete", cfgID, "app="+appID)
 	httputil.WriteData(w, map[string]string{"deleted": cfgID})
 }

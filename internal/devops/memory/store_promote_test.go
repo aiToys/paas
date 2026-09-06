@@ -68,3 +68,27 @@ func TestPromoteReleaseInheritsService(t *testing.T) {
 		t.Fatalf("prod product 基线被错配污染: %s", p.Image)
 	}
 }
+
+// TestPromoteReleaseSourceWorkloadGone 源 workload 已删（单独删除后 promote 旧 release）必须
+// fail-closed 报错——静默降级会让基线匹配回到全列表取首个，错配在生产无感知复发（终审 I2）。
+func TestPromoteReleaseSourceWorkloadGone(t *testing.T) {
+	wl := wlmemory.NewStore()
+	s := NewStore(wl)
+	ctx := tenant.WithTenant(t.Context(), "t-acme")
+
+	seedImage(s, "img-gone-1", "t-acme", "app-cs")
+	src, err := s.CreateRelease(ctx, devops.ReleaseInput{
+		AppID: "app-cs", EnvID: "env-test", ImageID: "img-gone-1", Service: "order",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 删除源 workload（模拟基线被单独删除），再 promote。
+	if err := wl.Delete(ctx, src.WorkloadID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PromoteRelease(ctx, src.ID, "env-prod"); err == nil {
+		t.Fatal("源 workload 已删时 promote 必须 fail-closed 报错，不得静默降级")
+	}
+}

@@ -152,6 +152,7 @@ func (s *Store) BindResource(ctx context.Context, id, resourceType, name string)
 	// 同类型同名视为已绑定，幂等返回
 	for _, b := range a.Bindings {
 		if b.Type == resourceType && b.Name == name {
+			a.Bindings = cloneBindings(a.Bindings) // 幂等分支同样深拷贝（与下方正常分支对齐），防返回值与 store 共享
 			return a, nil
 		}
 	}

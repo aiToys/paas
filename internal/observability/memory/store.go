@@ -48,6 +48,27 @@ func clonePoints(pts []observability.MetricPoint) []observability.MetricPoint {
 	return cp
 }
 
+// cloneTrace 深拷贝链路（Spans 切片 + Span.Tags map 逐层拷），确保返回值与 store 内独立，
+// 防止并发读写 race（当前 traces 无写入 API 属降级防御，与 clonePoints 同款）。
+func cloneTrace(t observability.Trace) observability.Trace {
+	if t.Spans == nil {
+		return t
+	}
+	cp := make([]observability.Span, len(t.Spans))
+	for i, sp := range t.Spans {
+		cp[i] = sp
+		if sp.Tags != nil {
+			m := make(map[string]string, len(sp.Tags))
+			for k, v := range sp.Tags {
+				m[k] = v
+			}
+			cp[i].Tags = m
+		}
+	}
+	t.Spans = cp
+	return t
+}
+
 func (s *Store) ListMetrics(ctx context.Context, targetType, targetID, name string) ([]observability.MetricSeries, error) {
 	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
@@ -273,7 +294,7 @@ func (s *Store) ListTraces(ctx context.Context, appID, status string, limit int)
 		if status != "" && t.Status != status {
 			continue
 		}
-		out = append(out, t)
+		out = append(out, cloneTrace(t))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].StartedAt.After(out[j].StartedAt) })
 	if len(out) > limit {
@@ -292,7 +313,7 @@ func (s *Store) GetTrace(ctx context.Context, traceID string) (observability.Tra
 	defer s.mu.Unlock()
 	for _, t := range s.traces[tid] {
 		if t.ID == traceID {
-			return t, nil
+			return cloneTrace(t), nil
 		}
 	}
 	return observability.Trace{}, observability.ErrTraceNotFound
