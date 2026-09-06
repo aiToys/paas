@@ -1,6 +1,23 @@
 package devops
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// Sentinel 错误。
+var (
+	// ErrTooManyActiveBuilds 租户活跃构建超限（可观测审计 C1：构建入口无并发上限，
+	// 脚本化触发可打爆节点 docker daemon；per-tenant 并发闸，handler 映射 429）。
+	ErrTooManyActiveBuilds = errors.New("活跃构建数超限，请等待进行中的构建完成")
+	// ErrRepoExists 仓库已存在（重复绑定；handler 映射 409，错误契约审计 I8：
+	// PG 唯一冲突此前无 sentinel 落 400，与 gitea.ErrRepoExists 的 409 不一致）。
+	ErrRepoExists = errors.New("仓库已存在")
+)
+
+// MaxActiveBuildsPerTenant 租户并发构建上限（DooD 共享节点 docker daemon 的保护值；
+// 超限 429 排队重试语义。memory/PG 双后端同源）。
+const MaxActiveBuildsPerTenant = 3
 
 // 四仓储接口方法名带实体前缀，避免单 Store 实现全部接口时方法名冲突
 // （List/Get/Create 在多实体上重名）。实现必须从 ctx 取租户并强制过滤

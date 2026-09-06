@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -73,6 +74,9 @@ type Handler struct {
 	giteaExternalURL string
 	// registryClient 镜像库 v2 客户端；nil 时 registry 实时视图不可用（降级 503）。
 	registryClient *registry.Client
+	// appIDLister 列当前租户应用 ID（registry catalog/tags 按应用=仓库名过滤，
+	// 防跨租户镜像枚举——安全审计第 2 轮 M3）；nil 时降级为不过滤（测试场景）。
+	appIDLister AppIDLister
 	// logStreamer 构建实时日志流（k8s Pod logs follow）；nil 时 /logs/stream 降级 503。
 	logStreamer builder.BuildLogStreamer
 	// svcLister 查 app 已部署的服务集合（多服务发布 service 必填校验用）；
@@ -143,6 +147,41 @@ func WithGiteaClient(c *gitea.Client) HandlerOpt {
 // WithRegistryClient 注入镜像库 v2 客户端，启用 registry 实时视图（catalog/tags）。
 func WithRegistryClient(c *registry.Client) HandlerOpt {
 	return func(h *Handler) { h.registryClient = c }
+}
+
+// AppIDLister 列当前租户（ctx）的应用 ID 集合（registry 租户过滤用）。
+type AppIDLister interface {
+	List(ctx context.Context) ([]string, error)
+}
+
+// WithAppIDLister 注入租户应用 ID 列表（registry catalog/tags 过滤）。
+func WithAppIDLister(l AppIDLister) HandlerOpt {
+	return func(h *Handler) { h.appIDLister = l }
+}
+
+// filterRepoByTenant 过滤 catalog 仓库名：仓库=应用（builder push 到 <registry>/<appID>），
+// 只保留当前租户的应用。lister nil（测试未装配）或查询失败时返回全部（fail-open 仅限
+// 平台自身 registry 视图降级，与多租户 Repository 强制过滤不同源）。
+func (h *Handler) filterRepoByTenant(ctx context.Context, names []string) []string {
+	if h.appIDLister == nil {
+		return names
+	}
+	ids, err := h.appIDLister.List(ctx)
+	if err != nil || len(ids) == 0 {
+		return names
+	}
+	allowed := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		allowed[id] = true
+	}
+	out := names[:0]
+	for _, n := range names {
+		// catalog 名可能含路径前缀（如 paas/app），取末段比对应用 ID。
+		if allowed[path.Base(n)] {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // WithBuildLogStreamer 注入构建实时日志流（k8s Pod logs follow）；nil 时 /logs/stream 降级 503。
@@ -267,14 +306,14 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 		case 2:
 			h.serveRepos(w, r, appID)
 		case 3:
-			h.serveRepoDelete(w, r, parts[2])
+			h.serveRepoDelete(w, r, appID, parts[2])
 		case 4:
 			if parts[3] == "pulls" {
 				// /repositories/{rid}/pulls PR 列表（仅 internal）
 				h.serveRepoPulls(w, r, appID, parts[2], parts[3:])
 			} else {
 				// /repositories/{rid}/{tree|commits|file} 仓库内容浏览（仅 internal）
-				h.serveRepoBrowse(w, r, parts[2], parts[3])
+				h.serveRepoBrowse(w, r, appID, parts[2], parts[3])
 			}
 		case 5, 6:
 			// /repositories/{rid}/pulls/{number}[/{reviews|merge}] PR 评审闭环（仅 internal）
@@ -334,6 +373,10 @@ func (h *Handler) serveRepos(w http.ResponseWriter, r *http.Request, appID strin
 		if !h.allow(w, r, PermRepoWrite) {
 			return
 		}
+		// 应用级权限（权限审计 I2）：仓库绑定/解绑改应用代码源，受限应用需 write。
+		if !h.allowApp(w, r, appID, application.AppActionWrite) {
+			return
+		}
 		var repo CodeRepo
 		if err := json.NewDecoder(r.Body).Decode(&repo); err != nil {
 			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
@@ -378,9 +421,10 @@ func (h *Handler) serveRepos(w http.ResponseWriter, r *http.Request, appID strin
 			repo.Status = RepoStatusActive
 		}
 		if err := h.repos.CreateRepo(r.Context(), repo); err != nil {
-			httputil.WriteServiceError(w, http.StatusBadRequest, err)
+			writeCreateErr(w, err)
 			return
 		}
+		h.recordAudit(r, "repo_create", "coderepo", repo.ID, "app="+appID+" source="+repo.Source)
 		httputil.WriteDataCreated(w, repo)
 		return
 	}
@@ -401,7 +445,20 @@ func (h *Handler) writeGiteaErr(w http.ResponseWriter, err error) {
 	}
 }
 
-func (h *Handler) serveRepoDelete(w http.ResponseWriter, r *http.Request, repoID string) {
+// writeCreateErr Create 类错误分流：sentinel（409 重复 / 429 并发超限）优先，
+// 其余经 WriteServiceError 脱敏分流（错误契约审计 I8 / 可观测审计 C1）。
+func writeCreateErr(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrRepoExists):
+		httputil.WriteError(w, http.StatusConflict, "仓库已存在")
+	case errors.Is(err, ErrTooManyActiveBuilds):
+		httputil.WriteError(w, http.StatusTooManyRequests, err.Error())
+	default:
+		httputil.WriteServiceError(w, http.StatusBadRequest, err)
+	}
+}
+
+func (h *Handler) serveRepoDelete(w http.ResponseWriter, r *http.Request, appID, repoID string) {
 	if r.Method != http.MethodDelete {
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -409,16 +466,44 @@ func (h *Handler) serveRepoDelete(w http.ResponseWriter, r *http.Request, repoID
 	if !h.allow(w, r, PermRepoWrite) {
 		return
 	}
+	repo, err := h.repos.GetRepo(r.Context(), repoID)
+	if err != nil {
+		httputil.WriteError(w, http.StatusNotFound, "仓库不存在")
+		return
+	}
+	// 归属校验（同 serveRepoPulls/Browse）：URL appId 与仓库真实归属一致。
+	if repo.AppID != appID {
+		httputil.WriteError(w, http.StatusNotFound, "仓库不存在")
+		return
+	}
+	// 应用级权限（权限审计 I2）：删仓库是应用级写操作，受限应用需 write。
+	if !h.allowApp(w, r, appID, application.AppActionWrite) {
+		return
+	}
+	// 级联删 Gitea 仓库（集成审计 I4）：只删平台记录会留 Gitea 残仓，重名 409 死锁。
+	// 顺序先 Gitea 后平台：Gitea 失败拒绝删除（两侧一致）；平台侧失败留 Gitea 已删+
+	// 记录残留，可重删（DeleteRepo 幂等）。
+	if repo.Source == RepoSourceInternal && h.giteaClient != nil {
+		owner := repo.GiteaOwner
+		if owner == "" {
+			owner = h.giteaClient.Username()
+		}
+		if gerr := h.giteaClient.DeleteRepo(r.Context(), owner, repo.GiteaRepo); gerr != nil {
+			h.writeGiteaErr(w, gerr)
+			return
+		}
+	}
 	if err := h.repos.DeleteRepo(r.Context(), repoID); err != nil {
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
+	h.recordAudit(r, "repo_delete", "coderepo", repoID, "app="+appID)
 	httputil.WriteData(w, map[string]string{"deleted": repoID})
 }
 
 // serveRepoBrowse 处理 /api/applications/{id}/repositories/{rid}/{action}。
 // action: tree（文件树）/ commits（提交历史）/ file（单文件内容，?path=）。仅 internal 仓库支持（external 返 405）。
-func (h *Handler) serveRepoBrowse(w http.ResponseWriter, r *http.Request, repoID, action string) {
+func (h *Handler) serveRepoBrowse(w http.ResponseWriter, r *http.Request, appID, repoID, action string) {
 	if r.Method != http.MethodGet {
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -432,6 +517,12 @@ func (h *Handler) serveRepoBrowse(w http.ResponseWriter, r *http.Request, repoID
 	}
 	repo, err := h.repos.GetRepo(r.Context(), repoID)
 	if err != nil {
+		httputil.WriteError(w, http.StatusNotFound, "仓库不存在")
+		return
+	}
+	// 归属校验（同 serveRepoPulls）：URL appId 必须与仓库真实归属一致，防同租户
+	// 跨应用浏览其他应用的 internal 仓库源码（安全审计第 2 轮 M1）。
+	if repo.AppID != appID {
 		httputil.WriteError(w, http.StatusNotFound, "仓库不存在")
 		return
 	}
@@ -475,6 +566,14 @@ func (h *Handler) serveRepoBrowse(w http.ResponseWriter, r *http.Request, repoID
 			return
 		}
 		httputil.WriteData(w, map[string]any{"path": fc.Path, "name": fc.Name, "size": fc.Size, "content": content})
+	case "branches":
+		// 分支列表（旅程审计 R5-I6：构建触发对话框分支选择数据源）。
+		branches, err := h.giteaClient.ListBranches(r.Context(), owner, name, 50)
+		if err != nil {
+			h.writeGiteaErr(w, err)
+			return
+		}
+		httputil.WriteData(w, branches)
 	default:
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
@@ -714,6 +813,7 @@ func (h *Handler) serveRegistryCatalog(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, http.StatusServiceUnavailable, "镜像库不可达")
 		return
 	}
+	names = h.filterRepoByTenant(r.Context(), names)
 	// 转为对象数组（前端统一 .data 解包），便于未来加 tag 数/最新推送等聚合字段
 	out := make([]map[string]any, 0, len(names))
 	for _, n := range names {
@@ -739,6 +839,26 @@ func (h *Handler) serveRegistryTags(w http.ResponseWriter, r *http.Request) {
 	if repo == "" {
 		httputil.WriteError(w, http.StatusBadRequest, "字段非法或缺失: repository")
 		return
+	}
+	// 归属校验：仓库=应用，须属于当前租户（防跨租户 tag/digest 枚举）。
+	// lister 校验失败 fail-closed（与 catalog 过滤的展示性降级不同，这里是数据面）。
+	if h.appIDLister != nil {
+		ids, err := h.appIDLister.List(r.Context())
+		if err != nil {
+			httputil.WriteServiceError(w, http.StatusInternalServerError, err)
+			return
+		}
+		owned := false
+		for _, id := range ids {
+			if id == path.Base(repo) {
+				owned = true
+				break
+			}
+		}
+		if !owned {
+			httputil.WriteError(w, http.StatusNotFound, "镜像仓库不存在")
+			return
+		}
 	}
 	tags, err := h.registryClient.Tags(r.Context(), repo)
 	if err != nil {
@@ -785,29 +905,44 @@ func (h *Handler) serveBuildRuns(w http.ResponseWriter, r *http.Request, appID s
 			httputil.WriteError(w, http.StatusBadRequest, "repoId 不能为空")
 			return
 		}
-		// internal 仓库：从 Gitea 拿最新 commit sha + message 填入（替代 store 的 mock），
+		// 归属校验（权限审计 I5）：RepoID 必须属于 URL app——应用 A 的 buildrun 引用
+		// 应用 B 的仓库会让 B 的源码经 A 的构建日志/镜像外泄给 A 的成员（restricted 绕过）。
+		// 统一 404 不泄漏存在性（与 browse/pulls 同款）。
+		repo, rerr := h.repos.GetRepo(r.Context(), b.RepoID)
+		if rerr != nil || repo.AppID != appID {
+			httputil.WriteError(w, http.StatusNotFound, "仓库不存在")
+			return
+		}
+		// 分支回落：请求未指定时用仓库默认分支（与 builder 实际 checkout 分支一致）。
+		if b.Branch == "" {
+			b.Branch = repo.Branch
+		}
+		// internal 仓库：从 Gitea 拿该分支最新 commit sha + message 填入（替代 store 的 mock），
 		// 使构建记录的 commit/tag/message 真实（builder script COMMIT 非空则不 rev-parse，直接用此 sha 生成 tag）。
+		// 按 branch 取 HEAD（旅程审计 R5-I6 手动触发路径，与 pipeline 触发同款）：不传 ref 会
+		// 取默认分支 HEAD，选非默认分支构建时 commit/message 与实际构建内容错位。
 		// external 仓库或 Gitea 不可达时回退 store mock（保持原行为）。
-		if b.Commit == "" && h.giteaClient != nil {
-			if repo, rerr := h.repos.GetRepo(r.Context(), b.RepoID); rerr == nil && repo.Source == RepoSourceInternal {
-				owner := repo.GiteaOwner
-				if owner == "" {
-					owner = h.giteaClient.Username()
-				}
-				if cs, gerr := h.giteaClient.ListCommits(r.Context(), owner, repo.GiteaRepo, 1); gerr == nil && len(cs) > 0 {
-					b.Commit = cs[0].SHA
-					if b.Message == "" {
-						b.Message = cs[0].Message
-					}
+		if b.Commit == "" && h.giteaClient != nil && repo.Source == RepoSourceInternal {
+			owner := repo.GiteaOwner
+			if owner == "" {
+				owner = h.giteaClient.Username()
+			}
+			if cs, gerr := h.giteaClient.ListCommits(r.Context(), owner, repo.GiteaRepo, 1, b.Branch); gerr == nil && len(cs) > 0 {
+				b.Commit = cs[0].SHA
+				if b.Message == "" {
+					b.Message = cs[0].Message
 				}
 			}
 		}
-		if _, err := h.builds.CreateBuildRun(r.Context(), b); err != nil {
-			httputil.WriteServiceError(w, http.StatusBadRequest, err)
+		created, err := h.builds.CreateBuildRun(r.Context(), b)
+		if err != nil {
+			writeCreateErr(w, err)
 			return
 		}
-		// 返回创建的 BuildRun（含后端分配的 ID/状态），符合 {data:T} 契约（spec 登记 WithResp(BuildRun{})）。
-		httputil.WriteDataCreated(w, b)
+		h.recordAudit(r, "build_run_create", "buildrun", created.ID, "app="+appID+" branch="+created.Branch+" args="+fmt.Sprintf("%v", created.BuildArgs))
+		// 返回 store 分配 ID/状态后的对象（此前丢弃返回值致响应 id 为空，
+		// 前端触发后拿不到新构建 ID 无法直跳详情）。
+		httputil.WriteDataCreated(w, created)
 		return
 	}
 	httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -837,6 +972,7 @@ func (h *Handler) serveBuildDetail(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
+	b.Log = builder.CapLog(b.Log) // 终端全量返回兜底截断（层 2 落库已 cap，双保险防存量超限行）
 	httputil.WriteData(w, b)
 }
 
@@ -871,10 +1007,10 @@ func (h *Handler) serveBuildLogsStream(w http.ResponseWriter, r *http.Request, i
 		}
 	}
 
-	// 终态：返全量日志后关流
+	// 终态：返全量日志后关流（层 4 cap：存量超限日志兜底截断，层 2 落库已 cap）
 	if b.Status == BuildSuccess || b.Status == BuildFailed {
 		if b.Log != "" {
-			writeSSE(b.Log)
+			writeSSE(builder.CapLog(b.Log))
 		}
 		_, _ = fmt.Fprint(w, "event: end\ndata: terminal\n\n")
 		if flusher != nil {
@@ -925,20 +1061,58 @@ func (h *Handler) serveBuildLogsStream(w http.ResponseWriter, r *http.Request, i
 		}
 	}
 	defer func() { _ = stream.Close() }()
-	// 逐块读 + SSE 转发（每行一个 data）。
+	// 逐块读 + SSE 转发（每行一个 data）。每块先过 builder.MaskToken 脱敏：
+	// Pod 日志可能含带凭证的 clone URL（http://paas-bot:<pwd>@...），SSE 直通分支
+	// 与持久化路径（runBuild 落库已 mask）必须同款脱敏，防 paas-bot 密码泄漏给
+	// build:read 权限者（安全审计 I4）。按行缓冲转发，避免凭证 URL 被块边界截断漏匹配。
 	// stream.Read 阻塞，ctx 取消时 client-go Stream 内部使 Read 返 error（依赖此机制退出）。
 	// 区分「客户端断连」（ctx.Err!=nil，静默退出不发 end，避免对已断连连接 Write）与「流正常结束」（发 end）。
 	buf := make([]byte, 4096)
+	var lineBuf []byte
+	flushLine := func(force bool) {
+		for {
+			idx := -1
+			for i, c := range lineBuf {
+				if c == '\n' {
+					idx = i
+					break
+				}
+			}
+			if idx < 0 && !force {
+				break // 无完整行且非强制：留在缓冲（凭证 URL 可能被块边界截断）
+			}
+			if idx < 0 { // force 且无换行：整缓冲发出
+				writeSSE(builder.MaskToken(string(lineBuf)))
+				lineBuf = lineBuf[:0]
+				break
+			}
+			writeSSE(builder.MaskToken(string(lineBuf[:idx+1])))
+			lineBuf = lineBuf[idx+1:]
+		}
+	}
+	sent := 0 // SSE 累计转发上限：超过即截断关流（层 4 cap，集成审计 I6）
 	for {
 		n, readErr := stream.Read(buf)
 		if n > 0 {
-			writeSSE(string(buf[:n]))
+			lineBuf = append(lineBuf, buf[:n]...)
+			flushLine(false)
+			sent += n
+			if sent > builder.MaxLogBytes {
+				flushLine(true)
+				writeSSE(fmt.Sprintf("...[实时日志超 %s 截断，完整日志见构建详情]...", "8MB"))
+				_, _ = fmt.Fprint(w, "event: end\ndata: stream-closed\n\n")
+				if flusher != nil {
+					flusher.Flush()
+				}
+				return
+			}
 		}
 		if readErr != nil {
 			if ctx.Err() != nil {
 				// 客户端断连/请求取消：静默退出（end 事件无处可发）
 				return
 			}
+			flushLine(true) // 尾部残行（无换行结尾）也脱敏发出
 			// 流结束（Pod 完成/上游断连）：发 end 事件，前端转轮询拉终态全量
 			_, _ = fmt.Fprint(w, "event: end\ndata: stream-closed\n\n")
 			if flusher != nil {
@@ -1037,6 +1211,7 @@ func (h *Handler) serveReleases(w http.ResponseWriter, r *http.Request, appID st
 			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
+		h.recordAudit(r, "release_create", "release", rel.ID, "app="+appID+" env="+input.EnvID+" image="+input.ImageID+" service="+input.Service)
 		httputil.WriteDataCreated(w, rel)
 		return
 	}
@@ -1079,6 +1254,7 @@ func (h *Handler) serveReleaseAction(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
+		h.recordAudit(r, "release_rollback", "release", releaseID, "app="+orig.AppID+" env="+orig.EnvID)
 		httputil.WriteData(w, rb)
 	case "promote":
 		// 发布流水线逐级提升：算下个阶序环境，目标 prod 需 prod:write。
@@ -1099,6 +1275,7 @@ func (h *Handler) serveReleaseAction(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
+		h.recordAudit(r, "release_promote", "release", releaseID, "app="+orig.AppID+" to="+target.ID)
 		httputil.WriteData(w, rel)
 	default:
 		httputil.WriteError(w, http.StatusNotFound, "not found")
