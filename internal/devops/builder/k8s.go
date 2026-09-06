@@ -12,6 +12,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/utils/ptr"
@@ -89,9 +90,13 @@ func (k K8sJob) Build(ctx context.Context, p Params) (result Result, err error) 
 	}
 	// Job 创建成功后，任何错误返回前清理 Job（失败/超时/无 digest），避免残留占集群资源
 	// （GPU/调度）；TTL=86400 兜底，但失败立即删减少占用窗口。成功返回（err=nil）不删。
+	// deleteJob 带 30s 超时（可观测审计 I7）：API server 短暂不可达时 Background ctx 的
+	// Delete 无限阻塞会把 runBuild goroutine 永久挂死（build 卡 running 直到下次 sweep）。
 	defer func() {
 		if err != nil {
-			k.deleteJob(context.Background(), ns, jobName)
+			cctx, ccancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer ccancel()
+			k.deleteJob(cctx, ns, jobName)
 		}
 	}()
 
@@ -174,10 +179,12 @@ func (k K8sJob) podLogs(ctx context.Context, ns, jobName string) string {
 	}
 	defer func() { _ = stream.Close() }()
 	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, stream); err != nil {
-		return buf.String()
+	// 上限 MaxLogBytes+1（多读 1 字节判定超限）：Pod 日志无界，防异常构建打爆内存
+	// （集成审计 I6；截断格式化由 CapLog 统一处理）。
+	if _, err := io.Copy(&buf, io.LimitReader(stream, MaxLogBytes+1)); err != nil {
+		return CapLog(buf.String())
 	}
-	return buf.String()
+	return CapLog(buf.String())
 }
 
 // buildJobSpec 构造 batch/Job（DooD：docker:git + 挂节点 docker.sock，非 privileged）。
@@ -224,6 +231,19 @@ func buildJobSpec(builderImage string, p Params, jobName, ref, cloneURL string) 
 							Name:      "docker-sock",
 							MountPath: dockerSock,
 						}},
+						// 资源规格（集成审计 M1）：平台自身基线「生产禁 BestEffort」，构建 Pod 也
+						// 应有 requests/limits——构建高峰挤占业务 Pod。构建属可重试负载，limit
+						// 收紧触发 OOM/驱逐时可重跑，不给过高默认值。
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("200m"),
+								corev1.ResourceMemory: resource.MustParse("512Mi"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("2"),
+								corev1.ResourceMemory: resource.MustParse("2Gi"),
+							},
+						},
 						// 无 SecurityContext.Privileged：DooD 关键（仅读写 sock 文件，复用节点 daemon）。
 					}},
 					Volumes: []corev1.Volume{{

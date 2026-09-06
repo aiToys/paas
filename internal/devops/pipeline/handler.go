@@ -240,10 +240,21 @@ func (h *Handler) serveAppPipelines(w http.ResponseWriter, r *http.Request) {
 			}
 			p, err := h.pipes.GetPipeline(r.Context(), pid)
 			if err != nil {
-				httputil.WriteServiceError(w, toHTTPStatus(err), err)
+				writePipeErr(w, err)
 				return
 			}
-			// get 返回 token（同租户可见，designer 展示 webhook URL 配 Gitea 用；list 才 mask）
+			// 归属校验：路径 appID 与 pipeline 实际归属不符统一 404（不泄漏存在性），
+			// 防同租户跨应用「移花接木」（安全审计 I1，与 serveRepoPulls 同款）。
+			if p.AppID != appID {
+				httputil.WriteError(w, http.StatusNotFound, "pipeline 不存在")
+				return
+			}
+			// token 按权限分流（权限审计 C2）：webhook token 可匿名触发 run（webhook 路径
+			// 无用户身份），viewer 持 pipeline:read 拿到即读权限提权到写。仅持 pipeline:write
+			// （designer 编辑态拼 webhook URL）返回明文，只读一律 mask。
+			if h.Authorize != nil && !h.Authorize(r, PermPipelineWrite) {
+				p = maskTrigger(p)
+			}
 			httputil.WriteData(w, p)
 		case http.MethodPut:
 			h.updatePipeline(w, r, appID, pid)
@@ -251,8 +262,31 @@ func (h *Handler) serveAppPipelines(w http.ResponseWriter, r *http.Request) {
 			if !h.allow(w, r, PermPipelineWrite) {
 				return
 			}
+			// 应用级权限（权限审计 I3）：删流水线属应用级写操作。
+			if !h.allowApp(w, r, appID, application.AppActionWrite) {
+				return
+			}
+			// 归属校验（同 get 分支注释）：不符 404，防跨应用删他人流水线。
+			if dp, err := h.pipes.GetPipeline(r.Context(), pid); err != nil {
+				writePipeErr(w, err)
+				return
+			} else if dp.AppID != appID {
+				httputil.WriteError(w, http.StatusNotFound, "pipeline 不存在")
+				return
+			}
+			// 活跃 run 前置拦截：级联删 runs 会蒸发 in-flight run 的记录（engine 后续
+			// UpdateRun 报 NotFound 静默退出、K8s 构建 Job 孤儿无记录可寻）。
+			active, err := h.runs.HasActiveRun(r.Context(), pid)
+			if err != nil {
+				httputil.WriteServiceError(w, http.StatusInternalServerError, err)
+				return
+			}
+			if active {
+				httputil.WriteError(w, http.StatusConflict, "流水线有进行中的运行，请先终止再删除")
+				return
+			}
 			if err := h.pipes.DeletePipeline(r.Context(), pid); err != nil {
-				httputil.WriteServiceError(w, toHTTPStatus(err), err)
+				writePipeErr(w, err)
 				return
 			}
 			h.recordAudit(r, "delete", "pipeline", pid, "")
@@ -279,6 +313,10 @@ func (h *Handler) serveAppPipelines(w http.ResponseWriter, r *http.Request) {
 // 支持从模板创建（templateId 非空时校验模板存在 + 继承 Kind；stages 运行时从模板解析，不复制）。
 func (h *Handler) createPipeline(w http.ResponseWriter, r *http.Request, appID string) {
 	if !h.allow(w, r, PermPipelineWrite) {
+		return
+	}
+	// 应用级权限（权限审计 I3）：建流水线可改 ParamOverrides 指向 prod，受限应用需 write。
+	if !h.allowApp(w, r, appID, application.AppActionWrite) {
 		return
 	}
 	var body struct {
@@ -317,7 +355,7 @@ func (h *Handler) createPipeline(w http.ResponseWriter, r *http.Request, appID s
 	}
 	created, err := h.pipes.CreatePipeline(r.Context(), p)
 	if err != nil {
-		httputil.WriteServiceError(w, toHTTPStatus(err), err)
+		writePipeErr(w, err)
 		return
 	}
 	h.recordAudit(r, "create", "pipeline", created.ID, "")
@@ -330,6 +368,10 @@ func (h *Handler) updatePipeline(w http.ResponseWriter, r *http.Request, appID, 
 	if !h.allow(w, r, PermPipelineWrite) {
 		return
 	}
+	// 应用级权限（权限审计 I3）：改流水线可换 envId/branch glob，受限应用需 write。
+	if !h.allowApp(w, r, appID, application.AppActionWrite) {
+		return
+	}
 	var p Pipeline
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		httputil.WriteError(w, http.StatusBadRequest, "invalid body")
@@ -337,7 +379,12 @@ func (h *Handler) updatePipeline(w http.ResponseWriter, r *http.Request, appID, 
 	}
 	existing, err := h.pipes.GetPipeline(r.Context(), pid)
 	if err != nil {
-		httputil.WriteServiceError(w, toHTTPStatus(err), err)
+		writePipeErr(w, err)
+		return
+	}
+	// 归属校验（同 get 分支注释）：不符 404，防跨应用改挂 AppID「移花接木」。
+	if existing.AppID != appID {
+		httputil.WriteError(w, http.StatusNotFound, "pipeline 不存在")
 		return
 	}
 	p.ID = pid
@@ -362,7 +409,7 @@ func (h *Handler) updatePipeline(w http.ResponseWriter, r *http.Request, appID, 
 	}
 	updated, err := h.pipes.UpdatePipeline(r.Context(), p)
 	if err != nil {
-		httputil.WriteServiceError(w, toHTTPStatus(err), err)
+		writePipeErr(w, err)
 		return
 	}
 	httputil.WriteData(w, updated)
@@ -451,7 +498,7 @@ func (h *Handler) serveAdminTemplates(w http.ResponseWriter, r *http.Request) {
 			// 平台级公共模板（tenant 空）无需补租户：store 对平台预置不强制 tenant_id。
 			saved, err := h.templates.CreateTemplate(r.Context(), t)
 			if err != nil {
-				httputil.WriteServiceError(w, toHTTPStatus(err), err)
+				writePipeErr(w, err)
 				return
 			}
 			h.recordAudit(r, "create", "pipeline_template", saved.ID, "")
@@ -474,14 +521,14 @@ func (h *Handler) serveAdminTemplates(w http.ResponseWriter, r *http.Request) {
 		t.Builtin = false
 		updated, err := h.templates.UpdateTemplate(r.Context(), t)
 		if err != nil {
-			httputil.WriteServiceError(w, toHTTPStatus(err), err)
+			writePipeErr(w, err)
 			return
 		}
 		h.recordAudit(r, "update", "pipeline_template", id, "")
 		httputil.WriteData(w, updated)
 	case http.MethodDelete:
 		if err := h.templates.DeleteTemplate(r.Context(), id); err != nil {
-			httputil.WriteServiceError(w, toHTTPStatus(err), err)
+			writePipeErr(w, err)
 			return
 		}
 		h.recordAudit(r, "delete", "pipeline_template", id, "")
@@ -532,7 +579,7 @@ func (h *Handler) serveRuns(w http.ResponseWriter, r *http.Request) {
 		}
 		run, err := h.runs.GetRun(r.Context(), id)
 		if err != nil {
-			httputil.WriteServiceError(w, toHTTPStatus(err), err)
+			writePipeErr(w, err)
 			return
 		}
 		httputil.WriteData(w, run)
@@ -548,17 +595,26 @@ func (h *Handler) serveRuns(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteError(w, http.StatusServiceUnavailable, "engine not configured")
 			return
 		}
+		// GetRun 提为主路径：查询失败直接返回（fail-closed，防 appGuard 在瞬时故障下跳过——错误契约审计 I6）。
+		run, err := h.runs.GetRun(r.Context(), id)
+		if err != nil {
+			writePipeErr(w, err)
+			return
+		}
 		// 应用级权限：审批门禁是生产发布动作，受限应用需 release（app-maintainer+）。
-		if h.appGuard != nil {
-			if run, err := h.runs.GetRun(r.Context(), id); err == nil {
-				if !h.allowApp(w, r, run.AppID, application.AppActionRelease) {
-					return
-				}
-			}
+		if !h.allowApp(w, r, run.AppID, application.AppActionRelease) {
+			return
+		}
+		// prod:write 复查（权限审计 C1）：webhook 触发的 run 只要求模板含 approve 门禁，
+		// approve 动作本身若不复查，developer（无 prod:write）自建 webhook pipeline ->
+		// push -> paused -> 自行 approve -> 生产部署执行。与 retry 的 allowProdFlow 重放同款：
+		// approve 后剩余 stages 将继续执行，触达 prod 必须持 prod:write。
+		if !h.allowProdFlow(w, r, stagesAfter(run, atoiSafe(parts[2]))) {
+			return
 		}
 		stageIdx := atoiSafe(parts[2])
 		if err := h.engine.Resume(r.Context(), id, stageIdx); err != nil {
-			httputil.WriteServiceError(w, toHTTPStatus(err), err)
+			writePipeErr(w, err)
 			return
 		}
 		h.recordAudit(r, "approve", "pipeline_run", id, fmt.Sprintf("stage=%d", stageIdx))
@@ -578,14 +634,18 @@ func (h *Handler) serveRuns(w http.ResponseWriter, r *http.Request) {
 		var in struct {
 			Action string `json:"action"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&in)
+		if derr := json.NewDecoder(r.Body).Decode(&in); derr != nil {
+			// decode 错误显式报出（错误契约审计 I7）：吞掉会让非法 JSON 报误导性的 action 文案。
+			httputil.WriteError(w, http.StatusBadRequest, "请求体非法（JSON 解析失败）")
+			return
+		}
 		if in.Action != "promote" && in.Action != "terminate" {
 			httputil.WriteError(w, http.StatusBadRequest, "action 必须是 promote 或 terminate")
 			return
 		}
 		run, err := h.runs.GetRun(r.Context(), id)
 		if err != nil {
-			httputil.WriteServiceError(w, toHTTPStatus(err), err)
+			writePipeErr(w, err)
 			return
 		}
 		// 应用级权限：金丝雀放量是生产发布动作，受限应用需 release（app-maintainer+）。
@@ -602,7 +662,7 @@ func (h *Handler) serveRuns(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if err := h.engine.CanaryResume(r.Context(), id, stageIdx, in.Action == "promote"); err != nil {
-			httputil.WriteServiceError(w, toHTTPStatus(err), err)
+			writePipeErr(w, err)
 			return
 		}
 		h.recordAudit(r, "canary_"+in.Action, "pipeline_run", id, fmt.Sprintf("stage=%d", stageIdx))
@@ -615,12 +675,20 @@ func (h *Handler) serveRuns(w http.ResponseWriter, r *http.Request) {
 		if !h.allow(w, r, PermPipelineWrite) {
 			return
 		}
+		// 应用级权限（安全审计 I2）：abort 打断 run 属写操作，受限应用非成员不得执行。
+		// GetRun 失败直接返回（fail-closed，错误契约审计 I6）。
+		if run, err := h.runs.GetRun(r.Context(), id); err != nil {
+			writePipeErr(w, err)
+			return
+		} else if !h.allowApp(w, r, run.AppID, application.AppActionWrite) {
+			return
+		}
 		if h.engine == nil {
 			httputil.WriteError(w, http.StatusServiceUnavailable, "engine not configured")
 			return
 		}
 		if err := h.engine.Abort(r.Context(), id); err != nil {
-			httputil.WriteServiceError(w, toHTTPStatus(err), err)
+			writePipeErr(w, err)
 			return
 		}
 		h.recordAudit(r, "abort", "pipeline_run", id, "")
@@ -634,8 +702,14 @@ func (h *Handler) serveRuns(w http.ResponseWriter, r *http.Request) {
 		}
 		// 应用级权限：重试会重新执行后续 stage（含 CD 的 deploy/release），按 run 的
 		// stage 构成判定动作（与 triggerRun 同源：含 deploy/release/promote/approve → release）。
-		if h.appGuard != nil {
-			if run, err := h.runs.GetRun(r.Context(), id); err == nil {
+		// 同时补 prod:write 复查：retry 用 run.StageRuns 原 Input 重放，若触达 prod 而
+		// 当前用户无 prod:write（如 admin 之外的开发者点他人失败 run 的 retry），
+		// 等于绕过 triggerRun 的 allowProdFlow 静态预演（安全审计 I3）。
+		if run, err := h.runs.GetRun(r.Context(), id); err != nil {
+			writePipeErr(w, err)
+			return
+		} else {
+			if h.appGuard != nil {
 				action := application.AppActionWrite
 				for _, sr := range run.StageRuns {
 					if sr.Type == StageDeploy || sr.Type == StageRelease || sr.Type == StagePromote || sr.Type == StageApprove || sr.Type == StageCanary {
@@ -647,13 +721,21 @@ func (h *Handler) serveRuns(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
+			// StageRun.Input 即触发时固化的 resolved params，映射回 StageDef 复用 targetsProd。
+			replay := make([]StageDef, 0, len(run.StageRuns))
+			for _, sr := range run.StageRuns {
+				replay = append(replay, StageDef{Type: sr.Type, Name: sr.Name, Params: sr.Input})
+			}
+			if !h.allowProdFlow(w, r, replay) {
+				return
+			}
 		}
 		if h.engine == nil {
 			httputil.WriteError(w, http.StatusServiceUnavailable, "engine not configured")
 			return
 		}
 		if err := h.engine.Retry(r.Context(), id); err != nil {
-			httputil.WriteServiceError(w, toHTTPStatus(err), err)
+			writePipeErr(w, err)
 			return
 		}
 		h.recordAudit(r, "retry", "pipeline_run", id, "")
@@ -670,6 +752,20 @@ func (h *Handler) allowApp(w http.ResponseWriter, r *http.Request, appID, action
 	}
 	httputil.WriteError(w, http.StatusForbidden, "forbidden: 无该应用的应用级权限（"+action+"）")
 	return false
+}
+
+// stagesAfter 把 run 从 fromIdx 起的剩余 StageRun 映射回 StageDef（Input 即触发时固化的
+// resolved params），供 approve 的 allowProdFlow 复查（与 retry 重放同款）。
+func stagesAfter(run PipelineRun, fromIdx int) []StageDef {
+	if fromIdx < 0 {
+		fromIdx = 0
+	}
+	out := make([]StageDef, 0, len(run.StageRuns)-min(fromIdx, len(run.StageRuns)))
+	for i := fromIdx; i < len(run.StageRuns); i++ {
+		sr := run.StageRuns[i]
+		out = append(out, StageDef{Type: sr.Type, Name: sr.Name, Params: sr.Input})
+	}
+	return out
 }
 
 // triggerRun POST /api/applications/{id}/pipelines/{pid}/run。
@@ -695,7 +791,12 @@ func (h *Handler) triggerRun(w http.ResponseWriter, r *http.Request, appID, pid 
 	}
 	p, err := h.pipes.GetPipeline(r.Context(), pid)
 	if err != nil {
-		httputil.WriteServiceError(w, toHTTPStatus(err), err)
+		writePipeErr(w, err)
+		return
+	}
+	// 归属校验（同 get 分支注释）：不符 404，防跨应用触发他人流水线。
+	if p.AppID != appID {
+		httputil.WriteError(w, http.StatusNotFound, "pipeline 不存在")
 		return
 	}
 	// 从模板解析 stages（占位符 {{app.env.*}}/{{app.repo}} + ParamOverrides 实例化）。
@@ -706,7 +807,8 @@ func (h *Handler) triggerRun(w http.ResponseWriter, r *http.Request, appID, pid 
 	}
 	resolved, rerr := ResolveStages(r.Context(), tpl.Stages, p.ParamOverrides, h.paramResolver, appID, body.Branch)
 	if rerr != nil {
-		httputil.WriteError(w, http.StatusBadRequest, "参数解析失败: "+rerr.Error())
+		// WriteServiceError 分流（错误契约审计 C1）：rerr 可能内嵌 pgx 原始错误，裸 400 直通泄漏内部细节。
+		httputil.WriteServiceError(w, http.StatusBadRequest, rerr)
 		return
 	}
 	// deploy stage envId 必填校验（fail-fast，避免注定失败的 run 占住单实例串行槽位）。
@@ -736,7 +838,7 @@ func (h *Handler) triggerRun(w http.ResponseWriter, r *http.Request, appID, pid 
 	}
 	created, err := h.triggerRunInternal(r.Context(), appID, pid, resolved, body.Branch, body.Commit, body.Version, TriggerManual)
 	if err != nil {
-		httputil.WriteServiceError(w, toHTTPStatus(err), err)
+		writePipeErr(w, err)
 		return
 	}
 	h.recordAudit(r, "run", "pipeline_run", created.ID, fmt.Sprintf("pipeline=%s branch=%s", pid, body.Branch))
@@ -788,21 +890,24 @@ func (h *Handler) triggerRunInternal(ctx context.Context, appID, pid string, res
 // 不匹配分支 glob 或非分支 push（tag）静默返 200（webhook 源不感知平台内部跳过）。
 func (h *Handler) webhookTrigger(w http.ResponseWriter, r *http.Request, pid string) {
 	ctx := r.Context()
-	// webhook 无 tenant ctx，跨租户按 ID 查 pipeline（token 鉴权提供安全性）
+	// webhook 无 tenant ctx，跨租户按 ID 查 pipeline（token 鉴权提供安全性）。
+	// 校验顺序（错误契约审计 C2）：token 常量时间比较前置，所有失败统一 401——原顺序
+	// 404(不存在)/400(非 webhook)/401(token 错) 三态可被无凭证枚举 pipeline ID 并分类。
 	p, err := h.pipes.GetPipelineAny(ctx, pid)
 	if err != nil {
-		httputil.WriteError(w, http.StatusNotFound, "pipeline not found")
+		httputil.WriteError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	if p.Trigger.Type != TriggerWebhook {
-		httputil.WriteError(w, http.StatusBadRequest, "pipeline trigger is not webhook")
-		return
-	}
-	// token 常量时间比较（防时序枚举）；pipeline 未配 token 或请求无 token 拒
+	// token 常量时间比较（防时序枚举）；pipeline 未配 token、非 webhook 触发器或请求无 token 均拒
 	token := r.URL.Query().Get("token")
-	if p.Trigger.Token == "" || token == "" ||
+	if p.Trigger.Type != TriggerWebhook || p.Trigger.Token == "" || token == "" ||
 		subtle.ConstantTimeCompare([]byte(token), []byte(p.Trigger.Token)) != 1 {
-		httputil.WriteError(w, http.StatusUnauthorized, "invalid token")
+		httputil.WriteError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	// 已禁用流水线不触发（对照 FindPipeline 的 Disabled 检查；静默 200 避免 webhook 源重试）。
+	if p.Disabled {
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 	// 解析 Gitea push event（ref/after；Gitea 与 GitHub 字段名一致）
@@ -817,6 +922,11 @@ func (h *Handler) webhookTrigger(w http.ResponseWriter, r *http.Request, pid str
 	branch := strings.TrimPrefix(push.Ref, "refs/heads/")
 	if branch == push.Ref || branch == "" {
 		// 非分支引用（tag/PR 等），静默忽略（返 200 避免 webhook 源重试）
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	// 分支删除 push（after 全零）：无 commit 可建，静默跳过（否则建出注定失败的 BuildRun，集成审计 M2）。
+	if strings.Trim(push.After, "0") == "" {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -835,7 +945,9 @@ func (h *Handler) webhookTrigger(w http.ResponseWriter, r *http.Request, pid str
 	}
 	resolved, rerr := ResolveStages(wctx, tpl.Stages, p.ParamOverrides, h.paramResolver, p.AppID, branch)
 	if rerr != nil {
-		httputil.WriteError(w, http.StatusBadRequest, "参数解析失败: "+rerr.Error())
+		// WriteServiceError 分流（错误契约审计 C1）：rerr 可能内嵌 apps.Get/envs.List 的
+		// 原始 pgx 错误（dial tcp/SQLSTATE），裸 400 直通会泄漏连接串/SQL 细节给前端。
+		httputil.WriteServiceError(w, http.StatusBadRequest, rerr)
 		return
 	}
 	// webhook 触发免 prod:write（无用户身份），但若 stages 触达 prod 必须含 approve 门禁兜底，
@@ -846,7 +958,13 @@ func (h *Handler) webhookTrigger(w http.ResponseWriter, r *http.Request, pid str
 	}
 	created, err := h.triggerRunInternal(wctx, p.AppID, pid, resolved, branch, push.After, "", TriggerWebhook)
 	if err != nil {
-		httputil.WriteServiceError(w, toHTTPStatus(err), err)
+		// 已有 active run（Gitea 重发/人工 replay 窗口内重复投递）：静默 200——返 409 会
+		// 触发 webhook 源重试风暴，且「已有 run 在跑」本身就是期望状态（并发审计 M6）。
+		if errors.Is(err, ErrActiveRunExists) {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		writePipeErr(w, err)
 		return
 	}
 	// audit：webhook 无用户身份，actor="webhook"，tenant 取 pipeline 租户
@@ -993,6 +1111,42 @@ func toHTTPStatus(err error) int {
 		return http.StatusBadRequest
 	}
 	return http.StatusBadRequest
+}
+
+// sentinelText 仓储/模型 sentinel -> 中文文案（旅程审计 R5-I8：
+// "pipeline already exists" 等英文直出对中文控制台用户不可读）。
+// sentinel 是包级单例，可作 map key；未命中走 WriteServiceError 原样透传。
+var sentinelText = map[error]string{
+	ErrPipelineNotFound: "流水线不存在",
+	ErrPipelineExists:   "同名流水线已存在",
+	ErrRunNotFound:      "运行不存在",
+	ErrRunExists:        "运行 ID 已存在",
+	ErrActiveRunExists:  "该流水线已有进行中的运行（单实例串行），请等待完成或先中止",
+	ErrNotRunning:       "运行不在进行中，无法操作",
+	ErrTemplateExists:   "模板已存在",
+	ErrNoTenant:         "缺少租户上下文",
+	ErrInvalidKind:      "流水线类型非法（仅 ci/cd）",
+	ErrNoStages:         "模板缺少阶段定义",
+	ErrInvalidStageType: "阶段类型非法",
+	ErrNotPaused:        "运行不在等待审批状态",
+	ErrStageNotCurrent:  "阶段不在当前位置，无法操作",
+	ErrNotFailed:        "仅失败的运行可重试",
+	ErrTemplateRequired: "缺少模板 ID",
+	ErrTemplateBuiltin:  "内置模板不可修改",
+	errNameRequired:     "名称不能为空",
+	errAppRequired:      "应用 ID 不能为空",
+}
+
+// writePipeErr 统一错误出口：sentinel 映射中文文案；其余经 WriteServiceError
+// 脱敏分流（底层技术错误 pgx/dial tcp 不外泄）。
+func writePipeErr(w http.ResponseWriter, err error) {
+	for sentinel, msg := range sentinelText {
+		if errors.Is(err, sentinel) {
+			httputil.WriteError(w, toHTTPStatus(err), msg)
+			return
+		}
+	}
+	httputil.WriteServiceError(w, toHTTPStatus(err), err)
 }
 
 // recordAudit 记审计（audit/actorFn nil 跳过）。

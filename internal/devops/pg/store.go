@@ -397,6 +397,11 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) (devops.B
 		b.ID, b.TenantID, b.AppID, b.RepoID, b.Trigger, b.Commit, b.Branch, b.Message,
 		b.Status, b.ImageID, b.Log, marshalStrMap(b.BuildArgs), b.StartedAt, b.FinishedAt)
 	if err != nil {
+		// 槽位在 INSERT 前占用，失败必须归还——否则 DB 故障窗口内每次失败的创建都
+		// 永久消耗一个槽，3 次后租户恒 429 直到进程重启（终审 I1：保护闸自转为拒绝服务）。
+		s.slotMu.Lock()
+		s.buildSlots[tid]--
+		s.slotMu.Unlock()
 		return devops.BuildRun{}, err
 	}
 
@@ -1073,9 +1078,13 @@ func (s *Store) PromoteRelease(ctx context.Context, srcReleaseID, targetEnvID st
 		CreatedBy: src.CreatedBy,
 	}
 	if src.WorkloadID != "" {
-		if swl, err := s.workload.Get(ctx, src.WorkloadID); err == nil {
-			input.Service, input.ServiceID, input.LaneID = swl.Service, swl.ServiceID, swl.LaneID
+		swl, gerr := s.workload.Get(ctx, src.WorkloadID)
+		if gerr != nil {
+			// fail-closed（终审 I2）：promote 是低频高危写操作，源 workload 查不到（已删）
+			// 或瞬态 DB 错时静默降级=错配 bug 在边缘条件无感知复发（镜像推给生产无关服务）。
+			return devops.Release{}, fmt.Errorf("晋升失败：源工作负载不可用 %s: %w", src.WorkloadID, gerr)
 		}
+		input.Service, input.ServiceID, input.LaneID = swl.Service, swl.ServiceID, swl.LaneID
 	}
 	rel, err := s.CreateRelease(ctx, input)
 	if err != nil {

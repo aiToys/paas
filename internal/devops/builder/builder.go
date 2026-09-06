@@ -101,7 +101,7 @@ func ImageRef(p Params, tag string) string {
 	return RegistryOrDefault(p) + "/" + p.AppID + ":" + tag
 }
 
-// buildTag 生成镜像 tag：<branch>-<commit8>[-<argsHash8>]。
+// buildTag 生成镜像 tag：<branch>-<commit8>[-<argsHash8>][-<dfHash8>]。
 //
 // 多服务同 repo 构建场景（如 paas-shop 用 buildArgs SERVICE=product/recommend/... 区分）：
 // 同 app 同 commit 的多次构建若 tag 仅 branch-commit8 会完全相同，后构建在 registry 覆盖
@@ -113,17 +113,48 @@ func ImageRef(p Params, tag string) string {
 //   - 不同 buildArgs → 不同 argsHash → 不同 tag（多服务区分，各自独立 digest）
 //   - 无 buildArgs → 保持原 branch-commit8（向后兼容，单服务场景不变）
 //
+// dockerfile/buildContext 同理参与产物（D1 修复 2026-09-04）：切 Dockerfile 产物必变而
+// tag 不变 → 同 tag 两 digest，破坏 registry digest 不可变语义（reconcile D 节抓出）。
+// 非默认值（dockerfile≠"Dockerfile" 或 context≠"."）时追加独立 dfHash 段：
+//   - 默认构建与「有 buildArgs」的存量 tag 形态零变化（dfHash 段仅在非默认时出现）
+//   - 同 dockerfile/context 重构 → 同 dfHash（幂等）；切换 → 新 tag（各自独立 digest）
+//
 // fallbackCommit 为空 Commit 时的兜底（各实现用 BuildID 派生）。
 func buildTag(p Params) string {
 	tagCommit := p.Commit
 	if tagCommit == "" {
 		tagCommit = p.BuildID
 	}
-	base := p.Branch + "-" + safeShort(tagCommit, 8)
-	if len(p.BuildArgs) == 0 {
-		return base
+	tag := p.Branch + "-" + safeShort(tagCommit, 8)
+	if len(p.BuildArgs) > 0 {
+		tag += "-" + argsHash(p.BuildArgs)
 	}
-	return base + "-" + argsHash(p.BuildArgs)
+	if h := dfHash(p.Dockerfile, p.BuildContext); h != "" {
+		tag += "-" + h
+	}
+	return tag
+}
+
+// 默认构建输入（与 devops.DefaultDockerfile/DefaultBuildContext 对齐，避免包间依赖）。
+const (
+	defaultDockerfile   = "Dockerfile"
+	defaultBuildcontext = "."
+)
+
+// dfHash 对非默认 dockerfile/buildContext 取 sha256 前 8 位；全默认返回空（不追加段）。
+// 两者并入同一哈希输入：切换任一都改变产物，合并区分足够且段更短。
+func dfHash(dockerfile, buildContext string) string {
+	df, bctx := dockerfile, buildContext
+	if df == "" {
+		df = defaultDockerfile
+	}
+	if bctx == "" {
+		bctx = defaultBuildcontext
+	}
+	if df == defaultDockerfile && bctx == defaultBuildcontext {
+		return ""
+	}
+	return safeShort(sha256hex("df="+df+"|ctx="+bctx), 8)
 }
 
 // argsHash 按 key 排序拼接 buildArgs 后取 sha256 前 8 位（确定性，避免 map 迭代序漂移）。

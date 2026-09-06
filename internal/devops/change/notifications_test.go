@@ -48,7 +48,7 @@ func TestNotifications(t *testing.T) {
 		{ID: "run-s", AppID: "app-1", Status: "succeeded", Current: ""}, // 成功不通知
 	}}
 
-	notifs, err := Notifications(ctx, store, runs, nil)
+	notifs, err := Notifications(ctx, store, runs, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestNotifications(t *testing.T) {
 	}
 
 	// runLister=nil 降级：只通知批次侧
-	only, err := Notifications(ctx, store, nil, nil)
+	only, err := Notifications(ctx, store, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestNotifications(t *testing.T) {
 	canaryRuns := &fakeRunLister{items: []RunStatusItem{
 		{ID: "run-c", AppID: "app-1", Status: "paused", Current: "金丝雀验证", StageType: "canary"},
 	}}
-	cn, err := Notifications(ctx, store, canaryRuns, nil)
+	cn, err := Notifications(ctx, store, canaryRuns, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -112,7 +112,7 @@ func TestNotifications(t *testing.T) {
 	// 单元层不重复断言——见 runTriggerBridge.ListRunStatuses 调 pipeline.ListRuns）。
 	globex := tenant.WithTenant(context.Background(), "t-globex")
 	globexRuns := &fakeRunLister{} // 模拟真实 bridge：跨租户返空
-	empty, err := Notifications(globex, store, globexRuns, nil)
+	empty, err := Notifications(globex, store, globexRuns, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,6 +128,42 @@ func (f *fakeAlertLister) ListAlertItems(ctx context.Context) ([]AlertItem, erro
 	return f.items, nil
 }
 
+// fakeBuildLister 可控独立构建源（R9-I3 构建失败通知）。
+type fakeBuildLister struct{ items []BuildItem }
+
+func (f *fakeBuildLister) ListBuildItems(ctx context.Context) ([]BuildItem, error) {
+	return f.items, nil
+}
+
+// TestNotificationsBuilds：failed 构建（窗口内）进通知 + 非 failed 不进。
+func TestNotificationsBuilds(t *testing.T) {
+	store := NewMemoryStore()
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	now := time.Now().UTC()
+	builds := &fakeBuildLister{items: []BuildItem{
+		{ID: "b-fail", AppID: "app-1", Status: "failed", Branch: "feature-x",
+			At: now.Add(-1 * time.Hour).Format(time.RFC3339)},
+		{ID: "b-ok", AppID: "app-1", Status: "success", Branch: "main",
+			At: now.Add(-1 * time.Hour).Format(time.RFC3339)},
+		{ID: "b-old", AppID: "app-1", Status: "failed", Branch: "main",
+			At: now.Add(-10 * 24 * time.Hour).Format(time.RFC3339)}, // 窗口外
+	}}
+	notifs, err := Notifications(ctx, store, nil, nil, builds)
+	if err != nil {
+		t.Fatalf("Notifications: %v", err)
+	}
+	if len(notifs) != 1 {
+		t.Fatalf("应仅 1 条构建失败通知，got %d: %+v", len(notifs), notifs)
+	}
+	n := notifs[0]
+	if n.Type != NotifBuildFailed || n.TargetType != "build" || n.TargetID != "b-fail" || n.AppID != "app-1" {
+		t.Fatalf("构建通知字段不符: %+v", n)
+	}
+	if !strings.Contains(n.Title, "feature-x") {
+		t.Fatalf("文案应含分支名，got %q", n.Title)
+	}
+}
+
 // TestNotificationsAlerts：firing critical→error、pending→info、resolved 不进通知。
 func TestNotificationsAlerts(t *testing.T) {
 	store := NewMemoryStore()
@@ -140,7 +176,7 @@ func TestNotificationsAlerts(t *testing.T) {
 		{RuleName: "已恢复", TargetType: "app", TargetID: "app-2", MetricName: "rps",
 			Severity: "warning", Status: "resolved", At: "2026-08-23T10:02:00Z"},
 	}}
-	notifs, err := Notifications(ctx, store, nil, alerts)
+	notifs, err := Notifications(ctx, store, nil, alerts, nil)
 	if err != nil {
 		t.Fatalf("Notifications: %v", err)
 	}
@@ -179,7 +215,7 @@ func TestNotificationsWindow(t *testing.T) {
 			At: now.Add(-2 * 24 * time.Hour).Format(time.RFC3339)}, // 窗口内：通知
 	}}
 
-	notifs, err := Notifications(ctx, store, runs, nil)
+	notifs, err := Notifications(ctx, store, runs, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

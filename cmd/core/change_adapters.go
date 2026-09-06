@@ -171,6 +171,33 @@ func (b *runTriggerBridge) ReleasesOfRun(ctx context.Context, runID string) ([]s
 var _ change.RunTrigger = (*runTriggerBridge)(nil)
 var _ change.RunReader = (*runTriggerBridge)(nil)
 
+// changeBuildListerBridge 桥接 devops builds → change.BuildLister（构建失败通知 R9-I3）。
+// ListBuildRuns(ctx, "") 空应用=租户全部（repo 层强制 tenant 过滤）；只导出 failed
+// 项（通知侧窗口过滤），减少跨包结构透传。
+type changeBuildListerBridge struct {
+	builds devops.BuildRunRepository
+}
+
+func (b *changeBuildListerBridge) ListBuildItems(ctx context.Context) ([]change.BuildItem, error) {
+	list, err := b.builds.ListBuildRuns(ctx, "")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]change.BuildItem, 0, len(list))
+	for _, r := range list {
+		if r.Status != devops.BuildFailed {
+			continue
+		}
+		out = append(out, change.BuildItem{
+			ID: r.ID, AppID: r.AppID, Status: r.Status, Branch: r.Branch,
+			At: r.StartedAt.Format(time.RFC3339),
+		})
+	}
+	return out, nil
+}
+
+var _ change.BuildLister = (*changeBuildListerBridge)(nil)
+
 // changeRepoLookup 解析应用内置仓库（owner/repo 名/CodeRepo ID），
 // 供 change.Service 定位变更分支归属仓库。
 func changeRepoLookup(repos devops.CodeRepoRepository) change.RepoLookup {

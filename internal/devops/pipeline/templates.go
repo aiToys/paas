@@ -49,23 +49,17 @@ func BuiltinTemplates() []PipelineTemplate {
 			Name:        "上线发布流水线",
 			Kind:        KindCD,
 			Builtin:     true,
-			Version:     2, // v2: 部署后加金丝雀验证 stage（并行验证式：观察后确认放量/终止；v1 经 builtin 版本升级机制自动覆盖）
-			Description: "正式上线：审批 -> 部署到生产基线 -> 金丝雀验证（并行观察，确认放量或零风险终止）-> 打版本号 -> 合并主干",
+			Version:     3, // v3: 金丝雀提前到 prod deploy 前（经典序：canary 观察 -> promote 自带基线放量/terminate 零风险退出；v2 的 deploy->canary 序使 terminate 时基线已换新镜像，与「零风险退出」语义矛盾——状态机审计 I7）
+			Description: "正式上线：审批 -> 金丝雀验证（并行观察，确认放量=基线滚动+打版本，或零风险终止）-> 打版本号 -> 合并主干",
 			Stages: []StageDef{
 				{Name: "上线审批", Type: StageApprove, Params: map[string]any{
 					"message": "确认发布到生产环境",
 				}},
-				{Name: "部署到生产", Type: StageDeploy, Params: map[string]any{
-					"envId":       "{{app.env.prod}}", // 占位符：触发时解析 app 租户的 prod 环境 ID
-					"lane":        LaneDefault,        // 生产基线（无泳道）
-					"imageSource": ImageLatestReady,   // CD 消费 CI 产物（app 最新 ready Image）
-					"strategy":    "rolling",
-				}},
 				{Name: "金丝雀验证", Type: StageCanary, Params: map[string]any{
-					"envId":       "{{app.env.prod}}", // 与 deploy 同环境
-					"imageSource": ImagePriorBuild,    // 消费前序 deploy Output.imageId（deploy 已回写，canary 验证同一镜像）
+					"envId":       "{{app.env.prod}}", // 占位符：触发时解析 app 租户的 prod 环境 ID
+					"imageSource": ImageLatestReady,   // CD 消费 CI 产物（app 最新 ready Image）——canary 提前到 deploy 前无前序输出可依
 					// 并行验证式金丝雀（spec D3=A）：canary-<runID> 泳道 1 副本观察，验证地址见 stage 日志/前端面板；
-					// 「确认放量」= 基线滚动到同一镜像后删 canary；「终止」= 仅删 canary 零风险退出。
+					// 「确认放量」= 基线滚动到同一镜像后删 canary；「终止」= 仅删 canary 零风险退出（基线从未被动过）。
 				}},
 				{Name: "发布版本", Type: StageRelease, Params: map[string]any{
 					"versionStrategy": "auto-increment", // git tag + Image.version，不部署

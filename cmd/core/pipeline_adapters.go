@@ -27,8 +27,13 @@ import (
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
-// 构建轮询间隔（秒级，CI runner 异步流转）。
-const pipelineBuildPollInterval = 1 * time.Second
+// 构建轮询间隔（秒级，CI runner 异步流转）+ 总超时（防 build 永久 pending 时
+// 轮询 goroutine 无限挂起占死流水线串行槽位；K8sJob 自身 BuildTimeout 30min，
+// 这里 40min 兜底覆盖排队时间）。
+const (
+	pipelineBuildPollInterval = 1 * time.Second
+	pipelineBuildPollTimeout  = 40 * time.Minute
+)
 
 // 工作负载就绪轮询间隔 + 总超时（部署后等 Pod ready）。
 const (
@@ -44,8 +49,10 @@ type buildBridge struct {
 }
 
 // CreateBuildRun 触发构建，返回写入后的 BuildRun（含 ID，供轮询）。
-// commit 为空且 internal 仓库时从 Gitea 取最新 commit sha/message（与 devops handler 路径同源，
-// 消除流水线构建记录 mock commit——迭代旅程审计卡点：用户无法回答「这个版本包含我的改动吗」）。
+// commit 为空且 internal 仓库时从 Gitea 取 branch 分支 HEAD commit sha/message（与 devops
+// handler 路径同源，消除流水线构建记录 mock commit——迭代旅程审计卡点）。
+// ListCommits 第三参传 branch（旅程审计 R5-C1）：此前固定取默认分支 HEAD，非默认分支
+// CI 的镜像 tag `<branch>-<commit8>` 里 commit 是默认分支的——tag 与代码实际内容错位。
 func (b *buildBridge) CreateBuildRun(ctx context.Context, appID, repoID, branch, commit string, buildArgs map[string]string) (devops.BuildRun, error) {
 	message := ""
 	if b.gitea != nil && b.repos != nil {
@@ -54,8 +61,12 @@ func (b *buildBridge) CreateBuildRun(ctx context.Context, appID, repoID, branch,
 			if owner == "" {
 				owner = b.gitea.Username()
 			}
-			if cs, gerr := b.gitea.ListCommits(ctx, owner, repo.GiteaRepo, 1); gerr == nil && len(cs) > 0 {
-				// commit 已带（webhook push.after）时只补 message（构建记录可读性）；否则都取最新。
+			ref := branch
+			if ref == "" {
+				ref = repo.Branch // 未指定分支回落仓库默认分支（同 ListCommits sha 语义）
+			}
+			if cs, gerr := b.gitea.ListCommits(ctx, owner, repo.GiteaRepo, 1, ref); gerr == nil && len(cs) > 0 {
+				// commit 已带（webhook push.after）时只补 message（构建记录可读性）；否则都取该分支 HEAD。
 				if commit == "" {
 					commit = cs[0].SHA
 				}
@@ -69,10 +80,12 @@ func (b *buildBridge) CreateBuildRun(ctx context.Context, appID, repoID, branch,
 	})
 }
 
-// PollBuildRun 阻塞轮询到终态（success/failed）；ctx cancel 退出（Abort 传播）。
+// PollBuildRun 阻塞轮询到终态（success/failed）；ctx cancel 退出（Abort 传播）；
+// pipelineBuildPollTimeout 总超时兜底（build 永久 pending 时不无限挂起）。
 func (b *buildBridge) PollBuildRun(ctx context.Context, buildID string) (devops.BuildRun, error) {
 	ticker := time.NewTicker(pipelineBuildPollInterval)
 	defer ticker.Stop()
+	deadline := time.After(pipelineBuildPollTimeout)
 	for {
 		if br, err := b.builds.GetBuildRun(ctx, buildID); err != nil {
 			return devops.BuildRun{}, err
@@ -82,6 +95,8 @@ func (b *buildBridge) PollBuildRun(ctx context.Context, buildID string) (devops.
 		select {
 		case <-ctx.Done():
 			return devops.BuildRun{}, ctx.Err()
+		case <-deadline:
+			return devops.BuildRun{}, fmt.Errorf("构建 %s 超时（%s 未到终态）", buildID, pipelineBuildPollTimeout)
 		case <-ticker.C:
 		}
 	}

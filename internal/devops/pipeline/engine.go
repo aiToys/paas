@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -168,6 +169,19 @@ func (e *Engine) releaseCancel(runID string) {
 	e.mu.Unlock()
 }
 
+// CancelAll cancel 全部进行中 run 的 advance ctx（SIGTERM 优雅关闭用，可观测审计 R9-I6）。
+// 语义：停止「开始下一个 stage」；进行中的 stage 调用因 ctx cancel 中止后，run 停在
+// running——不在此处落库终态（markFailed 的 ctx 守卫会跳过），由下次启动的
+// SweepInterrupted 统一标 failed（崩溃恢复同款路径，单一收口）。
+func (e *Engine) CancelAll() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for id, cancel := range e.cancels {
+		cancel()
+		delete(e.cancels, id)
+	}
+}
+
 // Abort 终止 run：标 aborted + cancel 进行中的 advance（PollBuildRun 因 ctx.Done 退出）。
 // 仅 running/paused 可 abort；已终态（succeeded/failed/aborted）返 ErrNotRunning。
 // 清理残留 StageRunning 的 stage_runs 标 StageAborted（数据一致：否则 run=aborted 但 stage=running）。
@@ -217,17 +231,23 @@ func (e *Engine) Abort(ctx context.Context, runID string) error {
 // Retry 重试失败的 run：从失败 stage（CurrentStage）重新推进。
 // 仅 RunFailed 可 retry；重置该 stage 状态（Status=Pending，清 Error/Output/FinishedAt）+ run.Status=Running，
 // 然后 Start 异步推进。成功/暂停/运行中的 run 拒绝（ErrNotFailed）。串行约束天然满足（failed 非 active）。
+// 全程持 e.mu（与 Resume 同款范式）：并发 Retry 的 check-then-Start 竞态会产出双推进
+// goroutine + cancels 映射键覆盖（旧 goroutine 的 cancel 句柄丢失无法取消，并发审计 I-1）。
 func (e *Engine) Retry(ctx context.Context, runID string) error {
+	e.mu.Lock()
 	run, err := e.Runs.GetRun(ctx, runID)
 	if err != nil {
+		e.mu.Unlock()
 		return err
 	}
 	if run.Status != RunFailed {
+		e.mu.Unlock()
 		return ErrNotFailed
 	}
 	// 重置失败 stage：CurrentStage 指向失败的那一步（markFailed 不递增 CurrentStage）。
 	idx := run.CurrentStage
 	if idx < 0 || idx >= len(run.StageRuns) {
+		e.mu.Unlock()
 		return ErrStageNotCurrent
 	}
 	sr := &run.StageRuns[idx]
@@ -238,7 +258,9 @@ func (e *Engine) Retry(ctx context.Context, runID string) error {
 	sr.FinishedAt = time.Time{}
 	run.Status = RunRunning
 	run.FinishedAt = time.Time{}
-	if _, err := e.Runs.UpdateRun(ctx, run); err != nil {
+	_, err = e.Runs.UpdateRun(ctx, run)
+	e.mu.Unlock()
+	if err != nil {
 		return err
 	}
 	e.Start(ctx, runID)
@@ -281,10 +303,22 @@ func (e *Engine) Advance(ctx context.Context, runID string) error {
 			return e.markFailed(ctx, run, err)
 		}
 		if !finished {
-			// paused（test-manual/approve），标 Paused 等外部恢复
+			// paused（test-manual/approve），标 Paused 等外部恢复。
+			// 竞态守卫（C2-B）：execStage 返回 paused 与 markPaused 落库之间若 Abort 已把 run 标
+			// aborted，此处陈旧快照会把 aborted 覆写回 paused（canary workload 已被 Abort 清理，
+			// 用户却可继续 promote）——落库前重读校验。
+			if e.runAbortedSince(ctx, run) {
+				return nil
+			}
 			return e.markPaused(ctx, run)
 		}
-		// stage 成功，推进
+		// stage 成功，推进。
+		// 竞态守卫（C2-A）：execStage 成功与本轮 UpdateRun 之间若 Abort 已落库，陈旧快照会把
+		// aborted 覆写回 running + stage 状态被全量重写抹掉（且随后循环顶部 ctx.Err 退出，run
+		// 永久 running 无 sweep 可救）——落库前重读校验。
+		if e.runAbortedSince(ctx, run) {
+			return nil
+		}
 		run.CurrentStage++
 		if _, err := e.Runs.UpdateRun(ctx, run); err != nil {
 			return err
@@ -298,6 +332,13 @@ func (e *Engine) Advance(ctx context.Context, runID string) error {
 func (e *Engine) execStage(ctx context.Context, run *PipelineRun, stage StageDef, sr *StageRun) (bool, error) {
 	sr.StartedAt = time.Now()
 	sr.Status = StageRunning
+	// 开始即落库（旅程审计 R5-I3）：deploy/promote 等同步 stage 执行期间（可达数十秒），
+	// 前端轮询只能看到 stage 停在 Pending——没有任何「正在执行」反馈。落库后 Running +
+	// StartedAt 立即可见；stage 内 logf 增量仍随终态一并落库（秒级延迟可接受）。
+	// best-effort：可见性写失败不阻断执行（终态落库在 Advance/markFailed 仍有守门）。
+	if _, err := e.Runs.UpdateRun(ctx, *run); err != nil {
+		log.Printf("pipeline: stage 开始态落库失败 run=%s stage=%d: %v", run.ID, run.CurrentStage, err) //nolint:gosec // runID 平台生成
+	}
 	switch stage.Type {
 	case StageBuild:
 		return e.execBuild(ctx, run, stage, sr)
@@ -497,7 +538,20 @@ func (e *Engine) execRelease(ctx context.Context, run *PipelineRun, stage StageD
 
 // logf 追加 stage 日志事件（append-only，前端展开查看）。时间戳前缀便于排序。
 func logf(sr *StageRun, format string, args ...any) {
-	sr.Log += time.Now().Format("15:04:05 ") + fmt.Sprintf(format, args...) + "\n"
+	sr.Log += time.Now().Format("15:04:05 ") + maskInternals(fmt.Sprintf(format, args...)) + "\n"
+}
+
+// internRe 匹配底层技术错误特征（pgx/SQLSTATE/dial tcp 等）与嵌入凭证的 URL——
+// stage 日志/Error 直通 UI（错误契约审计 I5），落库前截断为类别提示。
+// 与 builder.MaskToken 同思路；pipeline 不 import builder（依赖倒置），正则本地复制。
+var internRe = regexp.MustCompile(`(?i)(sqlstate|dial tcp|pgx\.|connection refused|https?://[^@\s"']+@|git://[^@\s"']+@)`)
+
+// maskInternals 把底层技术细节替换为类别提示（保留首段上下文便于排障）。
+func maskInternals(s string) string {
+	if s == "" || !internRe.MatchString(s) {
+		return s
+	}
+	return internRe.ReplaceAllString(s, "[内部细节已脱敏]")
 }
 
 // execTest 测试 stage：smoke（HTTP 探活自动）/ manual（人工确认暂停）。
@@ -596,6 +650,11 @@ func (e *Engine) execCanary(ctx context.Context, run *PipelineRun, stage StageDe
 	}
 	logf(sr, "等待金丝雀 Workload %s 就绪", deployment.WorkloadID)
 	if err := e.Releases.PollWorkloadReady(ctx, deployment.WorkloadID); err != nil {
+		// 就绪超时清理 canary workload：Abort/terminate 路径有清理，唯独此处泄漏到
+		// LaneGC TTL（默认 72h）占资源 + 配额。DeleteWorkload 内含配额回收；best-effort。
+		if derr := e.Releases.DeleteWorkload(ctx, deployment.WorkloadID); derr != nil {
+			log.Printf("canary 就绪超时清理失败 wl=%s: %v（GC 兜底）", deployment.WorkloadID, derr)
+		}
 		sr.Error = err.Error()
 		return true, err
 	}
@@ -867,13 +926,17 @@ func (e *Engine) CanaryResume(ctx context.Context, runID string, stageIdx int, p
 
 	fail := func(err error) error {
 		// 认领后失败：stage 回 Waiting（可再次决策），日志增量落库防丢失（审查 M2）。
+		// WithoutCancel：客户端断连（请求 ctx cancel）后认领状态仍须落库——用请求 ctx
+		// 写会让 CAS 认领永久卡死（decision 已置但终态未落，canary 无法再决策，并发审计 I-5）。
+		tid, _ := tenant.TenantFrom(ctx)
+		mctx := tenant.WithTenant(context.WithoutCancel(ctx), tid)
 		e.mu.Lock()
 		defer e.mu.Unlock()
-		if r, gerr := e.Runs.GetRun(ctx, runID); gerr == nil && r.Status == RunPaused && stageIdx == r.CurrentStage && r.StageRuns[stageIdx].Status == StageRunning {
+		if r, gerr := e.Runs.GetRun(mctx, runID); gerr == nil && r.Status == RunPaused && stageIdx == r.CurrentStage && r.StageRuns[stageIdx].Status == StageRunning {
 			sr.Log += "失败: " + err.Error() + "\n"
 			r.StageRuns[stageIdx].Status = StageWaiting
 			r.StageRuns[stageIdx].Log = sr.Log
-			_, _ = e.Runs.UpdateRun(ctx, r)
+			_, _ = e.Runs.UpdateRun(mctx, r)
 		}
 		return err
 	}
@@ -909,6 +972,14 @@ func (e *Engine) CanaryResume(ctx context.Context, runID string, stageIdx int, p
 		run.StageRuns[stageIdx].Status = StageSuccess
 		run.StageRuns[stageIdx].Log = sr.Log
 		run.StageRuns[stageIdx].FinishedAt = time.Now()
+		// v3 序（canary 在 deploy 前）：promote 已把镜像滚到基线，补写 OutImageID 让
+		// 后续 release stage 的 resolvePriorOutput(OutImageID) 能取到本镜像（否则跳过 tag）。
+		if imageID != "" {
+			if run.StageRuns[stageIdx].Output == nil {
+				run.StageRuns[stageIdx].Output = map[string]any{}
+			}
+			run.StageRuns[stageIdx].Output[OutImageID] = imageID
+		}
 		run.CurrentStage++
 		run.Status = RunRunning
 		_, err = e.Runs.UpdateRun(ctx, run)
@@ -1003,7 +1074,12 @@ func (e *Engine) markFailed(ctx context.Context, run PipelineRun, cause error) e
 	}
 	run.Status = RunFailed
 	run.FinishedAt = time.Now()
-	// cause 已在 execStage 写入对应 sr.Error；此处只落 run 状态
+	// stage Error/Log 落库前统一脱敏（错误契约审计 I5）：SetVersion/Deploy 等桥接错误
+	// 可能内嵌 pgx/k8s 原始文本（dial tcp/SQLSTATE），会原样进 run 详情 UI 展示。
+	for i := range run.StageRuns {
+		run.StageRuns[i].Error = maskInternals(run.StageRuns[i].Error)
+		run.StageRuns[i].Log = maskInternals(run.StageRuns[i].Log)
+	}
 	_, err := e.Runs.UpdateRun(ctx, run)
 	return err
 }
@@ -1019,9 +1095,83 @@ func (e *Engine) markSucceeded(ctx context.Context, run PipelineRun) error {
 }
 
 func (e *Engine) markPaused(ctx context.Context, run PipelineRun) error {
+	if ctx.Err() != nil {
+		return nil // Abort 已标 aborted，不覆盖（与 markFailed/markSucceeded 同款守卫）
+	}
 	run.Status = RunPaused
 	_, err := e.Runs.UpdateRun(ctx, run)
 	return err
+}
+
+// runAbortedSince 竞态守卫：run 快照读出后是否已被并发 Abort 置为终态。
+// Advance 循环持陈旧快照整体 UpdateRun（无版本号乐观锁），execStage 副作用执行期间
+// Abort 落库的 aborted 会被覆写回 running/paused——落库前重读一次状态校验。
+// 读取失败保守返回 true（跳过写回，Abort 的终态优先；worst case 本轮推进丢失，
+// 由 SweepInterrupted/人工 Retry 兜底）。
+func (e *Engine) runAbortedSince(ctx context.Context, run PipelineRun) bool {
+	latest, err := e.Runs.GetRun(ctx, run.ID)
+	if err != nil {
+		return true
+	}
+	return latest.Status == RunAborted || latest.Status == RunFailed || latest.Status == RunSucceeded
+}
+
+// SweepInterrupted 崩溃恢复：把进程重启中断的 running run 标 failed（devops BuildRun
+// SweepInterrupted 同款）。启动时调用一次；paused 保留（approve/canary 人工决策点，
+// Resume/CanaryResume 天然可续）。防 kill -9/OOM 后 run 永久 running：串行槽位被
+// HasActiveRun + 部分唯一索引双重封锁、泳道 GC 视为活跃不可回收、通知永久「运行中」。
+//
+// paused 特例（状态机审计 I1）：canary 决策认领（CAS 置 stage=Running）后进程 crash，
+// 留下 run=paused + stage=running 的「认领残留」——CanaryResume 拒（非 Waiting）、
+// Resume 拒 canary stage，双拒绝死局。Sweep 把这类 stage 回退 Waiting 让决策可重做
+// （认领只是并发防重入锁，非业务终态；promote/terminate 副作用幂等由各自实现保证）。
+func (e *Engine) SweepInterrupted(ctx context.Context) error {
+	runs, err := e.Runs.ListAllRuns(ctx, RunRunning)
+	if err != nil {
+		return err
+	}
+	for _, run := range runs {
+		r := run
+		r.Status = RunFailed
+		r.FinishedAt = time.Now()
+		for i := range r.StageRuns {
+			if r.StageRuns[i].Status == StageRunning {
+				r.StageRuns[i].Status = StageFailed
+				r.StageRuns[i].Error = "进程重启中断"
+				r.StageRuns[i].FinishedAt = time.Now()
+			}
+		}
+		if _, err := e.Runs.UpdateRun(ctx, r); err != nil {
+			log.Printf("pipeline: sweep run %s 失败: %v", run.ID, err)
+		} else {
+			log.Printf("pipeline: sweep 中断 run %s -> failed（进程重启）", run.ID)
+		}
+	}
+	// 认领残留恢复：paused run 中 stage=running（canary 认领后 crash）回退 Waiting。
+	paused, err := e.Runs.ListAllRuns(ctx, RunPaused)
+	if err != nil {
+		return err
+	}
+	for _, run := range paused {
+		r := run
+		touched := false
+		for i := range r.StageRuns {
+			if r.StageRuns[i].Status == StageRunning && r.StageRuns[i].Type == StageCanary {
+				r.StageRuns[i].Status = StageWaiting
+				r.StageRuns[i].Log += "进程重启：决策认领残留已回退，可重新决策\n"
+				touched = true
+			}
+		}
+		if !touched {
+			continue
+		}
+		if _, err := e.Runs.UpdateRun(ctx, r); err != nil {
+			log.Printf("pipeline: sweep paused run %s 失败: %v", run.ID, err)
+		} else {
+			log.Printf("pipeline: sweep 回退 run %s canary 认领残留 -> Waiting（进程重启）", run.ID)
+		}
+	}
+	return nil
 }
 
 // ---------- map[string]any 类型断言 helper ----------

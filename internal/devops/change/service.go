@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/aitoys/paas/internal/devops/gitea"
+	"github.com/aitoys/paas/internal/devops/pipeline"
 )
 
 // sentinel 错误（handler 按 errors.Is 映射 HTTP 状态）。
@@ -57,8 +59,13 @@ type RepoLookup func(ctx context.Context, appID string) (owner, repo, repoID str
 
 // ChangeInput 创建变更入参（handler 绑定）。
 type ChangeInput struct {
-	Title, Type, Branch, BaseBranch string
-	CreateBranch                    bool
+	// json tag 必备（契约审计 I4）：reflector 无 tag 回退字段原名（Title/Branch），
+	// OpenAPI schema 与前端实际发送的驼峰字段不一致。
+	Title        string `json:"title"`
+	Type         string `json:"type"`
+	Branch       string `json:"branch"`
+	BaseBranch   string `json:"baseBranch"`
+	CreateBranch bool   `json:"createBranch"`
 }
 
 // Service 变更编排：集成批次 integrate/approve/release + 惰性状态推进。
@@ -70,6 +77,27 @@ type Service struct {
 	runs         RunTrigger
 	readRuns     RunReader
 	repoResolver RepoLookup
+	// batchMu per-batchID 互斥：AddChangeToBatch/RemoveChangeFromBatch/AbandonChange/
+	// SyncBatchStatus 全是 Get→内存改→全量 UpdateBatch 的读-改-写，并发交错会丢失
+	// 成员更新致 Change 永久孤儿化（挂在已移除批次上，跨重启仍错——并发审计 I-4）。
+	batchMu    sync.Mutex
+	batchLocks map[string]*sync.Mutex
+}
+
+// lockBatch 取指定批次的互斥锁（懒建，全局表锁保护懒建本身）。
+func (s *Service) lockBatch(batchID string) func() {
+	s.batchMu.Lock()
+	if s.batchLocks == nil {
+		s.batchLocks = map[string]*sync.Mutex{}
+	}
+	mu, ok := s.batchLocks[batchID]
+	if !ok {
+		mu = &sync.Mutex{}
+		s.batchLocks[batchID] = mu
+	}
+	s.batchMu.Unlock()
+	mu.Lock()
+	return mu.Unlock
 }
 
 // ServiceOpt 可选依赖注入。
@@ -164,6 +192,8 @@ func batchAllowed(b IntegrationBatch, statuses ...string) bool {
 
 // AddChangeToBatch 变更入批：批次 collecting/failed（失败后重新收集）+ 变更 open 且未入批。
 func (s *Service) AddChangeToBatch(ctx context.Context, batchID, changeID string) (IntegrationBatch, error) {
+	unlock := s.lockBatch(batchID)
+	defer unlock()
 	b, err := s.repo.GetBatch(ctx, batchID)
 	if err != nil {
 		return IntegrationBatch{}, err
@@ -194,6 +224,8 @@ func (s *Service) AddChangeToBatch(ctx context.Context, batchID, changeID string
 
 // RemoveChangeFromBatch 变更出批：collecting/conflict/failed 状态可移出。
 func (s *Service) RemoveChangeFromBatch(ctx context.Context, batchID, changeID string) (IntegrationBatch, error) {
+	unlock := s.lockBatch(batchID)
+	defer unlock()
 	b, err := s.repo.GetBatch(ctx, batchID)
 	if err != nil {
 		return IntegrationBatch{}, err
@@ -361,6 +393,8 @@ func (s *Service) Release(ctx context.Context, batchID string) (IntegrationBatch
 	if s.gitea == nil || s.runs == nil {
 		return IntegrationBatch{}, ErrGiteaNotConfigured
 	}
+	unlock := s.lockBatch(batchID)
+	defer unlock()
 	b, err := s.repo.GetBatch(ctx, batchID)
 	if err != nil {
 		return IntegrationBatch{}, err
@@ -429,6 +463,8 @@ func (s *Service) Release(ctx context.Context, batchID string) (IntegrationBatch
 //   - releasing：CD 终态 succeeded→released（change→released + FinishedAt + ReleaseIDs 回填）；
 //     failed/aborted→回 tested（可重试 Release）
 func (s *Service) SyncBatchStatus(ctx context.Context, batchID string) (IntegrationBatch, error) {
+	unlock := s.lockBatch(batchID)
+	defer unlock()
 	b, err := s.repo.GetBatch(ctx, batchID)
 	if err != nil {
 		return IntegrationBatch{}, err
@@ -441,7 +477,14 @@ func (s *Service) SyncBatchStatus(ctx context.Context, batchID string) (Integrat
 	}
 	status, err := s.readRuns.GetRunStatus(ctx, b.RunID)
 	if err != nil {
-		return b, err // 读失败保持现状（下次再推）
+		// run 记录已不存在（pipeline 删除级联等）：视为 aborted 推进 failed，
+		// 否则批次永卡 testing（GetRunStatus 永久报错、无人触发就永久滞留）。
+		if errors.Is(err, pipeline.ErrRunNotFound) {
+			b.Status = BatchFailed
+			b.FinishedAt = time.Now()
+			return s.repo.UpdateBatch(ctx, b)
+		}
+		return b, err // 其余读失败保持现状（下次再推）
 	}
 
 	switch b.Status {

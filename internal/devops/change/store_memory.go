@@ -207,7 +207,7 @@ func (s *MemoryStore) CreateBatch(ctx context.Context, in IntegrationBatch) (Int
 			return IntegrationBatch{}, ErrBatchExists
 		}
 	}
-	s.batches[in.ID] = in
+	s.batches[in.ID] = cloneBatch(in) // 存深拷贝（与 UpdateBatch 对齐）：隔离 caller 传入的 ChangeIDs 引用
 	return cloneBatch(in), nil
 }
 
@@ -224,7 +224,9 @@ func (s *MemoryStore) UpdateBatch(ctx context.Context, in IntegrationBatch) (Int
 	}
 	in.TenantID = tid
 	in.CreatedAt = cur.CreatedAt
-	s.batches[in.ID] = in
+	// 存深拷贝（与 UpdateRun 范式对齐）：消除调用方 append 依赖「返回 clone cap==len 必重分配」
+	// 的隐式假设，caller 直接写 ChangeIDs 也不会写穿 store 数组。
+	s.batches[in.ID] = cloneBatch(in)
 	return cloneBatch(in), nil
 }
 

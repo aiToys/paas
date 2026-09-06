@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -60,6 +61,8 @@ type Handler struct {
 	runLister RunLister
 	// alertLister 通知聚合读告警状态（nil 降级不含告警源）。
 	alertLister AlertLister
+	// buildLister 通知聚合读独立构建状态（nil 降级不含构建失败源，R9-I3）。
+	buildLister BuildLister
 	// appGuard 应用级权限 enforcement（受限应用 integrate/approve/release 需成员角色）；nil 跳过。
 	appGuard *application.AppGuard
 }
@@ -100,6 +103,9 @@ func WithRunLister(rl RunLister) HandlerOpt { return func(h *Handler) { h.runLis
 // WithAlertLister 注入告警状态列表（通知聚合用，评估引擎桥接）。
 func WithAlertLister(al AlertLister) HandlerOpt { return func(h *Handler) { h.alertLister = al } }
 
+// WithBuildLister 注入独立构建状态列表（通知聚合用，构建失败通知 R9-I3）。
+func WithBuildLister(bl BuildLister) HandlerOpt { return func(h *Handler) { h.buildLister = bl } }
+
 // NewHandler 构造 Handler。
 func NewHandler(svc *Service, repo Repository, opts ...HandlerOpt) *Handler {
 	h := &Handler{svc: svc, repo: repo}
@@ -115,6 +121,16 @@ func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) boo
 		return true
 	}
 	httputil.WriteError(w, http.StatusForbidden, "forbidden: missing "+perm)
+	return false
+}
+
+// allowApp 校验受限应用的应用级权限（权限审计 I4：变更/批次全写端点补齐）；
+// 未注入/非受限放行，不通过回 403。
+func (h *Handler) allowApp(w http.ResponseWriter, r *http.Request, appID, action string) bool {
+	if h.appGuard == nil || h.appGuard.Allow(r, appID, action) {
+		return true
+	}
+	httputil.WriteError(w, http.StatusForbidden, "forbidden: 无该应用的应用级权限（"+action+"）")
 	return false
 }
 
@@ -170,7 +186,7 @@ func (h *Handler) ServeGlobal(w http.ResponseWriter, r *http.Request) {
 	case "/api/notifications":
 		// 通知依赖批次最新状态（tested 待审批等），先惰性推进再聚合。
 		if _, serr := h.syncAndListBatches(r.Context(), "", ""); serr == nil {
-			list, err = Notifications(r.Context(), h.repo, h.runLister, h.alertLister)
+			list, err = Notifications(r.Context(), h.repo, h.runLister, h.alertLister, h.buildLister)
 		} else {
 			err = serr
 		}
@@ -245,6 +261,10 @@ func (h *Handler) serveChanges(w http.ResponseWriter, r *http.Request, appID str
 			if !h.allow(w, r, PermPipelineWrite) {
 				return
 			}
+			// 应用级权限（权限审计 I4）：创建变更会建 Gitea 分支，受限应用需 write。
+			if !h.allowApp(w, r, appID, application.AppActionWrite) {
+				return
+			}
 			var in ChangeInput
 			if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 				httputil.WriteError(w, http.StatusBadRequest, "invalid body")
@@ -277,6 +297,10 @@ func (h *Handler) serveChanges(w http.ResponseWriter, r *http.Request, appID str
 			httputil.WriteData(w, c)
 		case http.MethodDelete:
 			if !h.allow(w, r, PermPipelineWrite) {
+				return
+			}
+			// 应用级权限（权限审计 I4）：放弃变更属应用级写操作。
+			if !h.allowApp(w, r, appID, application.AppActionWrite) {
 				return
 			}
 			if _, ok := h.ownChange(w, r, appID, cid); !ok {
@@ -344,6 +368,10 @@ func (h *Handler) serveBatches(w http.ResponseWriter, r *http.Request, appID str
 			}
 			httputil.WriteData(w, b)
 		case http.MethodDelete:
+			// 应用级权限（权限审计 I4）：放弃批次属应用级写操作。
+			if !h.allowApp(w, r, appID, application.AppActionWrite) {
+				return
+			}
 			h.abandonBatch(w, r, appID, bid)
 		default:
 			httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -356,6 +384,10 @@ func (h *Handler) serveBatches(w http.ResponseWriter, r *http.Request, appID str
 		switch {
 		case len(parts) == 4 && r.Method == http.MethodPost:
 			if !h.allow(w, r, PermPipelineWrite) {
+				return
+			}
+			// 应用级权限（权限审计 I4）：入批属应用级写操作。
+			if !h.allowApp(w, r, appID, application.AppActionWrite) {
 				return
 			}
 			var body struct {
@@ -379,6 +411,10 @@ func (h *Handler) serveBatches(w http.ResponseWriter, r *http.Request, appID str
 			if !h.allow(w, r, PermPipelineWrite) {
 				return
 			}
+			// 应用级权限（权限审计 I4）：出批属应用级写操作。
+			if !h.allowApp(w, r, appID, application.AppActionWrite) {
+				return
+			}
 			if _, ok := h.ownChange(w, r, appID, parts[4]); !ok {
 				return
 			}
@@ -398,16 +434,18 @@ func (h *Handler) serveBatches(w http.ResponseWriter, r *http.Request, appID str
 	// /batches/{bid}/integrate|approve|release
 	if len(parts) == 4 && r.Method == http.MethodPost {
 		// 应用级权限：受限应用的批次动作需成员角色（integrate=write；approve/release=release 动作）。
-		if h.appGuard != nil {
-			if b, err := h.repo.GetBatch(ctx, bid); err == nil {
-				action := application.AppActionRelease
-				if parts[3] == "integrate" {
-					action = application.AppActionWrite
-				}
-				if !h.appGuard.Allow(r, b.AppID, action) {
-					httputil.WriteError(w, http.StatusForbidden, "forbidden: 无该应用的应用级权限（"+action+"）")
-					return
-				}
+		// GetBatch 失败直接返回（fail-closed，错误契约审计 I6 同款：瞬时故障不得跳过校验）。
+		if gb, gerr := h.repo.GetBatch(ctx, bid); gerr != nil {
+			httputil.WriteServiceError(w, toHTTPStatus(gerr), gerr)
+			return
+		} else if h.appGuard != nil {
+			action := application.AppActionRelease
+			if parts[3] == "integrate" {
+				action = application.AppActionWrite
+			}
+			if !h.appGuard.Allow(r, gb.AppID, action) {
+				httputil.WriteError(w, http.StatusForbidden, "forbidden: 无该应用的应用级权限（"+action+"）")
+				return
 			}
 		}
 		switch parts[3] {
@@ -463,6 +501,10 @@ func (h *Handler) createBatch(w http.ResponseWriter, r *http.Request, appID stri
 	if !h.allow(w, r, PermPipelineWrite) {
 		return
 	}
+	// 应用级权限（权限审计 I4）：建批次属应用级写操作。
+	if !h.allowApp(w, r, appID, application.AppActionWrite) {
+		return
+	}
 	var body struct {
 		Title  string `json:"title"`
 		Branch string `json:"branch"`
@@ -504,9 +546,12 @@ func (h *Handler) abandonBatch(w http.ResponseWriter, r *http.Request, appID, bi
 		return
 	}
 	switch b.Status {
-	case BatchCollecting, BatchConflict, BatchFailed:
+	case BatchCollecting, BatchConflict, BatchFailed, BatchTesting, BatchReleasing:
+		// testing/releasing 也允许放弃（用户主动止损出口）：关联 run 由 SyncBatchStatus
+		// 在 run NotFound/aborted 时推进 failed，或用户另行 Abort。原状态面过窄会把
+		// testing/releasing 批次锁成死局（无任何退出动作）。
 	default:
-		httputil.WriteServiceError(w, http.StatusConflict, errors.New("仅 collecting/conflict/failed 批次可放弃"))
+		httputil.WriteServiceError(w, http.StatusConflict, errors.New("仅 collecting/conflict/failed/testing/releasing 批次可放弃"))
 		return
 	}
 	b.Status = BatchAbandoned
@@ -522,7 +567,11 @@ func (h *Handler) abandonBatch(w http.ResponseWriter, r *http.Request, appID, bi
 			if c.Status == ChangeIntegrated {
 				c.Status = ChangeOpen
 			}
-			_, _ = h.repo.UpdateChange(ctx, c)
+			// 清理路径 best-effort 不阻断批次删除，但失败必须有日志——否则变更永久悬挂在
+			// 已删批次上，只有对账式审计才能发现（吞错无感知是 R4 审计 Minor）。
+			if _, uerr := h.repo.UpdateChange(ctx, c); uerr != nil {
+				slog.Warn("批次放弃：变更回 open 出批失败（可能悬挂批次引用）", "changeId", cid, "err", uerr)
+			}
 		}
 	}
 	h.recordAudit(r, "batch_abandon", "integration_batch", bid, "app="+appID)
@@ -544,7 +593,7 @@ func (h *Handler) writeBatchError(w http.ResponseWriter, err error) {
 func toHTTPStatus(err error) int {
 	switch {
 	case errors.Is(err, ErrChangeNotFound), errors.Is(err, ErrBatchNotFound),
-		errors.Is(err, ErrNoCIPipeline):
+		errors.Is(err, ErrNoCIPipeline), errors.Is(err, gitea.ErrBranchNotFound):
 		return http.StatusNotFound
 	case errors.Is(err, ErrChangeExists), errors.Is(err, ErrBatchExists),
 		errors.Is(err, ErrBatchState), errors.Is(err, ErrMergeConflictBatch),
@@ -552,7 +601,9 @@ func toHTTPStatus(err error) int {
 		return http.StatusConflict
 	case errors.Is(err, ErrNoTenant):
 		return http.StatusBadRequest
-	case errors.Is(err, ErrGiteaNotConfigured):
+	case errors.Is(err, ErrGiteaNotConfigured), errors.Is(err, gitea.ErrGiteaUnavailable):
+		// gitea.ErrGiteaUnavailable 补映射（错误契约审计 I9）：Gitea 宕机时批次动作
+		// 此前落 500 脱敏，503 才能让前端给出「Git 后端不可达」的正确指引。
 		return http.StatusServiceUnavailable
 	}
 	return http.StatusBadRequest

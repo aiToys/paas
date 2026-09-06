@@ -718,8 +718,9 @@ func TestPipelineWebhookTrigger(t *testing.T) {
 	req = httptest.NewRequest(http.MethodPost, "/api/webhooks/pipeline/"+resp2.Data.ID+"?token=x", strings.NewReader(pushBody))
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("非 webhook pipeline 触发期望 400，got %d", rec.Code)
+	// 统一 401（错误契约审计 C2）：非 webhook 触发器/不存在/token 错不再三态区分，防无凭证枚举 pipeline ID。
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("非 webhook pipeline 触发期望 401（统一鉴权失败），got %d", rec.Code)
 	}
 }
 

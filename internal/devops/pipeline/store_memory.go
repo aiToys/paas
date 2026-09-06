@@ -55,7 +55,14 @@ func (s *memoryStore) ListPipelines(ctx context.Context, appID string) ([]Pipeli
 		}
 		out = append(out, clonePipeline(p))
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	// CreatedAt 排序对齐 PG 版（一致性审计 I3）：memory run ID 是哈希，按 ID 字典序
+	// ≈ 随机序，前端「最新优先」在 memory 模式失效。
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out, nil
 }
 
@@ -191,8 +198,13 @@ func (s *memoryStore) ListRuns(ctx context.Context, appID, pipelineID, status st
 		}
 		out = append(out, cloneRun(r))
 	}
-	// 倒序（最新优先）
-	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	// 倒序（最新优先）；CreatedAt 对齐 PG 版排序（一致性审计 I3：ID 哈希字典序非时间序）
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].ID > out[j].ID
+	})
 	return out, nil
 }
 
@@ -207,7 +219,13 @@ func (s *memoryStore) ListAllRuns(ctx context.Context, status string) ([]Pipelin
 		}
 		out = append(out, cloneRun(r))
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	// CreatedAt 倒序对齐 PG 版（一致性审计 I3）。
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].ID > out[j].ID
+	})
 	return out, nil
 }
 
@@ -255,11 +273,13 @@ func (s *memoryStore) CreateRun(ctx context.Context, r PipelineRun) (PipelineRun
 	if _, exists := s.runs[r.ID]; exists {
 		return PipelineRun{}, ErrRunExists
 	}
-	s.runs[r.ID] = r
+	s.runs[r.ID] = cloneRun(r) // 存深拷贝（与 UpdateRun 对称）：防 caller 存后继续写共享引用写穿 store
 	return cloneRun(r), nil
 }
 
 // UpdateRun 全量写回（engine 推进时调）：stageRuns + currentStage + status + version + finishedAt。
+// 入参深拷贝后存储：engine 在「开始即落库」（execStage R5-I3）后仍会继续写 stage 的
+// Log/Input——存引用会让 store 内对象与 engine 并发读写（race 审计）。
 func (s *memoryStore) UpdateRun(ctx context.Context, r PipelineRun) (PipelineRun, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {
@@ -271,10 +291,11 @@ func (s *memoryStore) UpdateRun(ctx context.Context, r PipelineRun) (PipelineRun
 	if !ok || ex.TenantID != tid {
 		return PipelineRun{}, ErrRunNotFound
 	}
-	r.TenantID = tid
-	r.CreatedAt = ex.CreatedAt
-	s.runs[r.ID] = r
-	return cloneRun(r), nil
+	stored := cloneRun(r)
+	stored.TenantID = tid
+	stored.CreatedAt = ex.CreatedAt
+	s.runs[r.ID] = stored
+	return cloneRun(stored), nil
 }
 
 func (s *memoryStore) HasActiveRun(ctx context.Context, pipelineID string) (bool, error) {

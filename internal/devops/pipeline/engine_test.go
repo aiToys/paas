@@ -1312,6 +1312,54 @@ func TestEngineRetryGuards(t *testing.T) {
 	}
 }
 
+// TestSweepInterrupted 验证崩溃恢复：running 孤儿 run 标 failed + 残留 running stage 标
+// failed；paused 保留（approve/canary 人工决策点天然可续）。
+func TestSweepInterrupted(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := acmeCtxEngine()
+	tpl, _ := s.CreateTemplate(ctx, PipelineTemplate{
+		ID: "tpl-sweep", Name: "Sweep测试", Kind: KindCI,
+		Stages: []StageDef{{Name: "构建", Type: StageBuild}, {Name: "部署", Type: StageDeploy}},
+	})
+	p, _ := s.CreatePipeline(ctx, Pipeline{Name: "p-sweep", AppID: "app-sweep", Kind: KindCI, TemplateID: tpl.ID})
+	p2, _ := s.CreatePipeline(ctx, Pipeline{Name: "p-sweep2", AppID: "app-sweep", Kind: KindCI, TemplateID: tpl.ID})
+	// 不同 pipeline：同 pipeline 已有 active run 会被单实例串行拒（ErrActiveRunExists）。
+	orphan, err := s.CreateRun(ctx, PipelineRun{
+		PipelineID: p.ID, AppID: "app-sweep", Status: RunRunning, CurrentStage: 0,
+		StageRuns: []StageRun{{Index: 0, Name: "构建", Type: StageBuild, Status: StageRunning}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun orphan 失败: %v", err)
+	}
+	paused, err := s.CreateRun(ctx, PipelineRun{
+		PipelineID: p2.ID, AppID: "app-sweep", Status: RunPaused, CurrentStage: 0,
+		StageRuns: []StageRun{{Index: 0, Name: "构建", Type: StageApprove, Status: StageWaiting}},
+	})
+	if err != nil {
+		t.Fatalf("CreateRun paused 失败: %v", err)
+	}
+
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{}, Releases: &fakeReleaser{}}
+	if err := eng.SweepInterrupted(ctx); err != nil {
+		t.Fatalf("SweepInterrupted 失败: %v", err)
+	}
+
+	got, _ := s.GetRun(ctx, orphan.ID)
+	if got.Status != RunFailed {
+		t.Errorf("running 孤儿应标 failed，got %s", got.Status)
+	}
+	if got.StageRuns[0].Status != StageFailed || got.StageRuns[0].Error == "" {
+		t.Errorf("残留 running stage 应标 failed 带 Error，got %s %q", got.StageRuns[0].Status, got.StageRuns[0].Error)
+	}
+	if got.FinishedAt.IsZero() {
+		t.Errorf("FinishedAt 应写入")
+	}
+	pa, _ := s.GetRun(ctx, paused.ID)
+	if pa.Status != RunPaused {
+		t.Errorf("paused 应保留（人工决策可续），got %s", pa.Status)
+	}
+}
+
 // TestAbortClearsRunningStage 验证 Abort 清理残留 running 的 stage_runs 标 StageAborted。
 // 场景：run=running 且某 stage=running 时 abort，该 stage 应标 aborted（数据一致），
 // 已终态 stage（success）不动。修复第 18 轮「abort 后 stage_runs 残留 running」数据不一致。

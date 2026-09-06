@@ -136,29 +136,26 @@ func TestBuiltinTemplatesContent(t *testing.T) {
 	if cd.ID != "tpl-cd" || cd.Kind != KindCD || !cd.Builtin {
 		t.Fatalf("cd 模板元数据错: %+v", cd)
 	}
-	if len(cd.Stages) != 5 {
-		t.Fatalf("cd want 5 stages（approve/deploy/canary/release/baseline），got %d", len(cd.Stages))
+	if len(cd.Stages) != 4 {
+		t.Fatalf("cd want 4 stages（approve/canary/release/baseline），got %d", len(cd.Stages))
 	}
-	wantCDTypes := []string{StageApprove, StageDeploy, StageCanary, StageRelease, StageBaseline}
+	wantCDTypes := []string{StageApprove, StageCanary, StageRelease, StageBaseline}
 	for i, s := range cd.Stages {
 		if s.Type != wantCDTypes[i] {
 			t.Fatalf("cd stage %d want %s，got %s", i, wantCDTypes[i], s.Type)
 		}
 	}
-	// cd deploy 用 latestReady（CD 消费 CI 产物），ci deploy 用 priorBuild（CI 自产自销）
+	// cd canary 用 latestReady（CD 消费 CI 产物；v3 起 canary 在 deploy 前无前序输出），
+	// ci deploy 用 priorBuild（CI 自产自销）
 	if cd.Stages[1].Params["imageSource"] != ImageLatestReady {
-		t.Fatalf("cd deploy imageSource 期望 %s，got %v", ImageLatestReady, cd.Stages[1].Params["imageSource"])
+		t.Fatalf("cd canary imageSource 期望 %s，got %v", ImageLatestReady, cd.Stages[1].Params["imageSource"])
 	}
 	if ci.Stages[1].Params["imageSource"] != ImagePriorBuild {
 		t.Fatalf("ci deploy imageSource 期望 %s，got %v", ImagePriorBuild, ci.Stages[1].Params["imageSource"])
 	}
-	// canary 用 priorBuild 消费前序 deploy Output.imageId（v2 起 deploy 回写 imageId），验证同一镜像
-	if cd.Stages[2].Params["imageSource"] != ImagePriorBuild {
-		t.Fatalf("cd canary imageSource 期望 %s（消费 deploy 产物），got %v", ImagePriorBuild, cd.Stages[2].Params["imageSource"])
-	}
 	// cd baseline mainBranch="main"（上线后合并主干），ci 无 baseline（CI 不动主干）
-	if cd.Stages[4].Params["mainBranch"] != "main" {
-		t.Fatalf("cd baseline mainBranch 期望 main，got %v", cd.Stages[4].Params["mainBranch"])
+	if cd.Stages[3].Params["mainBranch"] != "main" {
+		t.Fatalf("cd baseline mainBranch 期望 main，got %v", cd.Stages[3].Params["mainBranch"])
 	}
 }
 
@@ -194,7 +191,8 @@ func hasStage(tpl PipelineTemplate, stageType string) bool {
 
 // TestBuiltinTemplatesSemantics 验证 ci/cd 在 release/lane 维度的语义区分：
 //   - ci 不含 release（测试不打版本）；ci 的 deploy 用 lane={{run.branch}}（分支泳道联调）
-//   - cd 含 release（上线打版本）；cd 的 deploy 用 lane=default（生产基线）
+//   - cd 含 release（上线打版本）；v3 起金丝雀提前（canary 在 deploy 前，promote 自带
+//     基线放量），故 cd 无独立 deploy stage，canary 在 release 之前
 func TestBuiltinTemplatesSemantics(t *testing.T) {
 	tpls := BuiltinTemplates()
 	ci := findTpl(tpls, "tpl-ci")
@@ -212,11 +210,24 @@ func TestBuiltinTemplatesSemantics(t *testing.T) {
 	if !hasStage(cd, StageRelease) {
 		t.Error("cd 模板应含 release（上线打版本）")
 	}
-	// cd 的 deploy lane=default
-	cdDep := findStage(cd, StageDeploy)
-	if cdDep.Params["lane"] != LaneDefault {
-		t.Errorf("cd deploy lane 应为 default，得 %v", cdDep.Params["lane"])
+	// v3：cd 无独立 prod deploy（promote 自带基线放量）；canary 在 release 之前
+	if hasStage(cd, StageDeploy) {
+		t.Error("cd v3 不应含独立 deploy stage（canary promote 自带基线放量）")
 	}
+	canary := findStage(cd, StageCanary)
+	relIdx, canaryIdx := -1, -1
+	for i, s := range cd.Stages {
+		if s.Type == StageRelease {
+			relIdx = i
+		}
+		if s.Type == StageCanary {
+			canaryIdx = i
+		}
+	}
+	if canaryIdx < 0 || relIdx < 0 || canaryIdx > relIdx {
+		t.Errorf("cd canary(%d) 应在 release(%d) 之前", canaryIdx, relIdx)
+	}
+	_ = canary
 }
 
 // TestSeedTemplatesCrossTenantVisible 平台预置模板对所有租户可见。

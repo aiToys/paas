@@ -85,6 +85,44 @@ func TestArgsHashStableRegardlessOfMapIterationOrder(t *testing.T) {
 	}
 }
 
+// TestBuildTagDockerfileHash dockerfile/buildContext 参与哈希（D1 修复 2026-09-04）：
+// 切 Dockerfile 产物必变，tag 必须随之变化，否则同 tag 两 digest 破坏 registry 不可变语义；
+// 默认值与存量形态（含 argsHash 段）零变化。
+func TestBuildTagDockerfileHash(t *testing.T) {
+	base := Params{Branch: "main", Commit: "abcdef1234567890"}
+	// 1. 默认构建：tag 保持 branch-commit8（存量兼容，不追加 dfHash 段）。
+	if got := buildTag(base); got != "main-abcdef12" {
+		t.Fatalf("默认 dockerfile/context 不应追加段，got %s", got)
+	}
+	// 2. 有 buildArgs + 默认输入：形态与存量完全一致（argsHash 后不追加）。
+	withArgs := base.withArgs(map[string]string{"SERVICE": "frontend"})
+	if got, want := buildTag(withArgs), "main-abcdef12-"+argsHash(withArgs.BuildArgs); got != want {
+		t.Fatalf("默认输入 + buildArgs 应与存量形态一致，got %s want %s", got, want)
+	}
+	// 3. 切 dockerfile：tag 必变（frontend nginx vs traffic-gen 同 buildArgs 场景）。
+	frontend := withArgs
+	frontend.Dockerfile = "paas-shop/frontend/Dockerfile"
+	if buildTag(frontend) == buildTag(withArgs) {
+		t.Fatal("切 dockerfile 应产出不同 tag（防同 tag 两 digest）")
+	}
+	// 4. 同 dockerfile 重构幂等。
+	frontend2 := withArgs
+	frontend2.Dockerfile = "paas-shop/frontend/Dockerfile"
+	if buildTag(frontend) != buildTag(frontend2) {
+		t.Fatal("同 dockerfile 重构 tag 应一致（幂等）")
+	}
+	// 5. 非默认 buildContext 同理参与。
+	ctxCustom := withArgs
+	ctxCustom.BuildContext = "paas-shop"
+	if buildTag(ctxCustom) == buildTag(withArgs) {
+		t.Fatal("切 buildContext 应产出不同 tag")
+	}
+	// 6. dfHash 全默认返回空。
+	if dfHash("", "") != "" || dfHash("Dockerfile", ".") != "" {
+		t.Fatal("全默认输入 dfHash 应为空（不追加段）")
+	}
+}
+
 // withArgs 辅助构造（值传递后设 BuildArgs）。
 func (p Params) withArgs(a map[string]string) Params {
 	p.BuildArgs = a

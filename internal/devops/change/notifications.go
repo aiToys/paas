@@ -26,6 +26,7 @@ const (
 	NotifBatchApprove   = "batch_approve"
 	NotifAlertFiring    = "alert_firing"  // 告警触发（评估引擎 firing）
 	NotifAlertPending   = "alert_pending" // 告警观察中（pending，未达持续窗口）
+	NotifBuildFailed    = "build_failed"  // 独立构建失败（不经 pipeline 的手动构建，可观测审计 R9-I3）
 )
 
 // NotifWindow 通知时间窗口：超过该时长的终态事件（failed run 等）不再进通知——
@@ -85,9 +86,25 @@ type AlertLister interface {
 	ListAlertItems(ctx context.Context) ([]AlertItem, error)
 }
 
+// BuildItem 独立构建通知最小字段（BuildLister 返回，避免 change→devops builds 依赖）。
+type BuildItem struct {
+	ID     string
+	AppID  string
+	Status string // success|failed|running|pending
+	Branch string // 通知文案展示
+	At     string // 开始时间 ISO（窗口过滤/排序用）
+}
+
+// BuildLister 通知聚合对独立构建的最小依赖（cmd/core 桥接 devops builds）。
+// pipeline run 里的 build stage 失败已经由 run_failed 覆盖；这里补手动触发
+// （应用构建 tab / DevOps 中心）的失败——同一值班台闭环（可观测审计 R9-I3）。
+type BuildLister interface {
+	ListBuildItems(ctx context.Context) ([]BuildItem, error)
+}
+
 // Notifications 聚合通知（tenant 内，按 at 倒序）。
-// alerts 可为 nil（未注入告警源时跳过，通知其余源不受影响）。
-func Notifications(ctx context.Context, repo Repository, runs RunLister, alerts AlertLister) ([]Notification, error) {
+// alerts/builds 可为 nil（未注入对应源时跳过，通知其余源不受影响）。
+func Notifications(ctx context.Context, repo Repository, runs RunLister, alerts AlertLister, builds BuildLister) ([]Notification, error) {
 	now := time.Now()
 	var out []Notification
 	batches, err := repo.ListBatches(ctx, "", "")
@@ -181,17 +198,40 @@ func Notifications(ctx context.Context, repo Repository, runs RunLister, alerts 
 					out = append(out, Notification{
 						ID:   "alert:" + a.RuleName + ":" + a.TargetType + ":" + a.TargetID + ":firing",
 						Type: NotifAlertFiring, Severity: sev,
-						Title:      fmt.Sprintf("告警「%s」触发：%s %s=%s 超阈值（%s）", a.RuleName, a.TargetType, a.TargetID, a.MetricName, a.Status),
-						TargetType: "alert", TargetID: a.TargetType, At: a.At,
+						Title: fmt.Sprintf("告警「%s」触发：%s %s=%s 超阈值（%s）", a.RuleName, a.TargetType, a.TargetID, a.MetricName, a.Status),
+						// TargetID 存真实资源 ID（旅程审计 R5-I1）：此前误存 TargetType 字符串，
+						// 前端跳转换算不出目标页面。
+						TargetType: "alert", TargetID: a.TargetID, At: a.At,
 					})
 				case "pending":
 					out = append(out, Notification{
 						ID:   "alert:" + a.RuleName + ":" + a.TargetType + ":" + a.TargetID + ":pending",
 						Type: NotifAlertPending, Severity: "info",
 						Title:      fmt.Sprintf("告警「%s」观察中：%s %s %s 接近阈值", a.RuleName, a.TargetType, a.TargetID, a.MetricName),
-						TargetType: "alert", TargetID: a.TargetType, At: a.At,
+						TargetType: "alert", TargetID: a.TargetID, At: a.At,
 					})
 				}
+			}
+		}
+	}
+
+	// 独立构建失败（R9-I3）：只报窗口内 failed（历史失败自然退出，同 run_failed 语义）；
+	// 成功/进行中不进通知（构建列表页自看，无需打扰）。
+	if builds != nil {
+		if items, err := builds.ListBuildItems(ctx); err == nil {
+			for _, b := range items {
+				if b.Status != "failed" || !inNotifWindow(b.At, now) {
+					continue
+				}
+				branch := ""
+				if b.Branch != "" {
+					branch = "@" + b.Branch
+				}
+				out = append(out, Notification{
+					ID: "build:" + b.ID + ":failed", Type: NotifBuildFailed, Severity: "error",
+					Title: fmt.Sprintf("构建失败%s（可重试）", branch), AppID: b.AppID,
+					TargetType: "build", TargetID: b.ID, At: b.At,
+				})
 			}
 		}
 	}
