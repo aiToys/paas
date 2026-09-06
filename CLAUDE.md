@@ -131,7 +131,8 @@ pnpm build                    # 构建三套
 
 ### 审计
 
-- 写操作全记审计（只增不删）：security handler 自动记；identity（tenant/user/apikey CRUD）、maas/engine、configcenter、pipeline（change_/batch_/canary_）、devops PR（review/merge）、app member/restrict 均已接入。actor 从 ctx 取，空租户归 "platform"。
+- 写操作全记审计（只增不删）：security handler 自动记；identity（tenant/user/apikey CRUD）、maas/engine、configcenter、pipeline（change_/batch_/canary_）、devops（PR review/merge + build_run/release create/rollback/promote）、app member/restrict、appconfig、backup、messaging、dataservice（租户侧 delete）、governance、lane、service、workflow、billing 均已接入（元审计 2026-09-04 全量比对补齐）。actor 从 ctx 取，空租户归 "platform"。
+- 审计接入双维度核查：「代码接了」+「装配层注入」缺一不可（appconfig 曾代码有装配漏）；新模块 handler 加 WithAudit 后必须到 cmd/core/main.go 对应装配段补注入。
 
 ### 配额
 
@@ -165,7 +166,7 @@ pnpm build                    # 构建三套
 ### 应用主线 + 工作负载 + 环境
 
 - `internal/core/application/`：Application（Bindings 真源 + Resources 派生）+ OnAppCreate hook（自动绑定默认 CI/CD 流水线）+ CascadeDeleter（级联 workload/appconfig + 配额回收 + 清 app 级配置 ns）。
-- `internal/workload/`：Workload（Service/Job/CronJob，多服务 Service 字段）/ Instance（Pod 级）/ PodLogs（越权校验）/ ResourceSpec（cpu/mem requests+limits，**生产禁 BestEffort 双入口**）/ K8s 数据面（CRD 投影 + WorkloadReconciler，fake client 测不出 apiserver 校验类 bug，需真实集群验证）+ LaneGC（泳道回收级联 cleaners）。
+- `internal/workload/`：Workload（Service/Job/CronJob，多服务 Service 字段）/ Instance（Pod 级）/ PodLogs（越权校验）/ ResourceSpec（cpu/mem requests+limits，**生产禁 BestEffort 双入口**）/ K8s 数据面（CRD 投影 + WorkloadReconciler，fake client 测不出 apiserver 校验类 bug，需真实集群验证）+ LaneGC（泳道回收级联 cleaners）+ **OrphanGC**（WorkloadReconciler 周期对账平台仓库，平台侧已删的 CR 级联回收，宽限 10min，防僵尸 Service 抢名）。
 - `internal/environment/`：环境一等公民（type prod|test）+ PromoteOrder 发布阶序 + `NextPromoteTarget`。
 - 命名约定：Deployment 名 = 工作负载 ID；Pod = `<id>-<rsHash>-<podHash>`；治理 Service.Name == K8s Service 名 == 工作负载名（数据面发现靠此对齐）；lane label `paas.aitoys/lane`（值经 sanitize，K8s label/Service 名不许 `/`）。
 
@@ -189,7 +190,7 @@ pnpm build                    # 构建三套
 
 - `internal/dataservice/`：6 Kind（db/cache/mq/storage/vector/search）同构领域 + KindMetas 表单元数据真源 + Connection（凭证生成持久化 / FQDN / MaskConnection）/ Engine 三模式（managed/external-shared/external-dedicated，轻量引擎 qdrant/meilisearch）；reconciler 建 Secret+Service+StatefulSet（OwnerRef 级联）+ exporter sidecar（指标按 `paas_aitoys_dataservice` label 过滤）；PG 持久层加密；占位 Kind 返 failed 不拉起（避免 port=0 死循环）。
 - 绑定注入：`application.BindingInjector` 桥接，按 Kind 写 appconfig 连接条目（DATABASE_URL/REDIS_URL/...），解绑重注入最后剩余绑定。
-- `internal/backup/`：备份 CRUD（mock 完成）+ prod:write fail-closed。
+- `internal/backup/`：备份记录 CRUD（PG 持久化 migration 0044 + RLS；Create 即 completed，真实快照执行留后续）+ prod:write fail-closed。
 
 ### 服务治理（四件套已落地）
 
@@ -199,7 +200,7 @@ pnpm build                    # 构建三套
 
 ### 可观测（三支柱 + 告警 + OTel）
 
-- `internal/observability/`：memory 惰性 mock + `real/`（Prom/Loki/Jaeger 适配，env 开关 `PAAS_PROM_URL|PAAS_LOKI_URL|PAAS_JAEGER_URL` 三支柱独立混用）+ `compose/` 聚合。多租户：PromQL/LogQL/Tempo 均带 tenant/ns 过滤；应用级查询走 WorkloadLister pod 正则（`wl-<id>-.*`）。
+- `internal/observability/`：`real/`（Prom/Loki/Jaeger 适配，env 开关 `PAAS_PROM_URL|PAAS_LOKI_URL|PAAS_JAEGER_URL` 三支柱独立混用）+ `compose/` 聚合；告警状态机/历史已迁 PG（migration 0042，重启不丢）。多租户：PromQL/LogQL/Tempo 均带 tenant/ns 过滤；应用级查询走 WorkloadLister pod 正则（`wl-<id>-.*`）。
 - trace 后端 = Jaeger all-in-one（非 Tempo，OOM）；`internal/observability/tracing`：env 门控 OTLP init（`PAAS_OTEL_ENDPOINT`，空=noop）+ otelhttp mux 中间件 + **ErrorTraceMiddleware**（error span 写 exception.type/message，panic 写 exception.stacktrace）；GenAI 语义约定（gen_ai.*）手写 attribute。
 - trace-log 关联：`ListLogs` 支持 `?traceId=`（内存过滤，trace_id 非 Loki label）；前端 trace 列表含 traceID 深链 + 错误摘要 + 关联日志面板。
 - `internal/metrics`：Prometheus registry + HTTPMiddleware（在 recovery 外层才能记 panic-500）+ `/metrics`。
@@ -212,7 +213,7 @@ pnpm build                    # 构建三套
 
 ### 智能体（AI 编排）
 
-- `internal/ai/`：agent/tool/knowledgebase/prompt/skill 五实体（Skill=可叠加能力指令包）+ runtime（多轮记忆 conversationStore / eval 历史落库 / workflow 编排引擎 llm/condition/approve/end 节点 DB 状态驱动恢复）+ Marketplace（`marketplace_items` 平台级快照不可变 + fork 安装，SanitizeConfig 剔除凭证，EntityForker 依赖倒置）；admin 总览 `/api/admin/ai/*`（ListAll 只读）。
+- `internal/ai/`：agent/tool/knowledgebase/prompt/skill 五实体（Skill=可叠加能力指令包）+ runtime（多轮记忆 conversationStore / eval 历史落库 / workflow 编排引擎 llm/condition/approve/end 节点 DB 状态驱动恢复）+ Marketplace **六类实体**（skill/prompt/tool/agent/knowledgebase/workflow；`marketplace_items` 平台级快照不可变 + fork 安装，SanitizeConfig 剔除凭证，EntityForker 依赖倒置；KB 只发配置骨架、安装时经 finder 重绑本租户 vector/storage 实例；workflow 整包快照内嵌引用的 Agent/工具副本、安装后节点引用旧ID→新ID重写 + Enabled=false）；admin 总览 `/api/admin/ai/*`（ListAll 只读）。
 - REST `/api/skills|agent-evals|marketplace` 等；console-user「智能体」菜单 + `Explore.vue` 广场。
 
 ### 身份 + 前端
@@ -228,10 +229,12 @@ route registry（`internal/apiroute/`）驱动 mux 注册与 spec 生成；`GET 
 
 ## 标准基线（审计外部基准，2026-08-26 设立）
 
-**为什么有这一章**：守卫式审计查不出「该实现而未实现」的完备性缺口。审计三原则：
+**为什么有这一章**：守卫式审计查不出「该实现而未实现」的完备性缺口。审计五原则：
 1. **完备性对表**：重要模块审计对照下表问「业界标准能力我们缺哪些」。
 2. **旅程式审计常态化**：每模块至少一轮「模拟真实用户完整旅程」（模块接缝断链只有旅程能发现）。
 3. **留后续复审**：每次大功能落地后扫「留后续」清单，问「这笔欠账现在该还了吗」。
+4. **对账式审计常态化**（2026-09-04 立项，首案=paas-shop 删旧应用后 workload 引用孤儿镜像 + registry 实物与 DB 记录因 repo 命名变迁肉眼不可对应）：平台无 DB 外键（多租户 + Repository 分层），软外键漂移单模块审计查不出——必须跨层比对**部署引用 ↔ 平台记录 ↔ 外部实物**。固化工具 `./scripts/reconcile.sh`（A 孤儿引用 / B 幽灵记录 / C 配额漂移 / D 同 tag 不同 digest / E registry 孤儿实物概览 / F 幽灵 workload（DB 有行无 CR，drift 失效）/ G 孤儿 CR（OrphanGC 失效）；A1/B1/C1/D1/F1/G1 存在时退出码非零可挂 CI，F/G 依赖 kubectl 不可达时跳过）。每轮审计必须跑一次；引用形态归一化（tag / host@digest / 裸 digest）与 bash 踩坑见脚本头注释。
+5. **能力曝光对账**（2026-09-05 立项，首案=广场缺 knowledgebase/workflow + backup/messaging 后端有前端零调用）：新能力落地后必须对**全部应有暴露面**逐一对账——**后端 API × 前端入口 × 示例演示（paas-shop）× admin 总览 × 用户文档 × OpenAPI 登记**。守卫式审计只验「实现的代码对不对」，旅程式审计只验「已有入口走得通」，都不问「这个能力接入了所有应有入口吗」——故 10 轮审查仍漏掉此类缺口。落地新实体/端点时逐面自问：用户从哪发现它？示例里有没有演示？admin 看得到吗？
 
 | 模块 | 业界对标 | 当前缺口 |
 |------|---------|---------|
@@ -246,7 +249,7 @@ route registry（`internal/apiroute/`）驱动 mux 注册与 spec 生成；`GET 
 ## 遗留债务索引（按需复审）
 
 - **安全**：refresh rotation + logout jti 黑名单、限流多副本 Redis、密钥轮转/过期、各 client CheckRedirect 已收口但新 client 需用 httputil.NewClient。
-- **持久化/规模**：observability 迁 PG、RLS 全覆盖、ClickHouse 时序计量、审计分页、流水线运行历史分页、configcenter 长连接 watch/灰度下发。
+- **持久化/规模**：observability 迁 PG、RLS 生产角色非超级用户生效（dev postgres chart 超级用户 BYPASSRLS，策略已全表覆盖 migration 0043/0044）、ClickHouse 时序计量、审计分页、流水线运行历史分页、configcenter 长连接 watch/灰度下发。~~配额计数回收失衡~~（**已修复 2026-09-04**：dataservice Delete 补回收 + 启动自愈 `recalcUsageIfDrift` 对齐行数计数型资源，reconcile C1 清零）。
 - **发布/部署**：batches 切流实现（D1）、蓝绿模板变体、金丝雀告警联动、promote 跨级跳迁、PVC 数据服务重启保数据（现 STS 删 pod 不删 PVC 可恢复）、异步创建流转 PG 反向同步、真实备份任务。
 - **MaaS**：通道健康检查真实探活、凭证测试 ping、Vendor 改配置后存量通道/绑定自动同步、按用户 scope 列 API Key。
 - **流水线**：cron 触发器、Gitea webhook 自动注册、process/mock 模式实时构建日志、租户自定义模板编辑器、行级评论、CI 状态挂 PR。
