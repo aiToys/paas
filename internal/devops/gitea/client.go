@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aitoys/paas/internal/devops/builder"
 	"github.com/aitoys/paas/internal/httputil"
 )
 
@@ -35,6 +36,9 @@ var (
 	ErrBranchExists     = errors.New("分支已存在")
 	ErrBranchNotFound   = errors.New("分支不存在")
 	ErrPRExists         = errors.New("同源 PR 已存在")
+	// ErrTagExists tag 已存在（CreateTag 幂等回查后仍非同 commit 才返回；
+	// release stage Retry 同版本号重打 tag 的常见路径）。
+	ErrTagExists = errors.New("tag 已存在")
 )
 
 // Client 调 Gitea REST API（/api/v1）。baseURL 形如 http://gitea.paas.svc.cluster.local:3000。
@@ -124,6 +128,15 @@ func (c *Client) GetRepo(ctx context.Context, owner, name string) (Repo, error) 
 		return Repo{}, err
 	}
 	return out, nil
+}
+
+// DeleteRepo 删除 Gitea 仓库（平台 DeleteRepo 级联用）。已不存在视为成功（幂等）。
+func (c *Client) DeleteRepo(ctx context.Context, owner, name string) error {
+	err := c.doJSON(ctx, http.MethodDelete, "/api/v1/repos/"+pathEscape(owner)+"/"+pathEscape(name), nil, nil)
+	if errors.Is(err, ErrRepoNotFound) {
+		return nil // 幂等：残留清理场景
+	}
+	return err
 }
 
 // CloneURLWithAuth 返回含 basic auth 的 git clone URL（供 builder Job 内网 clone）。
@@ -248,6 +261,9 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 			}
 		}
 		return nil
+	case http.StatusNoContent:
+		// DELETE 类 API（如 DeleteRepo）成功返 204 无 body。
+		return nil
 	case http.StatusNotFound:
 		return ErrRepoNotFound
 	case http.StatusConflict, http.StatusBadRequest:
@@ -266,7 +282,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, out 
 	default:
 		// 响应体只进服务端日志，不回传客户端（防 Gitea 内部细节泄漏，审计 M-1）
 		b, _ := io.ReadAll(resp.Body)
-		log.Printf("gitea API %s %s 返回 %d: %s", method, path, resp.StatusCode, string(b))
+		log.Printf("gitea API %s %s 返回 %d: %s", method, path, resp.StatusCode, builder.MaskToken(string(b)))
 		return fmt.Errorf("gitea API %s %s 返回 %d", method, path, resp.StatusCode)
 	}
 }
@@ -291,6 +307,28 @@ func (c *Client) CreateTag(ctx context.Context, owner, repo, tag, commit string)
 	}
 	p := fmt.Sprintf("/api/v1/repos/%s/%s/git/tags", pathEscape(owner), pathEscape(repo))
 	if err := c.doJSON(ctx, http.MethodPost, p, body, &out); err != nil {
+		// 幂等恢复：release stage Retry 确定性生成同版本号，首次 CreateTag 可能实际成功
+		// 但响应丢失/超时——409 时回查 tag，同 commit 视为成功（否则 Retry 永久失败且
+		// 文案误导为「仓库已存在」，须手工去 Gitea 删 tag）。
+		if errors.Is(err, ErrRepoExists) { // doJSON 把 POST 409 统一映射为 ErrRepoExists
+			sha, gerr := c.getTagSHA(ctx, owner, repo, tag)
+			if gerr == nil && sha == commit {
+				return sha, nil
+			}
+			return "", ErrTagExists
+		}
+		return "", err
+	}
+	return out.SHA, nil
+}
+
+// getTagSHA 查单tag 指向的 commit SHA（CreateTag 幂等回查用）。不存在返 ErrRepoNotFound。
+func (c *Client) getTagSHA(ctx context.Context, owner, repo, tag string) (string, error) {
+	var out struct {
+		SHA string `json:"sha"`
+	}
+	p := fmt.Sprintf("/api/v1/repos/%s/%s/git/tags/%s", pathEscape(owner), pathEscape(repo), pathEscape(tag))
+	if err := c.doJSON(ctx, http.MethodGet, p, nil, &out); err != nil {
 		return "", err
 	}
 	return out.SHA, nil
@@ -340,6 +378,17 @@ func (c *Client) Merge(ctx context.Context, owner, repo, head, base, mode string
 	}
 	mergePath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/merge", pathEscape(owner), pathEscape(repo), pr.Number)
 	if err := c.doMerge(ctx, mergePath, mergeBody); err != nil {
+		// 已合并幂等恢复：change.Release 半程失败（merge 全成但 TriggerAppRun 失败回 tested）
+		// 重试时对已合并分支再 merge，Gitea 返 409「已合并」——误判 ErrMergeConflict 会把
+		// 批次锁在 tested 死循环（每次重试都「冲突」）。回查 PR 状态，已合并视为成功。
+		if errors.Is(err, ErrMergeConflict) {
+			if merged, _ := c.isPRMerged(ctx, owner, repo, pr.Number); merged {
+				if commits, cerr := c.ListCommits(ctx, owner, repo, 1); cerr == nil && len(commits) > 0 {
+					return commits[0].SHA, nil
+				}
+				return pr.Head.SHA, nil
+			}
+		}
 		return "", err
 	}
 	// 3. 取 merge 后 base 最新 commit SHA（squash=新 commit / ff=head commit）
@@ -366,6 +415,18 @@ func mergeDo(mode string) string {
 		return "squash"
 	}
 	return "merge"
+}
+
+// isPRMerged 查 PR 是否已合并（Merge 的 409 已合并幂等回查用）。查询失败返 false（保守走冲突路径）。
+func (c *Client) isPRMerged(ctx context.Context, owner, repo string, number int) (bool, error) {
+	var out struct {
+		Merged bool `json:"merged"`
+	}
+	p := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d", pathEscape(owner), pathEscape(repo), number)
+	if err := c.doJSON(ctx, http.MethodGet, p, nil, &out); err != nil {
+		return false, err
+	}
+	return out.Merged, nil
 }
 
 // findOpenPR 查找同 head→base 的 open PR（ErrPRExists 时复用，不重复建）。
@@ -413,8 +474,6 @@ type Branch struct {
 	CommitSHA string `json:"-"` // 从 commit.id 提取
 }
 
-// CreateBranch 从 from 分支/commit 创建新分支（POST /repos/{o}/{r}/branches）。
-// 422（分支已存在）-> ErrBranchExists。
 // CreateWebhook 注册仓库 webhook（push 事件 -> pipeline 自动触发）。
 // URL 需集群内可达（core Service FQDN）；已存在同 URL webhook 时幂等跳过（Gitea 返 422）。
 func (c *Client) CreateWebhook(ctx context.Context, owner, repo, url string) error {
@@ -440,6 +499,7 @@ func (c *Client) CreateFile(ctx context.Context, owner, repo, path, message, con
 		map[string]any{"content": contentB64, "message": message}, nil)
 }
 
+// CreateBranch 从 from 分支创建新分支（POST /repos/{o}/{r}/branches）。
 func (c *Client) CreateBranch(ctx context.Context, owner, repo, branch, from string) error {
 	body := map[string]any{"new_branch_name": branch, "old_branch_name": from, "old_ref_name": from}
 	p := fmt.Sprintf("/api/v1/repos/%s/%s/branches", pathEscape(owner), pathEscape(repo))
@@ -459,6 +519,28 @@ func (c *Client) GetBranch(ctx context.Context, owner, repo, branch string) (Bra
 		return Branch{}, err
 	}
 	return Branch{Name: out.Name, CommitSHA: out.Commit.ID}, nil
+}
+
+// ListBranches 列仓库分支（旅程审计 R5-I6：构建触发对话框分支选择数据源）。
+func (c *Client) ListBranches(ctx context.Context, owner, repo string, limit int) ([]Branch, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	var out []struct {
+		Name   string `json:"name"`
+		Commit struct {
+			ID string `json:"id"`
+		} `json:"commit"`
+	}
+	p := fmt.Sprintf("/api/v1/repos/%s/%s/branches?limit=%d", pathEscape(owner), pathEscape(repo), limit)
+	if err := c.doBranchJSON(ctx, http.MethodGet, p, nil, &out); err != nil {
+		return nil, err
+	}
+	bs := make([]Branch, 0, len(out))
+	for _, b := range out {
+		bs = append(bs, Branch{Name: b.Name, CommitSHA: b.Commit.ID})
+	}
+	return bs, nil
 }
 
 // DeleteBranch 删除分支（集成分支重建用）。
@@ -522,7 +604,10 @@ func (c *Client) doBranchJSON(ctx context.Context, method, path string, body, ou
 		if resp.StatusCode == http.StatusInternalServerError && bytes.Contains(b, []byte("object does not exist")) {
 			return ErrBranchNotFound
 		}
-		return fmt.Errorf("gitea branch %s %s 返回 %d: %s", method, path, resp.StatusCode, string(b))
+		// 响应体只进服务端日志，不拼进 error（Gitea 5xx body 可能含内部堆栈/路径/连接串，
+		// error 会经 writeGiteaErr/WriteServiceError 到达用户——与 doJSON 对齐，集成审计 I3）。
+		log.Printf("gitea branch %s %s 返回 %d: %s", method, path, resp.StatusCode, string(b))
+		return fmt.Errorf("gitea branch %s %s 返回 %d", method, path, resp.StatusCode)
 	}
 }
 
