@@ -73,6 +73,8 @@ const boardTotal = computed(() => boardErrors.value.length + boardWarnings.value
 function notifGo(n: Notification) {
   if (n.targetType === 'run') router.push(`/devops/runs/${n.targetId}`)
   else if (n.targetType === 'batch') router.push(`/devops/batches/${n.targetId}`)
+  else if (n.targetType === 'build') router.push(`/devops/builds/${n.targetId}`) // 独立构建失败（R9-I3）：直达详情可重试
+  else if (n.targetType === 'alert') router.push('/platform/observability') // 告警在可观测页（tab 内含规则/事件）
   else router.push(`/devops/changes/${n.targetId}`)
 }
 

@@ -4,6 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#0a0e1a" />
+    <script>
+      // 主题预置：localStorage（用户手选）> 系统偏好，首帧渲染前写 <html data-theme> 防 FOUC。
+      // 与 SiteNav 切换按钮共用 'paas-theme' key；meta theme-color 随主题同步（移动端浏览器 chrome 色）。
+      (function () {
+        var t = null
+        try { t = localStorage.getItem('paas-theme') } catch (e) {}
+        if (t !== 'light' && t !== 'dark') {
+          t = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+        }
+        document.documentElement.dataset.theme = t
+        var m = document.querySelector('meta[name="theme-color"]')
+        if (m) m.setAttribute('content', t === 'light' ? '#f6f7fb' : '#0a0e1a')
+      })()
+    </script>
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="description" content="paas —— 开源一站式 PaaS 平台。服务治理、资源中心、MaaS、DevOps 收敛成一个云原生控制面。Apache 2.0，多租户，SaaS 与私有化双模交付。" />
     <meta name="keywords" content="PaaS, 云原生, Kubernetes, MaaS, 服务治理, DevOps, OpenAI 兼容, 开源, Go" />

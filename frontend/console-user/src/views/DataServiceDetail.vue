@@ -276,7 +276,7 @@ async function bootstrap() {
     if (!ds.value) return // 加载失败（errorMsg 已设），不启轮询
     syncManageForm() // 同步扩缩容/升级表单初值
     alive = true
-    await Promise.all([loadPollingData(), loadBoundApps()])
+    await Promise.all([loadPollingData(), loadBoundApps(), loadBackups(), loadTopics()])
   } finally {
     loading.value = false
   }
@@ -370,6 +370,117 @@ async function deleteRule(r: AlertRule) {
   if (resp.ok) {
     ElMessage.success('已删除')
     loadRules()
+  } else {
+    const err = await resp.json().catch(() => ({}))
+    ElMessage.error(err.error || '删除失败')
+  }
+}
+
+// —— 备份（backup 模块入口：记录型 CRUD，真实快照执行留后续） ——
+interface Backup { id: string; resourceId: string; type: string; status: string; sizeMB: number; createdAt: string }
+const backups = ref<Backup[]>([])
+async function loadBackups() {
+  if (!ds.value?.id) { backups.value = []; return }
+  const resp = await fetchAuth(`/api/backups?resourceId=${encodeURIComponent(ds.value.id)}`)
+  backups.value = resp.ok ? (await resp.json()).data ?? [] : []
+}
+const showBackup = ref(false)
+const backupForm = ref({ type: 'full' })
+async function saveBackup() {
+  if (!ds.value?.id) return
+  const resp = await fetchAuth('/api/backups', {
+    method: 'POST',
+    body: JSON.stringify({ resourceId: ds.value.id, type: backupForm.value.type }),
+  })
+  if (resp.ok) {
+    ElMessage.success('备份已记录')
+    showBackup.value = false
+    loadBackups()
+  } else {
+    const err = await resp.json().catch(() => ({}))
+    ElMessage.error(err.error || '创建失败')
+  }
+}
+async function deleteBackup(b: Backup) {
+  const resp = await fetchAuth(`/api/backups/${b.id}`, { method: 'DELETE' })
+  if (resp.ok) {
+    ElMessage.success('已删除')
+    loadBackups()
+  } else {
+    const err = await resp.json().catch(() => ({}))
+    ElMessage.error(err.error || '删除失败')
+  }
+}
+
+// —— 消息主题/消费组（messaging 模块入口，mq kind 专属） ——
+interface Topic { id: string; name: string; partitions: number; retention: string; status: string; createdAt: string }
+interface ConsumerGroup { id: string; topicId: string; name: string; mode: string; members: number; createdAt: string }
+const topics = ref<Topic[]>([])
+const topicGroups = ref<Record<string, ConsumerGroup[]>>({})
+async function loadTopics() {
+  if (!ds.value?.id || ds.value.kind !== 'mq') { topics.value = []; return }
+  const resp = await fetchAuth(`/api/mq-topics?mqId=${encodeURIComponent(ds.value.id)}`)
+  topics.value = resp.ok ? (await resp.json()).data ?? [] : []
+}
+async function loadGroups(topicId: string) {
+  const resp = await fetchAuth(`/api/consumer-groups?topicId=${encodeURIComponent(topicId)}`)
+  topicGroups.value = { ...topicGroups.value, [topicId]: resp.ok ? (await resp.json()).data ?? [] : [] }
+}
+const showTopic = ref(false)
+const topicForm = ref({ name: '', partitions: 1, retention: '7d' })
+async function saveTopic() {
+  if (!topicForm.value.name.trim()) { ElMessage.warning('请填写主题名'); return }
+  if (!ds.value?.id) return
+  const resp = await fetchAuth('/api/mq-topics', {
+    method: 'POST',
+    body: JSON.stringify({ mqId: ds.value.id, ...topicForm.value }),
+  })
+  if (resp.ok) {
+    ElMessage.success('主题已创建')
+    showTopic.value = false
+    topicForm.value = { name: '', partitions: 1, retention: '7d' }
+    loadTopics()
+  } else {
+    const err = await resp.json().catch(() => ({}))
+    ElMessage.error(err.error || '创建失败')
+  }
+}
+async function deleteTopic(t: Topic) {
+  const resp = await fetchAuth(`/api/mq-topics/${t.id}`, { method: 'DELETE' })
+  if (resp.ok) {
+    ElMessage.success('已删除')
+    loadTopics()
+  } else {
+    const err = await resp.json().catch(() => ({}))
+    ElMessage.error(err.error || '删除失败')
+  }
+}
+// 展开主题行时懒加载消费组
+async function onTopicExpand(row: Topic, expanded: Topic[]) {
+  if (expanded.some((t) => t.id === row.id) && !topicGroups.value[row.id]) await loadGroups(row.id)
+}
+const groupForm = ref<Record<string, { name: string; mode: string }>>({})
+async function saveGroup(topicId: string) {
+  const f = groupForm.value[topicId] ?? { name: '', mode: 'clustering' }
+  if (!f.name.trim()) { ElMessage.warning('请填写消费组名'); return }
+  const resp = await fetchAuth('/api/consumer-groups', {
+    method: 'POST',
+    body: JSON.stringify({ topicId, name: f.name, mode: f.mode }),
+  })
+  if (resp.ok) {
+    ElMessage.success('消费组已创建')
+    groupForm.value = { ...groupForm.value, [topicId]: { name: '', mode: 'clustering' } }
+    loadGroups(topicId)
+  } else {
+    const err = await resp.json().catch(() => ({}))
+    ElMessage.error(err.error || '创建失败')
+  }
+}
+async function deleteGroup(topicId: string, g: ConsumerGroup) {
+  const resp = await fetchAuth(`/api/consumer-groups/${g.id}`, { method: 'DELETE' })
+  if (resp.ok) {
+    ElMessage.success('已删除')
+    loadGroups(topicId)
   } else {
     const err = await resp.json().catch(() => ({}))
     ElMessage.error(err.error || '删除失败')
@@ -598,6 +709,95 @@ v-else type="info" :closable="false"
       <el-empty v-else description="暂无监控数据" :image-size="48" />
     </section>
 
+    <!-- 备份记录（backup 模块：全 kind；记录型 CRUD，真实快照执行留后续） -->
+    <section v-if="!errorMsg && !loading && ds" class="block">
+      <div class="block-head">
+        <span class="block-title">备份记录</span>
+        <el-button type="primary" size="small" @click="showBackup = true">+ 发起备份</el-button>
+      </div>
+      <el-table :data="backups" size="small" empty-text="暂无备份记录">
+        <el-table-column prop="id" label="备份 ID" min-width="200" class="mono" />
+        <el-table-column label="类型" width="110">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.type === 'full' ? 'primary' : 'success'">
+              {{ row.type === 'full' ? '全量' : '增量' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="110">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.status === 'completed' ? 'success' : row.status === 'running' ? 'warning' : 'danger'">
+              {{ row.status }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="sizeMB" label="大小 (MB)" width="100" />
+        <el-table-column label="时间" min-width="160">
+          <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="80">
+          <template #default="{ row }">
+            <el-button text type="danger" size="small" @click="deleteBackup(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </section>
+
+    <!-- 消息主题/消费组（messaging 模块：mq kind 专属） -->
+    <section v-if="!errorMsg && !loading && ds && ds.kind === 'mq'" class="block">
+      <div class="block-head">
+        <span class="block-title">消息主题</span>
+        <el-button type="primary" size="small" @click="showTopic = true">+ 新建主题</el-button>
+      </div>
+      <el-table :data="topics" size="small" empty-text="暂无主题" row-key="id" @expand-change="onTopicExpand">
+        <el-table-column type="expand">
+          <template #default="{ row }">
+            <div class="group-wrap">
+              <el-table :data="topicGroups[row.id] ?? []" size="small" empty-text="该主题暂无消费组">
+                <el-table-column prop="name" label="消费组" min-width="140" />
+                <el-table-column label="模式" width="110">
+                  <template #default="{ row: g }">
+                    <el-tag size="small" :type="g.mode === 'clustering' ? 'primary' : 'warning'">
+                      {{ g.mode === 'clustering' ? '集群' : '广播' }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
+                <el-table-column prop="members" label="成员数" width="90" />
+                <el-table-column label="操作" width="80">
+                  <template #default="{ row: g }">
+                    <el-button text type="danger" size="small" @click="deleteGroup(row.id, g)">删除</el-button>
+                  </template>
+                </el-table-column>
+              </el-table>
+              <div class="group-add">
+                <el-input v-model="(groupForm[row.id] ??= { name: '', mode: 'clustering' }).name" placeholder="消费组名" size="small" style="width: 200px" />
+                <el-select :model-value="groupForm[row.id]?.mode ?? 'clustering'" size="small" style="width: 110px" @update:model-value="(v: string) => (groupForm[row.id] = { name: groupForm[row.id]?.name ?? '', mode: v })">
+                  <el-option label="集群" value="clustering" />
+                  <el-option label="广播" value="broadcast" />
+                </el-select>
+                <el-button size="small" @click="saveGroup(row.id)">+ 消费组</el-button>
+              </div>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column prop="name" label="主题名" min-width="160" />
+        <el-table-column prop="partitions" label="分区数" width="90" />
+        <el-table-column prop="retention" label="保留" width="100" />
+        <el-table-column label="状态" width="100">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.status === 'active' ? 'success' : 'info'">
+              {{ row.status === 'active' ? '活跃' : '暂停' }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="80">
+          <template #default="{ row }">
+            <el-button text type="danger" size="small" @click="deleteTopic(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </section>
+
     <!-- 告警规则 -->
     <section v-if="!errorMsg" class="block">
       <div class="block-head">
@@ -630,6 +830,44 @@ v-else type="info" :closable="false"
         </el-table-column>
       </el-table>
     </section>
+
+    <!-- 备份创建弹窗 -->
+    <el-dialog v-model="showBackup" title="发起备份" width="420px">
+      <el-form label-width="70px">
+        <el-form-item label="目标">
+          <el-input :model-value="ds?.name ?? ''" disabled />
+        </el-form-item>
+        <el-form-item label="类型">
+          <el-radio-group v-model="backupForm.type">
+            <el-radio value="full">全量</el-radio>
+            <el-radio value="incremental">增量</el-radio>
+          </el-radio-group>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showBackup = false">取消</el-button>
+        <el-button type="primary" @click="saveBackup">创建</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 主题创建弹窗 -->
+    <el-dialog v-model="showTopic" title="新建消息主题" width="440px">
+      <el-form label-width="70px">
+        <el-form-item label="主题名">
+          <el-input v-model="topicForm.name" placeholder="如 orders.events" />
+        </el-form-item>
+        <el-form-item label="分区数">
+          <el-input-number v-model="topicForm.partitions" :min="1" :max="64" />
+        </el-form-item>
+        <el-form-item label="保留">
+          <el-input v-model="topicForm.retention" placeholder="如 7d" style="width: 140px" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showTopic = false">取消</el-button>
+        <el-button type="primary" @click="saveTopic">创建</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 规则创建弹窗 -->
     <el-dialog v-model="showRule" title="创建告警规则" width="480px">
@@ -696,6 +934,8 @@ v-else type="info" :closable="false"
 .spark { display: flex; align-items: flex-end; gap: 2px; height: 36px; margin-top: 8px; }
 .spark-bar { flex: 1; background: var(--brand); opacity: 0.7; border-radius: 2px 2px 0 0; min-width: 2px; }
 .cond-row { display: flex; gap: 8px; width: 100%; }
+.group-wrap { padding: 8px 12px; }
+.group-add { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .err-actions { display: flex; justify-content: center; gap: 8px; margin-top: 12px; }
 .ctx-bar {
   margin-bottom: 16px;

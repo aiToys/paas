@@ -79,7 +79,12 @@ async function bootstrap() {
       await loadRuns()
     }
   } catch {
-    /* run 不存在时 PipelineRunView 自显 empty，无需处理 */
+    // run 不存在/已删/无权限（旅程审计 R5-I9）：空壳页无反馈无引导，
+    // 提示后跳回 DevOps 中心（通知里的陈旧链接是典型入口）。
+    if (runId.value && route.path === `/devops/runs/${runId.value}`) {
+      ElMessage.error('运行不存在或已被删除')
+      router.replace('/devops')
+    }
   }
 }
 

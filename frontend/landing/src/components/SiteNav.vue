@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import LogoMark from './LogoMark.vue'
 
 // 顶部 sticky 导航：logo + 锚点菜单 + 主 CTA。移动端折叠为汉堡。
+// 文档站经 core 同源 serve（/docs/ 必须带尾斜杠——StripPrefix 前缀匹配，无斜杠会落到 landing 兜底）。
 const open = ref(false)
 const links = [
   { href: '#capabilities', label: '能力' },
@@ -10,6 +11,21 @@ const links = [
   { href: '#quickstart', label: '快速开始' },
   { href: 'https://github.com/aitoys/paas', label: 'GitHub', ext: true },
 ]
+
+// ---- 主题切换（暗/亮）----
+// 初始值由 index.html 预置脚本写 <html data-theme>（防 FOUC）；此处读回同步组件状态。
+// 手选即固定（写 localStorage 'paas-theme'，与预置脚本同 key）；未手选时预置脚本跟随系统。
+const theme = ref(document.documentElement.dataset.theme === 'light' ? 'light' : 'dark')
+
+function toggleTheme() {
+  theme.value = theme.value === 'light' ? 'dark' : 'light'
+  document.documentElement.dataset.theme = theme.value
+  try { localStorage.setItem('paas-theme', theme.value) } catch { /* 隐私模式禁写 —— 仅本次会话生效 */ }
+  // 移动端浏览器 chrome 色随主题同步
+  document
+    .querySelector('meta[name="theme-color"]')
+    ?.setAttribute('content', theme.value === 'light' ? '#f6f7fb' : '#0a0e1a')
+}
 </script>
 
 <template>
@@ -24,11 +40,23 @@ const links = [
           {{ l.label }}
           <span v-if="l.ext" class="ext">↗</span>
         </a>
+        <!-- 移动端汉堡：补全顶栏放不下的入口（文档/管理后台），与锚点一起折叠 -->
+        <a class="m-extra" href="/docs/" @click="open = false">使用文档</a>
+        <a class="m-extra" href="/admin/" @click="open = false">管理后台</a>
         <a class="btn primary cta-mobile" href="/console/">立即体验</a>
       </nav>
 
       <div class="right">
-        <a class="btn ghost console-link" href="/console/">控制台</a>
+        <button class="theme-toggle" :aria-label="theme === 'light' ? '切换到深色模式' : '切换到浅色模式'" @click="toggleTheme">
+          <!-- 双图标按当前主题显隐：月亮=当前深色（点击转亮），太阳=当前亮色；octicons 16px 路径 -->
+          <svg v-if="theme === 'dark'" width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path d="M9.598 1.591a.749.749 0 0 1 .785-.175 7.001 7.001 0 1 1-8.967 8.967.75.75 0 0 1 .961-.96 5.5 5.5 0 0 0 7.046-7.046.75.75 0 0 1 .175-.786Zm1.616 1.945a7 7 0 0 1-7.678 7.678 5.499 5.499 0 1 0 7.678-7.678Z" />
+          </svg>
+          <svg v-else width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path d="M8 12a4 4 0 1 1 0-8 4 4 0 0 1 0 8ZM8 0a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0V.75A.75.75 0 0 1 8 0Zm0 13a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 8 13ZM2.343 2.343a.75.75 0 0 1 1.061 0l1.06 1.061a.75.75 0 1 1-1.06 1.06l-1.06-1.06a.75.75 0 0 1 0-1.06Zm9.193 9.193a.75.75 0 0 1 1.06 0l1.061 1.06a.75.75 0 0 1-1.06 1.061l-1.061-1.06a.75.75 0 0 1 0-1.061ZM16 8a.75.75 0 0 1-.75.75h-1.5a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 16 8ZM3 8a.75.75 0 0 1-.75.75H.75a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 3 8Zm10.657-5.657a.75.75 0 0 1 0 1.061l-1.06 1.06a.75.75 0 1 1-1.061-1.06l1.06-1.06a.75.75 0 0 1 1.061 0ZM5.464 10.464a.75.75 0 0 1 0 1.061l-1.06 1.06a.75.75 0 0 1-1.061-1.06l1.06-1.06a.75.75 0 0 1 1.061 0Z" />
+          </svg>
+        </button>
+        <a class="btn ghost console-link" href="/docs/">使用文档</a>
         <a class="btn ghost admin-link" href="/admin/">管理后台</a>
         <a class="btn ghost" href="https://github.com/aitoys/paas">
           <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
@@ -50,7 +78,7 @@ const links = [
   position: sticky;
   top: 0;
   z-index: 50;
-  background: rgba(10, 14, 26, 0.72);
+  background: var(--nav-bg); /* 毛玻璃底随主题切换（暗 rgba(10,14,26) / 亮 rgba(255,255,255)） */
   backdrop-filter: saturate(140%) blur(14px);
   -webkit-backdrop-filter: saturate(140%) blur(14px);
   border-bottom: 1px solid var(--border);
@@ -86,6 +114,24 @@ const links = [
   align-items: center;
   gap: 10px;
 }
+/* 主题切换：icon-only 小方钮，视觉与 ghost 按钮同族 */
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.theme-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
 .burger {
   display: inline-flex;
   flex-direction: column;
@@ -106,6 +152,10 @@ const links = [
   border-radius: 1px;
 }
 .cta-mobile {
+  display: none;
+}
+/* 移动端汉堡专属入口：桌面隐藏（顶栏 ghost 按钮已有，避免双入口） */
+.m-extra {
   display: none;
 }
 
@@ -140,6 +190,9 @@ const links = [
   .links.open a {
     padding: 12px 4px;
     border-bottom: 1px solid var(--border);
+  }
+  .links.open .m-extra {
+    display: block;
   }
   .links.open .cta-mobile {
     display: inline-flex;

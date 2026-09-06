@@ -11,7 +11,7 @@ const pillars = [
     n: '02',
     title: '子系统是插件，不是微服务',
     body: '以插件形式注册进 Core，共享鉴权 / 存储 / 事件总线。插件契约（pkg/plugin）对外可见，拓扑排序 + 环检测 + 依赖倒置注入。',
-    foot: '本期范围：Core 底座 + MaaS；治理 / 中间件 / DevOps 后续按插件接入',
+    foot: 'MaaS / 治理 / 资源 / DevOps / AI 编排均已按插件接入落地',
   },
   {
     n: '03',

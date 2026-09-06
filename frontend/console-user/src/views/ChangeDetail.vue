@@ -21,6 +21,15 @@
           <el-button size="small" text @click="copyClone">复制</el-button>
           <el-button size="small" text type="primary" @click="router.push(repoLink(change.appId, change.repoId))">浏览仓库 →</el-button>
 </div>
+        <!-- 内网 Gitea 集群外不可达（旅程审计 R5-I11）：本地 clone 前先 port-forward，
+             给出可复制的辅助命令而非让用户自己猜为何 clone 超时。 -->
+        <div v-if="isClusterInternal" class="kv clone-hint">
+          <span></span>
+          <span class="dim">
+            内网仓库需先建立隧道：<code class="mono">{{ portForwardCmd }}</code>
+            <el-button size="small" text @click="copyText(portForwardCmd)">复制</el-button>
+          </span>
+        </div>
         <div v-if="commits.length" class="commits">
           <div class="sub">最近提交</div>
           <div v-for="c in commits" :key="c.sha" class="commit">
@@ -105,6 +114,18 @@ const repoGitUrl = ref('')
 // 克隆命令：仓库地址来自仓库详情（GitURL，internal=内网 Gitea / external=用户填的公网地址）
 const cloneCmd = computed(() =>
   repoGitUrl.value ? `git clone -b ${change.value?.branch ?? ''} ${repoGitUrl.value}` : '（仓库地址加载中…）')
+
+// 内网 Gitea 判定：地址含 .svc.（集群 Service FQDN）时本地不可达，需 port-forward。
+// 端口取仓库地址里的（默认 3000，与 deploy/devops/gitea.yaml Service 一致）。
+const isClusterInternal = computed(() => repoGitUrl.value.includes('.svc.'))
+const portForwardCmd = computed(() => {
+  try {
+    const port = new URL(repoGitUrl.value).port || '3000'
+    return `kubectl port-forward -n paas svc/gitea ${port}:${port}`
+  } catch {
+    return 'kubectl port-forward -n paas svc/gitea 3000:3000'
+  }
+})
 
 const statusType = (s: string) => statusOf(CHANGE_STATUS, s).type
 const statusLabel = (s: string) => statusOf(CHANGE_STATUS, s).label
@@ -196,6 +217,7 @@ watch(() => route.params.id, () => load())
 .kv { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; }
 .kv > span:first-child { color: var(--el-text-color-secondary); min-width: 64px; }
 .clone { background: var(--el-fill-color-light); padding: 2px 8px; border-radius: 4px; }
+.clone-hint { margin-top: -4px; }
 .mono { font-family: ui-monospace, monospace; font-size: 12px; }
 .dim { color: var(--el-text-color-placeholder); font-size: 13px; }
 .link { color: var(--el-color-primary); cursor: pointer; }

@@ -7,6 +7,7 @@ import { statusOf, DOC_STATUS } from '@/composables/useStatus'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchJSON, fetchAuth, apiError } from '@/api'
+import { usePublish } from '@/composables/usePublish'
 
 interface KnowledgeBase {
   id: string; name: string
@@ -113,8 +114,12 @@ async function create() {
   }
 }
 
-async function remove(kb: KnowledgeBase) {
-  try {
+// 发布到广场（配置骨架：嵌入模型/维度/检索参数；文档与数据服务引用不带走）
+const { publish } = usePublish('knowledgebase', async () => {
+  // KB 无 category 字段，分类不回写（仅随发布快照走）
+})
+
+async function remove(kb: KnowledgeBase) {  try {
     await ElMessageBox.confirm(`确认删除知识库「${kb.name}」？关联文档与向量将一并清除`, '删除确认', { type: 'warning' })
   } catch {
     return
@@ -265,9 +270,10 @@ onUnmounted(stopPoll)
       <el-table-column label="创建时间" width="180">
         <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="220">
+      <el-table-column label="操作" width="280">
         <template #default="{ row }">
           <el-button size="small" @click="openDocs(row)">文档管理</el-button>
+          <el-button size="small" type="primary" link @click="publish(row)">发布</el-button>
           <el-button size="small" type="danger" @click="remove(row)">删除</el-button>
         </template>
       </el-table-column>

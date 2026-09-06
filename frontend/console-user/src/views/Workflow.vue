@@ -8,6 +8,7 @@ import {
   listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow,
   type WorkflowDef, type NodeDef,
 } from '@/api/workflow'
+import { usePublish } from '@/composables/usePublish'
 import WorkflowRunView from './WorkflowRunView.vue'
 
 interface AgentOption { id: string; name: string; enabled: boolean }
@@ -197,6 +198,11 @@ async function save() {
   }
 }
 
+// 发布到广场（整包快照：节点引用的 Agent/工具一并打包，工具凭证剔除）
+const { publish } = usePublish('workflow', async () => {
+  // 工作流无 category 字段，分类不回写（仅随发布快照走）
+})
+
 async function remove(w: WorkflowDef) {
   try {
     await ElMessageBox.confirm(
@@ -237,6 +243,7 @@ function openRuns(w: WorkflowDef) {
           <span class="grow" />
           <el-button size="small" @click="openRuns(w)">运行</el-button>
           <el-button size="small" @click="openEdit(w)">编辑</el-button>
+          <el-button size="small" type="primary" link @click="publish(w)">发布</el-button>
           <el-button size="small" type="danger" plain @click="remove(w)">删除</el-button>
         </div>
         <p v-if="w.desc" class="wf-desc">{{ w.desc }}</p>

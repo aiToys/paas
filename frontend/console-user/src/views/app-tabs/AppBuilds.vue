@@ -40,12 +40,44 @@ const repos = ref<Repo[]>([])
 const loading = ref(false)
 const showTrigger = ref(false)
 const selectedRepo = ref('')
+const branches = ref<string[]>([])
+const selectedBranch = ref('')
+const branchesLoading = ref(false)
 
 async function loadRepos() {
   const resp = await fetchAuth(`/api/applications/${props.appId}/repositories`)
   if (resp.ok) repos.value = (await resp.json()).data ?? []
   if (repos.value.length && !selectedRepo.value) selectedRepo.value = repos.value[0].id
 }
+
+// 拉取选中仓库的分支列表，默认选中仓库默认分支（常用路径零额外操作，旅程审计 R5-I6）。
+// 拉失败降级为仅默认分支可选项（不阻断触发）。
+async function loadBranches() {
+  branches.value = []
+  const repo = repos.value.find((r) => r.id === selectedRepo.value)
+  selectedBranch.value = repo?.branch ?? ''
+  if (!repo) return
+  branchesLoading.value = true
+  try {
+    const resp = await fetchAuth(`/api/applications/${props.appId}/repositories/${repo.id}/branches`)
+    if (resp.ok) {
+      const list: { name: string }[] = (await resp.json()).data ?? []
+      const names = list.map((b) => b.name).filter(Boolean)
+      if (names.length) {
+        branches.value = names
+        // 默认分支不在列表（如被删）时回落第一项，保证选中值有效。
+        if (!names.includes(selectedBranch.value)) selectedBranch.value = names[0]
+      }
+    }
+  } finally {
+    branchesLoading.value = false
+  }
+}
+
+// 对话框开着时切换仓库才重拉分支（避免页面加载设默认仓库时多余请求，@open 已兜底首次）。
+watch(selectedRepo, () => {
+  if (showTrigger.value) loadBranches()
+})
 
 async function load(silent = false) {
   if (!silent) loading.value = true
@@ -74,7 +106,7 @@ async function trigger() {
   try {
     const resp = await fetchAuth(`/api/applications/${props.appId}/buildruns`, {
       method: 'POST',
-      body: JSON.stringify({ repoId: selectedRepo.value }),
+      body: JSON.stringify({ repoId: selectedRepo.value, branch: selectedBranch.value || undefined }),
     })
     if (resp.ok) {
       ElMessage.success('构建已触发')
@@ -156,18 +188,28 @@ usePolling(() => load(true), 2000, {
       </el-table-column>
     </el-table>
 
-    <el-dialog v-model="showTrigger" title="触发构建" width="440px">
+    <el-dialog v-model="showTrigger" title="触发构建" width="440px" @open="loadBranches">
       <el-form label-width="70px">
         <el-form-item label="仓库">
           <el-select v-model="selectedRepo" placeholder="选择仓库" style="width: 100%">
             <el-option v-for="r in repos" :key="r.id" :label="r.gitUrl" :value="r.id" />
           </el-select>
         </el-form-item>
+        <el-form-item label="分支">
+          <el-select v-model="selectedBranch" placeholder="选择分支" style="width: 100%" :loading="branchesLoading">
+            <el-option
+              v-for="name in branches.length ? branches : selectedBranch ? [selectedBranch] : []"
+              :key="name"
+              :label="name"
+              :value="name"
+            />
+          </el-select>
+        </el-form-item>
       </el-form>
       <div v-if="!repos.length" class="empty-hint">请先在「代码仓库」tab 绑定仓库</div>
       <template #footer>
         <el-button @click="showTrigger = false">取消</el-button>
-        <el-button type="primary" :disabled="!selectedRepo" @click="trigger">触发</el-button>
+        <el-button type="primary" :disabled="!selectedRepo || !selectedBranch" @click="trigger">触发</el-button>
       </template>
     </el-dialog>
   </div>

@@ -96,16 +96,45 @@ function buildPreview(it: MarketItem) {
     if (Array.isArray(snap.tools) && snap.tools.length) parts.push(`${snap.tools.length} 个工具`)
     preview.value.push({ label: '组装结构', value: parts.join(' + ') || '仅系统提示' })
   }
+  // 知识库：配置骨架（数据服务引用已剥离，安装时重绑本租户实例）
+  if (it.entityType === 'knowledgebase') {
+    const parts: string[] = []
+    if (snap.embeddingModel) parts.push(`嵌入模型 ${String(snap.embeddingModel)}`)
+    if (snap.embeddingDim) parts.push(`${String(snap.embeddingDim)} 维`)
+    const rc = snap.retrieverConfig as Record<string, unknown> | undefined
+    if (rc?.topK) parts.push(`TopK ${String(rc.topK)}`)
+    if (parts.length) preview.value.push({ label: '配置骨架', value: parts.join(' · ') })
+  }
+  // 工作流：节点编排结构
+  if (it.entityType === 'workflow' && snap.workflow) {
+    const wf = snap.workflow as { nodes?: { type: string }[] }
+    const nodes = wf.nodes ?? []
+    const counts = new Map<string, number>()
+    for (const n of nodes) counts.set(n.type, (counts.get(n.type) ?? 0) + 1)
+    const label: Record<string, string> = { llm: 'LLM', tool: '工具', condition: '条件', approve: '确认', start: '起点', end: '终点' }
+    const parts = [...counts.entries()].map(([t, c]) => `${c}×${label[t] ?? t}`)
+    if (parts.length) preview.value.push({ label: '节点编排', value: parts.join(' + ') })
+    const embedded = ((snap.agents as unknown[] | undefined)?.length ?? 0) + ((snap.tools as unknown[] | undefined)?.length ?? 0)
+    preview.value.push({ label: '内嵌资产', value: `${embedded} 个（Agent/工具副本，安装后引用自动重写）` })
+  }
 }
 
 // 安装落点路由（fork 完成后可直达）
 const entityTypeRoute: Record<string, string> = {
   skill: '/ai/skills', prompt: '/ai/prompts', tool: '/ai/tools', agent: '/ai/agents',
+  knowledgebase: '/ai/knowledgebases', workflow: '/ai/workflows',
+}
+
+// 安装提示（按类型明示快照语义边界）
+const installHint: Record<string, string> = {
+  tool: '工具凭证不会随安装带入，装完需自行补填。',
+  knowledgebase: '数据服务引用与文档不随安装带入：装完自动绑定本租户向量库/对象存储实例（需已创建），文档需自行上传。',
+  workflow: '内嵌的 Agent/工具会作为副本一并安装（凭证剔除）；工作流默认停用，补齐配置后再启用。',
 }
 
 async function install(it: MarketItem) {
   await ElMessageBox.confirm(
-    `安装「${it.name}」到本租户？${it.entityType === 'tool' ? '工具凭证不会随安装带入，装完需自行补填。' : ''}安装后与源头独立演进。`,
+    `安装「${it.name}」到本租户？${installHint[it.entityType] ?? ''}安装后与源头独立演进。`,
     '安装确认', { type: 'info' },
   )
   installing.value = true
@@ -124,6 +153,11 @@ async function install(it: MarketItem) {
 function fmtDate(s: string) {
   return s ? new Date(s).toLocaleDateString() : ''
 }
+
+// 类型展示（label 复用 ENTITY_TYPES 真源）与 tag 配色
+const typeLabel = (t: string) => ENTITY_TYPES.find(x => x.value === t)?.label ?? t
+const typeTagKind = (t: string): 'primary' | 'success' | 'warning' | 'info' | 'danger' =>
+  ({ agent: 'primary', skill: 'success', tool: 'warning', workflow: 'danger' } as const)[t] ?? 'info'
 
 onMounted(load)
 </script>
@@ -176,8 +210,8 @@ onMounted(load)
           <el-tag size="small" type="info">{{ catLabel(it.category) }}</el-tag>
         </div>
         <div class="card-type">
-          <el-tag size="small" :type="it.entityType === 'agent' ? 'primary' : it.entityType === 'skill' ? 'success' : 'warning'">
-            {{ it.entityType }}
+          <el-tag size="small" :type="typeTagKind(it.entityType)">
+            {{ typeLabel(it.entityType) }}
           </el-tag>
         </div>
         <p class="card-desc">{{ it.description || '（无说明）' }}</p>
@@ -196,7 +230,7 @@ onMounted(load)
       <template v-if="detail">
         <div v-loading="detailLoading">
           <el-descriptions :column="1" border size="small">
-            <el-descriptions-item label="类型">{{ detail.entityType }}</el-descriptions-item>
+            <el-descriptions-item label="类型">{{ typeLabel(detail.entityType) }}</el-descriptions-item>
             <el-descriptions-item label="分类">{{ catLabel(detail.category) }}</el-descriptions-item>
             <el-descriptions-item label="发布者">{{ detail.publisherName || detail.publisherTenant }}</el-descriptions-item>
             <el-descriptions-item label="安装量">{{ detail.installs }}</el-descriptions-item>

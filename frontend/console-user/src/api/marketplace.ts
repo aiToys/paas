@@ -16,6 +16,8 @@ export const ENTITY_TYPES = [
   { value: 'prompt', label: 'Prompt' },
   { value: 'tool', label: '工具' },
   { value: 'agent', label: 'Agent' },
+  { value: 'knowledgebase', label: '知识库' },
+  { value: 'workflow', label: '工作流' },
 ] as const
 
 export const catLabel = (v?: string) =>

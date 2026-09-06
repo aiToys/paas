@@ -17,8 +17,9 @@ const cols = [
     title: '资源',
     links: [
       { label: 'GitHub 仓库', href: 'https://github.com/aitoys/paas', ext: true },
+      { label: '使用文档', href: '/docs/' },
       { label: 'API 契约', href: '/openapi.json' },
-      { label: '交互文档', href: '/docs' },
+      { label: 'API 参考', href: '/api-docs' },
       { label: '设计规格', href: 'https://github.com/aitoys/paas/tree/main/docs/superpowers/specs', ext: true },
     ],
   },
@@ -44,6 +45,7 @@ const year = 2026
       </div>
       <div class="cta-btns">
         <a class="btn primary" href="#quickstart">开始使用 →</a>
+        <a class="btn ghost" href="/docs/">阅读文档</a>
         <a class="btn ghost" href="https://github.com/aitoys/paas">GitHub</a>
       </div>
     </div>

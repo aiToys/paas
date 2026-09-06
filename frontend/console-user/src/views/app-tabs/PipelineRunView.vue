@@ -12,7 +12,7 @@ import {
   getRun, approveStage, abortRun, retryRun, getBuildRun, canaryDecision,
   type PipelineRun, type StageRun, laneOf, buildRunIdOf,
 } from '@/api/pipeline'
-import { apiError } from '@/api'
+import { fetchAuth, apiError } from '@/api'
 import { listMetrics } from '@/api/observability'
 
 const props = defineProps<{ runId: string }>()
@@ -89,6 +89,23 @@ const canaryMetrics = ref<{ label: string; value: string }[]>([])
 let canaryTimer: ReturnType<typeof setInterval> | null = null
 let canaryBusy = false
 
+// canary 目标环境名（R5-M3：决策文案动态化用；租户环境列表小，进入等待态拉一次即可）
+const canaryEnvName = ref('')
+watch(canaryStage, async (s) => {
+  const envId = typeof s?.input?.envId === 'string' ? s.input.envId : ''
+  if (!s || !envId) { canaryEnvName.value = ''; return }
+  try {
+    const resp = await fetchAuth('/api/environments')
+    if (resp.ok) {
+      const envs: { id: string; name?: string; type?: string }[] = (await resp.json()).data ?? []
+      const e = envs.find((x) => x.id === envId)
+      canaryEnvName.value = e ? (e.name || e.type || envId) : envId
+    } else {
+      canaryEnvName.value = envId
+    }
+  } catch { canaryEnvName.value = envId }
+})
+
 async function loadCanaryMetrics() {
   const s = canaryStage.value
   const wlID = String(s?.output?.canaryWorkloadId ?? '')
@@ -131,15 +148,18 @@ async function canaryDecide(action: 'promote' | 'terminate') {
   const r = run.value
   if (!r || deciding.value) return
   const cur = r.stageRuns[r.currentStage]
+  // 环境名按 stage envId 动态化（旅程审计 R5-M3）：canary 不只 prod（自定义模板可放 test），
+  // 文案写死「生产基线」会误导。名称由 canaryStage watch 拉取，拉不到回落 envId。
+  const envSuffix = canaryEnvName.value ? `「${canaryEnvName.value}」` : ''
   try {
     if (action === 'promote') {
       await ElMessageBox.confirm(
-        '确认放量将把该镜像全量滚动到生产基线，并回收金丝雀并行负载。继续？',
+        `确认放量将把该镜像全量滚动到环境${envSuffix}的基线，并回收金丝雀泳道 canary-${r.id.slice(0, 8)} 的并行负载。继续？`,
         '金丝雀放量确认', { type: 'warning', confirmButtonText: '确认放量' },
       )
     } else {
       await ElMessageBox.confirm(
-        '终止将删除金丝雀并行验证负载（基线未动，零风险退出），本次发布标记失败。继续？',
+        `终止将删除金丝雀泳道 canary-${r.id.slice(0, 8)} 的并行验证负载（${envSuffix || '目标环境'}基线未动，零风险退出），本次发布标记失败。继续？`,
         '金丝雀终止确认', { type: 'warning', confirmButtonText: '终止' },
       )
     }

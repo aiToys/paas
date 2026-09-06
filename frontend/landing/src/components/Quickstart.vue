@@ -137,9 +137,11 @@ async function copy(line: string, idx: number) {
   color: var(--text-faint);
 }
 
+/* 终端窗口刻意保持深色（亮色模式下代码块/终端仍深色的惯例）——
+   边框须固定浅色调：若用 --border 变量，亮色下变为深色系画在深底上不可见。 */
 .terminal {
   background: #060912;
-  border: 1px solid var(--border-strong);
+  border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: var(--radius);
   overflow: hidden;
   box-shadow: var(--shadow);
@@ -150,7 +152,7 @@ async function copy(line: string, idx: number) {
   gap: 7px;
   padding: 11px 14px;
   background: #0d1220;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
 .dot {
   width: 11px;
@@ -169,7 +171,7 @@ async function copy(line: string, idx: number) {
 .term-title {
   margin-left: 8px;
   font-size: 12px;
-  color: var(--text-faint);
+  color: #6b7390; /* 终端固定深色，文字不走主题变量（亮色下会变深色调不可读） */
 }
 .term-body {
   padding: 20px;
@@ -181,7 +183,7 @@ async function copy(line: string, idx: number) {
   position: relative;
 }
 .prompt {
-  color: var(--accent);
+  color: #22d3ee; /* 终端内固定配色，不随主题（理由同 term-title） */
   margin-right: 10px;
   user-select: none;
 }
@@ -214,7 +216,7 @@ async function copy(line: string, idx: number) {
 .com {
   margin-top: 6px;
   font-size: 12.5px;
-  color: var(--text-faint);
+  color: #6b7390; /* 终端内固定配色，不随主题 */
 }
 
 .api-note {

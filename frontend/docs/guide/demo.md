@@ -10,9 +10,10 @@ paas-shop 是平台的完整能力演示应用（电商域）：一份代码、�
 |------|------|------|
 | `shop.example.com` | 生产环境（Production） | 生产流量 |
 | `shop.test.example.com` | 测试环境（Staging） | 日常联调基线 |
-| `feat-order-v2.shop.test.example.com` | 泳道（全链路灰度，Feature Lane） | 变更验证 |
+| `shop.test.example.com` + `x-paas-lane: feat-order-v2` | 泳道（全链路灰度，Feature Lane） | 变更验证 |
 
 - 演示域名经 Ingress host 匹配；本机访问用 `curl -H 'Host: shop.example.com' http://<集群入口>/`，或配置 hosts 解析。
+- 泳道不是独立域名：平台 Route 无泳道维度（host 只有基线域名），染色入口是**基线域名 + `x-paas-lane` 请求头**（或页面顶栏泳道输入框）——`*.shop.test.example.com` 泛子域名需 Ingress 额外配 wildcard 泛解析方可使用。
 - 页面顶栏环境徽标一眼区分：红「生产」/ 绿「测试」/ 蓝「泳道」。
 - 泳道域名取 hostname 首段为泳道名，前端自动为所有请求附加 `x-paas-lane` 染色头。
 
@@ -37,7 +38,7 @@ curl -H 'Host: shop.test.example.com' http://<集群入口>/api/orders
 
 ### 3. 超卖防护（2 分钟）
 
-运营视图「商品」tab 行内编辑把库存清零，再下一笔单 → 409 库存不足。order 在同库单事务内做条件更新（`UPDATE ... WHERE stock >= qty`），受影响行数为 0 即回滚——数据库层防超卖，不靠应用层锁。
+运营视图「商品」tab 上新一个库存为 0 的商品，再对它下一笔单 → 409 库存不足。order 在同库单事务内做条件更新（`UPDATE ... WHERE stock >= qty`），受影响行数为 0 即回滚——数据库层防超卖，不靠应用层锁。
 
 ### 4. 超时关单（3 分钟）
 
@@ -64,8 +65,8 @@ curl -H 'Host: shop.test.example.com' http://<集群入口>/api/orders
 
 1. 控制台「环境」→ 测试环境详情创建泳道 `feat-order-v2`（standard 联调泳道，TTL 自动回收）；
 2. 把 order v2 部署到泳道——**只部署 order**（v2 为演示用自制变更：给下单响应加「预计送达」字段并在页面横幅展示）；
-3. 访问 `feat-order-v2.shop.test.example.com` 下单：请求自动带 `x-paas-lane` 染色，bff 经数据面发现 API 按泳道查 order 命中 v2 副本；product / recommend 未命中降级基线；
-4. 对比：回到 `shop.test.example.com` 同操作 → v1 响应无新字段。
+3. 访问 `shop.test.example.com` 并携带泳道染色——页面顶栏泳道输入框填 `feat-order-v2` 切换（或 `curl -H 'Host: shop.test.example.com' -H 'x-paas-lane: feat-order-v2' <集群入口>/api/orders...`）：bff 经数据面发现 API 按泳道查 order 命中 v2 副本；product / recommend 未命中降级基线；
+4. 对比：清空泳道输入框（或不带 `x-paas-lane` 头）同操作 → v1 响应无新字段。
 
 **停留点**：「环境」详情泳道区看泳道归属工作负载；「可观测」链路看 `paas.lane` 属性、日志按 lane 过滤；页面顶栏「实际命中实例」指纹在切换后变化，即流量走了不同副本。演示毕关闭泳道，级联回收全部泳道内工作负载。
 

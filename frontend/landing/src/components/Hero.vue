@@ -5,10 +5,12 @@ import { ref } from 'vue'
 // （接入层 → 控制面 Core → 数据面，cyan 流线 = 控制面下发期望状态 CRD）。
 // 这是产品核心抽象的可视化，比空泛文字 hero 更有信息量。
 
+// stats 四格分别对应：整体规模 / 治理 / DevOps / 交付模式（覆盖四大能力域）。
+// OpenAI 兼容卖点由 lead 与右侧示意图的接入层 chip 承担，不占格子。
 const stats = [
-  { v: '11', k: '平台模块已落地' },
-  { v: '4/4', k: '治理件套（注册/配置/网关/熔断）' },
-  { v: 'OpenAI', k: '兼容流式推理 + failover' },
+  { v: '12+', k: '平台模块已落地' },
+  { v: '4/4', k: '治理四件套（注册/配置/网关/熔断）' },
+  { v: '8 stage', k: 'CI/CD 流水线 · 含并行验证金丝雀' },
   { v: '双模', k: 'SaaS + 私有化离线交付' },
 ]
 </script>
@@ -23,7 +25,7 @@ const stats = [
           <span class="grad">一个控制面</span>
         </h1>
         <p class="lead">
-          服务治理 · 资源中心 · MaaS · DevOps ——
+          服务治理 · 资源中心 · MaaS · DevOps · AI 编排 ——
           云原生 Go 控制面 + 插件化子系统。多租户隔离、PostgreSQL 持久化、K8s 数据面 CRD，
           SaaS 与私有化双模交付。
         </p>
@@ -31,6 +33,9 @@ const stats = [
           <a class="btn primary" href="/console/">
             立即体验控制台
             <span class="arrow">→</span>
+          </a>
+          <a class="btn ghost" href="/docs/">
+            使用文档
           </a>
           <a class="btn ghost" href="#quickstart">
             快速开始
@@ -73,6 +78,7 @@ const stats = [
               <span class="plugin">治理</span>
               <span class="plugin">资源</span>
               <span class="plugin">DevOps</span>
+              <span class="plugin">智能体</span>
             </div>
             <div class="meta mono">Go · controller-runtime · PostgreSQL · NATS</div>
           </div>
@@ -146,7 +152,8 @@ h1 {
 .stat .v {
   font-size: 28px;
   font-weight: 800;
-  background: linear-gradient(120deg, #fff 0%, var(--accent) 130%);
+  /* 渐变起点随主题（暗=白 / 亮=深字色），终点 accent 双主题通用 */
+  background: linear-gradient(120deg, var(--stat-grad-from) 0%, var(--accent) 130%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -223,7 +230,8 @@ h1 {
   font-weight: 600;
   padding: 5px 11px;
   border-radius: 6px;
-  background: rgba(34, 211, 238, 0.1);
+  /* 背景/文字走 accent 变量（亮色自动切深青保证对比），描边固定青色调双主题可见 */
+  background: var(--accent-soft);
   border: 1px solid rgba(34, 211, 238, 0.3);
   color: var(--accent);
 }
