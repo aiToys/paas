@@ -43,6 +43,7 @@ import (
 	appcfgpg "github.com/aitoys/paas/internal/appconfig/pg"
 	"github.com/aitoys/paas/internal/backup"
 	bkmemory "github.com/aitoys/paas/internal/backup/memory"
+	bkpg "github.com/aitoys/paas/internal/backup/pg"
 	"github.com/aitoys/paas/internal/billing"
 	billingmemory "github.com/aitoys/paas/internal/billing/memory"
 	billingpg "github.com/aitoys/paas/internal/billing/pg"
@@ -206,7 +207,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto
 		evalRepo := evalpg.NewStore(db)
 		evalRunRepo := evalpg.NewStore(db)
 		msgRepo := messaging.Repository(msgmemory.NewStore())
-		bkRepo := backup.Repository(bkmemory.NewStore())
+		bkRepo := backup.Repository(bkpg.NewStore(db)) // PG 持久化备份记录（原 memory 重启丢）
 		pipelineStore := pipeline.NewPGStore(db.Pool())
 		changeRepo := changepg.NewStore(db)
 		laneRepo := lanepg.NewStore(db)

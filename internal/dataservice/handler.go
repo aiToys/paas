@@ -11,6 +11,7 @@ import (
 
 	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/httputil"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -48,12 +49,16 @@ type Restarter interface {
 //	PUT    /api/dataservices/{id}/scale      扩缩容 replicas/cpu/memory/storageGb（生产需 prod:write）
 //	PUT    /api/dataservices/{id}/upgrade    版本升级 image（生产需 prod:write）
 type Handler struct {
-	repo        Repository
-	engineRepo  EngineRepository // 创建实例时按 engineID 解析 kind/engine/mode/connection
-	envResolver EnvTypeResolver
-	restarter   Restarter
-	podReader   PodReader // pods 端点读运行 Pod（排障用）；nil 时返空降级
-	Authorize   func(r *http.Request, perm string) bool
+	repo         Repository
+	engineRepo   EngineRepository // 创建实例时按 engineID 解析 kind/engine/mode/connection
+	envResolver  EnvTypeResolver
+	restarter    Restarter
+	podReader    PodReader      // pods 端点读运行 Pod（排障用）；nil 时返空降级
+	quotaCheck   QuotaCheckFunc // 创建前检查+递增 dataservices 配额，超限 429（与 application/workload 同款；对账审计 C1 漂移补 2026-09-05——此前只有 Delete 回收无 Create 递增）
+	quotaRelease QuotaCheckFunc // 删除成功后回收 dataservices 配额（best-effort；对账审计 C 节 2026-09-04 补）
+	audit        AdminAuditRecorder
+	actorFn      func(*http.Request) string
+	Authorize    func(r *http.Request, perm string) bool
 }
 
 // NewHandler 创建数据服务 handler。
@@ -86,6 +91,30 @@ func WithEngineRepo(r EngineRepository) HandlerOpt {
 // WithPodReader 注入 Pod 读取器（K8s 模式查 STS Pod）；nil 时 pods 端点返空降级。
 func WithPodReader(r PodReader) HandlerOpt {
 	return func(h *Handler) { h.podReader = r }
+}
+
+// WithQuotaCheck 注入配额检查+递增（创建前 dataservices +1，超限拦截；Create 失败由 handler 回滚）。
+func WithQuotaCheck(f QuotaCheckFunc) HandlerOpt { return func(h *Handler) { h.quotaCheck = f } }
+
+// WithQuotaRelease 注入配额回收（删除成功后 dataservices -1，与 admin 删除路径对齐）。
+func WithQuotaRelease(f QuotaCheckFunc) HandlerOpt { return func(h *Handler) { h.quotaRelease = f } }
+
+// WithAudit 注入审计 recorder + actor 解析（写操作记审计）。
+func WithAudit(a AdminAuditRecorder, actor func(*http.Request) string) HandlerOpt {
+	return func(h *Handler) { h.audit = a; h.actorFn = actor }
+}
+
+// recordAudit best-effort 记审计（错误不影响主流程；nil 未注入时跳过）。
+func (h *Handler) recordAudit(r *http.Request, action, resourceID, detail string) {
+	if h.audit == nil {
+		return
+	}
+	tid, _ := tenant.TenantFrom(r.Context())
+	actor := ""
+	if h.actorFn != nil {
+		actor = h.actorFn(r)
+	}
+	_ = h.audit.Record(r.Context(), tid, actor, action, "dataservice", resourceID, detail)
 }
 
 // resolveFromEngine 按 d.EngineID 从引擎目录解析 kind/engine/mode/connection，回填到 DataService。
@@ -206,8 +235,18 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request) {
 		if !h.allowProd(w, r, d.EnvID) {
 			return
 		}
+		// 横切配额拦截：创建前检查+递增，超限 429（不创建）；repo 失败回滚 -1 保持用量一致。
+		if h.quotaCheck != nil {
+			if err := h.quotaCheck(r.Context(), 1); err != nil {
+				httputil.WriteServiceError(w, http.StatusTooManyRequests, err)
+				return
+			}
+		}
 		saved, err := h.repo.Create(r.Context(), d)
 		if err != nil {
+			if h.quotaCheck != nil {
+				_ = h.quotaCheck(r.Context(), -1)
+			}
 			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
@@ -312,6 +351,12 @@ func (h *Handler) serveItemCRUD(w http.ResponseWriter, r *http.Request, id strin
 			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
+		// 删除成功后回收 dataservices 配额（best-effort，与 admin 删除路径对齐；此前租户侧
+		// 删除不回收致计数泄漏——对账审计 C 节 2026-09-04）。
+		if h.quotaRelease != nil {
+			_ = h.quotaRelease(r.Context(), -1)
+		}
+		h.recordAudit(r, "dataservice_delete", id, "kind="+ex.Kind)
 		httputil.WriteData(w, map[string]string{"deleted": id})
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")

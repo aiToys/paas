@@ -1,6 +1,7 @@
 package messaging
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -13,13 +14,39 @@ import (
 // Handler 是 messaging HTTP 处理器（Topic + 消费组 CRUD）。
 // 路由扁平：/api/mq-topics、/api/consumer-groups（避免深嵌套）。
 type Handler struct {
-	repo Repository
+	repo    Repository
+	audit   AuditRecorder // 写操作审计；nil 跳过
+	actorFn func(*http.Request) string
 	// Authorize 方法级权限判定（main.go 注入 gateway.RequestAllowed）；nil 则放行。
 	Authorize func(r *http.Request, perm string) bool
 }
 
+// AuditRecorder 记审计（依赖倒置，cmd/core 桥接 security.AuditStore；与 backup 同源模式）。
+type AuditRecorder interface {
+	Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error
+}
+
 // NewHandler 创建 messaging handler。
 func NewHandler(repo Repository) *Handler { return &Handler{repo: repo} }
+
+// WithAudit 注入审计 recorder + actor 解析（写操作记审计，元审计 2026-09-04 补）。
+func (h *Handler) WithAudit(a AuditRecorder, actor func(*http.Request) string) *Handler {
+	h.audit = a
+	h.actorFn = actor
+	return h
+}
+
+// recordAudit best-effort 记审计（错误不影响主流程）。
+func (h *Handler) recordAudit(r *http.Request, tid, action, resourceID, detail string) {
+	if h.audit == nil {
+		return
+	}
+	actor := ""
+	if h.actorFn != nil {
+		actor = h.actorFn(r)
+	}
+	_ = h.audit.Record(r.Context(), tid, actor, action, "messaging", resourceID, detail)
+}
 
 func (h *Handler) authorize(r *http.Request, perm string) bool {
 	if h.Authorize == nil {
@@ -110,6 +137,7 @@ func (h *Handler) createTopic(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteServiceError(w, http.StatusConflict, err)
 		return
 	}
+	h.recordAudit(r, tid, "mq_topic_create", t.ID, "mq="+t.MQID+" name="+t.Name)
 	httputil.WriteData(w, t)
 }
 
@@ -127,6 +155,7 @@ func (h *Handler) deleteTopic(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
+	h.recordAudit(r, tid, "mq_topic_delete", id, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -178,6 +207,7 @@ func (h *Handler) createGroup(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteServiceError(w, http.StatusConflict, err)
 		return
 	}
+	h.recordAudit(r, tid, "consumer_group_create", g.ID, "topic="+g.TopicID+" name="+g.Name)
 	httputil.WriteData(w, g)
 }
 
@@ -195,6 +225,7 @@ func (h *Handler) deleteGroup(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
+	h.recordAudit(r, tid, "consumer_group_delete", id, "")
 	w.WriteHeader(http.StatusNoContent)
 }
 

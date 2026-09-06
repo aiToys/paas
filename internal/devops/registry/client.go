@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -61,6 +62,17 @@ type Tag struct {
 	Digest string `json:"digest"` // sha256:...（不可变真源）
 }
 
+// repoNameRe registry v2 仓库名语法（路径分量小写字母/数字/./_/-，/ 分隔）。
+// 校验即转义：语法本身排除 URL 保留字符，防 name/tag 注入 path（安全审计第 2 轮 M2）。
+var repoNameRe = regexp.MustCompile(`^[a-z0-9]+(?:(?:\.|_|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:\.|_|__|-+)[a-z0-9]+)*)*$`)
+
+// tagRe registry v2 tag 名语法（字母数字开头，[a-zA-Z0-9_./-]）。
+var tagRe = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}$`)
+
+func validRepoName(name string) bool { return repoNameRe.MatchString(name) }
+
+func validTag(tag string) bool { return tagRe.MatchString(tag) }
+
 // Catalog 列所有仓库名（registry v2 /v2/_catalog）。仅返名字，不查 tag（避免 N+1）。
 func (c *Client) Catalog(ctx context.Context) ([]string, error) {
 	if c.baseURL == "" {
@@ -80,6 +92,9 @@ func (c *Client) Catalog(ctx context.Context) ([]string, error) {
 func (c *Client) Tags(ctx context.Context, name string) ([]Tag, error) {
 	if c.baseURL == "" {
 		return nil, ErrRegistryUnavailable
+	}
+	if !validRepoName(name) {
+		return nil, fmt.Errorf("%w: 非法仓库名 %q", ErrRepoNotFound, name)
 	}
 	var resp struct {
 		Name string   `json:"name"`
@@ -102,6 +117,9 @@ func (c *Client) Tags(ctx context.Context, name string) ([]Tag, error) {
 
 // headDigest 取某 tag 的 digest（HEAD manifests，读 Docker-Content-Digest 响应头，不下载 body）。
 func (c *Client) headDigest(ctx context.Context, name, tag string) (string, error) {
+	if !validTag(tag) {
+		return "", fmt.Errorf("非法 tag %q", tag)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, c.baseURL+"/v2/"+name+"/manifests/"+tag, nil)
 	if err != nil {
 		return "", err

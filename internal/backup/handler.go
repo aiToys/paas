@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
@@ -19,6 +20,13 @@ type Handler struct {
 	Authorize  func(r *http.Request, perm string) bool
 	envType    EnvTypeResolver     // envID → 环境类型（main.go 注入 environment store）
 	resourceEv ResourceEnvResolver // resourceID → envID（main.go 注入 dataservice store）
+	audit      AuditRecorder       // 写操作审计（备份是数据安全高敏操作）；nil 跳过
+	actorFn    func(*http.Request) string
+}
+
+// AuditRecorder 记审计（依赖倒置，cmd/core 桥接 security.AuditStore；与 governance 同源模式）。
+type AuditRecorder interface {
+	Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error
 }
 
 // HandlerOption 配置 handler（函数式选项）。
@@ -27,6 +35,23 @@ type HandlerOption func(*Handler)
 // WithEnvResolver 注入环境类型 + 资源环境解析器，启用生产写校验（prod:write）。
 func WithEnvResolver(et EnvTypeResolver, re ResourceEnvResolver) HandlerOption {
 	return func(h *Handler) { h.envType = et; h.resourceEv = re }
+}
+
+// WithAudit 注入审计 recorder + actor 解析（写操作记审计，元审计 2026-09-04 补）。
+func WithAudit(a AuditRecorder, actor func(*http.Request) string) HandlerOption {
+	return func(h *Handler) { h.audit = a; h.actorFn = actor }
+}
+
+// recordAudit best-effort 记审计（错误不影响主流程）。
+func (h *Handler) recordAudit(r *http.Request, tid, action, resourceID, detail string) {
+	if h.audit == nil {
+		return
+	}
+	actor := ""
+	if h.actorFn != nil {
+		actor = h.actorFn(r)
+	}
+	_ = h.audit.Record(r.Context(), tid, actor, action, "backup", resourceID, detail)
 }
 
 func NewHandler(repo Repository, opts ...HandlerOption) *Handler {
@@ -145,6 +170,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteServiceError(w, http.StatusConflict, err)
 		return
 	}
+	h.recordAudit(r, tid, "backup_create", b.ID, "resource="+b.ResourceID+" type="+b.Type)
 	httputil.WriteData(w, b)
 }
 
@@ -171,6 +197,7 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteServiceError(w, http.StatusNotFound, err)
 		return
 	}
+	h.recordAudit(r, tid, "backup_delete", id, "resource="+b.ResourceID)
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -191,6 +191,10 @@ func (s *Store) Create(ctx context.Context, d dataservice.DataService) (dataserv
 	d.CreatedAt = now
 	d.UpdatedAt = now
 	s.services[d.ID] = d
+	// 返回前再深拷贝（先存后拷，与 IncUsage 同款）：返回值与 store 内 Spec/Connection/Replicas 独立
+	d.Spec = cloneStrMap(d.Spec)
+	d.Connection = cloneStrMap(d.Connection)
+	d.Replicas = cloneIntP(d.Replicas)
 	return d, nil
 }
 
@@ -243,9 +247,11 @@ func (s *Store) Update(ctx context.Context, d dataservice.DataService) (dataserv
 	if err := ex.Validate(); err != nil {
 		return dataservice.DataService{}, err
 	}
+	s.services[d.ID] = ex
+	// 返回前再深拷贝（先存后拷，与 IncUsage 同款）：返回值与 store 内 Spec/Connection/Replicas 独立
 	ex.Spec = cloneStrMap(ex.Spec)
 	ex.Connection = cloneStrMap(ex.Connection)
-	s.services[d.ID] = ex
+	ex.Replicas = cloneIntP(ex.Replicas)
 	return ex, nil
 }
 

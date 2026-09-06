@@ -156,6 +156,47 @@ func TestProdCreateBlocked(t *testing.T) {
 	}
 }
 
+// TestQuotaCheckOnCreate 验证创建配额：成功 +1、超限 429 不创建、Create 失败回滚 -1。
+// （2026-09-05 补：此前只有 Delete 回收无 Create 递增，reconcile C1 每新建一个实例漂移 +1。）
+func TestQuotaCheckOnCreate(t *testing.T) {
+	var count int
+	h := dataservice.NewHandler(dsmemory.NewStore(),
+		dataservice.WithEnvResolver(stubResolver{types: map[string]string{"env-acme-test": "test"}}),
+		dataservice.WithQuotaCheck(func(_ context.Context, delta int) error {
+			next := count + delta
+			if delta > 0 && next > 2 {
+				return fmt.Errorf("配额不足")
+			}
+			count = next
+			return nil
+		}),
+	)
+	h.Authorize = allowAll
+
+	// 成功创建 ×2 → 配额 +2
+	createDS(t, h, "t-acme", "db", "db-1", "env-acme-test", `{"engine":"postgres"}`)
+	createDS(t, h, "t-acme", "db", "db-2", "env-acme-test", `{"engine":"postgres"}`)
+	if count != 2 {
+		t.Fatalf("两次创建后配额应为 2，got %d", count)
+	}
+
+	// 超限第 3 个 → 429 且不创建（列表仍 2 条）
+	r := newReq(http.MethodPost, "/api/dataservices", `{"kind":"db","name":"db-3","spec":{"engine":"postgres"},"envId":"env-acme-test"}`, "t-acme")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("超限创建应 429，got %d body=%s", w.Code, w.Body.String())
+	}
+	r = newReq(http.MethodGet, "/api/dataservices", "", "t-acme")
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	var list []dataservice.DataService
+	decodeData(t, w, &list)
+	if len(list) != 2 {
+		t.Fatalf("超限被拦后应仍为 2 条，got %d", len(list))
+	}
+}
+
 // TestProdDeleteBlocked 验证跨租户删除生产资源被拒（先 not found 或 prod 拦截）。
 func TestProdDeleteAsAdmin(t *testing.T) {
 	h := dataservice.NewHandler(dsmemory.NewStore(), dataservice.WithEnvResolver(stubResolver{
@@ -315,4 +356,54 @@ func TestServePodsCrossTenantNotFound(t *testing.T) {
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("跨租户应 404 不泄漏，got %d", w.Code)
 	}
+}
+
+// TestDeleteReleasesQuotaAndAudits 验证租户侧删除回收 dataservices 配额（-1）并记审计
+// （对账审计 C 节修复回归防护，2026-09-04：此前租户删除不回收致计数泄漏）。
+func TestDeleteReleasesQuotaAndAudits(t *testing.T) {
+	var gotDelta int
+	var audited []string
+	h := dataservice.NewHandler(dsmemory.NewStore(),
+		dataservice.WithEnvResolver(stubResolver{types: map[string]string{"env-acme-test": "test"}}),
+		dataservice.WithQuotaRelease(func(_ context.Context, delta int) error { gotDelta = delta; return nil }),
+		dataservice.WithAudit(stubAuditRecorder{onRecord: func(action, resourceType, resourceID string) {
+			audited = append(audited, action+"/"+resourceType+"/"+resourceID)
+		}}, nil),
+	)
+	h.Authorize = allowAll
+
+	body := `{"kind":"db","name":"quota-db","spec":{"engine":"postgres","version":"15","size_gb":"10"},"envId":"env-acme-test"}`
+	r := newReq(http.MethodPost, "/api/dataservices", body, "t-acme")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("创建应 201，got %d", w.Code)
+	}
+	var d dataservice.DataService
+	decodeData(t, w, &d)
+
+	r2 := newReq(http.MethodDelete, "/api/dataservices/"+d.ID, "", "t-acme")
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, r2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("删除应 200，got %d", w2.Code)
+	}
+	if gotDelta != -1 {
+		t.Fatalf("删除应回收配额 -1，got %d", gotDelta)
+	}
+	if len(audited) != 1 || audited[0] != "dataservice_delete/dataservice/"+d.ID {
+		t.Fatalf("应记一条 dataservice_delete 审计，got %v", audited)
+	}
+}
+
+// stubAuditRecorder 审计桩：捕获 action/resourceType/resourceID。
+type stubAuditRecorder struct {
+	onRecord func(action, resourceType, resourceID string)
+}
+
+func (s stubAuditRecorder) Record(_ context.Context, _, _, action, resourceType, resourceID, _ string) error {
+	if s.onRecord != nil {
+		s.onRecord(action, resourceType, resourceID)
+	}
+	return nil
 }

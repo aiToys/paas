@@ -65,3 +65,19 @@ func (l *wlServiceLister) DeployedServices(ctx context.Context, appID, envID str
 	}
 	return out, nil
 }
+
+// appIDListAdapter 列当前租户应用 ID 集合（devops.AppIDLister 桥接，
+// registry catalog/tags 租户过滤用）。List 按 ctx 租户过滤（Repository 强制）。
+type appIDListAdapter struct{ repo application.Repository }
+
+func (a *appIDListAdapter) List(ctx context.Context) ([]string, error) {
+	apps, err := a.repo.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(apps))
+	for _, app := range apps {
+		out = append(out, app.ID)
+	}
+	return out, nil
+}
