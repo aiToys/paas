@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -108,5 +109,86 @@ func TestStatsAggConsume(t *testing.T) {
 	}
 	if a.snapshot().Orders != 2 {
 		t.Fatalf("状态转移不应增加订单数，got %d", a.snapshot().Orders)
+	}
+}
+
+// TestRefundRequest 一键退款审批：mock 平台 workflow API，验证按名找 workflow、
+// 触发 body 为顶层扁平 {orderId, reason}（reason 默认填充）、未配 env 503、缺 orderId 400。
+func TestRefundRequest(t *testing.T) {
+	mux := buildMux(newEventRing(10))
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	// 用例 1：未配 PAAS_PLATFORM_URL/TOKEN → 503（不 panic，给可读提示）
+	resp, err := srv.Client().Post(srv.URL+"/api/refunds", "application/json",
+		strings.NewReader(`{"orderId":"ORD-1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("未配平台凭证应 503，got %d", resp.StatusCode)
+	}
+
+	// mock 平台：list 按 name 过滤目标 wf-1；trigger 校验扁平 body 后返回 run。
+	t.Setenv("PAAS_PLATFORM_URL", "http://127.0.0.1:1") // 先占位，下面换 mock 地址
+	platform := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/workflows":
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]string{
+				{"id": "wf-other", "name": "无关工作流"},
+				{"id": "wf-refund", "name": "shop-refund-approval"},
+			}})
+		case "/api/workflows/wf-refund/runs":
+			if got := r.Header.Get("Authorization"); got != "Bearer sk-test" {
+				t.Errorf("平台调用应带凭证，got %q", got)
+			}
+			var in map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&in)
+			if in["orderId"] != "ORD-1" {
+				t.Errorf("触发 body 应含 orderId，got %v", in)
+			}
+			if in["reason"] == "" {
+				t.Error("reason 未传时应默认填充（LLM 分析节点需要）")
+			}
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]string{"id": "run-9", "status": "paused"}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer platform.Close()
+	t.Setenv("PAAS_PLATFORM_URL", platform.URL)
+	t.Setenv("PAAS_PLATFORM_TOKEN", "sk-test")
+
+	// 用例 2：正常发起 → 200 + runId 透传
+	resp, err = srv.Client().Post(srv.URL+"/api/refunds", "application/json",
+		strings.NewReader(`{"orderId":"ORD-1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("正常发起应 200，got %d", resp.StatusCode)
+	}
+	var out struct {
+		Data struct {
+			RunID string `json:"runId"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.Data.RunID != "run-9" {
+		t.Fatalf("应透传平台 runId，got %+v err=%v", out, err)
+	}
+
+	// 用例 3：缺 orderId → 400
+	resp, err = srv.Client().Post(srv.URL+"/api/refunds", "application/json",
+		strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("缺 orderId 应 400，got %d", resp.StatusCode)
 	}
 }

@@ -1,6 +1,7 @@
 package environment
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,6 +9,8 @@ import (
 	"time"
 
 	"github.com/aitoys/paas/internal/httputil"
+	adminutil "github.com/aitoys/paas/internal/web/admin"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -17,6 +20,13 @@ const (
 	// PermProdWrite 生产环境写操作额外权限；developer 无此权限 -> 生产只读。
 	PermProdWrite = "prod:write"
 )
+
+// EnvUsageChecker 环境占用查询（依赖倒置：environment 不 import workload——后者已 import
+// 本包作 EnvTypeResolver，直接依赖会循环）。cmd/core 桥接 workload store。
+type EnvUsageChecker interface {
+	// CountByEnv 返回该环境下工作负载数（实现内部按 ctx 租户过滤）。
+	CountByEnv(ctx context.Context, envID string) (int, error)
+}
 
 // Handler 暴露环境 REST API。
 //
@@ -28,11 +38,32 @@ type Handler struct {
 	repo Repository
 	// Authorize 校验当前请求是否持有权限；nil 跳过（测试场景）。
 	Authorize func(r *http.Request, perm string) bool
+	// Usage 环境占用检查（可选）；nil 跳过。注入后删除环境前查该环境下工作负载数，
+	// 非 0 拒删（409）——悬挂 envId 会让 allowProd fail-closed 按 prod 处理、发布阶序断裂。
+	Usage EnvUsageChecker
+	// Audit 写操作审计（Create/Delete）；nil 跳过。
+	Audit adminutil.AuditRecorder
+	// ActorFn 从请求取操作者（审计用）；nil 则空。
+	ActorFn func(r *http.Request) string
 }
 
 // NewHandler 创建环境 handler。
 func NewHandler(repo Repository) *Handler {
 	return &Handler{repo: repo}
+}
+
+// recordAudit best-effort 记审计（错误不影响主流程）。
+func (h *Handler) recordAudit(r *http.Request, action, resourceID, detail string) {
+	if h.Audit == nil {
+		return
+	}
+	actor := ""
+	if h.ActorFn != nil {
+		actor = h.ActorFn(r)
+	}
+	// 租户从 ctx 取（空归 platform，由 adapter 统一兜底）。
+	tid, _ := tenant.TenantFrom(r.Context())
+	_ = h.Audit.Record(r.Context(), tid, actor, action, "environment", resourceID, detail)
 }
 
 func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) bool {
@@ -93,6 +124,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteServiceError(w, http.StatusBadRequest, err)
 			return
 		}
+		h.recordAudit(r, "environment_create", e.ID, "type="+e.Type+" name="+e.Name)
 		httputil.WriteDataCreated(w, e)
 		return
 	}
@@ -126,10 +158,26 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		// 占用校验（与 identity.DeleteTenant 非空 409 同款先例）：环境下仍有工作负载时拒删，
+		// 防悬挂 envId 引用（allowProd fail-closed 全按生产处理 + 发布阶序断裂）。
+		// 查询失败 fail-closed 不删（环境 store 抖动期间不产生孤儿引用）。
+		if h.Usage != nil {
+			n, uerr := h.Usage.CountByEnv(r.Context(), id)
+			if uerr != nil {
+				httputil.WriteInternalError(w, uerr)
+				return
+			}
+			if n > 0 {
+				httputil.WriteError(w, http.StatusConflict,
+					fmt.Sprintf("环境下仍有 %d 个工作负载，请先删除或迁移后再删除环境", n))
+				return
+			}
+		}
 		if err := h.repo.Delete(r.Context(), id); err != nil {
 			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
+		h.recordAudit(r, "environment_delete", id, "type="+etype)
 		httputil.WriteData(w, map[string]string{"deleted": id})
 		return
 	}

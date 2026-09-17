@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS consumer_groups;
+DROP TABLE IF EXISTS topics;

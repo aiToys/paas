@@ -391,8 +391,10 @@ func TestDeleteReleasesQuotaAndAudits(t *testing.T) {
 	if gotDelta != -1 {
 		t.Fatalf("删除应回收配额 -1，got %d", gotDelta)
 	}
-	if len(audited) != 1 || audited[0] != "dataservice_delete/dataservice/"+d.ID {
-		t.Fatalf("应记一条 dataservice_delete 审计，got %v", audited)
+	// R7 审计补齐：Create 亦记审计（原仅 Delete），写操作全覆盖。
+	if len(audited) != 2 || audited[0] != "dataservice_create/dataservice/"+d.ID ||
+		audited[1] != "dataservice_delete/dataservice/"+d.ID {
+		t.Fatalf("应记 create+delete 两条审计，got %v", audited)
 	}
 }
 

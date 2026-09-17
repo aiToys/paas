@@ -200,6 +200,11 @@ func (c *Client) GetTree(ctx context.Context, owner, name, ref string) ([]TreeNo
 	if err := c.doJSON(ctx, http.MethodGet, p, nil, &resp); err != nil {
 		return nil, err
 	}
+	if resp.Truncated {
+		// 树超 Gitea 单次响应上限被截断：不阻断（部分树仍可浏览），但必须留服务端信号，
+		// 否则「文件树不全」无从排查（R16-M1）。
+		log.Printf("gitea GetTree %s/%s@%s 树被截断，前端仅显示部分文件", owner, name, ref)
+	}
 	return resp.Tree, nil
 }
 

@@ -157,11 +157,13 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	if !h.allowProdResource(w, r, b.ResourceID) {
 		return
 	}
-	if b.ID == "" {
-		b.ID = "bk-" + b.ResourceID + "-" + b.Type
-	}
+	// type 默认值必须先补再生成 ID（R8 审计 B1：原顺序在 body 无 type 时生成
+	// 尾部悬挂 '-' 的 ID，且与默认值补齐后实际 type 不一致）。
 	if b.Type == "" {
 		b.Type = TypeFull
+	}
+	if b.ID == "" {
+		b.ID = "bk-" + b.ResourceID + "-" + b.Type
 	}
 	b.Status = StatusCompleted
 	b.SizeMB = deterministicSize(b.ResourceID + b.Type)
@@ -171,7 +173,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.recordAudit(r, tid, "backup_create", b.ID, "resource="+b.ResourceID+" type="+b.Type)
-	httputil.WriteData(w, b)
+	httputil.WriteDataCreated(w, b)
 }
 
 func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {

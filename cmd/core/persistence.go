@@ -81,6 +81,7 @@ import (
 	mapg "github.com/aitoys/paas/internal/maas/pg"
 	"github.com/aitoys/paas/internal/messaging"
 	msgmemory "github.com/aitoys/paas/internal/messaging/memory"
+	msgpg "github.com/aitoys/paas/internal/messaging/pg"
 	"github.com/aitoys/paas/internal/observability"
 	obspg "github.com/aitoys/paas/internal/observability/pg"
 	"github.com/aitoys/paas/internal/security"
@@ -210,7 +211,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto
 		marketRepo := marketplacepg.NewStore(db)
 		evalRepo := evalpg.NewStore(db)
 		evalRunRepo := evalpg.NewStore(db)
-		msgRepo := messaging.Repository(msgmemory.NewStore())
+		msgRepo := msgpg.NewStore(db)                  // PG 持久化 Topic/消费组元数据（原 PG 分支误用 memory，R19 审计 M2）
 		bkRepo := backup.Repository(bkpg.NewStore(db)) // PG 持久化备份记录（原 memory 重启丢）
 		pipelineStore := pipeline.NewPGStore(db.Pool())
 		changeRepo := changepg.NewStore(db)
@@ -229,6 +230,9 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto
 
 		seedPGAllIfEmpty(ctx, idb, appRepo, envRepo, appcfgRepo, rawDs, rawWl,
 			devopsRepo, govRepo, ccRepo, billingRepo, secRepo)
+		if err := msgRepo.SeedIfEmpty(ctx); err != nil {
+			log.Printf("[seed] 消息队列失败: %v", err)
+		}
 		seedMaasCatalog(ctx, maasRepo, secRepo)
 		seedEnginesIfEmpty(ctx, rawDs)
 		// 平台预置流水线模板（全租户共享，不门控 demo seed，生产也需预置）
@@ -530,7 +534,11 @@ func seedApplications(ctx context.Context, appRepo application.Repository) {
 }
 
 // seedEnvironments 灌入环境预置数据（每条按 TenantID 建 ctx，PG Create 以 ctx 为准）。
+// PAAS_DISABLE_DEMO_SEED=true 跳过（演示租户环境属 demo 数据，与 seedApplications 同款门控）。
 func seedEnvironments(ctx context.Context, repo environment.Repository) {
+	if os.Getenv("PAAS_DISABLE_DEMO_SEED") == "true" {
+		return
+	}
 	for _, e := range envmemory.SeedEnvs() {
 		if err := repo.Create(tenant.WithTenant(ctx, e.TenantID), e); err != nil {
 			log.Printf("[seed] 环境 %s: %v", e.ID, err)
@@ -564,7 +572,13 @@ func seedEnginesIfEmpty(ctx context.Context, repo dataservice.EngineRepository) 
 }
 
 // seedWorkloads 灌入工作负载预置数据。
+// PAAS_DISABLE_DEMO_SEED=true 跳过（与 seedApplications 同款门控）——生产必须跳过：
+// 演示 workload 经 ApplyRepo 直接投影 CRD 会真实拉起 Deployment，且 AppID 指向演示应用
+// （生产被 seedApplications 跳过）成孤儿引用 + 占用租户配额。
 func seedWorkloads(ctx context.Context, repo workload.Repository) {
+	if os.Getenv("PAAS_DISABLE_DEMO_SEED") == "true" {
+		return
+	}
 	// 内网部署 seed 镜像拼 PAAS_IMAGE_REGISTRY 前缀（集群节点可拉）；空用公开名（dev 内存模式）。
 	registry := os.Getenv("PAAS_IMAGE_REGISTRY")
 	for _, w := range wlmemory.SeedWorkloads(registry) {

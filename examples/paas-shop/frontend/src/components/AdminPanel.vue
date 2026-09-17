@@ -38,17 +38,28 @@ async function act(id: string, action: 'ship' | 'close' | 'confirm') {
   await refresh()
 }
 
-// 退款引导层：运营动作发生在 PaaS 控制台工作流（spec §6 叙事），这里只复制订单号。
+// 退款引导层（spec §6）：bff 代调平台 API 一键触发 shop-refund-approval，
+// 用户只剩「到平台控制台点审批」一步，不再手写 JSON；失败回退复制订单号手动路径。
 const refundHint = ref('')
-function copyRefund(id: string) {
-  // 集群入口走 http（非 secure context）时 navigator.clipboard 不存在——降级
-  // execCommand 保演示可用，两条路径都失败则提示手动选择。
-  if (navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(id).catch(() => fallbackCopy(id))
-  } else {
+async function requestRefund(id: string) {
+  refundHint.value = `订单 ${id} 退款审批发起中…`
+  try {
+    const resp = await laneFetch('/api/refunds', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ orderId: id }),
+    })
+    if (!resp.ok) {
+      fallbackCopy(id)
+      refundHint.value = `发起失败（${resp.status}）——订单号 ${id} 已复制，可到平台控制台「AI 服务 → 工作流」手动运行 shop-refund-approval`
+      return
+    }
+    const d = await resp.json() as { data: { runId: string } }
+    refundHint.value = `订单 ${id} 退款审批已发起（运行 ${d.data.runId}）——请到平台控制台「AI 服务 → 工作流」shop-refund-approval 运行详情点「通过」`
+  } catch {
     fallbackCopy(id)
+    refundHint.value = `发起失败：网络错误——订单号 ${id} 已复制，可到平台控制台手动运行 shop-refund-approval`
   }
-  refundHint.value = `订单号 ${id} 已复制——请到平台控制台「AI 服务 → 工作流」运行 shop-refund-approval 完成退款审批`
 }
 
 // execCommand 降级：临时 textarea + 选区复制（deprecated 但 http 环境唯一可用路径）。
@@ -139,7 +150,7 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
             <button v-if="o.status === 'paid'" @click="act(o.id, 'ship')">发货</button>
             <button v-if="o.status === 'shipped'" @click="act(o.id, 'confirm')">确认收货</button>
             <button v-if="o.status === 'pending'" @click="act(o.id, 'close')">关单</button>
-            <button v-if="o.status === 'paid' || o.status === 'shipped'" @click="copyRefund(o.id)">退款</button>
+            <button v-if="o.status === 'paid' || o.status === 'shipped'" @click="requestRefund(o.id)">发起退款审批</button>
           </td>
         </tr>
         <tr v-if="orders.length === 0"><td colspan="5" class="empty">暂无订单</td></tr>

@@ -2,6 +2,7 @@ package workflowtest
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -441,4 +442,81 @@ func waitForStatus(t *testing.T, repo *memory.Store, status string) string {
 	}
 	t.Fatalf("等待状态 %s 超时", status)
 	return ""
+}
+
+// newPausedRun 直接构造 paused 态 run（NodeRuns 按传入），不走 Start 真实链路——
+// 用于 Approve 校验逻辑的单元隔离（无本进程等待者，Approve 成功即拉起 goAdvance 到终态）。
+func newPausedRun(t *testing.T, repo *memory.Store, nodeRuns []workflow.NodeRun) (string, string) {
+	t.Helper()
+	ctx := ctxTenant()
+	def, err := repo.Create(ctx, workflow.WorkflowDef{
+		Name: "wf-approve-guard", Enabled: true,
+		Nodes: []workflow.NodeDef{
+			{ID: "s", Type: workflow.NodeStart, NextID: "review"},
+			{ID: "review", Type: workflow.NodeApprove, NextID: "e"},
+			{ID: "e", Type: workflow.NodeEnd},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create def: %v", err)
+	}
+	run, err := repo.CreateRun(ctx, workflow.WorkflowRun{
+		WorkflowID: def.ID, Status: workflow.StatusPaused,
+		Inputs: map[string]string{}, NodeRuns: nodeRuns, CreatedAt: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("CreateRun: %v", err)
+	}
+	return run.ID, "review"
+}
+
+// TestApproveResumesLoopedApproveNode 锁住 R18-M1：condition 环内 approve 节点
+// 二次暂停时，同 NodeID 的首次记录已 succeeded——Approve 不得因此拒绝
+// （原实现历史扫描「同 NodeID 存在非 paused 即拒」把合法续批变 Abort 死局）。
+func TestApproveResumesLoopedApproveNode(t *testing.T) {
+	repo := memory.NewStore()
+	eng := workflow.NewEngine(repo, &fakeAgents{}, &fakeTools{})
+	runID, nodeID := newPausedRun(t, repo, []workflow.NodeRun{
+		{NodeID: "s", Status: workflow.StatusSucceeded},
+		{NodeID: "review", Status: workflow.StatusSucceeded}, // 首轮已批（环回来）
+		{NodeID: "review", Status: workflow.StatusPaused},    // 二次等待
+	})
+	if err := eng.Approve(ctxTenant(), runID, nodeID); err != nil {
+		t.Fatalf("环内二次 approve 应可恢复: %v", err)
+	}
+	waitStatus(t, repo, runID, workflow.StatusSucceeded)
+}
+
+// TestApproveRejectsNonCurrentNode 防混淆回归：传历史节点 ID（非最后等待节点）拒绝。
+func TestApproveRejectsNonCurrentNode(t *testing.T) {
+	repo := memory.NewStore()
+	eng := workflow.NewEngine(repo, &fakeAgents{}, &fakeTools{})
+	runID, _ := newPausedRun(t, repo, []workflow.NodeRun{
+		{NodeID: "s", Status: workflow.StatusSucceeded},
+		{NodeID: "review", Status: workflow.StatusPaused},
+	})
+	if err := eng.Approve(ctxTenant(), runID, "s"); !errors.Is(err, workflow.ErrNodeNotApprove) {
+		t.Fatalf("历史节点 ID 应拒 ErrNodeNotApprove, got %v", err)
+	}
+}
+
+// TestApproveRequiresPaused 非 paused 态拒绝。
+func TestApproveRequiresPaused(t *testing.T) {
+	repo := memory.NewStore()
+	eng := workflow.NewEngine(repo, &fakeAgents{}, &fakeTools{})
+	runID, nodeID := newPausedRun(t, repo, []workflow.NodeRun{
+		{NodeID: "review", Status: workflow.StatusPaused},
+	})
+	ctx := ctxTenant()
+	run, err := repo.GetRun(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.Status = workflow.StatusRunning
+	if _, err := repo.UpdateRun(ctx, run); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.Approve(ctx, runID, nodeID); !errors.Is(err, workflow.ErrRunNotPaused) {
+		t.Fatalf("running 态应拒 ErrRunNotPaused, got %v", err)
+	}
 }

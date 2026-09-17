@@ -17,7 +17,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 	"strings"
 
@@ -534,45 +533,15 @@ func (h *Handler) createBatch(w http.ResponseWriter, r *http.Request, appID stri
 }
 
 // abandonBatch DELETE /api/applications/{id}/batches/{bid}。
-// 仅 collecting/conflict/failed 可放弃；批内未出批变更一并回 open 出批（可重新入批）。
+// 状态面/批内变更出批逻辑在 Service.AbandonBatch（持 per-batch 锁，防与入批/推进并发
+// 交错丢成员）；handler 直写 repo 的旧路径不拿锁，已废弃。
 func (h *Handler) abandonBatch(w http.ResponseWriter, r *http.Request, appID, bid string) {
 	if !h.allow(w, r, PermPipelineWrite) {
 		return
 	}
-	ctx := r.Context()
-	b, err := h.repo.GetBatch(ctx, bid)
-	if err != nil {
+	if _, err := h.svc.AbandonBatch(r.Context(), bid); err != nil {
 		httputil.WriteServiceError(w, toHTTPStatus(err), err)
 		return
-	}
-	switch b.Status {
-	case BatchCollecting, BatchConflict, BatchFailed, BatchTesting, BatchReleasing:
-		// testing/releasing 也允许放弃（用户主动止损出口）：关联 run 由 SyncBatchStatus
-		// 在 run NotFound/aborted 时推进 failed，或用户另行 Abort。原状态面过窄会把
-		// testing/releasing 批次锁成死局（无任何退出动作）。
-	default:
-		httputil.WriteServiceError(w, http.StatusConflict, errors.New("仅 collecting/conflict/failed/testing/releasing 批次可放弃"))
-		return
-	}
-	b.Status = BatchAbandoned
-	if _, err := h.repo.UpdateBatch(ctx, b); err != nil {
-		httputil.WriteServiceError(w, toHTTPStatus(err), err)
-		return
-	}
-	// 批内变更回 open 出批（collecting/conflict 态变更仍挂批次；failed 态已由 Sync 出批，幂等）
-	for _, cid := range b.ChangeIDs {
-		if c, err := h.repo.GetChange(ctx, cid); err == nil {
-			c.BatchID = ""
-			c.ConflictWith = ""
-			if c.Status == ChangeIntegrated {
-				c.Status = ChangeOpen
-			}
-			// 清理路径 best-effort 不阻断批次删除，但失败必须有日志——否则变更永久悬挂在
-			// 已删批次上，只有对账式审计才能发现（吞错无感知是 R4 审计 Minor）。
-			if _, uerr := h.repo.UpdateChange(ctx, c); uerr != nil {
-				slog.Warn("批次放弃：变更回 open 出批失败（可能悬挂批次引用）", "changeId", cid, "err", uerr)
-			}
-		}
 	}
 	h.recordAudit(r, "batch_abandon", "integration_batch", bid, "app="+appID)
 	httputil.WriteData(w, map[string]string{"deleted": bid})

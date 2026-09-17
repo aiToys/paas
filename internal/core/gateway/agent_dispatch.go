@@ -3,6 +3,7 @@ package gateway
 import (
 	"errors"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/aitoys/paas/pkg/provider"
 )
@@ -39,25 +40,42 @@ type AgentDispatcher interface {
 // 而 agentRuntime 在 KB/凭证等依赖就绪后（line ~758）才构造。
 // holder 先以 nil 注册进 ChatCompletions，agentRuntime 构造后 Set 注入；
 // 请求时（远晚于启动）holder.v 必已就绪。holder 方法对 nil 内部实现安全降级（Match 返 false）。
-type AgentDispatcherHolder struct{ v AgentDispatcher }
+//
+// v 用 atomic.Pointer：读写跨 goroutine（Set 在启动期、Match 在请求期），
+// 原裸字段依赖「listen 晚于 Set」的隐式 happens-before，重排装配顺序即成 data race。
+type AgentDispatcherHolder struct {
+	v atomic.Pointer[AgentDispatcher]
+}
 
 // Set 注入真实 dispatcher（agentRuntime 构造后调用）。
-func (h *AgentDispatcherHolder) Set(d AgentDispatcher) { h.v = d }
+func (h *AgentDispatcherHolder) Set(d AgentDispatcher) { h.v.Store(&d) }
+
+// dispatcher 取内部 dispatcher；未注入返 nil。
+func (h *AgentDispatcherHolder) dispatcher() AgentDispatcher {
+	if h == nil {
+		return nil
+	}
+	if p := h.v.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
 
 // Match 内部 dispatcher 未注入时返 false（普通模型走 catalog 通道）。
 func (h *AgentDispatcherHolder) Match(model string) bool {
-	if h == nil || h.v == nil {
+	d := h.dispatcher()
+	if d == nil {
 		return false
 	}
-	return h.v.Match(model)
+	return d.Match(model)
 }
 
 // ServeSSE 委托内部 dispatcher；调用方需先 Match 判定。
 func (h *AgentDispatcherHolder) ServeSSE(w http.ResponseWriter, r *http.Request, model string, msgs []provider.Message) error {
-	return h.v.ServeSSE(w, r, model, msgs)
+	return h.dispatcher().ServeSSE(w, r, model, msgs)
 }
 
 // ServeSSEConv 委托内部 dispatcher（带会话 ID 多轮记忆）。
 func (h *AgentDispatcherHolder) ServeSSEConv(w http.ResponseWriter, r *http.Request, model, conversationID string, msgs []provider.Message) error {
-	return h.v.ServeSSEConv(w, r, model, conversationID, msgs)
+	return h.dispatcher().ServeSSEConv(w, r, model, conversationID, msgs)
 }

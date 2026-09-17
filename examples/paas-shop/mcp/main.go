@@ -152,19 +152,27 @@ func handleMCP(w http.ResponseWriter, r *http.Request) {
 			Arguments map[string]any `json:"arguments"`
 		}
 		_ = json.Unmarshal(req.Params, &p)
-		text := callTool(r.Context(), p.Name, p.Arguments)
+		text, isErr := callTool(r.Context(), p.Name, p.Arguments)
+		// MCP isError 语义：失败分支（订单状态机拒绝/下游不可达/参数缺失）标记后，
+		// 平台 client（internal/ai/tool/mcp/client.go Invoke）转 error——
+		// workflow tool 节点标 failed（run 不再伪 succeeded）、agent 把原因回给 LLM。
+		result := map[string]any{
+			"content": []map[string]any{{"type": "text", "text": text}},
+		}
+		if isErr {
+			result["isError"] = true
+		}
 		writeJSON(w, rpcResp{
 			JSONRPC: "2.0", ID: req.ID,
-			Result: map[string]any{
-				"content": []map[string]any{{"type": "text", "text": text}},
-			},
+			Result: result,
 		})
 	default:
 		writeJSON(w, rpcResp{JSONRPC: "2.0", ID: req.ID, Error: &rpcError{Code: -32601, Message: "method not found: " + req.Method}})
 	}
 }
 
-func callTool(ctx context.Context, name string, args map[string]any) string {
+// callTool 分发工具调用，返回 (结果文本, 是否失败)；失败时 handler 组装 isError=true。
+func callTool(ctx context.Context, name string, args map[string]any) (string, bool) {
 	switch name {
 	case "query_product":
 		return queryProduct(args)
@@ -175,7 +183,7 @@ func callTool(ctx context.Context, name string, args map[string]any) string {
 	case "refund_order":
 		return refundOrder(ctx, args)
 	default:
-		return "未知工具: " + name
+		return "未知工具: " + name, true
 	}
 }
 
@@ -208,47 +216,48 @@ func callOrder(ctx context.Context, method, path string) (int, []byte, error) {
 	return resp.StatusCode, body, err
 }
 
-// queryOrder 调 order 服务查真实订单（GET /orders/{id}；404 归一为工具消息非协议错误）。
-func queryOrder(ctx context.Context, args map[string]any) string {
+// queryOrder 调 order 服务查真实订单（GET /orders/{id}；404 归一为工具失败非协议错误）。
+func queryOrder(ctx context.Context, args map[string]any) (string, bool) {
 	code, body, err := callOrder(ctx, http.MethodGet, "/orders/"+argString(args, "orderId"))
 	if err != nil || code == http.StatusNotFound {
-		return "订单不存在或查询失败: " + argString(args, "orderId")
+		return "订单不存在或查询失败: " + argString(args, "orderId"), true
 	}
-	return "订单详情: " + string(body)
+	return "订单详情: " + string(body), false
 }
 
-// refundOrder 调 order 服务退款（POST /orders/{id}/refund；状态机拒绝 409 时透出原因）。
-func refundOrder(ctx context.Context, args map[string]any) string {
+// refundOrder 调 order 服务退款（POST /orders/{id}/refund；状态机拒绝 409 时标失败透出原因——
+// 否则 workflow run 伪 succeeded，用户看到「成功」但订单未退）。
+func refundOrder(ctx context.Context, args map[string]any) (string, bool) {
 	code, body, err := callOrder(ctx, http.MethodPost, "/orders/"+argString(args, "orderId")+"/refund")
 	if err != nil {
-		return "退款请求失败: " + err.Error()
+		return "退款请求失败: " + err.Error(), true
 	}
 	if code != http.StatusOK {
-		return "退款被拒绝: " + string(body)
+		return "退款被拒绝: " + string(body), true
 	}
-	return "退款结果: " + string(body)
+	return "退款结果: " + string(body), false
 }
 
 // queryProduct 调 product 服务查商品详情（GET /products/{id}）。
-func queryProduct(args map[string]any) string {
+func queryProduct(args map[string]any) (string, bool) {
 	pid := argString(args, "productId")
 	if pid == "" {
-		return "参数 productId 缺失"
+		return "参数 productId 缺失", true
 	}
 	resp, err := httpClient.Get(productURL + "/products/" + pid)
 	if err != nil {
-		return fmt.Sprintf("查询商品失败: %v", err)
+		return fmt.Sprintf("查询商品失败: %v", err), true
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Sprintf("商品服务返回 %d: %s", resp.StatusCode, string(body))
+		return fmt.Sprintf("商品服务返回 %d: %s", resp.StatusCode, string(body)), true
 	}
-	return "商品详情: " + string(body)
+	return "商品详情: " + string(body), false
 }
 
 // searchProducts 调 product 服务搜索商品（GET /products?q=&category=&limit=）。
-func searchProducts(args map[string]any) string {
+func searchProducts(args map[string]any) (string, bool) {
 	vals := url.Values{}
 	if v := argString(args, "q"); v != "" {
 		vals.Set("q", v)
@@ -262,14 +271,14 @@ func searchProducts(args map[string]any) string {
 	}
 	resp, err := httpClient.Get(productURL + "/products?" + vals.Encode())
 	if err != nil {
-		return fmt.Sprintf("搜索商品失败: %v", err)
+		return fmt.Sprintf("搜索商品失败: %v", err), true
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Sprintf("商品服务返回 %d: %s", resp.StatusCode, string(body))
+		return fmt.Sprintf("商品服务返回 %d: %s", resp.StatusCode, string(body)), true
 	}
-	return "商品搜索结果: " + string(body)
+	return "商品搜索结果: " + string(body), false
 }
 
 // argString 兼容 string/float64/json.Number 形态取参数（LLM 可能传数字 1 而非 "1"）。

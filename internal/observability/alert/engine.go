@@ -180,6 +180,10 @@ func (e *Engine) evaluate(ctx context.Context) {
 				continue
 			}
 			count := 0
+			// 状态机更新持锁（R13 审计 C1）：原实现在无锁区间 getState 写 states map
+			// 并更新 st.alert 字段，与 HTTP ListAlerts 的 RLock 并发读写构成 data race
+			//（-race 下并发场景可复现）。循环体纯内存操作，持锁开销可忽略。
+			e.mu.Lock()
 			for _, s := range series {
 				if !rule.Matches(s) {
 					continue
@@ -229,6 +233,7 @@ func (e *Engine) evaluate(ctx context.Context) {
 					st.alert.LastSeen = now
 				}
 			}
+			e.mu.Unlock()
 		}
 	}
 	// 未命中且曾命中（pending/firing）→ resolved；已 resolved 的保留一轮后清理。
@@ -309,7 +314,7 @@ func (e *Engine) persistStates(ctx context.Context, seen map[string]struct{}, ex
 	}
 }
 
-// getState 取或建状态（调用方持锁或单 goroutine evaluate 内使用）。
+// getState 取或建状态（调用方必须持 e.mu——evaluate 规则循环与 ListAlerts 并发）。
 func (e *Engine) getState(key string) *alertState {
 	if st, ok := e.states[key]; ok {
 		return st

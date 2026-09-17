@@ -248,7 +248,7 @@ route registry（`internal/apiroute/`）驱动 mux 注册与 spec 生成；`GET 
 
 ## 遗留债务索引（按需复审）
 
-- **安全**：refresh rotation + logout jti 黑名单、限流多副本 Redis、密钥轮转/过期、各 client CheckRedirect 已收口但新 client 需用 httputil.NewClient。
+- **安全**：refresh rotation + logout jti 黑名单、限流多副本 Redis、密钥轮转/过期、alert webhook SSRF（低危盲 SSRF：POST-only/无回显/不跟随重定向；真防护需 dialer 级连接时 IP 校验防 DNS rebinding，简单黑名单无效——2026-09-07 评估定案不做）、各 client CheckRedirect 已收口但新 client 需用 httputil.NewClient。
 - **持久化/规模**：observability 迁 PG、RLS 生产角色非超级用户生效（dev postgres chart 超级用户 BYPASSRLS，策略已全表覆盖 migration 0043/0044）、ClickHouse 时序计量、审计分页、流水线运行历史分页、configcenter 长连接 watch/灰度下发。~~配额计数回收失衡~~（**已修复 2026-09-04**：dataservice Delete 补回收 + 启动自愈 `recalcUsageIfDrift` 对齐行数计数型资源，reconcile C1 清零）。
 - **发布/部署**：batches 切流实现（D1）、蓝绿模板变体、金丝雀告警联动、promote 跨级跳迁、PVC 数据服务重启保数据（现 STS 删 pod 不删 PVC 可恢复）、异步创建流转 PG 反向同步、真实备份任务。
 - **MaaS**：通道健康检查真实探活、凭证测试 ping、Vendor 改配置后存量通道/绑定自动同步、按用户 scope 列 API Key。

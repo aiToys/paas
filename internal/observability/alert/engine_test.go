@@ -292,3 +292,28 @@ func TestEngineRestore(t *testing.T) {
 		t.Fatalf("恢复后续接计数应直接 firing, got %+v", alerts)
 	}
 }
+
+// TestEvaluateConcurrentListAlertsRace 锁住 R13-C1：evaluate 的状态机更新与
+// HTTP ListAlerts 并发（-race 下运行）。原实现规则命中循环无锁写 states map
+// 与 st.alert 字段，与 ListAlerts 的 RLock 构成 data race。
+func TestEvaluateConcurrentListAlertsRace(t *testing.T) {
+	rules := &fakeRules{rules: []observability.AlertRule{testRule()}}
+	metrics := &fakeMetrics{byTenant: map[string][]observability.MetricSeries{
+		"t-acme": {highCPU(95), highCPU(99)},
+	}}
+	e := NewEngine(rules, metrics, time.Second, nil, nil)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			e.evaluate(acmeCtx())
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		if _, err := e.ListAlerts(acmeCtx(), "", ""); err != nil {
+			t.Fatalf("ListAlerts: %v", err)
+		}
+	}
+	<-done
+}

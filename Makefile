@@ -36,7 +36,7 @@ test-pg: ## 运行 PostgreSQL 集成测试（需先 docker compose up postgres�
 	  ./internal/environment/pg/ ./internal/appconfig/pg/ ./internal/dataservice/pg/ \
 	  ./internal/workload/pg/ ./internal/devops/pg/ ./internal/devops/pipeline/ \
 	  ./internal/governance/pg/ ./internal/configcenter/pg/ ./internal/billing/pg/ \
-	  ./internal/security/pg/ ./internal/maas/pg/
+	  ./internal/security/pg/ ./internal/maas/pg/ ./internal/messaging/pg/
 
 migrate: ## 拉起本地 PG（迁移在 core 启动时自动跑：PAAS_DB_URL 非空即触发）
 	docker compose up -d postgres

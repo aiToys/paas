@@ -182,6 +182,13 @@ func (s *Store) DeleteUser(_ context.Context, tenantID, userID string) error {
 		return fmt.Errorf("用户不存在: %s", userID)
 	}
 	delete(s.users, userID)
+	// 级联吊销该用户的 API Key：LookupAPIKey 不校验用户存在性，
+	// 不删则已删用户的凭证永久有效（与 DeleteTenant 级联语义对称）。
+	for key, k := range s.apiKeys {
+		if k.UserID == userID {
+			delete(s.apiKeys, key)
+		}
+	}
 	return nil
 }
 

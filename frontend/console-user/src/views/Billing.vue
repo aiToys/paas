@@ -9,6 +9,7 @@ const router = useRouter()
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchAuth, apiError } from '@/api'
+import { useSessionStore } from '@/stores/session'
 
 interface UsageLine {
   resource: string; count: number; limit: number; over: boolean
@@ -50,6 +51,15 @@ function currentPeriod(): string {
 
 const quotaEditable = ref(false)
 const quotaDraft = ref<Record<string, number>>({})
+
+// 「调整配额」需后端专用权限 billing:quota-manage（R8-L1 分离 billing:write）；
+// developer 只读配额，按钮不显示（后端仍 403 兜底，前端仅 UX 对齐）。
+// tenant:admin 与 *（super_admin）通行一切权限，与后端 Role.Grants 同语义。
+const session = useSessionStore()
+const canManageQuota = computed(() => {
+  const perms = session.profile?.permissions ?? []
+  return perms.includes('*') || perms.includes('tenant:admin') || perms.includes('billing:quota-manage')
+})
 
 const hasOver = computed(() => view.value?.items.some((i) => i.over) ?? false)
 
@@ -173,7 +183,7 @@ onMounted(load)
         <h2>配额与账单</h2>
         <p class="sub">租户级资源配额 + 用量统计 + 计费账单（多租户商业化根基）</p>
       </div>
-      <el-button @click="startEditQuota" :disabled="!view">调整配额</el-button>
+      <el-button v-if="canManageQuota" @click="startEditQuota" :disabled="!view">调整配额</el-button>
     </div>
 
     <!-- 配额用量 -->

@@ -959,8 +959,15 @@ func (e *Engine) CanaryResume(ctx context.Context, runID string, stageIdx int, p
 		}
 	}
 
+	// 终态落库用脱离取消的 ctx（与 fail() 同款，并发审计 I-5 成功路径补齐）：副作用（基线
+	// 放量/删 canary）已执行，若沿用请求 ctx 且客户端断连（决策 Deploy 可能耗时数十秒，
+	// 超过网关/浏览器超时并不罕见），GetRun/UpdateRun 因 ctx cancel 失败——stage 卡 Running
+	// （认领残留）+ run 卡 Paused 的进程内存活死局：CanaryResume 拒（非 Waiting）、Resume 拒
+	// canary stage、SweepInterrupted 仅启动时跑，只能 Abort 逃生。
+	tid, _ := tenant.TenantFrom(ctx)
+	mctx := tenant.WithTenant(context.WithoutCancel(ctx), tid)
 	e.mu.Lock()
-	run, err = e.Runs.GetRun(ctx, runID) // 重读（锁外期间可能被 Abort 改变；认领已挡并发决策）
+	run, err = e.Runs.GetRun(mctx, runID) // 重读（锁外期间可能被 Abort 改变；认领已挡并发决策）
 	if err != nil || run.Status != RunPaused || stageIdx != run.CurrentStage || run.StageRuns[stageIdx].Status != StageRunning {
 		e.mu.Unlock()
 		if err != nil {
@@ -982,7 +989,7 @@ func (e *Engine) CanaryResume(ctx context.Context, runID string, stageIdx int, p
 		}
 		run.CurrentStage++
 		run.Status = RunRunning
-		_, err = e.Runs.UpdateRun(ctx, run)
+		_, err = e.Runs.UpdateRun(mctx, run)
 		e.mu.Unlock()
 		if err != nil {
 			return err
@@ -996,7 +1003,7 @@ func (e *Engine) CanaryResume(ctx context.Context, runID string, stageIdx int, p
 	run.StageRuns[stageIdx].Error = "金丝雀验证终止（人工）"
 	run.Status = RunFailed
 	run.FinishedAt = time.Now()
-	_, err = e.Runs.UpdateRun(ctx, run)
+	_, err = e.Runs.UpdateRun(mctx, run)
 	e.mu.Unlock()
 	return err
 }

@@ -407,9 +407,17 @@ func (h *Handler) servePublishHistory(w http.ResponseWriter, r *http.Request, ns
 // 发现端点是数据面消费契约（服务进程凭 API Key 拉运行时配置，与 /dp/* 同类低门槛）：
 // 只要求已认证（mux 层 auth 强制登录 + 租户注入），不要求 governance:read——
 // 服务级 Key 往往只有 model:infer 等窄权限，卡 read 会让配置热更新消费全断（R1 审计 H1/M3）。
+// merge 语义与应用维度/按应用名发现同款（shared 引用层 + 可选 lane 覆盖并入）：
+// 管理页「当前生效」必须等于运行时真相，否则排障视图失真（R6 审计 I-1）。
 func (h *Handler) servePublished(w http.ResponseWriter, r *http.Request, nsID string) {
 	if r.Method != http.MethodGet {
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	// 未知/跨租户 ns 与「未发布」统一 {"published":false}，不泄漏存在性。
+	ns, err := h.repo.GetNamespace(r.Context(), nsID)
+	if err != nil {
+		writeUnpublishedJSON(w)
 		return
 	}
 	active, ok, err := h.repo.ActivePublish(r.Context(), nsID)
@@ -421,9 +429,40 @@ func (h *Handler) servePublished(w http.ResponseWriter, r *http.Request, nsID st
 		writeUnpublishedJSON(w)
 		return
 	}
-	// 发现协议：保持 {published,version,snapshot,publishId} shape（前端 published.value = await json() 直取），
-	// 仅经 httputil 统一编码（Content-Type 显式）。非标准 {data:T}，因属数据面客户端发现契约。
-	writePublishedJSON(w, active, true)
+	// shared 引用层（shared ns 无引用则空集，merge 无影响——统一路径处理）。
+	shared, err := sharedLayersRepo(r.Context(), h.repo, ns.ID)
+	if err != nil {
+		httputil.WriteInternalError(w, err)
+		return
+	}
+	// lane 覆盖仅应用派生 ns 有语义（与按名发现同规则：lane=default 即基线不取覆盖）。
+	var ovs []LaneOverride
+	if lane := r.URL.Query().Get("lane"); lane != "" && lane != "default" && ns.AppID != "" {
+		ovs, err = listOverridesResolvedRepo(r.Context(), h.repo, ns.AppID, ns.EnvID, lane)
+		if err != nil {
+			httputil.WriteInternalError(w, err)
+			return
+		}
+	}
+	if len(shared) == 0 && len(ovs) == 0 {
+		// 发现协议：保持 {published,version,snapshot,publishId} shape（前端 published.value = await json() 直取），
+		// 仅经 httputil 统一编码（Content-Type 显式）。非标准 {data:T}，因属数据面客户端发现契约。
+		writePublishedJSON(w, active, true)
+		return
+	}
+	body := map[string]interface{}{
+		"published": true,
+		"version":   active.Version,
+		"snapshot":  MergeSnapshot3(shared, active.Snapshot, ovs),
+		"publishId": active.ID,
+	}
+	if len(ovs) > 0 {
+		body["overrideHash"] = OverrideHash(ovs)
+	}
+	if len(shared) > 0 {
+		body["sharedHash"] = SharedHash(shared)
+	}
+	httputil.WriteJSON(w, http.StatusOK, body)
 }
 
 // serveAppPublished GET /api/configcenter/apps/{appName}/published 按应用名发现（active 快照）。

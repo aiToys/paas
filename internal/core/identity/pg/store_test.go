@@ -105,3 +105,29 @@ func TestPGLookupAPIKey(t *testing.T) {
 		t.Fatal("无效 Key 应报错")
 	}
 }
+
+// TestPGDeleteUserRevokesAPIKeys 验证删除用户级联吊销其 API Key：
+// api_keys.user_id 无 FK（seed extraKey 语义），靠 DeleteUser 显式级联，
+// 不级联则已删用户的凭证永久有效（LookupAPIKey 不校验用户存在性）。
+func TestPGDeleteUserRevokesAPIKeys(t *testing.T) {
+	db := newTestDB(t)
+	s := NewStore(db)
+	ctx := context.Background()
+	_ = s.CreateTenant(ctx, identity.Tenant{ID: "t-u", Name: "U", CreatedAt: time.Now()})
+	if err := s.CreateUser(ctx, identity.User{ID: "u-del", TenantID: "t-u", Name: "del-me", Status: identity.StatusActive}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	if err := s.CreateAPIKey(ctx, identity.APIKey{
+		ID: "k-del", TenantID: "t-u", UserID: "u-del",
+		Roles: []string{"developer"}, Key: "sk-del", CreatedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+
+	if err := s.DeleteUser(ctx, "t-u", "u-del"); err != nil {
+		t.Fatalf("DeleteUser: %v", err)
+	}
+	if _, err := s.LookupAPIKey(ctx, "sk-del"); err == nil {
+		t.Fatal("删除用户后其 API Key 必须失效（凭证随身份消亡）")
+	}
+}

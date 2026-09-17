@@ -5,6 +5,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -31,10 +32,15 @@ func WithImageRegistry(registry string) StoreOpt {
 }
 
 // NewStore 创建仓储并 seed 示例工作负载（真实 nginx 业务服务镜像）。
+// PAAS_DISABLE_DEMO_SEED=true（chart seed.demo=false）时跳过演示 seed（与 application memory
+// 同款门控）：演示 workload 的 AppID 指向演示应用，生产灌入成孤儿引用 + K8s 投影拉起 Deployment。
 func NewStore(opts ...StoreOpt) *Store {
 	s := &Store{workloads: map[string]workload.Workload{}}
 	for _, o := range opts {
 		o(s)
+	}
+	if os.Getenv("PAAS_DISABLE_DEMO_SEED") == "true" {
+		return s
 	}
 	for _, w := range seed(s.imageRegistry) {
 		s.workloads[w.ID] = w

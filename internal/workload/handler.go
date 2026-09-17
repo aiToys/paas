@@ -13,6 +13,8 @@ import (
 	"github.com/aitoys/paas/internal/core/application"
 	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/httputil"
+	adminutil "github.com/aitoys/paas/internal/web/admin"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -49,6 +51,23 @@ type Handler struct {
 	statusReader StatusReader
 	// Guard 应用级权限 enforcement（受限应用工作负载写需成员角色）；nil 跳过。
 	Guard *application.AppGuard
+	// Audit 写操作审计（Create/Delete 高危操作：创建消耗集群资源、删除即下线服务）；nil 跳过。
+	Audit adminutil.AuditRecorder
+	// ActorFn 从请求取操作者（审计用）；nil 则空。
+	ActorFn func(r *http.Request) string
+}
+
+// recordAudit best-effort 记审计（错误不影响主流程；租户从 ctx 取，空归 platform 由 adapter 兜底）。
+func (h *Handler) recordAudit(r *http.Request, action, resourceID, detail string) {
+	if h.Audit == nil {
+		return
+	}
+	actor := ""
+	if h.ActorFn != nil {
+		actor = h.ActorFn(r)
+	}
+	tid, _ := tenant.TenantFrom(r.Context())
+	_ = h.Audit.Record(r.Context(), tid, actor, action, "workload", resourceID, detail)
 }
 
 // NewHandler 创建工作负载 handler。可选 envResolver 注入启用生产写校验。
@@ -82,6 +101,11 @@ func WithStatusReader(r StatusReader) HandlerOpt {
 // WithAppGuard 注入应用级权限 enforcement（受限应用工作负载写需成员角色）。
 func WithAppGuard(g *application.AppGuard) HandlerOpt {
 	return func(h *Handler) { h.Guard = g }
+}
+
+// WithAudit 注入写操作审计 recorder + actor 解析（Create/Delete 记审计）。
+func WithAudit(a adminutil.AuditRecorder, actor func(r *http.Request) string) HandlerOpt {
+	return func(h *Handler) { h.Audit = a; h.ActorFn = actor }
 }
 
 func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) bool {
@@ -251,6 +275,7 @@ func (h *Handler) serveApp(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// 统一 {data:T} 契约（与其他端点一致；原裸对象致 fetchJSON 解包失败）。
+		h.recordAudit(r, "workload_create", w0.ID, "app="+w0.AppID+" env="+w0.EnvID+" type="+w0.Type+" image="+w0.Image)
 		httputil.WriteDataCreated(w, w0)
 		return
 	}
@@ -476,6 +501,7 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 		if h.QuotaCheck != nil {
 			_ = h.QuotaCheck(r.Context(), -1)
 		}
+		h.recordAudit(r, "workload_delete", id, "app="+existing.AppID+" env="+existing.EnvID+" lane="+existing.LaneID)
 		httputil.WriteData(w, map[string]string{"deleted": id})
 		return
 	}

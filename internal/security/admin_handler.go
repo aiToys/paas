@@ -114,7 +114,8 @@ func (h *AdminHandler) recordAudit(r *http.Request, tenantID, action, resourceID
 }
 
 // findByID 跨租户取单条密钥（ListAllSecrets filter by id）。
-// Repository.GetSecret 强制 ctx tenant，admin 跨租户路径需绕过。返回明文（外部 Masked）。
+// Repository.GetSecret 强制 ctx tenant，admin 跨租户路径需绕过。
+// ListAllSecrets 返回即掩码（Value 为固定掩码占位，明文仅 Resolve 平台级路径）。
 func (h *AdminHandler) findByID(ctx context.Context, id string) (Secret, error) {
 	list, err := h.repo.ListAllSecrets(ctx)
 	if err != nil {

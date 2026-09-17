@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import type { Product } from './types'
 import { fmtPrice } from './format'
 import { lane, setLane, laneFetch, detectEnv, currentLane } from './lane'
@@ -12,8 +12,19 @@ import AdminPanel from './components/AdminPanel.vue'
 
 // 环境推断（spec §10 三套域名）：hostname 定环境，红生产/绿测试/蓝泳道（spec §11）
 const env = detectEnv(window.location.hostname)
-// 商店/运营视图切换（AdminPanel：订单管理 + 经营统计 + 商品上新）
-const view = ref<'shop' | 'admin'>('shop')
+// 商店/运营视图切换（AdminPanel：订单管理 + 经营统计 + 商品上新）。
+// 视图进 URL hash（#/admin）：刷新/分享链接不丢视图——此前纯内存 ref，运营视图刷新即回商店页。
+const ADMIN_HASH = '#/admin'
+const view = ref<'shop' | 'admin'>(location.hash === ADMIN_HASH ? 'admin' : 'shop')
+function toggleView() {
+  // 赋值 location.hash 天然入历史栈（前进/后退可用）并触发 hashchange → view 同步
+  location.hash = view.value === 'shop' ? ADMIN_HASH : '#/'
+}
+function onHashChange() {
+  view.value = location.hash === ADMIN_HASH ? 'admin' : 'shop'
+}
+addEventListener('hashchange', onHashChange)
+onUnmounted(() => removeEventListener('hashchange', onHashChange))
 
 const products = ref<Product[]>([])
 const recommends = ref<Product[]>([])
@@ -110,7 +121,7 @@ onMounted(() => {
         <span class="served-svc">{{ servedBy }}</span>
       </div>
       <NotificationCenter />
-      <button class="chat-btn" @click="view = view === 'shop' ? 'admin' : 'shop'">
+      <button class="chat-btn" @click="toggleView()">
         {{ view === 'shop' ? '运营视图' : '返回商店' }}
       </button>
       <button class="chat-btn" @click="chatRef?.open()">💬 智能客服</button>

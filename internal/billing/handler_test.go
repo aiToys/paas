@@ -148,6 +148,31 @@ func TestHandlerForbidden(t *testing.T) {
 	}
 }
 
+// TestQuotaPutRequiresQuotaManage 锁住 R8-L1：developer 持 billing:write（可生成/支付账单）
+// 但不持 billing:quota-manage，PUT 配额必须 403——否则可自扩配额绕过 CheckAndInc 的
+// 429 资源创建拦截（application/workload/dataservice 全部闸门失效）。
+func TestQuotaPutRequiresQuotaManage(t *testing.T) {
+	h := billing.NewHandler(billingmemory.NewStore())
+	// 模拟 developer：billing:write 放行，quota-manage 拒绝。
+	h.Authorize = func(_ *http.Request, perm string) bool { return perm == billing.PermBillingWrite }
+
+	// 账单写操作（billing:write 域）不受影响
+	r := newReq(http.MethodPost, "/api/billing/records/generate?period=2026-07", "", "t-acme")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("developer 生成账单应 201，got %d body=%s", w.Code, w.Body.String())
+	}
+
+	// PUT 配额 → 403（越权拦截）
+	r2 := newReq(http.MethodPut, "/api/billing/quota", `{"limits":{"gpu":16}}`, "t-acme")
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, r2)
+	if w2.Code != http.StatusForbidden {
+		t.Fatalf("developer PUT 配额应 403，got %d body=%s", w2.Code, w2.Body.String())
+	}
+}
+
 // TestHandlerTenantIsolation 验证账单列表租户隔离。
 func TestHandlerTenantIsolation(t *testing.T) {
 	h := billing.NewHandler(billingmemory.NewStore())

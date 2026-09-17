@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"sync"
 	"time"
@@ -18,8 +19,13 @@ type Store struct {
 }
 
 // NewStore 创建仓储并 seed 三环境（acme/globex 各见自己的，seed 按租户分）。
+// PAAS_DISABLE_DEMO_SEED=true 跳过演示环境 seed（演示租户环境属 demo 数据，
+// 与 application/workload memory 同款门控）。
 func NewStore() *Store {
 	s := &Store{envs: map[string]environment.Environment{}}
+	if os.Getenv("PAAS_DISABLE_DEMO_SEED") == "true" {
+		return s
+	}
 	for _, e := range seed() {
 		s.envs[e.ID] = e
 	}

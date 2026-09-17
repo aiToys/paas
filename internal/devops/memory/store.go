@@ -268,6 +268,12 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) (devops.B
 	if b.Branch == "" {
 		b.Branch = repo.Branch
 	}
+	// 请求级 branch 覆盖同源校验（与 CodeRepo.Validate 一致）：Branch 直进 builder 的
+	// `git clone --branch` argv，恶意值（-- 前缀/特殊字符）须在入口拒（覆盖 pipeline
+	// engine 经 buildBridge 直触发的路径，与 handler 校验双保险）。
+	if err := devops.ValidateBranch(b.Branch); err != nil {
+		return devops.BuildRun{}, err
+	}
 	if b.Commit == "" {
 		b.Commit = mockCommit()
 	}

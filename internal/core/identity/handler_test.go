@@ -134,6 +134,12 @@ func (f *fakeRepo) DeleteUser(_ context.Context, _, userID string) error {
 		return errNotFound("用户")
 	}
 	delete(f.users, userID)
+	// 与 memory/pg 同源：级联吊销该用户的 API Key（凭证随身份消亡）。
+	for id, k := range f.keys {
+		if k.UserID == userID {
+			delete(f.keys, id)
+		}
+	}
 	return nil
 }
 func (f *fakeRepo) ListAPIKeys(_ context.Context, tenantID string) ([]APIKey, error) {

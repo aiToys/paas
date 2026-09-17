@@ -105,8 +105,13 @@ func (r CodeRepo) Validate() error {
 	}
 	if r.Source == RepoSourceInternal {
 		// 内置仓库：GitURL 由 Gitea 建仓后回填，校验时可不要求；Branch 必填（默认分支）。
+		// 分支字符集与 external 同源校验（防 git argv flag 注入）：internal 分支同样进
+		// builder 的 `git clone --branch` argv，只校验非空留有注入面（审计 2026-09-07）。
 		if r.Branch == "" {
 			return errInvalid("branch")
+		}
+		if err := ValidateBranch(r.Branch); err != nil {
+			return err
 		}
 		return nil
 	}
@@ -120,7 +125,7 @@ func (r CodeRepo) Validate() error {
 	if err := validateExternalGitURL(r.GitURL); err != nil {
 		return err
 	}
-	if err := validateBranch(r.Branch); err != nil {
+	if err := ValidateBranch(r.Branch); err != nil {
 		return err
 	}
 	return nil
@@ -163,9 +168,11 @@ func isMetadataHost(host string) bool {
 	return false
 }
 
-// validateBranch 校验分支名，防 git argv flag 注入（Branch 作 --branch 传入）。
+// ValidateBranch 校验分支名，防 git argv flag 注入（Branch 作 --branch 传入）。
 // 仅允许字母/数字/._- 和路径分隔（/），拒绝 -- 前缀与 shell 元字符。
-func validateBranch(b string) error {
+// 导出供 memory/pg store 的 CreateBuildRun 复用（BuildRun.Branch 是请求级覆盖，
+// 与 repo.Branch 同进 builder 的 git argv，须同源校验——覆盖 pipeline engine 直触发路径）。
+func ValidateBranch(b string) error {
 	if b == "" || strings.HasPrefix(b, "-") {
 		return errInvalid("branch")
 	}

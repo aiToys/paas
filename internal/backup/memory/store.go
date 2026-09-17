@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -34,6 +35,13 @@ func (s *Store) List(_ context.Context, tenantID, resourceID string) ([]backup.B
 			out = append(out, b)
 		}
 	}
+	// 与 PG 实现同序（created_at DESC, id），map 遍历序随机否则前端列表顺序不稳定。
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out, nil
 }
 

@@ -1,7 +1,8 @@
 // Package pg 提供 security.Repository 的 PostgreSQL 实现。
 // 显式 WHERE tenant_id 多租户过滤（与内存 1:1）；平台级 Secret TenantID 写 NULL，
 // ListSecrets 用 `scope='tenant' AND tenant_id=$1 OR scope='platform'` 全租户可见平台资产。
-// Secret 值后端明文存储，List/Get/Create 返回掩码（不泄漏长度/内容）；
+// Value 落库前经静态加密（装配层 NewEncryptedRepo 装饰器 + seed 路径手动加密，格式 enc:v1:，
+// 见 internal/crypto）；List/Get/Create 返回掩码（不泄漏长度/内容）；
 // 仅 Resolve 平台级路径返明文（供第三方供应商通道运行时解析）。
 package pg
 
@@ -11,6 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -135,7 +137,7 @@ func (s *Store) GetSecret(ctx context.Context, id string) (security.Secret, erro
 	return sec.Masked(), nil
 }
 
-// CreateSecret 明文存储，返回掩码。tenant 级以 ctx 租户写 tenant_id；
+// CreateSecret 写入（装配层装饰器已加密 Value），返回掩码。tenant 级以 ctx 租户写 tenant_id；
 // platform 级 tenant_id 写 NULL（全租户共享）。唯一冲突（两个 partial unique index 之一）
 // → 与内存同款「已存在」消息。
 func (s *Store) CreateSecret(ctx context.Context, sec security.Secret) (security.Secret, error) {
@@ -146,6 +148,9 @@ func (s *Store) CreateSecret(ctx context.Context, sec security.Secret) (security
 		_, _ = rand.Read(b)
 		sec.ID = "sec-" + hex.EncodeToString(b)
 	}
+	// UpdatedAt 服务端强制（R9 审计 S2）：原样信任请求体会把 zero time（0001-01-01）落库
+	//（memory 版一直强制 time.Now()，双实现语义分叉）。
+	sec.UpdatedAt = time.Now()
 	tid, err := storagepg.TenantOrErr(ctx)
 	if err != nil {
 		return security.Secret{}, err
@@ -339,8 +344,14 @@ func (s *Store) SeedIfEmpty(ctx context.Context) error {
 }
 
 // seedAll 灌入全部 seed（示例密钥 + 平台级凭证 + 审计），仅表空时调。
+// PAAS_DISABLE_DEMO_SEED=true（生产）跳过演示密钥/演示审计（与 memory seed 同款门控）；
+// 平台级凭证不受门控（运行时必需）。
 func (s *Store) seedAll(ctx context.Context) error {
+	demoDisabled := os.Getenv("PAAS_DISABLE_DEMO_SEED") == "true"
 	for _, sec := range secmemory.SeedSecrets() {
+		if demoDisabled && sec.Scope != security.ScopePlatform {
+			continue
+		}
 		// 平台级写 NULL tenant_id（与 CreateSecret 一致，全租户可见）。
 		var tenantArg any
 		if sec.Scope == security.ScopePlatform {
@@ -363,6 +374,9 @@ func (s *Store) seedAll(ctx context.Context) error {
 		}
 	}
 	for _, a := range secmemory.SeedAuditLogs() {
+		if demoDisabled {
+			break // 演示审计随演示密钥一起门控
+		}
 		if _, err := s.db.Pool().Exec(ctx,
 			`INSERT INTO audit_logs (id, tenant_id, actor, action, resource_type, resource_id, detail, at)
 			 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)

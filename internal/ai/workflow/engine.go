@@ -75,7 +75,7 @@ func (e *Engine) goAdvance(ctx context.Context, def WorkflowDef, run WorkflowRun
 	go func() {
 		defer func() {
 			if p := recover(); p != nil {
-				log.Printf("[workflow] advance run %s panic: %v\n%s", run.ID, p, debug.Stack())
+				log.Printf("[workflow] advance run %s panic: %v\n%s", run.ID, p, debug.Stack()) //nolint:gosec // G706 误报：日志格式化输出，非注入
 				// 脱离取消的 ctx 补偿落库（进程 SIGTERM 窗口内也尽力收口终态）。
 				markCtx := tenant.WithTenant(context.WithoutCancel(ctx), tid)
 				fresh, err := e.repo.GetRun(markCtx, run.ID)
@@ -351,14 +351,11 @@ func (e *Engine) Approve(ctx context.Context, runID, nodeID string) error {
 	if run.Status != StatusPaused {
 		return ErrRunNotPaused
 	}
-	// 校验 nodeID 是最后一个 paused 节点（防历史节点 ID 混淆）
+	// 校验 nodeID 是当前等待中的 approve 节点：run 已 paused + nodeID 是最后节点即充分
+	//（防历史节点 ID 混淆）。不做同 NodeID 历史扫描——condition 环内 approve 二次暂停时，
+	// 首次记录已 succeeded，历史扫描会误杀合法续批（只能 Abort 死局）。（R18 审计 M1）
 	if len(run.NodeRuns) == 0 || run.NodeRuns[len(run.NodeRuns)-1].NodeID != nodeID {
 		return ErrNodeNotApprove
-	}
-	for _, nr := range run.NodeRuns {
-		if nr.NodeID == nodeID && nr.Status != StatusPaused {
-			return ErrNodeNotApprove
-		}
 	}
 	run.NodeRuns[len(run.NodeRuns)-1].Status = StatusSucceeded
 	run.NodeRuns[len(run.NodeRuns)-1].FinishedAt = time.Now()

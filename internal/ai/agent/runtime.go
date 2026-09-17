@@ -139,8 +139,8 @@ func (r *Runtime) buildSystem(ctx context.Context, a Agent, msgs []provider.Mess
 }
 
 // buildTools 从 agent 引用的工具实体构建 LLM 工具定义 + 调用器。
-// 仅 MCP 类型可调用：经 ListTools 取真实 JSON Schema 参数；按工具实体 Name 匹配 MCP 工具名
-// （匹配失败取首个），invoker 调 tools/call。http/builtin 暂不可调用（invoke 仅 mcp，留后续）。
+// 仅 MCP 类型可调用：经 ListTools 取真实 JSON Schema 参数；按工具实体 Name 精确匹配 MCP 工具名
+// （匹配失败保持实体名直调，MCP 端报 unknown tool），invoker 调 tools/call。http/builtin 暂不可调用（invoke 仅 mcp，留后续）。
 func (r *Runtime) buildTools(ctx context.Context, a Agent) ([]provider.ToolDef, map[string]toolInvoker) {
 	if r.tools == nil || len(a.Tools) == 0 {
 		return nil, nil
@@ -159,13 +159,16 @@ func (r *Runtime) buildTools(ctx context.Context, a Agent) ([]provider.ToolDef, 
 		}
 		cli := mcp.GetClient(serverURL, apiKey)
 		// Initialize + ListTools 取真实 schema（失败则降级 permissive schema，仍可调）。
+		// 按工具实体名精确匹配 MCP 工具名；匹配失败保持实体名直调（MCP 端报 unknown tool，
+		// 调用方可见真实错误）。（R11 审计 C1：原条件 `mt.Name == t.Name || mcpName == t.Name`
+		// 第二项在首轮恒真——任何实体都被改写为调 MCP server 的**第一个**工具，
+		// 多工具 server 下全部串调 tools[0]，schema 也错位。）
 		mcpName := t.Name
 		schema := map[string]any{"type": "object", "properties": map[string]any{}}
 		if err := cli.Initialize(ctx); err == nil {
 			if tools, err := cli.ListTools(ctx); err == nil {
 				for _, mt := range tools {
-					if mt.Name == t.Name || mcpName == t.Name {
-						mcpName = mt.Name
+					if mt.Name == t.Name {
 						if mt.InputSchema != nil {
 							schema = mt.InputSchema
 						}

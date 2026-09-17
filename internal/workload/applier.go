@@ -89,6 +89,24 @@ func (r *ApplyRepo) SetResources(ctx context.Context, id string, res ResourceSpe
 	return nil
 }
 
+// SetDomain 设置对外域名并投影数据面（reconciler 据 CRD spec.domain 更新/回收 Ingress）。
+// 缺投影会让 canary 独立验证域名只写 PG、CRD spec.domain 不变——applyIngress 跳过，
+// 验证入口 Ingress 永远不建（与 SetResources 同款模式）。
+func (r *ApplyRepo) SetDomain(ctx context.Context, id string, domain string) error {
+	// r.Repository.SetDomain 显式选择嵌入字段：本方法即 SetDomain 装饰器，
+	// 简写 r.SetDomain 会无限自递归（QF1008 建议在此处不适用）。
+	if err := r.Repository.SetDomain(ctx, id, domain); err != nil { //nolint:staticcheck // QF1008：装饰器须显式走内层
+		return err
+	}
+	if r.applier != nil {
+		if w, err := r.Repository.Get(ctx, id); err == nil { //nolint:staticcheck // QF1008:装饰器显式转发嵌入实现
+			w = withTenant(ctx, w)
+			r.applyLog("set-domain", w.ID, r.applier.Apply(ctx, w))
+		}
+	}
+	return nil
+}
+
 // UpdateSchedule 修改 cron schedule 并投影数据面（reconciler 据 CRD spec.schedule 更新 K8s CronJob）。
 func (r *ApplyRepo) UpdateSchedule(ctx context.Context, id, schedule string) (Workload, error) {
 	saved, err := r.Repository.UpdateSchedule(ctx, id, schedule)

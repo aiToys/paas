@@ -2,6 +2,7 @@ package workload
 
 import (
 	"context"
+	"fmt"
 	"testing"
 )
 
@@ -11,13 +12,23 @@ type fakeRepo struct {
 	updated   []string
 	deleted   []string
 	createErr error
+	// stored 模拟已存行（可选）：非 nil 时 Get/SetDomain 按行读写，供投影类覆写测试。
+	stored map[string]Workload
 }
 
 func (f *fakeRepo) List(ctx context.Context, envID, appID, laneID, wtype, service string) ([]Workload, error) {
 	return nil, nil
 }
-func (f *fakeRepo) ListAll(ctx context.Context) ([]Workload, error)      { return nil, nil }
-func (f *fakeRepo) Get(ctx context.Context, id string) (Workload, error) { return Workload{}, nil }
+func (f *fakeRepo) ListAll(ctx context.Context) ([]Workload, error) { return nil, nil }
+func (f *fakeRepo) Get(ctx context.Context, id string) (Workload, error) {
+	if f.stored != nil {
+		if w, ok := f.stored[id]; ok {
+			return w, nil
+		}
+		return Workload{}, fmt.Errorf("工作负载不存在: %s", id)
+	}
+	return Workload{}, nil
+}
 func (f *fakeRepo) Create(ctx context.Context, w Workload) error {
 	if f.createErr != nil {
 		return f.createErr
@@ -35,9 +46,19 @@ func (f *fakeRepo) UpdateImage(ctx context.Context, id, image, imageRef string) 
 func (f *fakeRepo) UpdateSchedule(ctx context.Context, id, schedule string) (Workload, error) {
 	return Workload{ID: id, Schedule: schedule}, nil
 }
-func (f *fakeRepo) SetServiceID(ctx context.Context, id, serviceID string) error        { return nil }
+func (f *fakeRepo) SetServiceID(ctx context.Context, id string, serviceID string) error { return nil }
 func (f *fakeRepo) SetResources(ctx context.Context, id string, res ResourceSpec) error { return nil }
-func (f *fakeRepo) SetDomain(ctx context.Context, id, domain string) error              { return nil }
+func (f *fakeRepo) SetDomain(ctx context.Context, id string, domain string) error {
+	if f.stored != nil {
+		if w, ok := f.stored[id]; ok {
+			w.Domain = domain
+			f.stored[id] = w
+			return nil
+		}
+		return fmt.Errorf("工作负载不存在: %s", id)
+	}
+	return nil
+}
 func (f *fakeRepo) Delete(ctx context.Context, id string) error {
 	f.deleted = append(f.deleted, id)
 	return nil
@@ -121,3 +142,23 @@ type someErr struct{}
 
 func (someErr) Error() string { return "some error" }
 func newSomeErr() error       { return someErr{} }
+
+func TestApplyRepoSetDomainInvokesApplier(t *testing.T) {
+	// canary 验证域名经 SetDomain 写回：必须投影 CRD（reconciler 据 spec.domain 建 Ingress）。
+	inner := &fakeRepo{stored: map[string]Workload{"wl-5": {ID: "wl-5", Name: "n", Image: "img"}}}
+	ap := &fakeApplier{}
+	repo := NewApplyRepo(inner, ap)
+	if err := repo.SetDomain(context.Background(), "wl-5", "canary.example.com"); err != nil {
+		t.Fatalf("SetDomain 失败: %v", err)
+	}
+	if len(ap.applied) != 1 || ap.applied[0].Domain != "canary.example.com" {
+		t.Fatalf("applier.Apply 应带新域名投影: %+v", ap.applied)
+	}
+	// 不存在的 workload：inner 报错，不投影。
+	if err := repo.SetDomain(context.Background(), "wl-none", "x.example.com"); err == nil {
+		t.Fatalf("不存在 workload 应报错")
+	}
+	if len(ap.applied) != 1 {
+		t.Fatalf("失败路径不应投影")
+	}
+}

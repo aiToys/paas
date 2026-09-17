@@ -84,6 +84,11 @@ func TestBackupCRUD(t *testing.T) {
 		t.Fatalf("List 过滤 ds-1 应仅 bk-t1: %v %+v", err, only)
 	}
 
+	// 重复 Create 同 ID 返「备份已存在」（R8 审计 B2：原 ON CONFLICT DO NOTHING 静默假成功）
+	if err := s.Create(ctx, sampleBackup("bk-t2", "t-acme", "ds-2")); err == nil {
+		t.Fatalf("重复 Create 应报已存在")
+	}
+
 	// Delete 后 Get 报不存在
 	if err := s.Delete(ctx, "t-acme", "bk-t1"); err != nil {
 		t.Fatalf("Delete: %v", err)

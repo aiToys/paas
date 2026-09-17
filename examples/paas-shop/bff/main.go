@@ -6,7 +6,9 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -118,6 +120,9 @@ func buildMuxWithStats(events *eventRing, stats *statsAgg) *http.ServeMux {
 	// 订单代理：/api/orders（列表/下单）与 /api/orders/{id}[/{action}]（查询/动作）统一转发。
 	mux.HandleFunc("/api/orders", proxyOrder)
 	mux.HandleFunc("/api/orders/", proxyOrder)
+	// 一键退款审批（spec §6 引导层）：代调平台 workflow API 触发 shop-refund-approval，
+	// 用户不再手写 JSON，只剩「到平台控制台点审批」一步。
+	mux.HandleFunc("/api/refunds", handleRefundRequest)
 	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSONStats(w, stats.snapshot())
 	})
@@ -151,6 +156,108 @@ func proxyOrder(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Paas-Bff", observ.ServiceFingerprint())
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+// refundWorkflowName 退款审批工作流名（平台 Tool/Workflow 按 name 匹配的同款约定）。
+const refundWorkflowName = "shop-refund-approval"
+
+// handleRefundRequest 一键发起退款审批：代调平台 API 触发 shop-refund-approval（spec §6）。
+// 前端只发 orderId；平台地址/凭证经 appconfig env 注入（PAAS_PLATFORM_URL/PAAS_PLATFORM_TOKEN）。
+func handleRefundRequest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	base, tok := os.Getenv("PAAS_PLATFORM_URL"), os.Getenv("PAAS_PLATFORM_TOKEN")
+	if base == "" || tok == "" {
+		http.Error(w, "退款审批未接入平台（PAAS_PLATFORM_URL/TOKEN 未配置）", http.StatusServiceUnavailable)
+		return
+	}
+	var body struct {
+		OrderID string `json:"orderId"`
+		Reason  string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.OrderID == "" {
+		http.Error(w, "orderId 必填", http.StatusBadRequest)
+		return
+	}
+	if body.Reason == "" {
+		body.Reason = "用户申请退款（运营视图一键发起）"
+	}
+	wfID, err := findRefundWorkflow(r.Context(), base, tok)
+	if err != nil {
+		slog.Error("查找退款工作流失败", "err", err)
+		http.Error(w, "退款工作流不可用", http.StatusServiceUnavailable)
+		return
+	}
+	payload, _ := json.Marshal(map[string]string{"orderId": body.OrderID, "reason": body.Reason})
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, base+"/api/workflows/"+wfID+"/runs", strings.NewReader(string(payload)))
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		slog.Error("触发退款工作流失败", "err", err)
+		http.Error(w, "触发失败", http.StatusServiceUnavailable)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		http.Error(w, "平台拒绝："+string(msg), resp.StatusCode)
+		return
+	}
+	var run struct {
+		Data struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"data"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&run)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"data": map[string]string{
+			"runId":       run.Data.ID,
+			"status":      run.Data.Status,
+			"workflowId":  wfID,
+			"hint":        "已发起，请到平台控制台「AI 服务 → 工作流 shop-refund-approval」运行详情点「通过」",
+		},
+	})
+}
+
+// findRefundWorkflow 按 name 找退款审批工作流 ID（demo 规模全量拉取本地过滤即可）。
+func findRefundWorkflow(ctx context.Context, base, tok string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/api/workflows", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("list workflows: HTTP %d", resp.StatusCode)
+	}
+	var list struct {
+		Data []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return "", err
+	}
+	for _, wf := range list.Data {
+		if wf.Name == refundWorkflowName {
+			return wf.ID, nil
+		}
+	}
+	return "", fmt.Errorf("workflow %s 不存在", refundWorkflowName)
 }
 
 func writeJSONStats(w http.ResponseWriter, s statsSnapshot) {

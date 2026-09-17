@@ -63,14 +63,19 @@ func (s *Store) Get(ctx context.Context, tenantID, id string) (backup.Backup, er
 	return b, nil
 }
 
-// Create 写入备份记录（幂等拒绝同 ID）。
+// Create 写入备份记录；同 ID 已存在返「备份已存在」（与内存版同语义，handler 映射 409）。
+// ON CONFLICT DO NOTHING 拦截原生 23505 错误（WriteServiceError 会脱敏成 500），
+// 再以 RowsAffected 区分（R8 审计 B2：原实现静默返回 nil，重复创建假成功且双实现语义分叉）。
 func (s *Store) Create(ctx context.Context, b backup.Backup) error {
-	_, err := s.db.Pool().Exec(ctx,
+	tag, err := s.db.Pool().Exec(ctx,
 		`INSERT INTO backups (`+bkCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7)
-		 ON CONFLICT (id) DO NOTHING`, //nolint:staticcheck // 命中冲突时受影响行数=0，调用方以 Get 校验
+		 ON CONFLICT (id) DO NOTHING`,
 		b.ID, b.TenantID, b.ResourceID, b.Type, b.Status, b.SizeMB, b.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("create backup: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("备份已存在: %s", b.ID)
 	}
 	return nil
 }

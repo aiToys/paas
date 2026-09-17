@@ -87,6 +87,29 @@ func TestBuiltinRoleAdminHasProdWrite(t *testing.T) {
 	assert.True(t, r.Grants("prod:write"), "admin 应有生产写权限")
 }
 
+// TestDeleteUserRevokesAPIKeys 验证删除用户级联吊销其 API Key：
+// LookupAPIKey 不校验用户存在性，不级联则已删用户的凭证永久有效（安全回归防护）。
+func TestDeleteUserRevokesAPIKeys(t *testing.T) {
+	s := NewStore()
+	require.NoError(t, s.CreateTenant(context.Background(), identity.Tenant{ID: "t1", Name: "a", CreatedAt: time.Now()}))
+	require.NoError(t, s.CreateUser(context.Background(), identity.User{ID: "u1", TenantID: "t1", Name: "alice"}))
+	require.NoError(t, s.CreateAPIKey(context.Background(), identity.APIKey{
+		ID: "k1", TenantID: "t1", UserID: "u1", Roles: []string{"developer"}, Key: "sk-alice",
+	}))
+	// 他人 Key 不应被误删。
+	require.NoError(t, s.CreateAPIKey(context.Background(), identity.APIKey{
+		ID: "k2", TenantID: "t1", UserID: "u2", Roles: []string{"viewer"}, Key: "sk-bob",
+	}))
+
+	require.NoError(t, s.DeleteUser(context.Background(), "t1", "u1"))
+
+	_, err := s.LookupAPIKey(context.Background(), "sk-alice")
+	assert.Error(t, err, "删除用户后其 API Key 必须失效（凭证随身份消亡）")
+	got, err := s.LookupAPIKey(context.Background(), "sk-bob")
+	require.NoError(t, err)
+	assert.Equal(t, "u2", got.UserID, "不应误删其他用户的 Key")
+}
+
 func TestGetUserByNameAndIsolation(t *testing.T) {
 	s := NewStore()
 	require.NoError(t, s.CreateUser(context.Background(), identity.User{

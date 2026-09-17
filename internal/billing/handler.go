@@ -14,6 +14,10 @@ import (
 const (
 	PermBillingRead  = "billing:read"
 	PermBillingWrite = "billing:write"
+	// PermQuotaManage 配额调整专用权限（R8 审计 L1）：配额是资源管控闸门
+	//（CheckAndInc 按它拦截 Create），developer 持 billing:write 若再能 PUT quota
+	// 即可自扩上限绕过全部 429 拦截——故调整权限单列，仅 tenant-admin（通配）持有。
+	PermQuotaManage = "billing:quota-manage"
 )
 
 // Handler 暴露配额计费 REST API（配额 + 用量 + 账单）。
@@ -112,7 +116,7 @@ func (h *Handler) serveQuota(w http.ResponseWriter, r *http.Request) {
 		}
 		httputil.WriteData(w, q)
 	case http.MethodPut:
-		if !h.allow(w, r, PermBillingWrite) {
+		if !h.allow(w, r, PermQuotaManage) {
 			return
 		}
 		var q ResourceQuota

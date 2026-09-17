@@ -126,7 +126,7 @@ func TestBackupTestEnvAllowed(t *testing.T) {
 	body := strings.NewReader(`{"resourceId":"ds-test","type":"full"}`)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, withTenant(httptest.NewRequest(http.MethodPost, "/api/backups", body), "t-acme"))
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusCreated {
 		t.Fatalf("测试环境备份创建应放行，实得 %d", rec.Code)
 	}
 }
@@ -143,7 +143,7 @@ func TestBackupProdAllowedWithPerm(t *testing.T) {
 	body := strings.NewReader(`{"resourceId":"ds-prod","type":"full"}`)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, withTenant(httptest.NewRequest(http.MethodPost, "/api/backups", body), "t-acme"))
-	if rec.Code != http.StatusOK {
+	if rec.Code != http.StatusCreated {
 		t.Fatalf("admin 生产备份创建应放行，实得 %d", rec.Code)
 	}
 	var wrap struct {
@@ -166,5 +166,33 @@ func TestBackupFailClosedOnUnknownResource(t *testing.T) {
 	h.ServeHTTP(rec, withTenant(httptest.NewRequest(http.MethodPost, "/api/backups", body), "t-acme"))
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("未知资源 fail-closed 应 403，实得 %d", rec.Code)
+	}
+}
+
+// TestBackupCreateDefaultTypeID 锁住 R8-B1：body 无 type 时默认值必须先补齐再生成 ID
+// （原顺序生成尾部悬挂 '-' 的 ID 且与实际 type 不一致）。
+func TestBackupCreateDefaultTypeID(t *testing.T) {
+	env := fakeEnv{
+		resEnv:  map[string]string{"ds-test": "env-test"},
+		envType: map[string]string{"env-test": "test"},
+	}
+	h := NewHandler(newFakeRepo(), WithEnvResolver(env, env))
+	h.Authorize = authWith("dataservice:read", "dataservice:write")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, withTenant(httptest.NewRequest(http.MethodPost, "/api/backups",
+		strings.NewReader(`{"resourceId":"ds-test"}`)), "t-acme"))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("无 type 创建应放行，实得 %d: %s", rec.Code, rec.Body.String())
+	}
+	var wrap struct {
+		Data Backup `json:"data"`
+	}
+	_ = json.NewDecoder(rec.Body).Decode(&wrap)
+	if wrap.Data.Type != TypeFull {
+		t.Fatalf("type 应默认 full，got %q", wrap.Data.Type)
+	}
+	if strings.HasSuffix(wrap.Data.ID, "-") || !strings.HasSuffix(wrap.Data.ID, "-"+TypeFull) {
+		t.Fatalf("ID 应为 bk-<rid>-full 无悬挂连字符，got %q", wrap.Data.ID)
 	}
 }

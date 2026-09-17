@@ -431,21 +431,34 @@ func (s *Store) UpdateUser(ctx context.Context, u identity.User) error {
 	return tx.Commit(ctx)
 }
 
+// DeleteUser 删除用户并级联吊销其 API Key（单事务，两删同生共死）。
+// api_keys.user_id 故意不加 FK（seed extraKey 允许 Key 归属不存在的用户），故靠显式级联；
+// 不级联则已删用户的 API Key 永久有效（LookupAPIKey 不校验用户存在性）。
 func (s *Store) DeleteUser(ctx context.Context, tenantID, userID string) error {
+	tx, err := s.db.Pool().Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	q := `DELETE FROM users WHERE id=$1`
 	args := []any{userID}
 	if tenantID != "" {
 		q += ` AND tenant_id=$2`
 		args = append(args, tenantID)
 	}
-	ct, err := s.db.Pool().Exec(ctx, q, args...)
+	ct, err := tx.Exec(ctx, q, args...)
 	if err != nil {
 		return err
 	}
 	if ct.RowsAffected() == 0 {
 		return fmt.Errorf("用户不存在: %s", userID)
 	}
-	return nil // user_roles FK CASCADE
+	// 级联吊销该用户名下 API Key（api_key_roles FK CASCADE 自动清）。
+	if _, err := tx.Exec(ctx, `DELETE FROM api_keys WHERE user_id=$1`, userID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx) // user_roles FK CASCADE
 }
 
 // ListAPIKeys tenantID 空则全租户。

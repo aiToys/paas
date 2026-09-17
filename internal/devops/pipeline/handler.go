@@ -19,8 +19,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
-	"path"
 	"strconv"
 	"strings"
 
@@ -412,6 +412,9 @@ func (h *Handler) updatePipeline(w http.ResponseWriter, r *http.Request, appID, 
 		writePipeErr(w, err)
 		return
 	}
+	// 写操作全记审计（与 create/delete 同源）：改 ParamOverrides 可换目标环境/分支 glob，
+	// 漏记会断「谁改的流水线配置」溯源链。
+	h.recordAudit(r, "update", "pipeline", pid, "")
 	httputil.WriteData(w, updated)
 }
 
@@ -930,8 +933,10 @@ func (h *Handler) webhookTrigger(w http.ResponseWriter, r *http.Request, pid str
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	// 分支 glob 匹配（Trigger.Branch 空=全部分支）
+	// 分支 glob 匹配（Trigger.Branch 空=全部分支）。跳过记日志：静默 200 对 webhook 源正确
+	// （防重试风暴），但对用户是黑盒——「push 了为什么不触发」需平台侧留痕排障。
 	if p.Trigger.Branch != "" && !globMatch(p.Trigger.Branch, branch) {
+		log.Printf("pipeline webhook 跳过：分支 %s 不匹配 glob %q（pipeline=%s）", branch, p.Trigger.Branch, pid) //nolint:gosec // pid/branch 非敏感
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -998,11 +1003,33 @@ func maskTrigger(p Pipeline) Pipeline {
 	return p
 }
 
-// globMatch 简单分支 glob 匹配（支持 * 通配，如 "feature-*" 匹配 "feature-x"）。
-// 用 path.Match（分支名无路径分隔符，等价于 shell glob）。
+// globMatch 分支 glob 匹配（支持 * 通配，如 "feature-*" 匹配 "feature-x"/"feature/login"）。
+// 不用 path.Match：其 * 不跨路径分隔符，而 Git 分支名常含 /（feature/login、release/1.0），
+// path.Match 语义下 "feature-*" 匹配不了 "feature/login"——webhook 静默不触发且无日志，
+// 用户会误判 webhook 配置失效。此处 * 匹配任意字符（含 /）。
 func globMatch(pattern, name string) bool {
-	matched, err := path.Match(pattern, name)
-	return err == nil && matched
+	if !strings.Contains(pattern, "*") {
+		return pattern == name
+	}
+	parts := strings.Split(pattern, "*")
+	// 首段前缀锚定、末段后缀锚定、中段按序 Contains（经典扁平 glob）
+	if !strings.HasPrefix(name, parts[0]) {
+		return false
+	}
+	name = name[len(parts[0]):]
+	last := parts[len(parts)-1]
+	if len(name) < len(last) || !strings.HasSuffix(name, last) {
+		return false
+	}
+	name = name[:len(name)-len(last)]
+	for _, mid := range parts[1 : len(parts)-1] {
+		idx := strings.Index(name, mid)
+		if idx < 0 {
+			return false
+		}
+		name = name[idx+len(mid):]
+	}
+	return true
 }
 
 // validateDeployEnvs 校验每个 deploy stage 必须含 envId（fail-fast）。

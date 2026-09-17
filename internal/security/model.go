@@ -3,8 +3,9 @@
 // 与 appconfig（应用×环境级、工作负载启动注入的 env/Secret）区分：本包的 Secret 是
 // 租户级平台资产（DB 密码 / TLS 证书 / 第三方 token），集中管理供应用引用，不绑定具体应用。
 //
-// Secret 后端明文存储，API 返回固定掩码（与 appconfig 一致，不泄漏长度/内容）。
-// 真实加密存储（KMS/Vault）留后续。审计日志只增不删（合规）。
+// Value 持久层静态加密（AES-256-GCM，格式 enc:v1:，见 internal/crypto；装配层
+// NewEncryptedRepo 装饰器），API 返回固定掩码（与 appconfig 一致，不泄漏长度/内容）。
+// KMS/Vault 托管与密钥轮转留后续。审计日志只增不删（合规）。
 package security
 
 import "time"

@@ -530,7 +530,8 @@ func (r *WorkloadReconciler) applyCronJob(ctx context.Context, w *v1alpha1.Workl
 		// 同 applyJob：衍生 Job 失败一次即终止（BackoffLimit=0）+ 1 天后 GC（防完成 Job/Pod 永久残留拖慢 list/watch）。
 		cj.Spec.JobTemplate.Spec.BackoffLimit = ptrInt32(0)
 		cj.Spec.JobTemplate.Spec.TTLSecondsAfterFinished = ptrInt32(86400)
-		// 应用配置注入（创建时，JobTemplate PodTemplate 不可变；新增绑定需删旧建新）。
+		// 应用配置注入。CronJob 的 jobTemplate 是可变字段（区别于 Job 的 PodTemplate），
+		// 每次 reconcile 重建 template 并注入最新 env——新增绑定后下个调度周期即生效，无需删旧建新。
 		if envVars := r.appEnvVars(ctx, w); len(envVars) > 0 {
 			tmpl := &cj.Spec.JobTemplate.Spec.Template.Spec.Containers[0]
 			tmpl.Env = append(tmpl.Env, envVars...)

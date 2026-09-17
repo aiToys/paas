@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -117,23 +118,21 @@ func (h *Handler) recordAudit(r *http.Request, action, resourceID, detail string
 	_ = h.audit.Record(r.Context(), tid, actor, action, "dataservice", resourceID, detail)
 }
 
-// resolveFromEngine 按 d.EngineID 从引擎目录解析 kind/engine/mode/connection，回填到 DataService。
-// 引擎目录是真源：用户不自由组合 kind+engine，而是选一个 Engine。mode 决定连接来源：
-//   - managed：清空 Connection，store.FillConnection 平台生成凭证。
-//   - external-shared：复制 Engine.Connection（共享集群，全租户复用）。
-//   - external-dedicated：保留用户填的 Connection（body 传入，校验 host 必填）。
-//
-// disabled 引擎拒绝（用户只能用 admin 启用的引擎）。
-func (h *Handler) resolveFromEngine(ctx context.Context, d *DataService) (DataService, error) {
+// resolveEngineSpec 按 d.EngineID 从引擎目录解析 kind/source/connection 回填 d
+// （租户 Handler 与 admin AdminHandler 共用真源；两条路径曾各自实现同构逻辑，DRY 合并）。
+func resolveEngineSpec(ctx context.Context, engineRepo EngineRepository, d *DataService) error {
 	if d.EngineID == "" {
-		return *d, fmt.Errorf("missing engineId")
+		return fmt.Errorf("missing engineId")
 	}
-	eng, err := h.engineRepo.GetEngine(ctx, d.EngineID)
+	if engineRepo == nil {
+		return fmt.Errorf("引擎目录未启用")
+	}
+	eng, err := engineRepo.GetEngine(ctx, d.EngineID)
 	if err != nil {
-		return *d, fmt.Errorf("引擎不存在: %s", d.EngineID)
+		return fmt.Errorf("引擎不存在: %s", d.EngineID)
 	}
 	if !eng.Enabled {
-		return *d, fmt.Errorf("引擎未启用: %s", d.EngineID)
+		return fmt.Errorf("引擎未启用: %s", d.EngineID)
 	}
 	d.Kind = eng.Kind
 	d.Source = eng.Mode
@@ -151,10 +150,24 @@ func (h *Handler) resolveFromEngine(ctx context.Context, d *DataService) (DataSe
 	case EngineModeExternalDedicated:
 		// 用户自填：校验 host 必填（外部独占实例至少要有地址）。
 		if d.Connection == nil || d.Connection["host"] == "" {
-			return *d, fmt.Errorf("external-dedicated 模式需填写连接 host")
+			return fmt.Errorf("external-dedicated 模式需填写连接 host")
 		}
 	default: // managed
 		d.Connection = nil // store.FillConnection 平台生成
+	}
+	return nil
+}
+
+// resolveFromEngine 按 d.EngineID 从引擎目录解析 kind/engine/mode/connection，回填到 DataService。
+// 引擎目录是真源：用户不自由组合 kind+engine，而是选一个 Engine。mode 决定连接来源：
+//   - managed：清空 Connection，store.FillConnection 平台生成凭证。
+//   - external-shared：复制 Engine.Connection（共享集群，全租户复用）。
+//   - external-dedicated：保留用户填的 Connection（body 传入，校验 host 必填）。
+//
+// disabled 引擎拒绝（用户只能用 admin 启用的引擎）。
+func (h *Handler) resolveFromEngine(ctx context.Context, d *DataService) (DataService, error) {
+	if err := resolveEngineSpec(ctx, h.engineRepo, d); err != nil {
+		return *d, err
 	}
 	return *d, nil
 }
@@ -251,6 +264,7 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		saved.Connection = MaskConnection(saved.Connection) // 返回前掩码（与 List/Detail 一致，明文仅内部绑定注入用）
+		h.recordAudit(r, "dataservice_create", saved.ID, "kind="+saved.Kind+",name="+saved.Name)
 		httputil.WriteDataCreated(w, saved)
 		return
 	}
@@ -334,6 +348,7 @@ func (h *Handler) serveItemCRUD(w http.ResponseWriter, r *http.Request, id strin
 			return
 		}
 		updated.Connection = MaskConnection(updated.Connection) // 返回前掩码
+		h.recordAudit(r, "dataservice_update", id, "")
 		httputil.WriteData(w, updated)
 	case http.MethodDelete:
 		if !h.allow(w, r, PermDataServiceWrite) {
@@ -395,6 +410,7 @@ func (h *Handler) serveLifecycle(w http.ResponseWriter, r *http.Request, id, act
 		return
 	}
 	updated.Connection = MaskConnection(updated.Connection)
+	h.recordAudit(r, "dataservice_"+action, id, "replicas="+strconv.Itoa(rep))
 	httputil.WriteData(w, updated)
 }
 
@@ -422,7 +438,16 @@ func (h *Handler) serveRestart(w http.ResponseWriter, r *http.Request, id string
 			return
 		}
 	}
+	h.recordAudit(r, "dataservice_restart", id, "")
 	httputil.WriteData(w, map[string]string{"restarted": id})
+}
+
+// scaleDetail Replicas 指针转审计 detail 片段（nil=未设置）。
+func scaleDetail(p *int) string {
+	if p == nil {
+		return ""
+	}
+	return strconv.Itoa(*p)
 }
 
 // validQuantity 校验 K8s 资源量格式（空串合法=未设置）；reconciler 侧 MustParse 不容错。
@@ -489,6 +514,8 @@ func (h *Handler) serveScale(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 	updated.Connection = MaskConnection(updated.Connection)
+	h.recordAudit(r, "dataservice_scale", id,
+		fmt.Sprintf("replicas=%s,cpu=%s,memory=%s,storageGb=%d", scaleDetail(ex.Replicas), ex.CPU, ex.Memory, ex.StorageGB))
 	httputil.WriteData(w, updated)
 }
 
@@ -530,6 +557,7 @@ func (h *Handler) serveUpgrade(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 	updated.Connection = MaskConnection(updated.Connection)
+	h.recordAudit(r, "dataservice_upgrade", id, "image="+in.Image)
 	httputil.WriteData(w, updated)
 }
 

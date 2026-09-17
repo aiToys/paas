@@ -590,8 +590,13 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 
 	// 环境（物理隔离单元 prod|test）：方法级权限 environment:read/write + prod 写校验。
 	// 同时作 EnvTypeResolver 横切注入到 workload/devops/appconfig/governance/dataservice。
+	// Usage 桥接 workload store：删环境前校验占用（非 0 拒 409，防悬挂 envId 引用）；
+	// Audit 记 Create/Delete（写操作全记审计）。
 	envHandler := environment.NewHandler(stores.Environment)
 	envHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+	envHandler.Usage = envUsageChecker{wl: stores.Workload}
+	envHandler.Audit = &identityAuditAdapter{store: stores.Security}
+	envHandler.ActorFn = func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }
 	mux.Handle("/api/environments", auth(envHandler))
 	mux.Handle("/api/environments/", auth(envHandler))
 
@@ -603,6 +608,9 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 		workload.WithEnvResolver(stores.Environment),
 		workload.WithStatusReader(statusReader),
 		workload.WithAppGuard(appGuard),
+		// Create/Delete 记审计（创建消耗集群资源、删除即下线服务；admin 侧同款已有）。
+		workload.WithAudit(&identityAuditAdapter{store: stores.Security},
+			func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
 	)
 	wlHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 	// 横切配额拦截：创建工作负载前调 billing.CheckAndInc，超限回 429。
@@ -1155,7 +1163,7 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	reg.Operation("PUT", "/api/tools/{id}", apiroute.Tags("AI工具"), apiroute.Summary("更新工具"), apiroute.Perm("tool:write"), apiroute.WithReqBody(tool.Tool{}), apiroute.WithResp(tool.Tool{}))
 	reg.Operation("DELETE", "/api/tools/{id}", apiroute.Tags("AI工具"), apiroute.Summary("删除工具"), apiroute.Perm("tool:write"))
 	reg.Operation("POST", "/api/tools/{id}/test", apiroute.Tags("AI工具"), apiroute.Summary("测试工具（MCP: initialize+tools/list）"), apiroute.Perm("tool:read"))
-	reg.Operation("POST", "/api/tools/{id}/invoke", apiroute.Tags("AI工具"), apiroute.Summary("调用工具（MCP: tools/call）"), apiroute.Perm("tool:read"))
+	reg.Operation("POST", "/api/tools/{id}/invoke", apiroute.Tags("AI工具"), apiroute.Summary("调用工具（MCP: tools/call）"), apiroute.Perm("tool:write"))
 
 	// Prompt 模板管理（P2）：版本化提示词，同 name 多版本，最新版自动激活。
 	promptHandler := prompt.NewHandler(stores.Prompt)
@@ -1554,7 +1562,7 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	reg.Operation("GET", "/api/security/audit-logs", apiroute.Tags("安全"), apiroute.Summary("审计日志"), apiroute.Perm("security:read"), apiroute.WithResp([]security.AuditLog{}))
 	// 配额计费
 	reg.Operation("GET", "/api/billing/quota", apiroute.Tags("配额计费"), apiroute.Summary("租户配额"), apiroute.Perm("billing:read"), apiroute.WithResp(billing.ResourceQuota{}))
-	reg.Operation("PUT", "/api/billing/quota", apiroute.Tags("配额计费"), apiroute.Summary("调整配额"), apiroute.Perm("billing:write"), apiroute.WithReqBody(billing.ResourceQuota{}), apiroute.WithResp(billing.ResourceQuota{}))
+	reg.Operation("PUT", "/api/billing/quota", apiroute.Tags("配额计费"), apiroute.Summary("调整配额"), apiroute.Perm("billing:quota-manage"), apiroute.WithReqBody(billing.ResourceQuota{}), apiroute.WithResp(billing.ResourceQuota{}))
 	reg.Operation("GET", "/api/billing/usage", apiroute.Tags("配额计费"), apiroute.Summary("用量视图（含超限标记）"), apiroute.Perm("billing:read"), apiroute.WithResp(billing.UsageView{}))
 	reg.Operation("GET", "/api/billing/records", apiroute.Tags("配额计费"), apiroute.Summary("账单列表"), apiroute.Perm("billing:read"), apiroute.WithResp([]billing.BillingRecord{}))
 	reg.Operation("POST", "/api/billing/records/generate", apiroute.Tags("配额计费"), apiroute.Summary("生成账单"), apiroute.Perm("billing:write"), apiroute.WithResp(billing.BillingRecord{}))

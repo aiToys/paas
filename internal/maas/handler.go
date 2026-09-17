@@ -294,7 +294,6 @@ func (h *Handler) serveChannel(w http.ResponseWriter, r *http.Request, modelID, 
 	}
 }
 
-// writeMaasErr 把仓储错误映射为 HTTP 状态：not found→404，exists→409，其余→400。
 // serveProvidersRoute 分发 /api/admin/providers[/{id}]：vendor CRUD（供应商预设管理）。
 // Vendor 不是路由实体（不进 gateway），CRUD 后无需 reloadModel。
 func (h *Handler) serveProvidersRoute(w http.ResponseWriter, r *http.Request) {
@@ -381,6 +380,7 @@ func (h *Handler) serveVendor(w http.ResponseWriter, r *http.Request, id string)
 	}
 }
 
+// writeMaasErr 把仓储错误映射为 HTTP 状态：not found→404，exists→409，其余→400。
 func writeMaasErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrModelNotFound), errors.Is(err, ErrChannelNotFound), errors.Is(err, ErrVendorNotFound):

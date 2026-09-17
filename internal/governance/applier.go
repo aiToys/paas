@@ -108,3 +108,32 @@ func (r *ApplyRepo) DeleteRoute(ctx context.Context, id string) error {
 	}
 	return nil
 }
+
+// DeleteService 装饰：store 的 DeleteService 会级联删该服务全部 Route（memory/PG 同款），
+// 若不投影，这些 Route 所在 host 的聚合 Ingress 会残留指向已删服务的 path（流量持续
+// 路由到已删除后端），直到同 host 其他 Route 变更才被动自愈。删前收集该服务 Route 的
+// host 集合，删后逐 host 重建（按剩余 enabled Route 决定去留）。
+func (r *ApplyRepo) DeleteService(ctx context.Context, id string) error {
+	var hosts []string
+	tid, _ := tenant.TenantFrom(ctx)
+	if r.applier != nil && tid != "" {
+		// r.Repository.ListRoutes 显式选择嵌入字段：本方法即 DeleteService 装饰器，
+		// 简写 r.ListRoutes 若被覆写会自递归（与 workload.SetDomain 同款取舍）。
+		if routes, lerr := r.Repository.ListRoutes(ctx, id); lerr == nil { //nolint:staticcheck // QF1008：显式走内层避免未来覆写自递归
+			seen := map[string]bool{}
+			for _, rt := range routes {
+				if rt.Host != "" && !seen[rt.Host] {
+					seen[rt.Host] = true
+					hosts = append(hosts, rt.Host)
+				}
+			}
+		}
+	}
+	if err := r.Repository.DeleteService(ctx, id); err != nil {
+		return err
+	}
+	for _, host := range hosts {
+		r.applyLog("delete-service", id, host, r.applier.Apply(ctx, tid, host))
+	}
+	return nil
+}

@@ -630,6 +630,91 @@ func TestAppPublishedByNameEnvLane(t *testing.T) {
 	}
 }
 
+// TestHandlerPublishedMergesSharedAndLane 锁住 R6 I-1：ns 维度发现端点必须与应用维度/
+// 按应用名发现同款三层 merge（shared 引用层 → 基线 → lane 覆盖）。原实现只返回 ns 自身
+// active 快照，管理页「当前生效」与运行时真相分叉（排障视图失真）。
+func TestHandlerPublishedMergesSharedAndLane(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+
+	// shared ns（引用层）：log.level=info + retry=2
+	shared, err := repo.CreateNamespace(ctx, configcenter.Namespace{Name: "shared-base", Scope: configcenter.ScopeShared})
+	if err != nil {
+		t.Fatalf("建 shared ns: %v", err)
+	}
+	for _, it := range []configcenter.ConfigItem{
+		{NamespaceID: shared.ID, Key: "log.level", Value: "info", Type: "text"},
+		{NamespaceID: shared.ID, Key: "retry", Value: "2", Type: "text"},
+	} {
+		if _, err := repo.UpsertItem(ctx, it); err != nil {
+			t.Fatalf("shared item: %v", err)
+		}
+	}
+	if _, err := repo.CreatePublish(ctx, shared.ID); err != nil {
+		t.Fatalf("shared publish: %v", err)
+	}
+
+	// app 派生 ns：log.level=debug（覆盖 shared 同 key）+ topk=3（基线独有）
+	ns, err := repo.EnsureByApp(ctx, "app-1")
+	if err != nil {
+		t.Fatalf("EnsureByApp: %v", err)
+	}
+	for _, it := range []configcenter.ConfigItem{
+		{NamespaceID: ns.ID, Key: "log.level", Value: "debug", Type: "text"},
+		{NamespaceID: ns.ID, Key: "topk", Value: "3", Type: "text"},
+	} {
+		if _, err := repo.UpsertItem(ctx, it); err != nil {
+			t.Fatalf("app item: %v", err)
+		}
+	}
+	if _, err := repo.CreatePublish(ctx, ns.ID); err != nil {
+		t.Fatalf("app publish: %v", err)
+	}
+	if _, err := repo.AddNSRef(ctx, ns.ID, shared.ID); err != nil {
+		t.Fatalf("AddNSRef: %v", err)
+	}
+	// lane 覆盖 topk=5
+	if _, err := repo.UpsertLaneOverride(ctx, configcenter.LaneOverride{AppID: "app-1", LaneID: "feat", Key: "topk", Value: "5"}); err != nil {
+		t.Fatalf("UpsertLaneOverride: %v", err)
+	}
+
+	get := func(path string) string {
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req(ctx, "GET", path, nil))
+		if w.Code != 200 {
+			t.Fatalf("%s -> %d %s", path, w.Code, w.Body.String())
+		}
+		return w.Body.String()
+	}
+	// ① 不带 query：merge shared（基线同 key 胜出）+ sharedHash；无 lane 覆盖不产 overrideHash
+	b := get("/api/configcenter/namespaces/" + ns.ID + "/published")
+	for _, want := range []string{`"log.level":"debug"`, `"retry":"2"`, `"topk":"3"`, `"sharedHash"`} {
+		if !strings.Contains(b, want) {
+			t.Fatalf("ns 维度发现应含 %s: %s", want, b)
+		}
+	}
+	if strings.Contains(b, "overrideHash") {
+		t.Fatalf("无 lane query 不应含 overrideHash: %s", b)
+	}
+	// ② ?lane=feat：lane 覆盖并入 + 双 hash
+	b = get("/api/configcenter/namespaces/" + ns.ID + "/published?lane=feat")
+	for _, want := range []string{`"topk":"5"`, `"overrideHash"`, `"sharedHash"`} {
+		if !strings.Contains(b, want) {
+			t.Fatalf("lane 发现应含 %s: %s", want, b)
+		}
+	}
+	// ③ lane=default 归一基线（与按应用名发现同规则）
+	if b := get("/api/configcenter/namespaces/" + ns.ID + "/published?lane=default"); !strings.Contains(b, `"topk":"3"`) || strings.Contains(b, "overrideHash") {
+		t.Fatalf("lane=default 应基线无 overrideHash: %s", b)
+	}
+	// ④ 未知 ns 统一 {"published":false} 不泄漏（merge 路径不改变此契约）
+	if b := get("/api/configcenter/namespaces/ns-nope/published"); !strings.Contains(b, `"published":false`) {
+		t.Fatalf("未知 ns 应 unpublished: %s", b)
+	}
+}
+
 // lane=default 在按应用名发现端点同样归一为基线（不报错——发现是数据面宽入口，与覆盖写 400 语义区分）。
 func TestAppPublishedByNameLaneDefault(t *testing.T) {
 	repo := ccmemory.NewStore()

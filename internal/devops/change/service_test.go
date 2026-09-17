@@ -153,6 +153,62 @@ func TestIntegrateConflict(t *testing.T) {
 	}
 }
 
+// TestAbandonBatchReopensChanges 放弃批次：批内变更须回 open 出批（否则永久悬挂在
+// 已弃批次上）。此逻辑现走 Service.AbandonBatch（持 per-batch 锁，防与入批/推进并发
+// 交错丢成员），不再由 handler 直写 repo。
+func TestAbandonBatchReopensChanges(t *testing.T) {
+	s, store, _, _ := newTestService(t)
+	ctx := acmeCtx()
+	c1, _ := s.CreateChangeWithBranch(ctx, "app-1", ChangeInput{Title: "a", Type: ChangeFeat, Branch: "feat/a"})
+	c2, _ := s.CreateChangeWithBranch(ctx, "app-1", ChangeInput{Title: "b", Type: ChangeFeat, Branch: "feat/b"})
+	b, _ := store.CreateBatch(ctx, IntegrationBatch{AppID: "app-1", RepoID: "repo-1", Title: "集成", Branch: "integration/x"})
+	_, _ = s.AddChangeToBatch(ctx, b.ID, c1.ID)
+	b, _ = s.AddChangeToBatch(ctx, b.ID, c2.ID)
+
+	got, err := s.AbandonBatch(ctx, b.ID)
+	if err != nil {
+		t.Fatalf("AbandonBatch: %v", err)
+	}
+	if got.Status != BatchAbandoned {
+		t.Fatalf("批应 abandoned, got %s", got.Status)
+	}
+	for _, cid := range []string{c1.ID, c2.ID} {
+		c, _ := store.GetChange(ctx, cid)
+		if c.BatchID != "" || c.Status != ChangeOpen {
+			t.Fatalf("变更 %s 应回 open 出批: %+v", cid, c)
+		}
+	}
+	// 已 abandoned 的批次不可再放弃（状态面拒绝）。
+	if _, err := s.AbandonBatch(ctx, b.ID); err == nil {
+		t.Fatalf("abandoned 批次重复放弃应拒绝")
+	}
+}
+
+// TestAbandonBatchTestingAllowed testing 态批次可放弃（用户主动止损出口；
+// 状态面过窄会把 testing/releasing 批次锁成死局）。
+func TestAbandonBatchTestingAllowed(t *testing.T) {
+	s, store, _, _ := newTestService(t)
+	ctx := acmeCtx()
+	c1, _ := s.CreateChangeWithBranch(ctx, "app-1", ChangeInput{Title: "a", Type: ChangeFeat, Branch: "feat/a"})
+	b, _ := store.CreateBatch(ctx, IntegrationBatch{AppID: "app-1", RepoID: "repo-1", Title: "x", Branch: "integration/x"})
+	_, _ = s.AddChangeToBatch(ctx, b.ID, c1.ID)
+	if _, err := s.Integrate(ctx, b.ID); err != nil {
+		t.Fatalf("Integrate: %v", err)
+	}
+	got, _ := store.GetBatch(ctx, b.ID)
+	if got.Status != BatchTesting {
+		t.Fatalf("前置：批应 testing, got %s", got.Status)
+	}
+	if _, err := s.AbandonBatch(ctx, b.ID); err != nil {
+		t.Fatalf("testing 批次应可放弃（止损出口）: %v", err)
+	}
+	// testing 态变更已 integrated，放弃后回 open。
+	ch, _ := store.GetChange(ctx, c1.ID)
+	if ch.BatchID != "" || ch.Status != ChangeOpen {
+		t.Fatalf("testing 批放弃后变更应回 open 出批: %+v", ch)
+	}
+}
+
 func TestSyncBatchStatusAdvances(t *testing.T) {
 	s, store, _, runs := newTestService(t)
 	ctx := acmeCtx()

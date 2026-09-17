@@ -202,11 +202,20 @@ func (s *Store) RecordAudit(ctx context.Context, log security.AuditLog) error {
 	return nil
 }
 
+// demoSeedDisabled 生产门控（与 workload/environment/application memory 同款）：
+// 跳过演示密钥与演示审计；平台级凭证（airouter env 注入，运行时必需）不受门控。
+func demoSeedDisabled() bool { return os.Getenv("PAAS_DISABLE_DEMO_SEED") == "true" }
+
 func (s *Store) seed() {
 	for _, sec := range SeedSecrets() {
+		if demoSeedDisabled() && sec.Scope != security.ScopePlatform {
+			continue
+		}
 		s.secrets[sec.ID] = sec
 	}
-	s.audits = append(s.audits, SeedAuditLogs()...)
+	if !demoSeedDisabled() {
+		s.audits = append(s.audits, SeedAuditLogs()...)
+	}
 }
 
 // SeedSecrets 返回预置密钥/证书资产（PG/内存同一真源，DRY）。

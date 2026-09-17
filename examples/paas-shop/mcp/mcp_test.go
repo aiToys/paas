@@ -46,7 +46,10 @@ func TestCallToolQueryProduct(t *testing.T) {
 	srv := fakeProduct(t)
 	defer srv.Close()
 	productURL = srv.URL
-	out := callTool(context.Background(), "query_product", map[string]any{"productId": "1"})
+	out, isErr := callTool(context.Background(), "query_product", map[string]any{"productId": "1"})
+	if isErr {
+		t.Fatal("成功查询不应标记 isError")
+	}
 	if want := "商品详情"; !contains(out, want) {
 		t.Fatalf("query_product 应含 %q，got %s", want, out)
 	}
@@ -59,12 +62,15 @@ func TestCallToolSearchProducts(t *testing.T) {
 	srv := fakeProduct(t)
 	defer srv.Close()
 	productURL = srv.URL
-	out := callTool(context.Background(), "search_products", map[string]any{"q": "键"})
+	out, isErr := callTool(context.Background(), "search_products", map[string]any{"q": "键"})
+	if isErr {
+		t.Fatal("成功搜索不应标记 isError")
+	}
 	if !contains(out, "机械键盘") {
 		t.Fatalf("search 应返回匹配商品，got %s", out)
 	}
 	// 参数全空 = 全量
-	out = callTool(context.Background(), "search_products", map[string]any{})
+	out, isErr = callTool(context.Background(), "search_products", map[string]any{})
 	if !contains(out, `"id":2`) && !contains(out, "2") {
 		t.Fatalf("空参数应返回全量，got %s", out)
 	}
@@ -74,11 +80,17 @@ func TestCallToolQueryOrder(t *testing.T) {
 	srv := fakeOrder(t)
 	defer srv.Close()
 	t.Setenv("ORDER_URL", srv.URL)
-	out := callTool(context.Background(), "query_order", map[string]any{"orderId": "ORD-1001"})
+	out, isErr := callTool(context.Background(), "query_order", map[string]any{"orderId": "ORD-1001"})
+	if isErr {
+		t.Fatal("成功查询不应标记 isError")
+	}
 	if !contains(out, "shipped") {
 		t.Fatalf("query_order 应含状态，got %s", out)
 	}
-	out = callTool(context.Background(), "query_order", map[string]any{"orderId": "NOPE"})
+	out, isErr = callTool(context.Background(), "query_order", map[string]any{"orderId": "NOPE"})
+	if !isErr {
+		t.Fatal("未知订单应标记 isError")
+	}
 	if !contains(out, "不存在") {
 		t.Fatalf("未知订单应提示不存在，got %s", out)
 	}
@@ -88,12 +100,18 @@ func TestCallToolRefundOrder(t *testing.T) {
 	srv := fakeOrder(t)
 	defer srv.Close()
 	t.Setenv("ORDER_URL", srv.URL)
-	out := callTool(context.Background(), "refund_order", map[string]any{"orderId": "ORD-1001", "reason": "质量问题"})
+	out, isErr := callTool(context.Background(), "refund_order", map[string]any{"orderId": "ORD-1001", "reason": "质量问题"})
+	if isErr {
+		t.Fatal("成功退款不应标记 isError")
+	}
 	if !contains(out, "refunded") {
 		t.Fatalf("refund_order 应返回退款后订单，got %s", out)
 	}
 	// 状态机拒绝（409）透出原因
-	out = callTool(context.Background(), "refund_order", map[string]any{"orderId": "ORD-2002", "reason": "质量问题"})
+	out, isErr = callTool(context.Background(), "refund_order", map[string]any{"orderId": "ORD-2002", "reason": "质量问题"})
+	if !isErr {
+		t.Fatal("状态机拒绝应标记 isError（否则 workflow run 伪 succeeded，用户以为退款成功）")
+	}
 	if !contains(out, "退款被拒绝") {
 		t.Fatalf("非法状态应提示退款被拒绝，got %s", out)
 	}
@@ -109,7 +127,7 @@ func TestRefundForwardsActionToken(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("ORDER_URL", srv.URL)
 	t.Setenv("PAAS_ORDER_ACTION_TOKEN", "tok-123")
-	_ = callTool(context.Background(), "refund_order", map[string]any{"orderId": "ORD-1001", "reason": "x"})
+	_, _ = callTool(context.Background(), "refund_order", map[string]any{"orderId": "ORD-1001", "reason": "x"})
 	if got != "tok-123" {
 		t.Fatalf("refund_order 应携带 X-Action-Token，got %q", got)
 	}
@@ -138,7 +156,10 @@ func TestCallToolQueryProductNumericID(t *testing.T) {
 	srv := fakeProduct(t)
 	defer srv.Close()
 	productURL = srv.URL
-	out := callTool(context.Background(), "query_product", map[string]any{"productId": float64(1)})
+	out, isErr := callTool(context.Background(), "query_product", map[string]any{"productId": float64(1)})
+	if isErr {
+		t.Fatal("数字形态 productId 查询成功，不应标记 isError")
+	}
 	if !contains(out, "机械键盘") {
 		t.Fatalf("数字形态 productId 应正常查询，got %s", out)
 	}

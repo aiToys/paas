@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aitoys/paas/internal/httputil"
+	"github.com/aitoys/paas/pkg/tenant"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
@@ -76,6 +77,19 @@ func (h *Handler) auditRestrict(r *http.Request, appID string, restricted bool) 
 		action = "app_restrict_on"
 	}
 	_ = h.Audit.Record(r.Context(), "", actor, action, "application", appID, "")
+}
+
+// audit 记写操作审计（best-effort；tenantID 从 ctx 取，空归 platform 由 adapter 兜底）。
+func (h *Handler) audit(r *http.Request, action, appID, detail string) {
+	if h.Audit == nil {
+		return
+	}
+	actor := ""
+	if h.ActorFn != nil {
+		actor = h.ActorFn(r)
+	}
+	tid, _ := tenant.TenantFrom(r.Context())
+	_ = h.Audit.Record(r.Context(), tid, actor, action, "application", appID, detail)
 }
 
 // HandlerOpt 配置 Handler。
@@ -173,6 +187,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				log.Printf("OnAppCreate 失败（不阻断应用创建）: app=%s: %v", a.ID, err) //nolint:gosec // G706 误报：日志格式化输出，非注入
 			}
 		}
+		h.audit(r, "application_create", a.ID, "name="+a.Name)
 		w.WriteHeader(http.StatusCreated)
 		httputil.WriteData(w, a)
 		return
@@ -284,7 +299,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// 先校验存在性 + 归属（跨租户 not found 不泄漏）。
-		if _, err := h.repo.Get(r.Context(), id); err != nil {
+		a, err := h.repo.Get(r.Context(), id)
+		if err != nil {
 			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
@@ -303,6 +319,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if h.QuotaCheck != nil {
 			_ = h.QuotaCheck(r.Context(), -1)
 		}
+		// 删除应用=级联清全部工作负载/配置（最高危破坏性操作），必记审计。
+		h.audit(r, "application_delete", id, "name="+a.Name)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}

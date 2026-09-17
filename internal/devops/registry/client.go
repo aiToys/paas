@@ -5,9 +5,6 @@
 // （内网裸 registry）；若后续启 auth，扩展 Client 加 basicAuth 即可。
 //
 // 降级：registry 不可达返 ErrRegistryUnavailable，handler 映射 503 提示，不 panic。
-//
-// 删除：registry:2 默认未启用 delete API（REGISTRY_STORAGE_DELETE_ENABLED=false），
-// Delete 方法在未启用时返 405，UI 据此灰显按钮。
 package registry
 
 import (
@@ -16,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
 	"strings"
@@ -28,7 +26,6 @@ import (
 var (
 	ErrRegistryUnavailable = errors.New("registry 后端不可达")
 	ErrRepoNotFound        = errors.New("镜像仓库不存在")
-	ErrDeleteDisabled      = errors.New("registry 未启用 delete API")
 )
 
 // Client 调 Docker Registry v2 API。baseURL 形如 http://registry.example.local:5000。
@@ -163,7 +160,10 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body io.Reader
 	case http.StatusNotFound:
 		return ErrRepoNotFound
 	default:
+		// 响应体只进服务端日志，不拼进 error（registry 5xx body 可能含内部路径/存储细节，
+		// error 会经 WriteServiceError 到达用户——与 gitea doJSON 对齐，R16-M2）。
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("registry API %s %s 返回 %d: %s", method, path, resp.StatusCode, string(b))
+		log.Printf("registry API %s %s 返回 %d: %s", method, path, resp.StatusCode, string(b))
+		return fmt.Errorf("registry API %s %s 返回 %d", method, path, resp.StatusCode)
 	}
 }

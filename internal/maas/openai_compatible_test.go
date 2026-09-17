@@ -90,6 +90,11 @@ func TestOpenAICompatible_ErrorClassification(t *testing.T) {
 		{"500 服务端→degraded", http.StatusInternalServerError, provider.ErrUpstreamUnavailable},
 		{"400 配置错误→offline", http.StatusBadRequest, provider.ErrUpstreamConfig},
 		{"404 模型不存在→offline", http.StatusNotFound, provider.ErrUpstreamConfig},
+		// R10-M1 回归：3xx（client 不跟随重定向）与其余非 200 不再返回 nil
+		//（原实现 fmt.Errorf("%w", nil) 畸形消息 + sentinel 丢失，通道误标 degraded）。
+		{"301 重定向（baseURL 配错）→offline", http.StatusMovedPermanently, provider.ErrUpstreamConfig},
+		{"307 临时重定向→offline", http.StatusTemporaryRedirect, provider.ErrUpstreamConfig},
+		{"204 异常 2xx→offline", http.StatusNoContent, provider.ErrUpstreamConfig},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

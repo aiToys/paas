@@ -403,8 +403,11 @@ func classifyErr(netErr error, status int) error {
 		return provider.ErrUpstreamRateLimit
 	case status >= 500:
 		return provider.ErrUpstreamUnavailable
-	case status >= 400:
+	default:
+		// 4xx 与 3xx（client 不跟随重定向，301/302 以最终响应直达此处）及
+		// 其余非 200 状态同属配置类——baseURL 配错/端点被迁移，标 offline 提示运维修配置。
+		// （R10 审计 M1：原实现此处 fallthrough 返回 nil，fmt.Errorf("%w", nil)
+		// 产生畸形消息且 sentinel 丢失，通道被误标 degraded。）
 		return provider.ErrUpstreamConfig
 	}
-	return nil
 }

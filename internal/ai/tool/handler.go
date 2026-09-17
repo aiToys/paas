@@ -210,7 +210,9 @@ func (h *Handler) serveInvoke(w http.ResponseWriter, r *http.Request, id string)
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	if !h.allow(w, r, PermToolRead) {
+	// invoke 是真实执行（MCP 工具可有退款等写副作用），须 write 权限
+	//（R11 审计 I1：原用 tool:read，viewer 亦可执行副作用操作；test 无副作用保持 read）。
+	if !h.allow(w, r, PermToolWrite) {
 		return
 	}
 	t, err := h.repo.Get(r.Context(), id)

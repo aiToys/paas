@@ -150,3 +150,48 @@ func TestApplyRepoUpdateRebuildsOldAndNewHost(t *testing.T) {
 		t.Fatalf("期望新+旧 host 都重建，实际 %+v", mock.applies)
 	}
 }
+
+// TestApplyRepoDeleteServiceRebuildsCascadedHosts 删服务级联删 Route 后，
+// 该服务涉及的每个 host 都要重建聚合 Ingress（防残留指向已删服务的 path）。
+func TestApplyRepoDeleteServiceRebuildsCascadedHosts(t *testing.T) {
+	mock := &mockRouteApplier{}
+	store := memory.NewStore()
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	// 服务 + 3 条 Route（两个不同 host + 一条无 host 不应触发）。
+	svc, err := store.CreateService(ctx, governance.Service{
+		Name: "svc-1", EnvID: "env-1", Protocol: governance.ProtocolHTTP, Port: 8080,
+	})
+	if err != nil {
+		t.Fatalf("CreateService: %v", err)
+	}
+	for _, rt := range []governance.Route{
+		{Name: "r1", Host: "a.example.com", Path: "/a", ServiceID: svc.ID, Methods: []string{"GET"}, Enabled: true},
+		{Name: "r2", Host: "a.example.com", Path: "/b", ServiceID: svc.ID, Methods: []string{"GET"}, Enabled: true},
+		{Name: "r3", Host: "b.example.com", Path: "/c", ServiceID: svc.ID, Methods: []string{"GET"}, Enabled: true},
+		{Name: "r4", Path: "/nohost", ServiceID: svc.ID, Methods: []string{"GET"}, Enabled: true},
+	} {
+		if _, err := store.CreateRoute(ctx, rt); err != nil {
+			t.Fatalf("CreateRoute %s: %v", rt.Name, err)
+		}
+	}
+	repo := governance.NewApplyRepo(store, mock)
+
+	if err := repo.DeleteService(ctx, svc.ID); err != nil {
+		t.Fatalf("DeleteService: %v", err)
+	}
+	// 同 host 去重：期望恰好 2 次 Apply（a.example.com + b.example.com）。
+	hosts := map[string]int{}
+	for _, c := range mock.applies {
+		if c.tid != "t-acme" {
+			t.Fatalf("Apply 应带租户 tid，实际 %+v", c)
+		}
+		hosts[c.host]++
+	}
+	if len(hosts) != 2 || hosts["a.example.com"] != 1 || hosts["b.example.com"] != 1 {
+		t.Fatalf("期望 a/b 各重建 1 次（同 host 去重），实际 %+v", mock.applies)
+	}
+	// 级联删除后 store 无残留 Route。
+	if left, _ := store.ListRoutes(ctx, ""); len(left) != 0 {
+		t.Fatalf("级联删 Route 后不应残留，实际 %d 条", len(left))
+	}
+}

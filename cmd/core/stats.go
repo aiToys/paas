@@ -42,6 +42,20 @@ func (s *appWorkloadStats) StatsByTenant(ctx context.Context) (map[string]applic
 	return stats, nil
 }
 
+// envUsageChecker 实现 environment.EnvUsageChecker：环境删除前查该环境下工作负载数
+// （非 0 拒删 409，防悬挂 envId 引用——allowProd fail-closed + 发布阶序断裂）。
+// 桥接 workload store（environment 不 import workload：后者已 import environment 会循环）。
+type envUsageChecker struct{ wl workload.Repository }
+
+func (c envUsageChecker) CountByEnv(ctx context.Context, envID string) (int, error) {
+	// List 按 ctx 租户过滤（Repository 强制）；appID/lane/type/service 空串=不过滤。
+	wls, err := c.wl.List(ctx, envID, "", "", "", "")
+	if err != nil {
+		return 0, err
+	}
+	return len(wls), nil
+}
+
 // wlServiceLister 查 app×env 已部署的服务集合（devops.WorkloadServiceLister 桥接，
 // 多服务发布 service 必填校验用）。Workload.Service 非空值去重；基线+泳道合并。
 type wlServiceLister struct{ repo workload.Repository }

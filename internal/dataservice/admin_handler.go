@@ -389,42 +389,10 @@ func (h *AdminHandler) serveCreate(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteDataCreated(w, maskDS(saved))
 }
 
-// resolveEngineForAdmin 与 Handler.resolveFromEngine 等价（admin 路径独立，避免耦合租户侧 Handler）。
-// engineID 必填；按引擎目录回填 kind/source/connection。
+// resolveEngineForAdmin 与 Handler.resolveFromEngine 共用 resolveEngineSpec 真源
+// （原两处同构实现，DRY 合并；admin 路径保留独立方法维持注入差异）。
 func (h *AdminHandler) resolveEngineForAdmin(ctx context.Context, d *DataService) error {
-	if d.EngineID == "" {
-		return fmt.Errorf("missing engineId")
-	}
-	if h.engineRepo == nil {
-		return fmt.Errorf("引擎目录未启用")
-	}
-	eng, err := h.engineRepo.GetEngine(ctx, d.EngineID)
-	if err != nil {
-		return fmt.Errorf("引擎不存在: %s", d.EngineID)
-	}
-	if !eng.Enabled {
-		return fmt.Errorf("引擎未启用: %s", d.EngineID)
-	}
-	d.Kind = eng.Kind
-	d.Source = eng.Mode
-	if d.Spec == nil {
-		d.Spec = map[string]string{}
-	}
-	d.Spec["engine"] = eng.Engine
-	switch eng.Mode {
-	case EngineModeExternalShared:
-		d.Connection = map[string]string{}
-		for k, v := range eng.Connection {
-			d.Connection[k] = v
-		}
-	case EngineModeExternalDedicated:
-		if d.Connection == nil || d.Connection["host"] == "" {
-			return fmt.Errorf("external-dedicated 模式需填写连接 host")
-		}
-	default:
-		d.Connection = nil // store.FillConnection 平台生成
-	}
-	return nil
+	return resolveEngineSpec(ctx, h.engineRepo, d)
 }
 
 // maskDS 返回 Connection 掩码副本（admin 详情/操作返回前一律掩码）。

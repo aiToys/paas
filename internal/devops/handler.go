@@ -917,6 +917,13 @@ func (h *Handler) serveBuildRuns(w http.ResponseWriter, r *http.Request, appID s
 		if b.Branch == "" {
 			b.Branch = repo.Branch
 		}
+		// 分支字符集同源校验（与 CodeRepo.Validate 一致，store 层双保险）：Branch 直进
+		// builder 的 `git clone --branch` argv，提前拒可省 internal commit 拉取（gitea
+		// 对非法 branch 的 400 会被误映射为 409 仓库已存在）。
+		if err := ValidateBranch(b.Branch); err != nil {
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
+			return
+		}
 		// internal 仓库：从 Gitea 拿该分支最新 commit sha + message 填入（替代 store 的 mock），
 		// 使构建记录的 commit/tag/message 真实（builder script COMMIT 非空则不 rev-parse，直接用此 sha 生成 tag）。
 		// 按 branch 取 HEAD（旅程审计 R5-I6 手动触发路径，与 pipeline 触发同款）：不传 ref 会

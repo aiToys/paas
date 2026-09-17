@@ -374,6 +374,16 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) (devops.B
 	if repo.AppID != b.AppID {
 		return devops.BuildRun{}, fmt.Errorf("仓库不存在或不属于本应用: %s", b.RepoID)
 	}
+	// 请求级 branch 覆盖同源校验（与 CodeRepo.Validate 一致）：Branch 直进 builder 的
+	// `git clone --branch` argv，恶意值（-- 前缀/特殊字符）须在入口拒（覆盖 pipeline
+	// engine 经 buildBridge 直触发的路径，与 handler 校验双保险）。置于并发闸之前：
+	// 校验失败拒绝不得占用构建槽（否则校验失败路径泄漏槽位，租户恒 429）。
+	if b.Branch == "" {
+		b.Branch = repo.Branch
+	}
+	if err := devops.ValidateBranch(b.Branch); err != nil {
+		return devops.BuildRun{}, err
+	}
 	// 并发闸（可观测审计 C1）：per-tenant 活跃构建上限，超限 429（handler 映射）。
 	// 计数在 runBuild 结束释放；进程重启由 SweepInterrupted 收口（计数归零重建）。
 	s.slotMu.Lock()
@@ -388,11 +398,7 @@ func (s *Store) CreateBuildRun(ctx context.Context, b devops.BuildRun) (devops.B
 	b.TenantID = tid
 	b.Status = devops.BuildPending
 	b.StartedAt = time.Now()
-	// 仅缺省回落 repo 默认分支：webhook/特性分支触发时调用方传入的 branch 是构建真源，
-	// 无条件覆盖会把 feature 分支构建错写成默认分支（buildTag 去重随之失真）。
-	if b.Branch == "" {
-		b.Branch = repo.Branch
-	}
+	// branch 已在并发闸前回落 + 校验（见上）。
 	if b.Commit == "" {
 		b.Commit = mockCommit()
 	}

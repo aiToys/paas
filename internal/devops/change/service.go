@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -180,6 +181,47 @@ func (s *Service) AbandonChange(ctx context.Context, id string) (Change, error) 
 	return s.repo.UpdateChange(ctx, c)
 }
 
+// AbandonBatch 放弃批次：仅 collecting/conflict/failed/testing/releasing 可放弃；
+// 批内未出批变更一并回 open 出批（可重新入批）。
+// 必须走 Service 而非 handler 直写 repo：abandon 是「Get→改→全量 UpdateBatch + 批内变更出批」，
+// 不持 per-batch 锁时与入批/SyncBatchStatus/Release 并发交错会覆盖丢成员（悬挂 Change）。
+func (s *Service) AbandonBatch(ctx context.Context, batchID string) (IntegrationBatch, error) {
+	unlock := s.lockBatch(batchID)
+	defer unlock()
+	b, err := s.repo.GetBatch(ctx, batchID)
+	if err != nil {
+		return IntegrationBatch{}, err
+	}
+	switch b.Status {
+	case BatchCollecting, BatchConflict, BatchFailed, BatchTesting, BatchReleasing:
+		// testing/releasing 也允许放弃（用户主动止损出口）：关联 run 由 SyncBatchStatus
+		// 在 run NotFound/aborted 时推进 failed，或用户另行 Abort。原状态面过窄会把
+		// testing/releasing 批次锁成死局（无任何退出动作）。
+	default:
+		return IntegrationBatch{}, fmt.Errorf("%w: 仅 collecting/conflict/failed/testing/releasing 批次可放弃", ErrBatchState)
+	}
+	b.Status = BatchAbandoned
+	if _, err := s.repo.UpdateBatch(ctx, b); err != nil {
+		return IntegrationBatch{}, err
+	}
+	// 批内变更回 open 出批（collecting/conflict 态变更仍挂批次；failed 态已由 Sync 出批，幂等）
+	for _, cid := range b.ChangeIDs {
+		if c, err := s.repo.GetChange(ctx, cid); err == nil {
+			c.BatchID = ""
+			c.ConflictWith = ""
+			if c.Status == ChangeIntegrated {
+				c.Status = ChangeOpen
+			}
+			// 清理路径 best-effort 不阻断批次删除，但失败必须有日志——否则变更永久悬挂在
+			// 已删批次上，只有对账式审计才能发现（吞错无感知是 R4 审计 Minor）。
+			if _, uerr := s.repo.UpdateChange(ctx, c); uerr != nil {
+				slog.Warn("批次放弃：变更回 open 出批失败（可能悬挂批次引用）", "changeId", cid, "err", uerr)
+			}
+		}
+	}
+	return s.repo.GetBatch(ctx, batchID)
+}
+
 // batchAllowed 批次状态 ∈ 给定集合。
 func batchAllowed(b IntegrationBatch, statuses ...string) bool {
 	for _, st := range statuses {
@@ -276,6 +318,11 @@ func (s *Service) Integrate(ctx context.Context, batchID string) (IntegrationBat
 	if s.runs == nil {
 		return IntegrationBatch{}, ErrGiteaNotConfigured
 	}
+	// 全程持 per-batch 锁（与 lockBatch 注释同族）：Integrate 是同款「Get→全量 UpdateBatch」
+	// 读-改-写，且 Gitea merge 耗时秒级——不拿锁时并发入批/出批的成员更新会被末尾的
+	// 全量 UpdateBatch 覆盖丢失，制造悬挂 Change（跨重启仍错）。
+	unlock := s.lockBatch(batchID)
+	defer unlock()
 	b, err := s.repo.GetBatch(ctx, batchID)
 	if err != nil {
 		return IntegrationBatch{}, err
