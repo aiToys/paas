@@ -1,19 +1,32 @@
 # Loki + Promtail 精简 values（dev 轻量但真实）。
 # Promtail 以 DaemonSet 采集全集群 Pod 日志（/var/log/pods/*），自动带 pod label（app 等）。
 # 平台 logs 查询（real/logs.go）用 LogQL `{app="...",level="..."} |= "..."`。
+#
+# ⚠ 本文件含 ${...} 占位符，必须经 scripts/deploy-observability.sh 应用（它 envsubst 注入集群相关值）：
+#     ${STORAGE_CLASS}          PVC StorageClass
+#     ${LOKI_IMAGE_REPO}        loki 镜像完整仓库路径（含 registry 主机）
+#     ${PROMTAIL_IMAGE_REGISTRY} / ${PROMTAIL_IMAGE_REPO}  promtail 镜像（registry/repository 分写）
 ---
 loki:
   enabled: true
-  # 镜像走本地 registry（节点拉不到 docker.io，曾致 ImagePullBackOff）。
+  # 镜像走内网中转 registry（换集群用 LOKI_IMAGE_REPO 覆盖为可达仓库）。
   # loki subchart 渲染 image 为 {repository}:{tag}（不加 registry 前缀），故 repository 含完整路径。
   # 注意：promtail subchart 反而会拼 docker.io 前缀，故 promtail 用 registry/repository 分写。
   image:
-    repository: hub.wang.dd:5000/observability/loki
+    repository: ${LOKI_IMAGE_REPO}
     tag: "2.6.1"
+  # 注解修正：grafana/loki chart 默认注入 prometheus.io/port="http-metrics"（端口**名**而非数字），
+  # 而 kube-prometheus-stack 的 kubernetes-pods job 的 relabel 正则 ([^:]+)(?::\d+)?;(\d+) 要求数字，
+  # 不匹配即静默失效 → 退回 Pod SD 默认行为（**每个 containerPort 各生成一个 target**），
+  # 于是 3100/9095/7946 三个端口全被抓：9095 是 gRPC（HTTP/2，报 malformed HTTP response
+  # "\x00\x00\f\x04..."）、7946 是 memberlist（connection reset）。改成数字 3100 后只抓 HTTP 端口。
+  podAnnotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "3100"
   # single binary，dev 不做高可用
   persistence:
     enabled: true
-    storageClassName: local-path
+    storageClassName: ${STORAGE_CLASS}
     size: 10Gi
   resources:
     requests: { cpu: 100m, memory: 256Mi }
@@ -30,10 +43,10 @@ loki:
 
 promtail:
   enabled: true
-  # 镜像走本地 registry（同 loki，registry/repository 分写）。
+  # 镜像走内网中转 registry（同 loki，registry/repository 分写）。
   image:
-    registry: hub.wang.dd:5000
-    repository: observability/promtail
+    registry: ${PROMTAIL_IMAGE_REGISTRY}
+    repository: ${PROMTAIL_IMAGE_REPO}
     tag: "3.5.1"
   # 抓所有 namespace Pod 日志（含 paas namespace）。
   # 应用级日志查询（real/logs.go）按 namespace + 工作负载 pod 名正则匹配（paas-<tenant>/wl-<id>-.*），
@@ -46,6 +59,14 @@ promtail:
     # pod label 键含 / 和 .，需整体转义（promtail label 名只许 [a-zA-Z0-9_]）。
     # 同时提取租户/应用 label，日志侧具备与 trace 一致的排障维度。
     snippets:
+      # pipeline_stages：cri + docker 双解析。docker shim 集群（/var/log/pods 软链到
+      # /data/docker/containers/<id>/<id>-json.log）日志行是 docker JSON 包装
+      # （{"log":...,"stream":...,"time":...}），只配 cri 时原样透传入库 → paas/Grafana
+      # 日志查询全显示原始 JSON。两 stage 各解析各自格式、非本格式行原样透传，可共存
+      # （containerd 集群 cri 生效、docker 集群 docker 生效）。
+      pipelineStages:
+        - cri: {}
+        - docker: {}
       extraScrapeConfigs: |
         - job_name: kubernetes-pods-lane
           kubernetes_sd_configs:
@@ -61,6 +82,7 @@ promtail:
               target_label: pod
           pipeline_stages:
             - cri: {}
+            - docker: {}
   # 内存 64Mi → 256Mi：节点 pod 多时 promtail tail 大量文件，64Mi 易 OOMKilled
   # （exit 137 CrashLoopBackOff，实测 kb3 OOM 重启 270 次）。256Mi 稳定。
   resources:

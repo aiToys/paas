@@ -320,6 +320,11 @@ func TestReconcileQdrant(t *testing.T) {
 	if c.VolumeMounts[0].MountPath != "/qdrant/storage" {
 		t.Fatalf("qdrant 数据卷挂载点应 /qdrant/storage, got %s", c.VolumeMounts[0].MountPath)
 	}
+	// 内置 /metrics 注入 prometheus 抓取注解（kubernetes-pods job 抓）
+	ann := sts.Spec.Template.Annotations
+	if ann["prometheus.io/scrape"] != "true" || ann["prometheus.io/port"] != "6333" || ann["prometheus.io/path"] != "/metrics" {
+		t.Fatalf("qdrant 应注入 prometheus 抓取注解, got %v", ann)
+	}
 }
 
 // TestReconcileMeilisearch 验证 meilisearch：镜像 + env MEILI_MASTER_KEY + 端口 7700。
@@ -357,6 +362,10 @@ func TestReconcileMeilisearch(t *testing.T) {
 	}
 	if !foundEnv {
 		t.Fatalf("meilisearch 缺 MEILI_MASTER_KEY env")
+	}
+	// meilisearch /metrics 需 experimental 参数 + 鉴权，注解方式带不了 header → 不注入（留后续）
+	if v, ok := sts.Spec.Template.Annotations["prometheus.io/scrape"]; ok {
+		t.Fatalf("meilisearch 不应注入抓取注解（需 exporter sidecar）, got %v", v)
 	}
 }
 
@@ -438,15 +447,15 @@ func TestExporterSidecarInjectedForPostgres(t *testing.T) {
 	if !containsStr(names, "exporter") {
 		t.Fatalf("postgres 应注入 exporter sidecar，实际容器：%v", names)
 	}
-	// exporter 容器应有端口名 exporter@9100 + DATA_SOURCE_NAME env。
+	// exporter 容器应有端口名 exporter@exporterPort + DATA_SOURCE_NAME env。
 	var exp *corev1.Container
 	for i := range sts.Spec.Template.Spec.Containers {
 		if sts.Spec.Template.Spec.Containers[i].Name == "exporter" {
 			exp = &sts.Spec.Template.Spec.Containers[i]
 		}
 	}
-	if exp == nil || len(exp.Ports) == 0 || exp.Ports[0].Name != "exporter" || exp.Ports[0].ContainerPort != 9100 {
-		t.Fatalf("exporter 端口应为 exporter@9100，got %+v", exp)
+	if exp == nil || len(exp.Ports) == 0 || exp.Ports[0].Name != "exporter" || exp.Ports[0].ContainerPort != 9200 {
+		t.Fatalf("exporter 端口应为 exporter@9200，got %+v", exp)
 	}
 	hasDSN := false
 	for _, e := range exp.Env {
@@ -457,15 +466,15 @@ func TestExporterSidecarInjectedForPostgres(t *testing.T) {
 	if !hasDSN {
 		t.Fatalf("postgres exporter 应有 DATA_SOURCE_NAME env")
 	}
-	// exporter 应显式 --web.listen-address=:9100（默认端口各异，强制统一对齐声明的 9100 + scrape job）。
+	// exporter 应显式 --web.listen-address=:9200（默认端口各异，强制统一对齐声明的 9200 + scrape job，9100 被物理网阻断）。
 	listenOK := false
 	for _, a := range exp.Args {
-		if a == "--web.listen-address=:9100" {
+		if a == "--web.listen-address=:9200" {
 			listenOK = true
 		}
 	}
 	if !listenOK {
-		t.Fatalf("postgres exporter 应 --web.listen-address=:9100，got args=%v", exp.Args)
+		t.Fatalf("postgres exporter 应 --web.listen-address=:9200，got args=%v", exp.Args)
 	}
 }
 
@@ -483,6 +492,21 @@ func TestNoSidecarForMinio(t *testing.T) {
 		if c.Name == "exporter" {
 			t.Fatalf("minio 不应注入 exporter sidecar（内置 metrics）")
 		}
+	}
+	// 内置指标端点注入抓取注解（非根路径）+ MINIO_PROMETHEUS_AUTH_TYPE=public（关认证）
+	ann := sts.Spec.Template.Annotations
+	if ann["prometheus.io/scrape"] != "true" || ann["prometheus.io/port"] != "9000" ||
+		ann["prometheus.io/path"] != "/minio/v2/metrics/cluster" {
+		t.Fatalf("minio 应注入 prometheus 抓取注解, got %v", ann)
+	}
+	var authPublic bool
+	for _, e := range sts.Spec.Template.Spec.Containers[0].Env {
+		if e.Name == "MINIO_PROMETHEUS_AUTH_TYPE" && e.Value == "public" {
+			authPublic = true
+		}
+	}
+	if !authPublic {
+		t.Fatalf("minio 缺 MINIO_PROMETHEUS_AUTH_TYPE=public env")
 	}
 }
 

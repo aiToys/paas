@@ -69,10 +69,14 @@ func (s *Store) query(ctx context.Context, sql string, args ...any) ([]observabi
 }
 
 // CreateAlertRule 创建规则（ID 为空自动生成；ctx 租户为准忽略请求体 TenantID）。
-// 同租户同名单一约束与 memory 一致。
+// 同租户同名单一约束与 memory 一致。Validate 与 memory 路径同源收口
+// （2026-09-25 审计 C2：曾缺失校验直接 INSERT，线上实证 2 条全空字段脏规则）。
 func (s *Store) CreateAlertRule(ctx context.Context, rule observability.AlertRule) (observability.AlertRule, error) {
 	tid, err := storagepg.TenantOrErr(ctx)
 	if err != nil {
+		return observability.AlertRule{}, err
+	}
+	if err := rule.Validate(); err != nil {
 		return observability.AlertRule{}, err
 	}
 	if rule.ID == "" {
@@ -90,6 +94,35 @@ func (s *Store) CreateAlertRule(ctx context.Context, rule observability.AlertRul
 	}
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return observability.AlertRule{}, err
+	}
+	return rule, nil
+}
+
+// UpdateAlertRule 更新规则（仅当前租户；ID/TenantID 不变，Validate 与 Create 同源；
+// 跨租户统一 not found 不泄漏——RowsAffected=0 即不存在或非本租户）。
+func (s *Store) UpdateAlertRule(ctx context.Context, id string, rule observability.AlertRule) (observability.AlertRule, error) {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return observability.AlertRule{}, err
+	}
+	if err := rule.Validate(); err != nil {
+		return observability.AlertRule{}, err
+	}
+	rule.ID = id
+	rule.TenantID = tid
+	rule.UpdatedAt = time.Now()
+	tag, err := s.db.Pool().Exec(ctx,
+		`UPDATE alert_rules SET name=$3, metric_name=$4, target_type=$5, target_id=$6,
+		 operator=$7, threshold=$8, severity=$9, enabled=$10, webhook_url=$11, updated_at=$12
+		 WHERE id=$1 AND tenant_id=$2`,
+		rule.ID, rule.TenantID, rule.Name, rule.MetricName, rule.TargetType, rule.TargetID,
+		rule.Operator, rule.Threshold, rule.Severity, rule.Enabled, rule.WebhookURL, rule.UpdatedAt,
+	)
+	if err != nil {
+		return observability.AlertRule{}, err
+	}
+	if tag.RowsAffected() == 0 {
+		return observability.AlertRule{}, fmt.Errorf("规则不存在: %s", id)
 	}
 	return rule, nil
 }

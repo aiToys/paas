@@ -107,6 +107,23 @@ func (r *ApplyRepo) SetDomain(ctx context.Context, id string, domain string) err
 	return nil
 }
 
+// SetMetricsPath 覆盖指标端点路径并投影数据面（reconciler 据 CRD spec.metricsPath 增删
+// prometheus.io/scrape 注解）。缺投影会只写 PG、CRD 不变——Pod 注解不更新，声明了也抓不到
+// （与 SetDomain 同款模式）。
+func (r *ApplyRepo) SetMetricsPath(ctx context.Context, id string, path string) error {
+	// 显式走内层嵌入字段，避免自递归（同 SetDomain）。
+	if err := r.Repository.SetMetricsPath(ctx, id, path); err != nil { //nolint:staticcheck // QF1008：装饰器须显式走内层
+		return err
+	}
+	if r.applier != nil {
+		if w, err := r.Repository.Get(ctx, id); err == nil { //nolint:staticcheck // QF1008:装饰器显式转发嵌入实现
+			w = withTenant(ctx, w)
+			r.applyLog("set-metrics-path", w.ID, r.applier.Apply(ctx, w))
+		}
+	}
+	return nil
+}
+
 // UpdateSchedule 修改 cron schedule 并投影数据面（reconciler 据 CRD spec.schedule 更新 K8s CronJob）。
 func (r *ApplyRepo) UpdateSchedule(ctx context.Context, id, schedule string) (Workload, error) {
 	saved, err := r.Repository.UpdateSchedule(ctx, id, schedule)
@@ -141,4 +158,31 @@ func withTenant(ctx context.Context, w Workload) Workload {
 		}
 	}
 	return w
+}
+
+// OnCreateRepo 在 Create 成功后触发回调（治理服务自动注册等增强动作）。
+// 依赖倒置：workload 不感知 governance，cmd/core 注入回调；仅 service 类型触发
+// （job/cronjob 无服务语义）。回调失败仅记日志、panic 不传播——注册属元数据
+// 增强，绝不阻断创建主路径。回调 nil 时透传（无副作用）。
+type OnCreateRepo struct {
+	Repository
+	OnCreate func(ctx context.Context, w Workload)
+}
+
+func (r *OnCreateRepo) Create(ctx context.Context, w Workload) error {
+	if err := r.Repository.Create(ctx, w); err != nil {
+		return err
+	}
+	if r.OnCreate == nil || w.Type != TypeService {
+		return nil
+	}
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				log.Printf("[workload-oncreate] 回调 panic recovered: %v", p)
+			}
+		}()
+		r.OnCreate(ctx, w)
+	}()
+	return nil
 }

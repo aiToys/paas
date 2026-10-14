@@ -60,6 +60,11 @@ func (r *Repo) CreateAlertRule(ctx context.Context, rule observability.AlertRule
 	return r.rules.CreateAlertRule(ctx, rule)
 }
 
+// UpdateAlertRule 更新规则（委托 rules store）。
+func (r *Repo) UpdateAlertRule(ctx context.Context, id string, rule observability.AlertRule) (observability.AlertRule, error) {
+	return r.rules.UpdateAlertRule(ctx, id, rule)
+}
+
 func (r *Repo) DeleteAlertRule(ctx context.Context, id string) error {
 	return r.rules.DeleteAlertRule(ctx, id)
 }

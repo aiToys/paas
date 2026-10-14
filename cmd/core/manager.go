@@ -31,7 +31,8 @@ type k8sAppliers struct {
 	dsRestarter  *controller.DSRestarter // 数据服务实例滚动重启（patch STS），nil=集群外降级
 	clientset    kubernetes.Interface    // 供 builder.K8sJob（create Job + pods/log）；nil=K8s 不可用
 	wlReconciler *controller.WorkloadReconciler
-	client       client.Client // controller-runtime typed client（供 route applier 聚合 Ingress）
+	dsReconciler *controller.DataServiceReconciler // 供 stores 构造后延迟注入 PlatformExists（孤儿回收）
+	client       client.Client                     // controller-runtime typed client（供 route applier 聚合 Ingress）
 }
 
 // startManager 启 controller-runtime manager（K8s 数据面），自动检测配置来源：
@@ -102,7 +103,8 @@ func startManager() (k8sAppliers, context.CancelFunc) {
 		log.Printf("K8s 数据面: 注册 WorkloadReconciler 失败（降级为无 K8s）: %v", err)
 		return k8sAppliers{}, nil
 	}
-	if err := (&controller.DataServiceReconciler{Client: mgr.GetClient(), Scheme: scheme}).SetupWithManager(mgr); err != nil {
+	dsReconciler := &controller.DataServiceReconciler{Client: mgr.GetClient(), Scheme: scheme}
+	if err := dsReconciler.SetupWithManager(mgr); err != nil {
 		log.Printf("K8s 数据面: 注册 DataServiceReconciler 失败（降级为无 K8s）: %v", err)
 		return k8sAppliers{}, nil
 	}
@@ -127,6 +129,7 @@ func startManager() (k8sAppliers, context.CancelFunc) {
 		dsRestarter:  controller.NewDSRestarter(mgr.GetClient()),
 		clientset:    clientset,
 		wlReconciler: wlReconciler,
+		dsReconciler: dsReconciler,
 		client:       mgr.GetClient(),
 	}, cancel
 }

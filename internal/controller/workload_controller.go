@@ -13,6 +13,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -146,13 +147,20 @@ func sanitizeLane(lane string) string {
 }
 
 // prometheusAnnotations 返回 service 类型工作负载 Pod 的 Prometheus 自动发现注解。
-// 仅 type=service 且端口>0：Prometheus kubernetes-pods job 按 prometheus.io/scrape=true 发现 Pod，
-// 抓 <port>/metrics（复用业务端口，paas-shop 等服务已在业务端口暴露 /metrics）。
+// 条件：type=service、端口>0、且 spec.metricsPath 非空（**显式声明**）。
+// Prometheus kubernetes-pods job 按 prometheus.io/scrape=true 发现 Pod，抓 <port><metricsPath>
+// （复用业务端口，paas-shop 等服务已在业务端口暴露 /metrics）。
 // job/cronjob 无常驻 HTTP server，不抓。端口取 ContainerPort，缺省取 Port。
 // 配合 Pod template 的 paas.aitoys/app + paas.aitoys/workload label（labelsFor），metrics.go
 // 可按 namespace + pod 正则聚合应用级 RED 指标（RPS/延迟/错误率）。
+//
+// metricsPath 为空则**不注入**：多数应用不暴露 /metrics，无条件注入会让这些 Pod 变成永久
+// down target（Prometheus 报 unsupported Content-Type "text/html"），将来 up==0 告警即假告警源。
 func prometheusAnnotations(w *v1alpha1.Workload) map[string]string {
 	if w.Spec.Type != "service" {
+		return nil
+	}
+	if w.Spec.MetricsPath == "" {
 		return nil
 	}
 	port := w.Spec.ContainerPort
@@ -165,7 +173,7 @@ func prometheusAnnotations(w *v1alpha1.Workload) map[string]string {
 	return map[string]string{
 		"prometheus.io/scrape": "true",
 		"prometheus.io/port":   strconv.Itoa(int(port)),
-		"prometheus.io/path":   "/metrics",
+		"prometheus.io/path":   w.Spec.MetricsPath,
 	}
 }
 func podSpec(w *v1alpha1.Workload) (corev1.PodSpec, error) {
@@ -406,10 +414,13 @@ func (r *WorkloadReconciler) applyService(ctx context.Context, w *v1alpha1.Workl
 // applyIngress CreateOrUpdate networkingv1.Ingress（仅 type=service 且 Port>0 且 Domain 非空）。
 // Ingress 名 = Workload 名（与 Service 同名）；host=Domain，path / -> Service:Port，pathType Prefix。
 // ingressClassName 取 r.IngressClass（env PAAS_INGRESS_CLASS，默认 hermes）。
-// OwnerRef 设 CR，删 CR 级联清 Ingress。Domain 空则跳过（仅集群内 DNS 可达，不对外暴露）。
+// OwnerRef 设 CR，删 CR 级联清 Ingress。Domain 空则回收已建 Ingress（撤域名语义）。
 func (r *WorkloadReconciler) applyIngress(ctx context.Context, w *v1alpha1.Workload) error {
 	if w.Spec.Type != "service" || w.Spec.Port <= 0 || w.Spec.Domain == "" {
-		return nil
+		// 撤下/不满足建 Ingress 条件时回收残留：此前空 domain 仅跳过不删，撤域名后旧
+		// Ingress 继续路由流量（2026-10-14 实测生产域名双 Ingress 同 host 并存，流量落在
+		// 旧 workload 的 Service 上）。NotFound 幂等；删 CR 仍走 OwnerRef 级联，不依赖此路径。
+		return r.cleanupIngress(ctx, w)
 	}
 	svcName := w.Spec.Name
 	if svcName == "" {
@@ -442,6 +453,20 @@ func (r *WorkloadReconciler) applyIngress(ctx context.Context, w *v1alpha1.Workl
 		return controllerutil.SetControllerReference(w, ing, r.Scheme)
 	})
 	return err
+}
+
+// cleanupIngress 删除该 workload 名下的 Ingress（applyIngress 的撤下分支）。命名与建时
+// 一致（Spec.Name 或 CR 名），NotFound 幂等。
+func (r *WorkloadReconciler) cleanupIngress(ctx context.Context, w *v1alpha1.Workload) error {
+	svcName := w.Spec.Name
+	if svcName == "" {
+		svcName = w.Name
+	}
+	ing := &networkingv1.Ingress{ObjectMeta: metav1.ObjectMeta{Name: svcName, Namespace: w.Namespace}}
+	if err := r.Delete(ctx, ing); err != nil && !errors.IsNotFound(err) {
+		return err
+	}
+	return nil
 }
 
 // applyJob CreateOrUpdate Job（一次性）+ 回写 status。

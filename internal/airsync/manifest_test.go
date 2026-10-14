@@ -15,7 +15,8 @@ func TestBuildAndVerifyManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	images := []ImageRef{{Name: "ghcr.io/aitoys/paas-core", Tag: "0.1.0", File: "core-0.1.0.tar"}}
-	m, err := BuildManifest(dir, "0.1.0", "0.1.0", "paas-0.1.0.tgz", images, "2026-07-30T00:00:00Z")
+	m, err := BuildManifest(ManifestInput{BundleDir: dir, PaasVersion: "0.1.0", ChartVersion: "0.1.0",
+		ChartFile: "paas-0.1.0.tgz", Images: images, GeneratedAt: "2026-07-30T00:00:00Z"})
 	if err != nil {
 		t.Fatalf("BuildManifest: %v", err)
 	}
@@ -34,7 +35,8 @@ func TestVerifyDetectsTamper(t *testing.T) {
 	if err := os.WriteFile(f, []byte("original"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := BuildManifest(dir, "0.1.0", "0.1.0", "", []ImageRef{{File: "core-0.1.0.tar"}}, ""); err != nil {
+	if _, err := BuildManifest(ManifestInput{BundleDir: dir, PaasVersion: "0.1.0", ChartVersion: "0.1.0",
+		Images: []ImageRef{{File: "core-0.1.0.tar"}}}); err != nil {
 		t.Fatalf("BuildManifest: %v", err)
 	}
 	// 篡改文件
@@ -53,7 +55,8 @@ func TestVerifyDetectsMissingFile(t *testing.T) {
 	if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, _ = BuildManifest(dir, "0.1.0", "0.1.0", "", []ImageRef{{File: "core.tar"}}, "")
+	_, _ = BuildManifest(ManifestInput{BundleDir: dir, PaasVersion: "0.1.0", ChartVersion: "0.1.0",
+		Images: []ImageRef{{File: "core.tar"}}})
 	_ = os.Remove(f)
 	_, mismatch, _ := VerifyManifest(dir)
 	if len(mismatch) == 0 {

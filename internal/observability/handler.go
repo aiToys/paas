@@ -213,7 +213,7 @@ func (h *Handler) serveRuleCollection(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) serveRuleItem(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
+	if r.Method != http.MethodDelete && r.Method != http.MethodPut {
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
@@ -224,6 +224,21 @@ func (h *Handler) serveRuleItem(w http.ResponseWriter, r *http.Request) {
 	id = strings.TrimRight(id, "/")
 	if id == "" {
 		httputil.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if r.Method == http.MethodPut {
+		// 更新规则（改规则不再「删了重建」——规则 ID 变会断开告警历史关联）。
+		var rule AlertRule
+		if err := json.NewDecoder(r.Body).Decode(&rule); err != nil {
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+			return
+		}
+		saved, err := h.repo.UpdateAlertRule(r.Context(), id, rule)
+		if err != nil {
+			httputil.WriteServiceError(w, http.StatusBadRequest, err)
+			return
+		}
+		httputil.WriteData(w, saved)
 		return
 	}
 	if err := h.repo.DeleteAlertRule(r.Context(), id); err != nil {

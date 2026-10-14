@@ -37,7 +37,7 @@ func NewStore(db *pg.DB) *Store { return &Store{db: db.Pool()} }
 // 列常量与 scan 列序严格对齐（列错位是 pg store 最易踩坑）。
 const (
 	changeCols = `id, tenant_id, app_id, repo_id, title, type, branch, branch_created, base_branch,
-		status, batch_id, conflict_with, created_by, created_at, updated_at`
+		status, batch_id, conflict_with, agent_run_name, created_by, created_at, updated_at`
 	batchCols = `id, tenant_id, app_id, repo_id, title, branch, status, change_ids,
 		pipeline_id, run_id, release_ids, created_by, created_at, finished_at`
 )
@@ -109,7 +109,7 @@ func (s *Store) ListChanges(ctx context.Context, appID, status string) ([]change
 		var c change.Change
 		if err = rows.Scan(&c.ID, &c.TenantID, &c.AppID, &c.RepoID, &c.Title, &c.Type, &c.Branch,
 			&c.BranchCreated, &c.BaseBranch, &c.Status, &c.BatchID, &c.ConflictWith,
-			&c.CreatedBy, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			&c.AgentRunName, &c.CreatedBy, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -128,7 +128,7 @@ func (s *Store) GetChange(ctx context.Context, id string) (change.Change, error)
 		`SELECT `+changeCols+` FROM changes WHERE id=$1 AND tenant_id=$2`, id, tid).
 		Scan(&c.ID, &c.TenantID, &c.AppID, &c.RepoID, &c.Title, &c.Type, &c.Branch,
 			&c.BranchCreated, &c.BaseBranch, &c.Status, &c.BatchID, &c.ConflictWith,
-			&c.CreatedBy, &c.CreatedAt, &c.UpdatedAt)
+			&c.AgentRunName, &c.CreatedBy, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return change.Change{}, change.ErrChangeNotFound
@@ -156,10 +156,10 @@ func (s *Store) CreateChange(ctx context.Context, in change.Change) (change.Chan
 		in.BaseBranch = "main"
 	}
 	_, err = s.db.Exec(ctx,
-		`INSERT INTO changes (`+changeCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+		`INSERT INTO changes (`+changeCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
 		in.ID, in.TenantID, in.AppID, in.RepoID, in.Title, in.Type, in.Branch,
 		in.BranchCreated, in.BaseBranch, in.Status, in.BatchID, in.ConflictWith,
-		in.CreatedBy, in.CreatedAt, in.UpdatedAt)
+		in.AgentRunName, in.CreatedBy, in.CreatedAt, in.UpdatedAt)
 	if err != nil {
 		if pg.IsUniqueViolation(err) {
 			return change.Change{}, change.ErrChangeExists
@@ -178,10 +178,10 @@ func (s *Store) UpdateChange(ctx context.Context, in change.Change) (change.Chan
 	in.TenantID = tid
 	in.UpdatedAt = time.Now().UTC()
 	tag, err := s.db.Exec(ctx, `UPDATE changes SET title=$3, type=$4, branch=$5, branch_created=$6,
-		base_branch=$7, status=$8, batch_id=$9, conflict_with=$10, created_by=$11, updated_at=$12
+		base_branch=$7, status=$8, batch_id=$9, conflict_with=$10, agent_run_name=$11, created_by=$12, updated_at=$13
 		WHERE id=$1 AND tenant_id=$2`,
 		in.ID, in.TenantID, in.Title, in.Type, in.Branch, in.BranchCreated,
-		in.BaseBranch, in.Status, in.BatchID, in.ConflictWith, in.CreatedBy, in.UpdatedAt)
+		in.BaseBranch, in.Status, in.BatchID, in.ConflictWith, in.AgentRunName, in.CreatedBy, in.UpdatedAt)
 	if err != nil {
 		if pg.IsUniqueViolation(err) {
 			return change.Change{}, change.ErrChangeExists

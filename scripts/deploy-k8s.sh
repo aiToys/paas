@@ -65,7 +65,10 @@ echo "▶ 1/4 构建镜像（多阶段：前端 build + Go 交叉编译 amd64 + 
 # Go 交叉编译到 amd64，避 QEMU 全栈模拟（Go http2/TLS 在 QEMU amd64 下 SIGSEGV 致 go mod
 # download 必 crash）。buildkit 内置 frontend 支持 $BUILDPLATFORM（不加 # syntax= 不拉远程）。
 # --platform=linux/amd64：明确目标架构（dev 集群 amd64），Dockerfile 的 ARG TARGETARCH 据此取 amd64。
-DOCKER_BUILDKIT=1 docker build --platform=linux/amd64 -t "$IMAGE" -f Dockerfile .
+DOCKER_BUILDKIT=1 docker build --platform=linux/amd64 \
+  ${BASE_REGISTRY:+--build-arg BASE_REGISTRY=$BASE_REGISTRY} \
+  ${BASE_REGISTRY:+--build-arg RUNTIME_IMAGE=$BASE_REGISTRY/alpine:3.20} \
+  -t "$IMAGE" -f Dockerfile .
 
 push_image() {
   # 优先 docker push（daemon 已配 insecure registry）；失败 fallback crane 直推（不经 dockerd）。
@@ -108,15 +111,21 @@ echo ""
 echo "▶ 3/5 部署知识库后端（qdrant + minio 共享实例，KB RAG 用）..."
 # KB 共享 infra：镜像来自内网 registry（library/qdrant + library/minio）。
 # ${NODE_IP} 由 envsubst 注入镜像地址；values-paas-k8s.yaml 的 kb 段指向这些 Service。
+#
+# envsubst 用**显式变量表**：只替换列出的 ${VAR}，其它 $ 原样保留。
+# 防御性加固，非修 bug——这三个文件当前只有 ${NODE_IP} 一个占位符，实测裸 envsubst 与
+# 显式变量表输出完全相同（$6 / $(cmd) 不是合法变量名起始，裸 envsubst 也不动它们）。
+# 真实风险在将来：$word 形式的引用（正则回引、Grafana 模板变量 $namespace/$__all）会被
+# 裸 envsubst 当成变量替换成空串。deploy-observability.sh 正是踩过这个坑才用显式变量表。
 export NODE_IP
-envsubst < deploy/kb/qdrant.yaml | kubectl -n "$NS" apply -f -
-envsubst < deploy/kb/minio.yaml | kubectl -n "$NS" apply -f -
+SUBST_VARS='${NODE_IP}'
+envsubst "$SUBST_VARS" < deploy/kb/qdrant.yaml | kubectl -n "$NS" apply -f -
+envsubst "$SUBST_VARS" < deploy/kb/minio.yaml | kubectl -n "$NS" apply -f -
 
 echo ""
 echo "▶ 4/5 envsubst values（注入 NODE_IP=${NODE_IP}）→ helm upgrade --install..."
 VALUES_TMP="$(mktemp -t paas-values.XXXXXX.yaml)"
-export NODE_IP
-envsubst < deploy/charts/paas/values-paas-k8s.yaml > "$VALUES_TMP"
+envsubst "$SUBST_VARS" < deploy/charts/paas/values-paas-k8s.yaml > "$VALUES_TMP"
 helm upgrade --install "$RELEASE" deploy/charts/paas \
   -n "$NS" --create-namespace \
   -f "$VALUES_TMP" \

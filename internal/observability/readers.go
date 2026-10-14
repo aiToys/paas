@@ -28,10 +28,13 @@ type TracesReader interface {
 	GetTrace(ctx context.Context, traceID string) (Trace, error)
 }
 
-// RuleStore 是告警规则配置存取（始终 memory，compose 委托）。
+// RuleStore 是告警规则配置存取（memory/PG 双实现，compose 委托）。
 type RuleStore interface {
 	ListAlertRules(ctx context.Context) ([]AlertRule, error)
 	CreateAlertRule(ctx context.Context, rule AlertRule) (AlertRule, error)
+	// UpdateAlertRule 更新规则（改规则不再「删了重建」——规则 ID 变会断开告警历史关联）。
+	// id 为路径参数；rule 为新字段值（ID/TenantID/UpdatedAt 以库内为准忽略请求体）。
+	UpdateAlertRule(ctx context.Context, id string, rule AlertRule) (AlertRule, error)
 	DeleteAlertRule(ctx context.Context, id string) error
 	// ListAllAlertRules 跨租户列出全部告警规则（admin 平台总览，不过滤 tenant）。
 	ListAllAlertRules(ctx context.Context) ([]AlertRule, error)

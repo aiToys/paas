@@ -45,6 +45,12 @@ export const createAlertRule = (body: Partial<AlertRule>) =>
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   }).then(r => unwrap<AlertRule>(r))
 
+// 更新规则（PUT 保持规则 ID 不变——删了重建会断开告警历史关联）。
+export const updateAlertRule = (id: string, body: Partial<AlertRule>) =>
+  fetchAuth(`/api/observability/alert-rules/${id}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(r => unwrap<AlertRule>(r))
+
 export const deleteAlertRule = (id: string) =>
   fetchAuth(`/api/observability/alert-rules/${id}`, { method: 'DELETE' })
 

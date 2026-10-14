@@ -1,19 +1,18 @@
 <script setup lang="ts">
-import { formatDateTime } from '@/utils/format'
-import { statusOf as statusOfCore, tagTypeToCls, POD_STATUS } from '@/composables/useStatus'
 // 应用详情 - 服务 tab（服务模型 Phase 1）：服务卡片 grid + 新建服务 + 实例抽屉聚合。
 // 服务是应用的组成单元（web/backend/agent/static/cron）；「查看实例」按 serviceId 过滤
-// 该服务工作负载，复用 Workloads 详情抽屉模式（实例表 + Pod 日志）。
+// 该服务工作负载；工作负载详情/日志走 WorkloadDetailDrawer 组件（与 Workloads 视图单一真源）。
 import { computed, onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { fetchJSON, apiError } from '@/api'
 import { listPipelines, triggerRun, type Pipeline } from '@/api/pipeline'
 import { createService, deleteService, listServices, type ServiceEntity, type ServiceType } from '@/api/service'
-import { getWorkload, getWorkloadLogs, type Workload, type WorkloadDetail } from '@/api/workload'
+import { updateWorkload, type Workload } from '@/api/workload'
+import WorkloadDetailDrawer from '@/components/WorkloadDetailDrawer.vue'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 
-const props = defineProps<{ appId: string }>()
+const props = defineProps<{ appId: string; appName: string }>()
 const emit = defineEmits<{ (e: 'switch-tab', tab: string): void }>()
 const router = useRouter()
 
@@ -39,7 +38,7 @@ async function load() {
     loading.value = false
   }
 }
-onMounted(load)
+onMounted(() => { load(); loadExposure() })
 
 // —— 新建服务 ——
 interface Repo { id: string; gitUrl: string; source?: string; giteaRepo?: string }
@@ -98,14 +97,25 @@ async function submitCreate() {
 
 // —— 部署：触发 app 的 CI 流水线（构建->部署->冒烟），直达运行页看进度 ——
 // 服务实体（含 Port）经 R1 后由 deploy stage 自动采用（单服务零操作）。
+// 二次确认（2026-10-13 用户实测反馈：无变更也可无限点，误触即触发完整 CI——
+// 重复构建浪费 + 运行记录噪音；确认框让语义诚实：这是「构建并部署」不是仅部署）。
 async function onDeploy(s: ServiceEntity) {
+  try {
+    await ElMessageBox.confirm(
+      `将触发「${s.name}」的完整 CI 流水线（构建 → 部署到开发环境 → 冒烟测试 → 写基线）。无新提交时重复触发只会重复构建，确认继续？`,
+      '构建并部署确认',
+      { type: 'warning', confirmButtonText: '构建并部署', cancelButtonText: '取消' }
+    )
+  } catch {
+    return // 取消
+  }
   deployingId.value = s.id
   try {
     const pipes = await listPipelines(props.appId)
     const ci = pipes.find((p: Pipeline) => p.kind === 'ci')
     if (!ci) { ElMessage.warning('未找到 CI 流水线（应用创建时自动绑定，可去「流水线」tab 查看）'); return }
     const r = await triggerRun(props.appId, ci.id, { branch: ci.trigger?.branch || 'main' })
-    ElMessage.success(`已触发「${s.name}」部署`)
+    ElMessage.success(`已触发「${s.name}」构建并部署`)
     router.push(`/devops/runs/${r.id}`)
   } catch (e) {
     ElMessage.error(apiError(e, '触发部署失败'))
@@ -114,6 +124,61 @@ async function onDeploy(s: ServiceEntity) {
   }
 }
 const deployingId = ref('')
+
+// —— 对外暴露（一键）：设置工作负载 domain → reconciler 自动建 host=domain 的 Ingress ——
+// 域名自动生成 <应用名>-<服务名>.<集群后缀>；后缀真源 env PAAS_DOMAIN_SUFFIX（GET /api/governance/domain）。
+// 前提：服务已部署（工作负载存在且 Port>0 才有 Ingress backend）；未配置后缀时降级提示。
+// DNS 是环境层（平台改不了）：提示 *.<后缀> 需解析到集群入口（dev：/etc/hosts）。
+const domainSuffix = ref('')
+const exposedHosts = ref<Record<string, string>>({}) // serviceId → domain（工作负载 domain 非空）
+const workloadIds = ref<Record<string, string>>({})  // serviceId → 基线工作负载 ID（Set 用）
+const exposingId = ref('')
+
+async function loadExposure() {
+  try {
+    const [d, wls] = await Promise.all([
+      fetchJSON<{ suffix: string }>('/api/governance/domain'),
+      fetchJSON<Workload[]>(`/api/applications/${props.appId}/workloads`)
+    ])
+    domainSuffix.value = d.suffix || ''
+    const hosts: Record<string, string> = {}
+    const wids: Record<string, string> = {}
+    for (const wl of wls) {
+      const sid = wl.serviceId
+      if (!sid) continue
+      // 基线负载（无泳道/default）才可设对外域名；泳道负载是联调态不对外
+      if (!wl.laneId || wl.laneId === 'default') wids[sid] = wids[sid] || wl.id
+      if (wl.domain) hosts[sid] = wl.domain
+    }
+    exposedHosts.value = hosts
+    workloadIds.value = wids
+  } catch { /* 暴露态加载失败不阻断服务列表（治理端点旧版本可能 404） */ }
+}
+
+const sanitizeSeg = (s: string) => s.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '') || 'svc'
+
+async function onExpose(s: ServiceEntity) {
+  if (!domainSuffix.value) {
+    ElMessage.warning('平台未配置域名后缀（PAAS_DOMAIN_SUFFIX），请联系管理员配置后使用一键暴露')
+    return
+  }
+  const wlId = workloadIds.value[s.id]
+  if (!wlId) {
+    ElMessage.warning('该服务尚无基线工作负载，请先「构建并部署」再对外暴露')
+    return
+  }
+  exposingId.value = s.id
+  try {
+    const host = `${sanitizeSeg(props.appName)}-${sanitizeSeg(s.name)}.${domainSuffix.value}`
+    await updateWorkload(wlId, { domain: host })
+    exposedHosts.value = { ...exposedHosts.value, [s.id]: host }
+    ElMessage.success(`已暴露：http://${host}/ （Ingress 自动下发；需 *.${domainSuffix.value} 解析到集群入口后可访问）`)
+  } catch (e) {
+    ElMessage.error(apiError(e, '暴露失败'))
+  } finally {
+    exposingId.value = ''
+  }
+}
 
 async function onDelete(s: ServiceEntity) {
   const ok = await confirmDangerous({ action: '删除服务', target: s.name, requireNameConfirm: true })
@@ -127,31 +192,18 @@ async function onDelete(s: ServiceEntity) {
   }
 }
 
-// —— 实例抽屉（按 serviceId 过滤该服务工作负载；详情/日志复用 Workloads 模式）——
+// —— 实例抽屉（按 serviceId 过滤该服务工作负载；详情/日志复用 WorkloadDetailDrawer 组件）——
 const showInstances = ref(false)
 const instancesLoading = ref(false)
 const focusService = ref<ServiceEntity | null>(null)
 const svcWorkloads = ref<Workload[]>([])
 
 const showDetail = ref(false)
-const detailLoading = ref(false)
-const detail = ref<WorkloadDetail | null>(null)
+const detailWlId = ref('')
 
-const showLogs = ref(false)
-const logsLoading = ref(false)
-const logsPod = ref('')
-const logsText = ref('')
-const logsPrevious = ref(false)
-
-// 状态字典收编 useStatus.POD_STATUS（R1-C1），dot 色经 tagTypeToCls 映射
-function podStatusOf(s: string): { label: string; cls: string } {
-  const m = statusOfCore(POD_STATUS, s)
-  return { label: m.label, cls: tagTypeToCls(m.type) }
-}
-const fmtTime = (t?: string) => {
-  if (!t) return '-'
-  const d = new Date(t)
-  return Number.isNaN(d.getTime()) ? '-' : formatDateTime(d)
+function openDetail(w: Workload) {
+  detailWlId.value = w.id
+  showDetail.value = true
 }
 
 async function openInstances(s: ServiceEntity) {
@@ -167,43 +219,6 @@ async function openInstances(s: ServiceEntity) {
   } finally {
     instancesLoading.value = false
   }
-}
-
-async function openDetail(w: Workload) {
-  showDetail.value = true
-  detailLoading.value = true
-  detail.value = null
-  try {
-    detail.value = await getWorkload(w.id)
-  } catch (e) {
-    ElMessage.error(apiError(e, '加载详情失败'))
-  } finally {
-    detailLoading.value = false
-  }
-}
-
-async function viewLogs(pod: string) {
-  showLogs.value = true
-  logsLoading.value = true
-  logsPod.value = pod
-  logsText.value = ''
-  try {
-    const params: Record<string, string> = { pod, tail: '1000' }
-    if (logsPrevious.value) params.previous = 'true'
-    const resp = await getWorkloadLogs(detail.value?.workload.id ?? '', params)
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    logsText.value = await resp.text()
-    if (!logsText.value) logsText.value = '（暂无日志输出）'
-  } catch (e) {
-    logsText.value = apiError(e, '日志加载失败') + '\n（非集群部署或 Pod 已清理时不可用）'
-  } finally {
-    logsLoading.value = false
-  }
-}
-
-async function togglePrevious() {
-  logsPrevious.value = !logsPrevious.value
-  if (logsPod.value) await viewLogs(logsPod.value)
 }
 </script>
 
@@ -238,8 +253,13 @@ async function togglePrevious() {
         <div v-if="s.type === 'cron' && s.schedule" class="svc-meta">
           <span class="meta-item sched mono">{{ s.schedule }}</span>
         </div>
+        <div v-if="exposedHosts[s.id]" class="svc-exposed">
+          <span class="exposed-tag">已暴露</span>
+          <a class="exposed-host mono" :href="`http://${exposedHosts[s.id]}/`" target="_blank" rel="noopener">{{ exposedHosts[s.id] }}</a>
+        </div>
         <div class="svc-actions">
-          <button class="act primary" :disabled="deployingId === s.id" @click="onDeploy(s)">{{ deployingId === s.id ? '触发中…' : '部署' }}</button>
+          <button class="act primary" :disabled="deployingId === s.id" @click="onDeploy(s)">{{ deployingId === s.id ? '触发中…' : '构建并部署' }}</button>
+          <button v-if="!exposedHosts[s.id]" class="act" :disabled="exposingId === s.id" @click="onExpose(s)">{{ exposingId === s.id ? '暴露中…' : '对外暴露' }}</button>
           <button class="act" @click="openInstances(s)">实例</button>
           <button class="act danger" @click="onDelete(s)">删除</button>
         </div>
@@ -269,71 +289,8 @@ async function togglePrevious() {
       </div>
     </el-drawer>
 
-    <!-- 工作负载详情：期望态 + 运行实例（Pod 级）+ 实例日志（复用 Workloads 模式） -->
-    <el-drawer v-model="showDetail" title="工作负载详情" size="640px" direction="rtl" append-to-body>
-      <div v-loading="detailLoading">
-        <template v-if="detail">
-          <div class="detail-info">
-            <div class="info-row"><span class="k">名称</span><span class="v">{{ detail.workload.name }}</span></div>
-            <div class="info-row"><span class="k">ID</span><span class="v mono">{{ detail.workload.id }}</span></div>
-            <div class="info-row"><span class="k">镜像</span><span class="v mono">{{ detail.workload.image }}</span></div>
-            <div class="info-row">
-              <span class="k">副本</span>
-              <span class="v mono">{{ detail.workload.ready }}/{{ detail.workload.replicas }}</span>
-            </div>
-            <div class="info-row"><span class="k">状态</span><span class="v">{{ detail.workload.status }}</span></div>
-          </div>
-
-          <div class="section-title">运行实例（{{ detail.instances.length }}）</div>
-          <div v-if="detail.instances.length === 0" class="empty-hint">
-            暂无运行实例（非集群部署或 Pod 未就绪）
-          </div>
-          <table v-else class="instances-table">
-            <thead>
-              <tr>
-                <th>实例（Pod）</th>
-                <th>状态</th>
-                <th>就绪</th>
-                <th>重启</th>
-                <th>节点</th>
-                <th>启动时间</th>
-                <th class="col-act"></th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="ins in detail.instances" :key="ins.name">
-                <td>
-                  <div class="name-cell">
-                    <span class="name mono">{{ ins.name }}</span>
-                    <span v-if="ins.message" class="msg">{{ ins.message }}</span>
-                  </div>
-                </td>
-                <td><span class="status" :class="podStatusOf(ins.status).cls">{{ podStatusOf(ins.status).label }}</span></td>
-                <td class="mono">{{ ins.ready || '-' }}</td>
-                <td class="mono" :class="{ err: ins.restarts > 0 }">{{ ins.restarts }}</td>
-                <td class="mono">{{ ins.node || '-' }}</td>
-                <td class="mono small">{{ fmtTime(ins.startedAt) }}</td>
-                <td class="col-act"><button class="act" @click="viewLogs(ins.name)">日志</button></td>
-              </tr>
-            </tbody>
-          </table>
-        </template>
-      </div>
-    </el-drawer>
-
-    <!-- 实例日志 -->
-    <el-dialog v-model="showLogs" :title="`日志：${logsPod}`" width="780px" top="6vh" append-to-body>
-      <div class="logs-toolbar">
-        <span class="pod-name mono">{{ logsPod }}</span>
-        <el-button size="small" :type="logsPrevious ? 'warning' : 'default'" @click="togglePrevious">
-          {{ logsPrevious ? '查看当前日志' : '查看上次终止日志' }}
-        </el-button>
-        <span v-if="logsPrevious" class="prev-hint">（已退出/重启容器的上次日志，排查崩溃关键）</span>
-      </div>
-      <div v-loading="logsLoading" class="logs-body">
-        <pre>{{ logsText }}</pre>
-      </div>
-    </el-dialog>
+    <!-- 工作负载详情：期望态 + 运行实例（Pod 级）+ 实例日志（组件单一真源） -->
+    <WorkloadDetailDrawer v-model="showDetail" :workload-id="detailWlId" />
 
     <!-- 新建服务 -->
     <el-dialog v-model="showCreate" title="新建服务" width="560px">
@@ -459,6 +416,32 @@ async function togglePrevious() {
 .tool-tag {
   font-size: 11px;
 }
+/* 已暴露条：绿点 + 可点域名（Ingress 已下发；DNS 解析到集群入口后可访问） */
+.svc-exposed {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--el-fill-color-light);
+}
+.exposed-tag {
+  font-size: 12px;
+  color: var(--el-color-success);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.exposed-host {
+  font-size: 12px;
+  color: var(--el-color-primary);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.exposed-host:hover { text-decoration: underline; }
+
 .svc-actions {
   display: flex;
   gap: 8px;
@@ -585,94 +568,5 @@ async function togglePrevious() {
   font-size: 12px;
   color: var(--text-dim);
 }
-.detail-info {
-  margin-bottom: 14px;
-}
-.info-row {
-  display: flex;
-  gap: 10px;
-  padding: 5px 0;
-  font-size: 13px;
-  border-bottom: 1px dashed var(--border);
-}
-.info-row .k {
-  width: 48px;
-  flex-shrink: 0;
-  color: var(--text-faint);
-}
-.info-row .v {
-  color: var(--text);
-  word-break: break-all;
-}
-.section-title {
-  margin: 14px 0 8px;
-  font-size: 13px;
-  font-weight: 600;
-}
-.instances-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12.5px;
-}
-.instances-table th {
-  text-align: left;
-  padding: 6px 8px;
-  color: var(--text-faint);
-  font-weight: 500;
-  border-bottom: 1px solid var(--border);
-}
-.instances-table td {
-  padding: 7px 8px;
-  border-bottom: 1px solid var(--border);
-  vertical-align: top;
-}
-.name-cell .name {
-  color: var(--text);
-}
-.name-cell .msg {
-  display: block;
-  margin-top: 2px;
-  font-size: 11px;
-  color: var(--warning);
-}
-.status.ok { color: var(--success); }
-.status.warn { color: var(--warning); }
-.status.err { color: var(--danger); }
-.status.done { color: var(--success); }
-.status.idle { color: var(--text-faint); }
 .mono { font-family: 'JetBrains Mono', monospace; }
-.small { font-size: 11px; }
-.err { color: var(--danger); }
-.col-act { text-align: right; }
-.logs-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 10px;
-}
-.pod-name {
-  font-size: 12px;
-  color: var(--text-dim);
-}
-.prev-hint {
-  font-size: 11.5px;
-  color: var(--text-faint);
-}
-.logs-body {
-  max-height: 60vh;
-  overflow: auto;
-  padding: 12px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-.logs-body pre {
-  margin: 0;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 12px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  word-break: break-all;
-  color: var(--text);
-}
 </style>

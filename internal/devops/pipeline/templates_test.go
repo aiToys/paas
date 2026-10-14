@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/aitoys/paas/pkg/tenant"
@@ -22,8 +23,8 @@ func TestSeedTemplatesIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTemplates 失败: %v", err)
 	}
-	if len(first) != 2 {
-		t.Fatalf("首次 want 2 模板，got %d", len(first))
+	if len(first) != 4 {
+		t.Fatalf("首次 want 4 模板，got %d", len(first))
 	}
 
 	// 幂等：再 seed 不报错不翻倍
@@ -31,8 +32,8 @@ func TestSeedTemplatesIdempotent(t *testing.T) {
 		t.Fatalf("二次 seed 失败: %v", err)
 	}
 	second, _ := s.ListTemplates(viewCtx)
-	if len(second) != 2 {
-		t.Fatalf("幂等 want 2，got %d", len(second))
+	if len(second) != 4 {
+		t.Fatalf("幂等 want 4，got %d", len(second))
 	}
 }
 
@@ -114,8 +115,8 @@ func TestSeedTemplatesSameVersionNoOverwrite(t *testing.T) {
 // TestBuiltinTemplatesContent 验证预置模板的 stages 类型序列与 Kind。
 func TestBuiltinTemplatesContent(t *testing.T) {
 	tpls := BuiltinTemplates()
-	if len(tpls) != 2 {
-		t.Fatalf("want 2 预置模板，got %d", len(tpls))
+	if len(tpls) != 4 {
+		t.Fatalf("want 4 预置模板，got %d", len(tpls))
 	}
 
 	ci := tpls[0]
@@ -238,11 +239,153 @@ func TestSeedTemplatesCrossTenantVisible(t *testing.T) {
 	}
 	acme, _ := s.ListTemplates(tenant.WithTenant(context.Background(), "t-acme"))
 	globex, _ := s.ListTemplates(tenant.WithTenant(context.Background(), "t-globex"))
-	if len(acme) != 2 || len(globex) != 2 {
+	if len(acme) != 4 || len(globex) != 4 {
 		t.Fatalf("平台预置应跨租户可见，acme=%d globex=%d", len(acme), len(globex))
 	}
 	// 都是平台预置（TenantID=""）
 	if acme[0].TenantID != "" || globex[0].TenantID != "" {
 		t.Fatalf("平台预置 TenantID 应空，acme=%q globex=%q", acme[0].TenantID, globex[0].TenantID)
+	}
+}
+
+// TestBuiltinAgentTemplates AI 研发 builtin 模板（spec 2026-10-11 §4.4）：
+// ship=agent→approve→build(priorAgent)→deploy(test 泳道)→smoke；review=单 agent(review) stage。
+func TestBuiltinAgentTemplates(t *testing.T) {
+	tpls := BuiltinTemplates()
+	var ship, review *PipelineTemplate
+	for i := range tpls {
+		switch tpls[i].ID {
+		case "tpl-agent-ship":
+			ship = &tpls[i]
+		case "tpl-agent-review":
+			review = &tpls[i]
+		}
+	}
+	if ship == nil || review == nil {
+		t.Fatalf("缺 builtin agent 模板: ship=%v review=%v", ship, review)
+	}
+	if ship.Kind != KindAgent || review.Kind != KindAgent {
+		t.Errorf("Kind 应为 agent: ship=%s review=%s", ship.Kind, review.Kind)
+	}
+	if ship.Stages[0].Type != StageAgent {
+		t.Errorf("ship 首 stage 应为 agent, got %s", ship.Stages[0].Type)
+	}
+	// ship 关键参数：registerChange + build branchSource + deploy 占位符
+	if ship.Stages[0].Params["registerChange"] != "true" {
+		t.Errorf("ship agent stage 应 registerChange=true")
+	}
+	var build, deploy, smoke *StageDef
+	for i := range ship.Stages {
+		switch ship.Stages[i].Type {
+		case StageBuild:
+			build = &ship.Stages[i]
+		case StageDeploy:
+			deploy = &ship.Stages[i]
+		case StageTest:
+			smoke = &ship.Stages[i]
+		}
+	}
+	if build == nil || build.Params["branchSource"] != "priorAgent" {
+		t.Errorf("ship build stage 应 branchSource=priorAgent, got %+v", build)
+	}
+	if deploy == nil || deploy.Params["envId"] != "{{app.env.test}}" || deploy.Params["lane"] != "agent-ship" {
+		t.Errorf("ship deploy stage 参数错误（v2: lane 固定 agent-ship）: %+v", deploy)
+	}
+	if smoke == nil || smoke.Params["mode"] != TestSmoke {
+		t.Errorf("ship 应含 smoke stage: %+v", smoke)
+	}
+	// v2 全链（2026-10-13）：AI 审查在前序产出分支上工作；release 段四件套齐备
+	var reviewStage, approve, canary, release, baseline *StageDef
+	for i := range ship.Stages {
+		st := &ship.Stages[i]
+		switch st.Type {
+		case StageAgent:
+			if st.Params["stage"] == "review" {
+				reviewStage = st
+			}
+		case StageApprove:
+			approve = st
+		case StageCanary:
+			canary = st
+		case StageRelease:
+			release = st
+		case StageBaseline:
+			baseline = st
+		}
+	}
+	if reviewStage == nil || reviewStage.Params["branchSource"] != "priorAgent" {
+		t.Errorf("AI 审查 stage 应 branchSource=priorAgent（在 AI 产出分支上审查）: %+v", reviewStage)
+	}
+	if approve == nil || canary == nil || release == nil {
+		t.Errorf("v2 release 段应含 上线审批/金丝雀/发布版本: approve=%v canary=%v release=%v", approve, canary, release)
+	}
+	if baseline == nil || baseline.Params["mergeFrom"] != "priorAgent" {
+		t.Errorf("baseline 应 mergeFrom=priorAgent（AI 产物合主干）: %+v", baseline)
+	}
+	// review 模板：单 stage，stage=review
+	if len(review.Stages) != 1 || review.Stages[0].Type != StageAgent || review.Stages[0].Params["stage"] != "review" {
+		t.Errorf("review 模板应为单 agent(review) stage: %+v", review.Stages)
+	}
+}
+
+// TestBuiltinAgentShipSegments 段裁剪映射锁（2026-10-13）：模板 stage 改名必须同步
+// agentShipSegments，否则 agent-ship/run 端点裁剪漏段（stage 静默残留）。
+func TestBuiltinAgentShipSegments(t *testing.T) {
+	tpls := BuiltinTemplates()
+	var ship *PipelineTemplate
+	for i := range tpls {
+		if tpls[i].ID == "tpl-agent-ship" {
+			ship = &tpls[i]
+		}
+	}
+	if ship == nil {
+		t.Fatal("缺 tpl-agent-ship")
+	}
+	for i, st := range ship.Stages {
+		if i == 0 {
+			if _, ok := agentShipSegments[st.Name]; ok {
+				t.Errorf("首 stage「AI 开发」不应在段映射（恒留）: %s", st.Name)
+			}
+			continue
+		}
+		if _, ok := agentShipSegments[st.Name]; !ok {
+			t.Errorf("stage「%s」不在 agentShipSegments 段映射：改名后未同步，裁剪将漏段", st.Name)
+		}
+	}
+}
+
+// TestTrimAgentShipStages 裁剪语义：段关移除、AI 开发恒留、全勾=原序全量。
+func TestTrimAgentShipStages(t *testing.T) {
+	tpls := BuiltinTemplates()
+	var stages []StageDef
+	for _, tpl := range tpls {
+		if tpl.ID == "tpl-agent-ship" {
+			stages = tpl.Stages
+		}
+	}
+	if len(stages) == 0 {
+		t.Fatal("缺 tpl-agent-ship stages")
+	}
+	names := func(ss []StageDef) []string {
+		out := make([]string, len(ss))
+		for i, s := range ss {
+			out[i] = s.Name
+		}
+		return out
+	}
+	// 全勾 = 原样
+	if got := trimAgentShipStages(stages, true, true, true); len(got) != len(stages) {
+		t.Errorf("全勾应保留全部 %d 段, got %d", len(stages), len(got))
+	}
+	// 仅 ship：AI 开发 + ship 三段（构建/部署/冒烟）
+	got := names(trimAgentShipStages(stages, false, true, false))
+	want := []string{"AI 开发", "构建", "部署到测试泳道", "冒烟联调"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("仅 ship 段裁剪错误: got %v want %v", got, want)
+	}
+	// 全不勾：只留 AI 开发
+	got = names(trimAgentShipStages(stages, false, false, false))
+	if len(got) != 1 || got[0] != "AI 开发" {
+		t.Errorf("全不勾应只留 AI 开发, got %v", got)
 	}
 }

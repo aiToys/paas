@@ -1111,3 +1111,23 @@ func TestPublishNoChangesRejected(t *testing.T) {
 		t.Fatalf("应 v2: %s", pub.Body.String())
 	}
 }
+
+// TestSharedRefsEmptyAppReturnsList 锁只读列表对「从未用过动态配置的应用」（无派生 ns）
+// 返空列表而非 404（2026-10-13 走查实测：paas-shop 无动态配置，GET shared-refs 404 进前端
+// console。曾复用 findAppNS——其 404 写出后又 WriteData 双写响应）。
+func TestSharedRefsEmptyAppReturnsList(t *testing.T) {
+	repo := ccmemory.NewStore()
+	h := configcenter.NewAppHandler(repo)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	r := httptest.NewRequest("GET", "/api/applications/app-fresh/dynamic-configs/shared-refs", nil)
+	r = r.WithContext(ctx)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != 200 {
+		t.Fatalf("无派生 ns 应 200 空列表: %d %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"data":[]`) {
+		t.Fatalf("应空列表: %s", w.Body.String())
+	}
+}

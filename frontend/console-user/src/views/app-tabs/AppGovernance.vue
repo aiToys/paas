@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // 应用详情 - 服务治理 tab：该应用注册的服务 + 实例发现 + 路由 + 熔断（只读）。
 // 复用 GET /api/services?appId=（按应用过滤）+ GET /api/services/{id}（聚合实例）。
-// 注册/注销/路由/熔断的写操作归 /platform/governance；本 tab 仅应用内可见性。
+// 服务注册已自动化（部署即注册：service 型 workload 创建时平台自动建治理 Service，
+// 实例随 K8s Endpoints 自动发现）；路由/熔断等写操作归 /platform/governance。
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
@@ -111,15 +112,15 @@ watch(() => envStore.currentEnvId, load)
   <div class="devops-tab">
     <div class="tab-head">
       <span class="tab-title">服务治理</span>
-      <span class="tab-hint">该应用注册的服务 · 实例 · 路由 · 熔断（只读）</span>
+      <span class="tab-hint">该应用注册的服务 · 实例 · 路由 · 熔断</span>
       <el-button text type="primary" size="small" style="margin-left: auto" @click="goRegistry">
         在服务治理中管理 →
       </el-button>
     </div>
 
     <div v-if="!services.length && !loading" class="empty">
-      <p>该应用尚未注册服务</p>
-      <el-button size="small" @click="goRegistry">去服务治理注册</el-button>
+      <p>暂无治理服务——服务型工作负载部署后自动注册（实例随部署自动发现）</p>
+      <p class="empty-sub">先在「服务」tab 构建部署，此处自动出现</p>
     </div>
 
     <el-table v-else :data="services" v-loading="loading" size="small" row-key="id" @expand-change="onExpand">
@@ -216,6 +217,7 @@ watch(() => envStore.currentEnvId, load)
 .tab-hint { font-size: 12px; color: var(--text-faint); }
 .empty { padding: 40px 0; text-align: center; color: var(--text-faint); font-size: 13px; }
 .empty p { margin: 0 0 10px; }
+.empty-sub { font-size: 12px; }
 .inst-sub { padding: 8px 16px 8px 40px; }
 .faint { font-size: 12px; color: var(--text-faint); }
 .sub-block { margin-top: 20px; }

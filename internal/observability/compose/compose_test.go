@@ -38,6 +38,9 @@ func (f *fakeRules) DeleteAlertRule(ctx context.Context, id string) error {
 	}
 	return nil
 }
+func (f *fakeRules) UpdateAlertRule(ctx context.Context, id string, rule observability.AlertRule) (observability.AlertRule, error) {
+	return rule, nil
+}
 func (f *fakeRules) ListAllAlertRules(ctx context.Context) ([]observability.AlertRule, error) {
 	return f.rules, nil
 }

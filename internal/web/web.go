@@ -14,6 +14,8 @@ import (
 	"embed"
 	"io/fs"
 	"net/http"
+	"path/filepath"
+	"strings"
 )
 
 // distFS 嵌入 dist 下三套前端产物。Dockerfile 构建期填充；本地 dev 仅有 .gitkeep 占位
@@ -32,9 +34,43 @@ func (s spaFS) Open(name string) (fs.File, error) {
 	if f, err := s.root.Open(name); err == nil {
 		return f, nil
 	}
-	// 兜底：找不到文件时返回 index.html（SPA 前端路由）。
+	// 静态资源后缀未命中直接 404（不 fallback）：部署滚动窗口期旧 index.html 引用的
+	// hash 资源已不存在，fallback 返回 index.html(HTML) 会被浏览器当 JS 模块执行抛
+	// SyntaxError("Unexpected token '<'")——router 自愈正则难覆盖该形态且 404 语义才
+	// 正确（2026-10-13 Agent 详情页白屏根因）。
+	if isStaticAsset(name) {
+		return nil, fs.ErrNotExist
+	}
+	// 兜底：找不到的导航路径返回 index.html（SPA 前端路由）。
 	// index.html 不存在（dev 占位）时返原错误 → FileServer 输出 404。
 	return s.root.Open("index.html")
+}
+
+// isStaticAsset 按扩展名判断静态资源（SPA 前端路由路径无扩展名，两者不相交）。
+func isStaticAsset(name string) bool {
+	switch filepath.Ext(name) {
+	case ".js", ".mjs", ".css", ".map", ".json", ".png", ".jpg", ".jpeg", ".gif",
+		".svg", ".ico", ".webp", ".avif", ".woff", ".woff2", ".ttf", ".eot",
+		".txt", ".webmanifest":
+		return true
+	}
+	return false
+}
+
+// cachePolicy 按资源形态设置缓存策略（SPA 标准实践）：
+//   - /assets/*（Vite content-hash 文件名，内容变文件名必变）：immutable 长缓存；
+//   - 其余（index.html 入口、SPA 路由 fallback、favicon 等无 hash 资源）：no-cache
+//     （允许缓存但每次协商）——无任何缓存头时浏览器对 index.html 走启发式缓存，
+//     发版后旧入口滞留 → 引用已删除的旧 chunk → 用户看到老版本或白屏。
+func cachePolicy(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/assets/") {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // ServeStatic 返回服务指定前端子目录的 handler。
@@ -51,9 +87,9 @@ func ServeStatic(prefix, subDir string) http.Handler {
 	}
 	fileServer := http.FileServer(http.FS(spaFS{root: sub}))
 	if prefix == "/" {
-		return fileServer
+		return cachePolicy(fileServer)
 	}
-	return http.StripPrefix(prefix, fileServer)
+	return cachePolicy(http.StripPrefix(prefix, fileServer))
 }
 
 // ServeDocs 服务 VitePress 文档站产物（多页静态 HTML，非 SPA）。

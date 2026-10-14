@@ -1,43 +1,60 @@
 # Prometheus 精简 values（dev 轻量但真实）。
-# 含：Prometheus server（持久化）+ node-exporter（节点指标）+ 抓 kubelet/cAdvisor（数据服务 Pod 指标）
-# 关：alertmanager、kube-state-metrics（YAGNI——应用级指标改按 workload pod 名正则查，无需 KSM label join）。
+# 含：Prometheus server（持久化 30d）+ node-exporter（节点指标）+ KSM + 抓 kubelet/cAdvisor（数据服务 Pod 指标）
+# 关：alertmanager（YAGNI）。
+#
+# ⚠ 本文件含 ${...} 占位符，必须经 scripts/deploy-observability.sh 应用（该脚本 envsubst 注入集群相关值）：
+#     ${NS_PAAS}        paas 控制面 namespace（paas-core 抓取 job）
+#     ${STORAGE_CLASS}  PVC StorageClass
+#     ${MIRROR_K8S}     registry.k8s.io 镜像中转域名
+#     ${MIRROR_QUAY}    quay.io 镜像中转域名
+#   直接 helm upgrade 会把 ${...} 原样传给集群 → 镜像/namespace 全错。换集群只改脚本 env
+#   （默认值 = 当前 dev 集群），不改本文件。
 ---
 alertmanager:
   enabled: false
 
-kubeStateMetrics:
-  enabled: false
+# 镜像走中转镜像站（MIRROR=daocloud，默认）：节点可直连；而 registry.k8s.io 会把 manifest
+# 请求重定向到 Google Artifact Registry（*.pkg.dev，本网络不可达）→ KSM 恒 ImagePullBackOff。
+# 注意 daocloud 按上游分域名：docker.m./k8s.m./quay.m.daocloud.io 分别代理 docker.io/registry.k8s.io/quay.io。
+# 公网环境设 MIRROR=none，脚本注入上游域名（本文件无需改）。
+kube-state-metrics:
+  image:
+    registry: ${MIRROR_K8S}
+    repository: kube-state-metrics/kube-state-metrics
+    tag: v2.19.1
 
 prometheus-node-exporter:
   enabled: true
+  image:
+    registry: ${MIRROR_QUAY}
+    repository: prometheus/node-exporter
+    tag: v1.12.1
+  # 端口弃 9100 改 9200：dev 集群物理网对 TCP 9100（HP JetDirect，企业网常屏蔽）端口级阻断，
+  # 跨节点抓取超时（2026-09-24 端口矩阵实测：9100/9101/9115 超时，9200/9250/5432/6379 可达）。
+  # service.port 一处驱动监听地址/containerPort/Service port；targetPort 默认值硬编码 9100，须同步覆盖。
+  service:
+    port: 9200
+    targetPort: 9200
   resources:
     requests: { cpu: 50m, memory: 32Mi }
     limits: { cpu: 200m, memory: 64Mi }
 
-# 额外抓取配置：kubelet cAdvisor（数据服务 Pod 真实指标来源）+ paas-core /metrics
-extraScrapeConfigs: |
-  # kubelet cAdvisor —— container_cpu_usage_seconds_total / container_memory_working_set_bytes 等
-  # 平台数据服务监控（real/metrics.go TargetDataservice）+ 应用级指标（listAppMetrics 按工作负载 pod 名正则）依赖这些。
-  - job_name: 'kubernetes-cadvisor'
-    scheme: https
-    tls_config:
-      ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
-      insecure_skip_verify: true
-    bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
-    kubernetes_sd_configs:
-      - role: node
-    relabel_configs:
-      - action: labelmap
-        regex: __meta_kubernetes_node_label_(.+)
-      - target_label: __address__
-        replacement: kubernetes.default.svc:443
-        source_labels: [__address__]
-        regex: (.+)
-      - source_labels: [__meta_kubernetes_node_name]
-        regex: (.+)
-        target_label: __metrics_path__
-        replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor
+prometheus-pushgateway:
+  image:
+    registry: ${MIRROR_QUAY}
+    repository: prometheus/pushgateway
+    tag: v1.11.3
 
+# 额外抓取配置：paas-core /metrics + 数据服务 exporter + 应用 Pod 指标
+#
+# 【勿再加 kubelet cAdvisor job】chart 内置的 kubernetes-nodes-cadvisor job 已直连
+# <nodeIP>:10250/metrics/cadvisor 提供 container_cpu_usage_seconds_total /
+# container_memory_working_set_bytes（数据服务监控 real/metrics.go TargetDataservice +
+# 应用级 listAppMetrics 的真实来源）。曾额外定义过走 apiserver 代理
+# （/api/v1/nodes/<node>/proxy/metrics/cadvisor）的同名指标 job，两个后果：
+#   1) 该代理路径需 nodes/proxy 权限，而 chart 29.x 的 ClusterRole 已移除该权限 → 恒 403；
+#   2) 一旦补上权限，两份时序并存会让平台不带 job 过滤的 sum() 查询结果翻倍。
+extraScrapeConfigs: |
   # paas-core 业务指标（internal/metrics Registry：http_requests_total /
   # http_request_duration_seconds / paas_inference_*）。/metrics 在主端口 :8080 暴露。
   # （controller-runtime 进程级指标经 PAAS_METRICS_ADDR=0 关闭，不再抓 :8081。）
@@ -46,7 +63,7 @@ extraScrapeConfigs: |
     kubernetes_sd_configs:
       - role: pod
         namespaces:
-          names: ['paas']
+          names: ['${NS_PAAS}']
     relabel_configs:
       # paas-core pod label 是 app.kubernetes.io/name（relabel 下划线替换点号）
       - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
@@ -58,7 +75,7 @@ extraScrapeConfigs: |
         replacement: $1:8080
 
   # 数据服务引擎 exporter sidecar（db.postgres/mysql、cache.redis/valkey、mq.nats）。
-  # reconciler 给 STS 注入 exporter sidecar（端口名 exporter@9100，复用主容器 Secret 凭证），
+  # reconciler 给 STS 注入 exporter sidecar（端口名 exporter@9200，复用主容器 Secret 凭证；9100 被物理网阻断），
   # 产 pg_stat_activity_count / redis_connected_clients / nats_connz_connections 等业务指标。
   # 仅抓 PaaS 托管 Pod 的 exporter 端口（managed-by=paas + 端口名 exporter）；minio/qdrant/meili
   # 内置 /metrics 走主容器 svc 端口，不经此 job（其指标名不同，real/metrics 查不到自然降级空）。
@@ -80,44 +97,42 @@ extraScrapeConfigs: |
       - source_labels: [__meta_kubernetes_pod_label_paas_aitoys_dataservice]
         target_label: paas_aitoys_dataservice
 
-  # 应用 Pod 自暴露指标（prometheus.io/scrape 注解发现——controller 给 service Pod 已注）。
-  # 应用 RED 指标（http_requests_total 等，real/metrics listAppMetrics 的 rps/latency/errorRate）
-  # 依赖此 job；透传 lane/tenant/app label 供泳道与租户维度过滤。未注解的 Pod 不抓（keep 过滤）。
-  - job_name: 'paas-app-pods'
-    kubernetes_sd_configs:
-      - role: pod
-    relabel_configs:
-      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
-        action: keep
-        regex: "true"
-      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
-        regex: (.+)
-        target_label: __metrics_path__
-      - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
-        regex: ([^:]+)(?::\d+)?;(\d+)
-        replacement: $1:$2
-        target_label: __address__
-      - source_labels: [__meta_kubernetes_namespace]
-        target_label: namespace
-      - source_labels: [__meta_kubernetes_pod_label_paas_aitoys_lane]
-        target_label: lane
-      - source_labels: [__meta_kubernetes_pod_label_paas_aitoys_tenant]
-        target_label: paas_aitoys_tenant
-      - source_labels: [__meta_kubernetes_pod_label_paas_aitoys_app]
-        target_label: paas_aitoys_app
+  # 【勿再加应用 Pod 抓取 job】应用 RED 指标（http_requests_total /
+  # http_request_duration_seconds，real/metrics listAppMetrics 的 rps/latency/errorRate）
+  # 由 chart 内置的 kubernetes-pods job 提供：它 keep prometheus.io/scrape=true 注解 Pod
+  # （controller 给 service Pod 已注），并经 labelmap 把全部 Pod label 透传为指标 label
+  # （paas.aitoys/lane → paas_aitoys_lane，租户/应用同款）。
+  #
+  # 曾额外定义过同款 'paas-app-pods' job（仅多一个 lane→lane 改名），后果与 cAdvisor 那次相同：
+  # 同一 Pod 被两个 job 抓 → 同名指标两份时序，而平台 PromQL（metrics.go:391 redLbl）只按
+  # namespace+pod 过滤、不带 job → sum() 结果翻倍。实测某租户 http_requests_total：
+  # 总量 1,084,381 = paas-app-pods 542,190 + kubernetes-pods 542,191，即应用 RPS 显示为真实值 2 倍。
+  # （P95 延迟与错误率是分位数/比值，不受影响；仅 RPS 与抓取负载/存储翻倍。）
+  # lane label 无 Prometheus 消费方（唯一 lane= 用法在 real/logs.go 走 Loki），故无需保留该 job。
+
+configmapReload:
+  prometheus:
+    image:
+      repository: ${MIRROR_QUAY}/prometheus-operator/prometheus-config-reloader
+      tag: v0.93.1
 
 server:
-  retention: "7d"
-  # TSDB 磁盘上限兜底（略小于 PVC 10Gi，预留 WAL/head 空间；时间 retention 先被触达即删旧）
-  retentionSize: "9GB"
+  image:
+    repository: ${MIRROR_QUAY}/prometheus/prometheus
+    tag: v3.13.2
+  retention: "30d"
+  # TSDB 磁盘上限兜底（略小于 PVC 20Gi，预留 WAL/head 空间；时间 retention 先被触达即删旧）
+  # 容量依据：实测 7d ≈ 2.0GiB blocks → 30d ≈ 8.7GiB，故 20Gi 留 2x 余量
+  retentionSize: "17GB"
   persistentVolume:
     enabled: true
-    size: 10Gi
-    storageClass: local-path
+    size: 20Gi
+    storageClass: ${STORAGE_CLASS}
   resources:
     requests: { cpu: 200m, memory: 512Mi }
     limits: { cpu: "1", memory: 1Gi }
 
-# RBAC：需 nodes/proxy 权限才能抓 kubelet cAdvisor（chart 默认 ClusterRole 含）
+# RBAC：chart 默认 ClusterRole 含 nodes/metrics（直连 kubelet 抓 cAdvisor 所需），
+# 不含 nodes/proxy —— 故不可走 /api/v1/nodes/<node>/proxy/* 代理路径（apiserver 会 403）。
 rbac:
   create: true

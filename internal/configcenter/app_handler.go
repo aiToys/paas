@@ -542,15 +542,21 @@ func (h *AppHandler) serveSharedRefs(w http.ResponseWriter, r *http.Request, app
 		if !h.allow(w, r, "application:read") {
 			return
 		}
-		ns, ok := h.findAppNS(w, r, appID, envID)
-		if !ok {
-			httputil.WriteData(w, []sharedRefView{})
-			return
-		}
-		refs, err := h.repo.ListNSRefs(r.Context(), ns.ID)
+		// 只读列表对「从未用过动态配置的应用」（无派生 ns）返空列表而非 404——对齐
+		// serveCollection 的 FindAppNamespaceEnv 回退语义。曾复用 findAppNS：其 404 已写出
+		// 后这里又 WriteData，双写响应致客户端收到 404（前端只能靠 catch 兜底）。
+		ns, ok, err := h.repo.FindAppNamespaceEnv(r.Context(), appID, envID)
 		if err != nil {
 			httputil.WriteInternalError(w, err)
 			return
+		}
+		var refs []NSRef
+		if ok {
+			refs, err = h.repo.ListNSRefs(r.Context(), ns.ID)
+			if err != nil {
+				httputil.WriteInternalError(w, err)
+				return
+			}
 		}
 		out := make([]sharedRefView, 0, len(refs))
 		for _, ref := range refs {

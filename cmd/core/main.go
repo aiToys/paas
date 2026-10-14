@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aitoys/paas/internal/agentrun"
 	aiadmin "github.com/aitoys/paas/internal/ai/admin"
 	"github.com/aitoys/paas/internal/ai/agent"
 	"github.com/aitoys/paas/internal/ai/eval"
@@ -128,6 +129,8 @@ func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, metrics
 	// 配额用量启动自愈：把计数型资源（applications/workloads/dataservices）对齐实际行数
 	// （seed 直插表与历史回收缺失造成的漂移，reconcile.sh C 节对账依据）。
 	recalcUsageIfDrift(ctx, stores)
+	// 治理服务存量补注册：service 型 workload 缺治理 Service 的补齐（部署即注册上线前存量）。
+	backfillGovernanceServices(ctx, stores)
 	// 延迟注入 AppConfigLookup 到 WorkloadReconciler（startManager 先于 stores 构造）。
 	// 让"绑定资源"（数据服务连接 + 模型 LLM 凭证）经 reconciler 真正注入 Pod env 生效。
 	// 启动初期无 CRD 事件，赋值与首条 reconcile 间无实际并发（best-effort + 单 worker）。
@@ -137,6 +140,12 @@ func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, metrics
 		// Service 名——chat 503 元凶）。ListAll 跨租户（回收需全局视角），查询失败本轮跳过不误删。
 		appliers.wlReconciler.Platform = platformWorkloadLookup{repo: stores.Workload}
 		appliers.wlReconciler.StartOrphanGC(ctx)
+	}
+	// 数据服务孤儿 CR 回收：与 workload 同款（2026-09-25 补齐——此前 dataservice 无此机制，
+	// 平台删除失败/重启窗口后 CR+STS+PVC 永久残留，一次对账即发现 9 个孤儿实例）。
+	if appliers.dsReconciler != nil {
+		appliers.dsReconciler.PlatformExists = platformDataExists(stores.DataService)
+		appliers.dsReconciler.StartOrphanGC(ctx)
 	}
 	// CredentialResolver 桥接 security store：注入 MaaS 插件解析平台级凭证。
 	// security.SecretStore 接口含 Resolve（PG/memory 透明）。
@@ -447,6 +456,8 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	// obsHandler（下方可观测段）共用；必须在第一个消费者之前，否则 bridge 捕获 nil。
 	// 引擎启动在 run 层（有进程生命周期 ctx）。
 	obsRepo, obsAlertEngine = buildObservabilityStore(workloadLister{repo: stores.Workload}, tenantEntityLister{apps: stores.Application, ds: stores.DataService, wls: stores.Workload}, stores.AlertRules, stores.AlertEvents, stores.AlertEvents)
+	// 开箱默认告警规则：给「零规则」租户灌入默认基线（demo 门控，生产自配）。
+	seedDefaultAlertRules(ctx, stores.Identity, stores.AlertRules)
 	mux := http.NewServeMux()
 	// BearerAuth 双通道：JWT（admin 浏览器登录）/ API Key（程序化调用）共存，下游零改动。
 	auth := gateway.BearerAuth(stores.Identity, jwtSecret)
@@ -745,13 +756,24 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	})
 
 	changeLookup := changeRepoLookup(stores.DevOpsRepos)
+	// Agent 编排执行域接入（spec 2026-10-11 + 契约 v2 双模式）：编排通道=静态 token（server-to-server，
+	// 后台 stage 期间用户 JWT 会过期）；委派按钮通道=用户 JWT（归因 claims.sub）。
+	// env 空=全通道禁用：agent stage 明确报错 + 委派端点/观测代理 503，平台其余功能不受影响。
+	agentrunURL := os.Getenv("PAAS_AGENTRUN_URL")
+	var agentrunClient *agentrun.Client
+	if agentrunURL != "" {
+		agentrunClient = agentrun.NewClient(agentrunURL, os.Getenv("PAAS_AGENTRUN_TOKEN"),
+			&agentrunRepoBridge{resolve: giteaBridgeInst.ResolveRepo, giteaURL: os.Getenv("PAAS_GITEA_URL")})
+		log.Printf("[agentrun] 执行域已接入: %s", agentrunURL) //nolint:gosec // URL 来自运维 env
+	}
+
 	changeSvc := change.NewService(stores.Change,
 		change.WithGitea(&giteaBrancherBridge{client: giteaClient}),
 		change.WithRunTrigger(changeRunBridge),
 		change.WithRunReader(changeRunBridge),
 		change.WithRepoLookup(changeLookup),
 	)
-	changeHandler := change.NewHandler(changeSvc, stores.Change,
+	changeOpts := []change.HandlerOpt{
 		change.WithAuthorize(func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }),
 		change.WithAudit(&identityAuditAdapter{store: stores.Security}),
 		change.WithActorFn(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
@@ -761,7 +783,19 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 		change.WithAlertLister(&changeAlertBridge{engine: obsAlertEngine}),
 		change.WithBuildLister(&changeBuildListerBridge{builds: stores.DevOpsBuilds}),
 		change.WithAppGuard(appGuard),
-	)
+	}
+	// 变更页「智能研发」委派按钮（契约 v2 §3.3/§5.1）：用户 JWT 通道（归因用户 sub）。
+	if agentrunClient != nil {
+		changeOpts = append(changeOpts, change.WithAgentDelegator(changeDelegatorBridge{c: agentrunClient}, agentrun.UserBearerToken))
+	}
+	changeHandler := change.NewHandler(changeSvc, stores.Change, changeOpts...)
+
+	// 编排通道接 pipeline engine（agent stage）：静态 token；Change 注册由 paas 执行器做（合入归 paas）。
+	if agentrunClient != nil {
+		pipeEngine.Agents = agentrunClient
+		pipeEngine.AgentChanges = &changeRegistrarBridge{svc: changeSvc}
+		pipeEngine.AgentBranches = &agentBranchCheckerBridge{gb: giteaBridgeInst}
+	}
 
 	// 应用配置（工作负载级 env/Secret）：注入 environment store（prod 写校验）。
 	// Secret 后端明文存储，API 返回固定掩码；与配置中心（服务治理，运行时动态）严格区分。
@@ -786,7 +820,8 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	govHandler := governance.NewHandler(stores.Governance,
 		governance.WithEnvResolver(stores.Environment),
 		governance.WithInstanceDiscoverer(govInstanceDiscoverer{r: dataplane.NewEndpointsReader(appliers.clientset)}),
-		governance.WithAudit(&identityAuditAdapter{store: stores.Security}))
+		governance.WithAudit(&identityAuditAdapter{store: stores.Security}),
+		governance.WithDomainSuffix(os.Getenv("PAAS_DOMAIN_SUFFIX")))
 	govHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 	govHandler.CallerUserID = gateway.UserIDFrom // ctx 版签名与 identity.CallerUserID 同源
 
@@ -985,7 +1020,7 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 				case "repositories", "buildruns", "images", "releases":
 					devopsHandler.ServeHTTP(w, r)
 					return
-				case "pipelines":
+				case "pipelines", "agent-ship":
 					pipelineHandler.ServeHTTP(w, r)
 					return
 				case "changes", "batches":
@@ -1025,6 +1060,22 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	mux.Handle("/api/admin/pipeline-templates/", auth(pipelineHandler))
 	mux.Handle("/api/pipelineruns", auth(pipelineHandler))
 	mux.Handle("/api/pipelineruns/", auth(pipelineHandler))
+	// Agent 编排观测代理（用户 JWT 通道，ns 服务端强制）：未配置 env 时整体 503 引导。
+	if agentrunURL != "" {
+		agentrunAudit := &identityAuditAdapter{store: stores.Security}
+		agentrunProxy := agentrun.NewProxy(agentrunURL,
+			func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) },
+			func(r *http.Request, action string) {
+				// 写操作（取消 run 等）轻量审计：paas 入口可追溯「谁触发了什么」
+				tid, _ := tenant.TenantFrom(r.Context())
+				_ = agentrunAudit.Record(r.Context(), tid, gateway.UserIDFrom(r.Context()), action, "agentrun", "", "")
+			})
+		mux.Handle("/api/agentrun/", auth(agentrunProxy))
+		reg.Operation("GET", "/api/agentrun/runs", apiroute.Tags("AgentRun"), apiroute.Summary("Agent 运行列表（代理 agentrun）"), apiroute.Perm("agentrun:read"), apiroute.WithResp(nil))
+		reg.Operation("GET", "/api/agentrun/runs/{name}", apiroute.Tags("AgentRun"), apiroute.Summary("Agent 运行详情"), apiroute.Perm("agentrun:read"), apiroute.WithResp(nil))
+		reg.Operation("DELETE", "/api/agentrun/runs/{name}", apiroute.Tags("AgentRun"), apiroute.Summary("取消 Agent 运行"), apiroute.Perm("agentrun:write"))
+		reg.Operation("GET", "/api/agentrun/runs/{name}/artifacts", apiroute.Tags("AgentRun"), apiroute.Summary("Agent 产物列表"), apiroute.Perm("agentrun:read"), apiroute.WithResp(nil))
+	}
 	// 变更/批次跨应用列表 + 通知聚合（DevOps 中心档案室/值班台，tenant 内，与 /api/buildruns 同款语义）。
 	// 注意：走 ServeGlobal（非 ServeHTTP——后者按 /api/applications/ 前缀解析，/api/changes 会被误解析为 appID="api"）。
 	globalChanges := http.HandlerFunc(changeHandler.ServeGlobal)
@@ -1053,6 +1104,8 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	// 服务治理（API 网关路由）
 	mux.Handle("/api/routes", auth(govHandler))
 	mux.Handle("/api/routes/", auth(govHandler))
+	mux.Handle("/api/governance/domain", auth(govHandler)) // 一键暴露域名后缀查询（GET，见 handler 分发）
+	reg.Operation("GET", "/api/governance/domain", apiroute.Tags("服务治理"), apiroute.Summary("集群对外域名后缀（一键暴露自动域名用；空=未配置）"), apiroute.WithResp(map[string]string{}))
 	// 服务治理（熔断器，治理四件套之熔断）
 	mux.Handle("/api/breakers", auth(govHandler))
 	mux.Handle("/api/breakers/", auth(govHandler))
@@ -1401,9 +1454,11 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	reg.Operation("GET", "/api/workloads/lanes", apiroute.Tags("工作负载"), apiroute.Summary("泳道枚举（distinct laneId + 工作负载/应用数，默认排除基线）"), apiroute.Perm("workload:read"), apiroute.WithResp([]map[string]any{}))
 	reg.Operation("GET", "/api/workloads/{id}", apiroute.Tags("工作负载"), apiroute.Summary("工作负载详情（含运行实例）"), apiroute.Perm("workload:read"), apiroute.WithResp(workload.Detail{}))
 	reg.Operation("GET", "/api/workloads/{id}/logs", apiroute.Tags("工作负载"), apiroute.Summary("实例（Pod）运行日志"), apiroute.Perm("workload:read"))
-	reg.Operation("PUT", "/api/workloads/{id}", apiroute.Tags("工作负载"), apiroute.Summary("扩缩容/更新状态"), apiroute.Perm("workload:write"), apiroute.WithReqBody(struct {
+	reg.Operation("PUT", "/api/workloads/{id}", apiroute.Tags("工作负载"), apiroute.Summary("扩缩容/更新状态/声明指标路径"), apiroute.Perm("workload:write"), apiroute.WithReqBody(struct {
 		Replicas int    `json:"replicas"`
 		Status   string `json:"status"`
+		// MetricsPath 非空时平台注入 prometheus.io/scrape 注解；空串撤下（指针语义：缺省=不改）。
+		MetricsPath *string `json:"metricsPath,omitempty"`
 	}{}), apiroute.WithResp(workload.Workload{}))
 	reg.Operation("PUT", "/api/workloads/{id}/schedule", apiroute.Tags("工作负载"), apiroute.Summary("修改 cronjob 调度表达式"), apiroute.Perm("workload:write"), apiroute.WithReqBody(struct {
 		Schedule string `json:"schedule"`
@@ -1461,6 +1516,12 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 		Commit  string `json:"commit"`
 		Version string `json:"version"`
 	}{}), apiroute.WithResp(pipeline.PipelineRun{}))
+	reg.Operation("POST", "/api/applications/{id}/agent-ship/run", apiroute.Tags("流水线"), apiroute.Summary("智能研发一条龙触发（需求文本+勾选段，自动绑定 tpl-agent-ship）"), apiroute.Perm("pipeline:write"), apiroute.WithReqBody(struct {
+		Request string `json:"request"`
+		Review  bool   `json:"review"`
+		Ship    bool   `json:"ship"`
+		Release bool   `json:"release"`
+	}{}), apiroute.WithResp(pipeline.PipelineRun{}))
 	reg.Operation("GET", "/api/pipelineruns", apiroute.Tags("流水线"), apiroute.Summary("运行列表（?appId=&pipelineId=&status=）"), apiroute.Perm("pipeline:read"), apiroute.WithResp([]pipeline.PipelineRun{}))
 	reg.Operation("GET", "/api/admin/pipelineruns", apiroute.Tags("流水线"), apiroute.Summary("运行总览（管理员跨租户，?status=）"), apiroute.Perm("super_admin"), apiroute.WithResp([]pipeline.PipelineRun{}))
 	reg.Operation("GET", "/api/admin/pipelineruns/{id}", apiroute.Tags("流水线"), apiroute.Summary("运行详情（管理员跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp(pipeline.PipelineRun{}))
@@ -1476,6 +1537,11 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	reg.Operation("POST", "/api/applications/{id}/changes", apiroute.Tags("变更管理"), apiroute.Summary("创建变更（createBranch=true 平台代建分支）"), apiroute.Perm("pipeline:write"), apiroute.WithReqBody(change.ChangeInput{}), apiroute.WithResp(change.Change{}))
 	reg.Operation("GET", "/api/applications/{id}/changes/{cid}", apiroute.Tags("变更管理"), apiroute.Summary("变更详情"), apiroute.Perm("pipeline:read"), apiroute.WithResp(change.Change{}))
 	reg.Operation("DELETE", "/api/applications/{id}/changes/{cid}", apiroute.Tags("变更管理"), apiroute.Summary("放弃变更（open→abandoned）"), apiroute.Perm("pipeline:write"))
+	reg.Operation("POST", "/api/applications/{id}/changes/{cid}/agent-run", apiroute.Tags("变更管理"), apiroute.Summary("委派智能研发（契约 v2 §3.3：agent 在变更分支工作，用户 JWT 归因）"), apiroute.Perm("agentrun:write"), apiroute.WithReqBody(struct {
+		Request string `json:"request"`
+	}{}), apiroute.WithResp(struct {
+		AgentRunName string `json:"agentRunName"`
+	}{}))
 	reg.Operation("GET", "/api/applications/{id}/batches", apiroute.Tags("变更管理"), apiroute.Summary("集成批次列表（?status=）"), apiroute.Perm("pipeline:read"), apiroute.WithResp([]change.IntegrationBatch{}))
 	reg.Operation("POST", "/api/applications/{id}/batches", apiroute.Tags("变更管理"), apiroute.Summary("创建集成批次"), apiroute.Perm("pipeline:write"), apiroute.WithReqBody(struct {
 		Title  string `json:"title"`
@@ -1549,6 +1615,7 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	reg.Operation("GET", "/api/observability/metrics", apiroute.Tags("可观测"), apiroute.Summary("指标时序（惰性补点）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.MetricSeries{}))
 	reg.Operation("GET", "/api/observability/alert-rules", apiroute.Tags("可观测"), apiroute.Summary("告警规则列表"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.AlertRule{}))
 	reg.Operation("POST", "/api/observability/alert-rules", apiroute.Tags("可观测"), apiroute.Summary("创建告警规则"), apiroute.Perm("observability:write"), apiroute.WithReqBody(observability.AlertRule{}), apiroute.WithResp(observability.AlertRule{}))
+	reg.Operation("PUT", "/api/observability/alert-rules/{id}", apiroute.Tags("可观测"), apiroute.Summary("更新告警规则"), apiroute.Perm("observability:write"), apiroute.WithReqBody(observability.AlertRule{}), apiroute.WithResp(observability.AlertRule{}))
 	reg.Operation("DELETE", "/api/observability/alert-rules/{id}", apiroute.Tags("可观测"), apiroute.Summary("删除告警规则"), apiroute.Perm("observability:write"))
 	reg.Operation("GET", "/api/observability/alerts", apiroute.Tags("可观测"), apiroute.Summary("当前告警（即时评估）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.Alert{}))
 	reg.Operation("GET", "/api/observability/alerts/events", apiroute.Tags("可观测"), apiroute.Summary("告警历史事件（firing/resolved，PG 持久化）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.AlertEvent{}))
@@ -1621,6 +1688,16 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 			return
 		}
 		httputil.WriteData(w, list)
+	}
+	// Agent 运行跨租户总览（super_admin 只读，能力曝光对账 admin 面）：上游 ns=agent 单一命名空间
+	// 无租户维度，按 run 名前缀归类来源（auto-* 为 agentrun 侧 webhook 自动触发）；tokens 汇总
+	// 让成本大头可见（auto-review 单 run 实测 40 万+ tokens）。
+	if agentrunClient != nil {
+		reg.Register("GET", "/api/admin/agentrun/runs", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ov, err := agentrunClient.Overview(r.Context())
+			renderList(w, ov, err)
+		})),
+			apiroute.Tags("AgentRun"), apiroute.Summary("Agent 运行总览（全量 run + 汇总；上游无租户维度，按来源归类）"), apiroute.Perm("super_admin"), apiroute.WithResp(agentrun.AdminOverview{}))
 	}
 	// admin 工作负载管理（详情+实例+日志 / 扩缩容 / 删除）：mux.Handle 到 wlAdminHandler（按 method+action 分发），
 	// spec 经 reg.Operation 登记。handler 内 ServeHTTP 已含 GET 列表 + GET/{id} 详情 + GET/{id}/logs + PUT/{id}/scale + DELETE/{id}。

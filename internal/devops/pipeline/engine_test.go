@@ -167,6 +167,7 @@ type fakeGiteaMerger struct {
 	repoErr  error
 	mergeSHA string
 	mergeErr error
+	gotHead  string // Merge 收到的 head 分支（mergeFrom=priorAgent 断言用）
 }
 
 func (g *fakeGiteaMerger) ResolveRepo(ctx context.Context, appID string) (string, string, error) {
@@ -184,6 +185,7 @@ func (g *fakeGiteaMerger) ResolveRepo(ctx context.Context, appID string) (string
 	return owner, repo, nil
 }
 func (g *fakeGiteaMerger) Merge(ctx context.Context, owner, repo, head, base, mode string) (string, error) {
+	g.gotHead = head
 	return g.mergeSHA, g.mergeErr
 }
 
@@ -981,6 +983,39 @@ func TestEngineBaselineMergeConflict(t *testing.T) {
 	}
 	if run.StageRuns[1].Error != "合并冲突，请手动解决" {
 		t.Fatalf("sr.Error 期望「合并冲突」，got %q", run.StageRuns[1].Error)
+	}
+}
+
+// TestEngineBaselineMergeInfraErrorFails：merge 基础设施错误（不可达/超时，非冲突）判失败可
+// Retry——此前与冲突同款宽容标 success，merge 超时也全绿假象（2026-10-14 实测：run 全绿但
+// PR 未合、main 未动、生产无新版，合主干段 error 里躺着「context deadline exceeded」）。
+func TestEngineBaselineMergeInfraErrorFails(t *testing.T) {
+	s := NewMemoryStore()
+	r := seedPipelineBranch(t, s, "p-mergeinfra", "app-mergeinfra", KindCI, []StageDef{
+		{Name: "部署", Type: StageDeploy, Params: map[string]any{
+			"envId": "env-dev", "imageSource": ImageSelected, "imageId": "img-1",
+		}},
+		{Name: "基线", Type: StageBaseline, Params: map[string]any{"mainBranch": "main"}},
+	}, "feature-x")
+
+	eng := &Engine{
+		Pipelines: s, Runs: s, Builds: fakeBuilder{},
+		Releases: &fakeReleaser{},
+		Gitea:    &fakeGiteaMerger{mergeErr: errors.New("gitea 后端不可达: context deadline exceeded")},
+	}
+	if err := eng.Advance(acmeCtxEngine(), r.ID); err != nil {
+		t.Fatalf("Advance 失败: %v", err)
+	}
+
+	run, _ := s.GetRun(acmeCtxEngine(), r.ID)
+	if run.Status != RunFailed {
+		t.Fatalf("merge 超时期望 run 失败（可 Retry），got %s", run.Status)
+	}
+	if run.StageRuns[1].Status != StageFailed {
+		t.Fatalf("baseline 段期望 failed，got %s", run.StageRuns[1].Status)
+	}
+	if !strings.Contains(run.StageRuns[1].Error, "deadline exceeded") {
+		t.Fatalf("sr.Error 应含上游超时文案，got %q", run.StageRuns[1].Error)
 	}
 }
 

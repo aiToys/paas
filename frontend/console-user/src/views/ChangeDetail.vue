@@ -5,6 +5,7 @@
       :tags="change ? [{ label: statusLabel(change.status), type: statusType(change.status) as ShellTag['type'] }] : []"
     >
       <template #actions>
+        <el-button v-if="change?.status === 'open'" size="small" type="primary" @click="openAgentDlg">智能研发</el-button>
         <el-button v-if="change?.status === 'open' && !change.batchId" size="small" type="danger" plain @click="abandon">放弃变更</el-button>
       </template>
     </DetailShell>
@@ -36,6 +37,29 @@
             <code class="mono sha">{{ c.sha.slice(0, 8) }}</code>
             <span class="msg">{{ c.message }}</span>
           </div>
+        </div>
+        <!-- 委派智能研发运行块（契约 v2 §5.2/§5.3）：存 pipeline 名（两阶段），stages 内嵌展开，
+             不外跳 AgentRunDetail（那是 run 名视图，pipeline 名查 /api/runs 会 404）。 -->
+        <div v-if="change?.agentRunName" class="agent-run-block">
+          <div class="kv">
+            <span>智能研发</span>
+            <el-tag v-if="agentRun" size="small" :type="phaseTagType(agentRun.phase)">{{ agentRun.phase }}</el-tag>
+            <span v-else class="dim">查询中…</span>
+            <code class="mono">{{ change.agentRunName }}</code>
+            <el-button v-if="agentRun?.phase === 'Running' || agentRun?.phase === 'Pending'" size="small" text
+              @click="pollAgentRun">刷新</el-button>
+          </div>
+          <div v-if="agentRun?.stages?.length" class="agent-stages">
+            <div v-for="st in agentRun.stages" :key="st.name" class="kv">
+              <span></span>
+              <el-tag size="small" :type="phaseTagType(st.phase)">{{ st.name }}</el-tag>
+              <span class="dim">{{ st.phase }}</span>
+              <el-button v-if="st.agentRun" size="small" text type="primary"
+                @click="router.push(`/devops/agent-runs/${encodeURIComponent(st.agentRun)}`)">run 详情 →</el-button>
+              <span v-if="st.summary" class="dim agent-summary">{{ st.summary.slice(0, 80) }}</span>
+            </div>
+          </div>
+          <div v-if="agentRun?.phase === 'Running'" class="dim agent-hint">AI 正在此变更分支上工作，产出将 push 回 {{ change.branch }}，完成后经下方批次集成发车</div>
         </div>
       </section>
 
@@ -89,14 +113,26 @@
 
     <el-skeleton v-else :rows="6" animated />
   </div>
+    <el-dialog v-model="agentDlg" title="委派智能研发" width="480px">
+      <p class="dim" style="margin-top: 0">
+        AI 将在变更分支 <code class="mono">{{ change?.branch }}</code> 上工作：独立验收 → AI 审查 → 研发审批门，
+        产出 push 回该分支（author=agent:&lt;run名&gt;），随后进入批次集成。
+      </p>
+      <el-input v-model="agentRequest" type="textarea" :rows="3" placeholder="需求文本（已预填变更标题，可修改）" />
+      <template #footer>
+        <el-button @click="agentDlg = false">取消</el-button>
+        <el-button type="primary" :loading="delegating" @click="confirmDelegate">发起</el-button>
+      </template>
+    </el-dialog>
 </template>
 
 <script setup lang="ts">
 import { copyText } from '@/utils/clipboard'
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { getChange, abandonChange, getBatch, listAllBatches, listAllChanges, type Change, type IntegrationBatch } from '@/api/change'
+import { getChange, abandonChange, delegateAgentRun, getBatch, listAllBatches, listAllChanges, type Change, type IntegrationBatch } from '@/api/change'
+import { getPipeline, phaseTagType, type AgentPipelineDetail } from '@/api/agentrun'
 import { fetchAuth, apiError } from '@/api'
 import { repoLink } from '@/composables/useDevopsLinks'
 import { CHANGE_STATUS, BATCH_STATUS, statusOf } from '@/composables/useStatus'
@@ -203,6 +239,51 @@ async function doLoad() {
   } catch { /* 非关键 */ }
 }
 
+// ---------- 委派智能研发（契约 v2 §3.3/§5.1：变更页「智能研发」按钮） ----------
+const agentDlg = ref(false)
+const agentRequest = ref('')
+const delegating = ref(false)
+const agentRun = ref<AgentPipelineDetail | null>(null)
+let agentPollTimer: number | undefined
+
+function openAgentDlg() {
+  agentRequest.value = change.value?.title ?? '' // 预填变更 Title（可改，即需求文本）
+  agentDlg.value = true
+}
+async function confirmDelegate() {
+  if (!change.value) return
+  delegating.value = true
+  try {
+    const r = await delegateAgentRun(change.value.appId, change.value.id, agentRequest.value.trim() || undefined)
+    agentDlg.value = false
+    ElMessage.success(`已委派智能研发（${r.agentRunName}）`)
+    change.value = await getChange(change.value.appId, change.value.id) // 回读 agentRunName
+    startAgentPoll()
+  } catch (e) {
+    ElMessage.error(apiError(e, '委派失败'))
+  } finally {
+    delegating.value = false
+  }
+}
+async function pollAgentRun() {
+  const name = change.value?.agentRunName // 委派存 pipeline 名（两阶段 analyze→implement）
+  if (!name) return
+  try {
+    agentRun.value = await getPipeline(name)
+    if (agentRun.value.phase === 'Succeeded' || agentRun.value.phase === 'Failed') stopAgentPoll()
+  } catch { /* 观测失败静默（未配置/不可达由详情页引导）；下轮再试 */ }
+}
+function startAgentPoll() {
+  stopAgentPoll()
+  void pollAgentRun()
+  agentPollTimer = window.setInterval(pollAgentRun, 5000)
+}
+function stopAgentPoll() {
+  if (agentPollTimer !== undefined) { clearInterval(agentPollTimer); agentPollTimer = undefined }
+}
+onUnmounted(stopAgentPoll)
+watch(() => change.value?.agentRunName, (n) => { if (n) startAgentPoll() })
+
 onMounted(load)
 // 同路由不同 id 复用组件（详情互链点另一单据）时重载
 watch(() => route.params.id, () => load())
@@ -227,4 +308,8 @@ watch(() => route.params.id, () => load())
 .sha { color: var(--el-color-primary); }
 .conflict { margin-top: 8px; padding: 8px 12px; background: var(--el-color-danger-light-9); border-radius: 6px; font-size: 13px; color: var(--el-color-danger); }
 .steps { margin: 8px 0; }
+.agent-run-block { margin-top: 10px; border-top: 1px dashed var(--el-border-color-lighter); padding-top: 10px; }
+.agent-stages { margin: 4px 0; }
+.agent-summary { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-hint { margin-top: 4px; }
 </style>

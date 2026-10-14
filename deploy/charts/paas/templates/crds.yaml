@@ -75,6 +75,13 @@ spec:
                 type: string
               laneId:
                 type: string
+              metricsPath:
+                description: |-
+                  MetricsPath 是业务端口上 Prometheus 指标端点的路径（如 "/metrics"）。非空时 reconciler 给 Pod
+                  注入 prometheus.io/scrape=true / prometheus.io/path=MetricsPath / prometheus.io/port=<ContainerPort|Port>，
+                  Prometheus 的 kubernetes-pods job 据此自动发现抓取；空则不注入任何注解（应用级 RED 指标不可用）。
+                  默认空是刻意的：多数应用不暴露 /metrics，无条件注入会让这些 Pod 成为永久 down target。
+                type: string
               name:
                 type: string
               port:

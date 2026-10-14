@@ -167,6 +167,7 @@ CREATE TABLE IF NOT EXISTS workloads (
     port           INTEGER NOT NULL DEFAULT 0,        -- Service 对外端口（>0 才建 Service）
     container_port INTEGER NOT NULL DEFAULT 0,        -- Pod 监听端口（0 取 port）
     domain         TEXT NOT NULL DEFAULT '',         -- 对外域名（非空时建 Ingress，host=domain -> Service:port）
+    metrics_path   TEXT NOT NULL DEFAULT '',         -- 指标端点路径（非空时注 prometheus.io/scrape 注解；空=不抓）
     resources      JSONB NOT NULL DEFAULT '{}',     -- 容器资源规格（CPU/内存 requests/limits，Quantity 字符串）
     created_at     TIMESTAMPTZ NOT NULL
 );
@@ -495,6 +496,7 @@ CREATE TABLE IF NOT EXISTS changes (
     status TEXT NOT NULL,
     batch_id TEXT NOT NULL DEFAULT '',
     conflict_with TEXT NOT NULL DEFAULT '',
+    agent_run_name TEXT NOT NULL DEFAULT '',
     created_by TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL

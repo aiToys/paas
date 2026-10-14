@@ -162,26 +162,64 @@ func (r *releaseBridge) PollWorkloadReady(ctx context.Context, workloadID string
 	}
 }
 
-// WorkloadDomain 拼探活域名：workload.Domain 优先，否则集群内 FQDN（同 ns DNS 可达）。
-// FQDN host 用 reconciler 建的 Service 名（wl.Name 优先，空则 wl.ID），与 applyService 命名一致；
-// port 非 0 且非 80 时显式带端口（Service 监听 wl.Port，smoke 默认走 80 会连不上）。
+// WorkloadDomain 拼展示/验证域名：workload.Domain 优先（对外域名，一键暴露/泳道派生），
+// 否则集群内 FQDN 兜底。注意：对外域名 core Pod 内解析不了（外部 DNS）——smoke 探活
+// 走 ProbeAddr（2026-10-13 分离）。
 func (r *releaseBridge) WorkloadDomain(ctx context.Context, workloadID string) string {
-	tid, _ := tenant.TenantFrom(ctx)
-	if wl, err := r.workloads.Get(ctx, workloadID); err == nil {
-		if wl.Domain != "" {
-			return wl.Domain
-		}
-		host := wl.Name
-		if host == "" {
-			host = workloadID
-		}
-		fqdn := fmt.Sprintf("%s.%s.svc.cluster.local", host, tenant.Namespace(tid))
-		if wl.Port > 0 && wl.Port != 80 {
-			fqdn = fmt.Sprintf("%s:%d", fqdn, wl.Port)
-		}
-		return fqdn
+	if wl, err := r.workloads.Get(ctx, workloadID); err == nil && wl.Domain != "" {
+		return wl.Domain
 	}
+	tid, _ := tenant.TenantFrom(ctx)
 	return fmt.Sprintf("%s.%s.svc.cluster.local", workloadID, tenant.Namespace(tid))
+}
+
+// ProbeAddr 集群内探活地址（pipeline.WorkloadProber）：固定 FQDN——外部域名在 core Pod
+// 内不可达（无外部 DNS），smoke 探活此前误用 WorkloadDomain 的对外域名致 05:52 起全败。
+// FQDN host 用 reconciler 建的 Service 名（wl.Name 优先，空则 wl.ID）；port 非 0 且非 80
+// 时显式带端口（Service 监听 wl.Port）。
+func (r *releaseBridge) ProbeAddr(ctx context.Context, workloadID string) string {
+	tid, _ := tenant.TenantFrom(ctx)
+	wl, err := r.workloads.Get(ctx, workloadID)
+	if err != nil {
+		return fmt.Sprintf("%s.%s.svc.cluster.local", workloadID, tenant.Namespace(tid))
+	}
+	host := wl.Name
+	if host == "" {
+		host = workloadID
+	}
+	fqdn := fmt.Sprintf("%s.%s.svc.cluster.local", host, tenant.Namespace(tid))
+	if wl.Port > 0 && wl.Port != 80 {
+		fqdn = fmt.Sprintf("%s:%d", fqdn, wl.Port)
+	}
+	return fqdn
+}
+
+// deployDomain 部署入口域名（泳道区分，2026-10-13）：default 泳道沿用 WorkloadDomain
+// （Domain 优先/FQDN 兜底）；非默认泳道（联调/一条龙验证/canary）且配了 PAAS_DOMAIN_SUFFIX
+// 时派生独立对外域名 <wl-name>.<suffix> 并 SetDomain 写回——wl.Name 含 lane 段
+// （BaselineWorkloadName），天然不撞基线 host，reconciler applyIngress 据此建独立入口。
+// 此前泳道部署无任何对外域名，版本验证断链（用户实测：泳道/基线/环境共用一个域名无法区分）。
+// port=0（多服务应用未显式 service/port，reconciler 不建 Service）返空串防前端展示死链
+// （原 canary 同款约定）；SetDomain 失败 best-effort 不阻断部署。
+func (r *releaseBridge) deployDomain(ctx context.Context, rel devops.Release, lane string) string {
+	suffix := os.Getenv("PAAS_DOMAIN_SUFFIX")
+	if lane == "" || lane == pipeline.LaneDefault || suffix == "" || rel.WorkloadID == "" {
+		return r.WorkloadDomain(ctx, rel.WorkloadID)
+	}
+	wl, err := r.workloads.Get(ctx, rel.WorkloadID)
+	if err != nil {
+		return r.WorkloadDomain(ctx, rel.WorkloadID)
+	}
+	if wl.Port == 0 {
+		return ""
+	}
+	name := wl.Name
+	if name == "" {
+		name = rel.WorkloadID
+	}
+	domain := fmt.Sprintf("%s.%s", name, suffix)
+	_ = r.workloads.SetDomain(ctx, rel.WorkloadID, domain)
+	return domain
 }
 
 // LatestReadyImage 返回 app 最新 ready Image ID（CD deploy 阶段 imageSource=latestReady 用）。
@@ -251,7 +289,7 @@ func (r *releaseBridge) Deploy(ctx context.Context, appID, envID, lane, service,
 		_ = r.releases.MarkSourceRun(ctx, rel.ID, sourceRunID)
 		rel.SourceRunID = sourceRunID
 	}
-	return rel, r.WorkloadDomain(ctx, rel.WorkloadID), nil
+	return rel, r.deployDomain(ctx, rel, lane), nil
 }
 
 // Publish 打版本号里程碑：Image.Version 回填 + git tag（commit 非空且仓库为 internal 时）。
@@ -274,32 +312,10 @@ func (r *releaseBridge) Publish(ctx context.Context, appID, imageID, version, co
 
 // DeployCanary 金丝雀并行验证部署（canary stage）：lane=canary-<dns1035(runID)>（与 engine 侧
 // LaneEnsurer/Abort 期望的命名口径一致，DNS-1035 清洗对齐）、replicas=1（基线不动）。
-// PAAS_DOMAIN_SUFFIX 非空时给 canary Workload 设独立验证域名 <wl-name>.<suffix>
-// （reconciler applyIngress 建验证入口），空则集群 FQDN（WorkloadDomain 兜底拼接）。
+// 验证域名派生统一在 Deploy->deployDomain（2026-10-13 下沉，泳道 deploy 与 canary 同款）。
 func (r *releaseBridge) DeployCanary(ctx context.Context, appID, envID, service, serviceID, imageID string, resources pipeline.DeployResources, sourceRunID string) (devops.Release, string, error) {
 	lane := "canary-" + pipeline.DNS1035(sourceRunID)
-	rel, domain, err := r.Deploy(ctx, appID, envID, lane, service, serviceID, imageID, 0, 0, resources, 1, sourceRunID)
-	if err != nil {
-		return rel, domain, err
-	}
-	// port=0（多服务应用未显式 service/port，reconciler 不建 Service）时验证地址不可达——
-	// 返空串防前端展示死链（k8s e2e 暴露：FQDN 无 Service 兜底）。用户可经 paramOverrides
-	// 显式 service+port 让 canary 获得独立 Service 入口（与 deploy stage 同款约定）。
-	if wl, gerr := r.workloads.Get(ctx, rel.WorkloadID); gerr == nil && wl.Port == 0 {
-		return rel, "", nil
-	}
-	// 可选外部验证域名：未配后缀则跳过（集群内 FQDN 已可验证）。写回失败不阻断（best-effort）。
-	if suffix := os.Getenv("PAAS_DOMAIN_SUFFIX"); suffix != "" && rel.WorkloadID != "" {
-		if wl, gerr := r.workloads.Get(ctx, rel.WorkloadID); gerr == nil {
-			name := wl.Name
-			if name == "" {
-				name = rel.WorkloadID
-			}
-			domain = fmt.Sprintf("%s.%s", name, suffix)
-			_ = r.workloads.SetDomain(ctx, rel.WorkloadID, domain)
-		}
-	}
-	return rel, domain, nil
+	return r.Deploy(ctx, appID, envID, lane, service, serviceID, imageID, 0, 0, resources, 1, sourceRunID)
 }
 
 // DeleteWorkload 删除 workload（canary 终止/abort 清理并行验证负载）：跨租户场景由

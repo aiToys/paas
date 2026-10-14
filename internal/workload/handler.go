@@ -458,9 +458,27 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Replicas *int   `json:"replicas,omitempty"`
 			Status   string `json:"status,omitempty"`
+			// MetricsPath 用指针区分「未传」（nil=不动）与「显式清空」（""=撤下抓取注解）。
+			// 供存量工作负载在 opt-in 语义下补声明（创建时未声明的负载否则抓取注解会消失）。
+			MetricsPath *string `json:"metricsPath,omitempty"`
+			// Domain 同款指针语义（服务 tab「对外暴露」一键设置）：reconciler 据此建/删
+			// host=domain 的 Ingress（nil=不动；""=撤下暴露）。
+			Domain *string `json:"domain,omitempty"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+			return
+		}
+		// metricsPath 先校验再落库（非空须绝对路径，同 Create 的 Validate 规则），
+		// 避免非法值写进 PG 后被 reconciler 静默拼成相对路径抓取 404。
+		if body.MetricsPath != nil && *body.MetricsPath != "" && !strings.HasPrefix(*body.MetricsPath, "/") {
+			httputil.WriteError(w, http.StatusBadRequest, "metricsPath 必须是以 / 开头的绝对路径")
+			return
+		}
+		// domain 非空须是合法 host（小写字母/数字/./-，非空段），防拼出非法 Ingress host
+		// 被 apiserver 拒后静默不生效（Create 同规则由 Validate 把关，PUT 单独校验）。
+		if body.Domain != nil && *body.Domain != "" && !ValidHost(*body.Domain) {
+			httputil.WriteError(w, http.StatusBadRequest, "domain 必须是合法域名（小写字母/数字/中划线/点分隔）")
 			return
 		}
 		// replicas 缺省时保留当前值（防 body 漏 replicas 致意外缩容到 0，与 admin scale 对齐）。
@@ -473,6 +491,39 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return
 		}
+		if body.MetricsPath != nil {
+			if err := h.repo.SetMetricsPath(r.Context(), id, *body.MetricsPath); err != nil {
+				httputil.WriteServiceError(w, http.StatusNotFound, err)
+				return
+			}
+			if w0, err = h.repo.Get(r.Context(), id); err != nil {
+				httputil.WriteServiceError(w, http.StatusNotFound, err)
+				return
+			}
+		}
+		if body.Domain != nil {
+			if err := h.repo.SetDomain(r.Context(), id, *body.Domain); err != nil {
+				httputil.WriteServiceError(w, http.StatusNotFound, err)
+				return
+			}
+			if w0, err = h.repo.Get(r.Context(), id); err != nil {
+				httputil.WriteServiceError(w, http.StatusNotFound, err)
+				return
+			}
+		}
+		// PUT 属生产敏感写：metricsPath 直接决定 Pod 的 prometheus.io 抓取注解、replicas 改变
+		// 副本——按「写操作全记审计」横切约定补记（此前本文件仅 create/delete 记）。
+		detail := fmt.Sprintf("app=%s env=%s replicas=%d", w0.AppID, w0.EnvID, w0.Replicas)
+		if body.Status != "" {
+			detail += " status=" + body.Status
+		}
+		if body.MetricsPath != nil {
+			detail += fmt.Sprintf(" metricsPath=%q", *body.MetricsPath)
+		}
+		if body.Domain != nil {
+			detail += fmt.Sprintf(" domain=%q", *body.Domain)
+		}
+		h.recordAudit(r, "workload_update", id, detail)
 		httputil.WriteData(w, w0)
 		return
 	}

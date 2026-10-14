@@ -24,8 +24,9 @@ var (
 
 // Kind 流水线分类（UI 分组 + 职责划分）。
 const (
-	KindCI     = "ci" // 测试联调流水线：build→deploy(test 泳道)→test（无版本、无合并）
-	KindCD     = "cd" // 上线发布流水线：approve→deploy(prod 基线)→release(版本)→baseline(合并主干)
+	KindCI     = "ci"    // 测试联调流水线：build→deploy(test 泳道)→test（无版本、无合并）
+	KindCD     = "cd"    // 上线发布流水线：approve→deploy(prod 基线)→release(版本)→baseline(合并主干)
+	KindAgent  = "agent" // AI 研发流水线：agentrun 执行域（需求→代码分支→构建→部署）
 	KindCustom = "custom"
 )
 
@@ -63,6 +64,7 @@ const (
 	StageRelease  = "release" // 打版本号里程碑（git tag + Image.version），不部署
 	StageBaseline = "baseline"
 	StageCanary   = "canary" // 金丝雀验证（并行验证式：canary 泳道部署 + 人工观察 + 确认放量/终止）
+	StageAgent    = "agent"  // AI 研发（agentrun 执行域）：需求→代码分支，产出经 Output.branch 衔接后续 build/baseline
 )
 
 // ImageSource deploy stage 的镜像来源（CI/CD 解耦关键）。
@@ -182,11 +184,15 @@ const (
 	OutImageID        = "imageId"
 	OutReleaseID      = "releaseId"
 	OutWorkloadDomain = "workloadDomain"
+	OutWorkloadID     = "workloadId" // deploy stage：workload ID（smoke 探活经 WorkloadProber 取集群内地址）
 	OutVersion        = "version"
 	OutMergeSHA       = "mergeSha"
 
 	OutCanaryWorkloadID = "canaryWorkloadId" // canary stage：并行验证 workload ID（promote/终止清理用）
 	OutCanaryDomain     = "canaryDomain"     // canary stage：验证域名（指标卡/直链）
+
+	OutAgentBranch  = "branch"  // agent stage：产出分支名（build branchSource=priorAgent / Change 注册消费）
+	OutAgentRunName = "runName" // agent stage：agentrun 侧 run 名（观测深链 / Retry workspaceFrom）
 )
 
 // Validate Pipeline 基本校验（绑定模型：校验 TemplateID，不校验 Stages--运行时从模板解析）。
@@ -198,7 +204,7 @@ func (p Pipeline) Validate() error {
 		return errAppRequired
 	}
 	switch p.Kind {
-	case KindCI, KindCD, KindCustom:
+	case KindCI, KindCD, KindAgent, KindCustom:
 		// valid
 	default:
 		return ErrInvalidKind

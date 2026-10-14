@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -91,6 +92,9 @@ func (s *Store) Upsert(ctx context.Context, item appconfig.ConfigItem) (appconfi
 		return appconfig.ConfigItem{}, err
 	}
 	item.TenantID = tid
+	// 时间戳 store 层统一生成（对齐 memory store）：请求体不传 UpdatedAt，
+	// 直接落请求值会把零值 0001-01-01 写库（前端「更新时间」显示 1/1/1）。
+	item.UpdatedAt = time.Now()
 	// ID 为空时生成（创建场景；请求体不传 ID）。否则 INSERT 用空串作主键，
 	// 多次创建不同 key 的配置项会因 id="" 重复触发 app_configs_pkey 冲突
 	// （ON CONFLICT 命中的是 (tenant,app,env,key) 唯一键，不是主键 id）。

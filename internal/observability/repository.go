@@ -13,6 +13,8 @@ type Repository interface {
 	ListAlertRules(ctx context.Context) ([]AlertRule, error)
 	// CreateAlertRule 创建规则。
 	CreateAlertRule(ctx context.Context, rule AlertRule) (AlertRule, error)
+	// UpdateAlertRule 更新规则（ID/TenantID 不变；改规则不再「删了重建」断开告警历史关联）。
+	UpdateAlertRule(ctx context.Context, id string, rule AlertRule) (AlertRule, error)
 	// DeleteAlertRule 删除规则。
 	DeleteAlertRule(ctx context.Context, id string) error
 	// ListAlerts 即时评估所有 enabled 规则，返回命中（firing）告警列表。

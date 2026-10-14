@@ -28,5 +28,9 @@ type Repository interface {
 	// SetDomain 设置对外域名（canary 独立验证域名；空串允许清除）。空值仅在新建时透传，
 	// 既有 Workload 的域名变更走此方法。跨租户访问返回 not found（不泄漏）。
 	SetDomain(ctx context.Context, id, domain string) error
+	// SetMetricsPath 覆盖指标端点路径（空串允许清除 = 不再注入 prometheus.io/scrape 注解）。
+	// 供存量工作负载在 opt-in 语义下补声明（创建时未声明的负载否则抓取注解会消失）。
+	// 跨租户访问返回 not found（不泄漏）。
+	SetMetricsPath(ctx context.Context, id, path string) error
 	Delete(ctx context.Context, id string) error
 }

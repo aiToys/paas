@@ -7,13 +7,16 @@
 # 存储：in-memory（dev 最稳最轻，重启丢 trace；MEMORY_MAX_TRACES 防无界增长）。
 #   生产/需持久化：换 badger 本地存储 + PVC（env SPAN_STORAGE_TYPE=badger + 挂载卷），留后续。
 #
-# 镜像：节点直拉国内源 docker.m.daocloud.io（省 crane copy 中转；daocloud 国内 CDN 节点可达）。
-# 若 daocloud 对某 tag DENIED（未缓存/限流），换 quay.io/jaegertracing/all-in-one:1.62（节点慢但能成）。
+# 镜像：走中转镜像站（MIRROR=daocloud 默认；MIRROR=none 注入上游 docker.io）。
+# 若中转站对某 tag DENIED（未缓存/限流），换 quay.io/jaegertracing/all-in-one:1.62（节点慢但能成）。
+#
+# ⚠ 本文件含 ${NS_OBS} / ${MIRROR_DOCKER} 占位符，必须经 scripts/deploy-observability.sh 应用
+#   （该脚本 envsubst 注入后 kubectl apply；直接 apply 会把 ${...} 原样写进集群）。
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: jaeger
-  namespace: observability
+  namespace: ${NS_OBS}
   labels:
     app.kubernetes.io/name: jaeger
     app.kubernetes.io/part-of: observability-stack
@@ -27,7 +30,7 @@ spec:
     spec:
       containers:
         - name: jaeger
-          image: docker.m.daocloud.io/jaegertracing/all-in-one:1.60.0
+          image: ${MIRROR_DOCKER}/jaegertracing/all-in-one:1.60.0
           args:
             - "--collector.otlp.enabled=true" # 启用 OTLP gRPC(4317)/HTTP(4318) 接收
           env:
@@ -55,7 +58,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: jaeger
-  namespace: observability
+  namespace: ${NS_OBS}
   labels:
     app.kubernetes.io/name: jaeger
     app.kubernetes.io/part-of: observability-stack

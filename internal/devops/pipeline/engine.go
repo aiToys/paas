@@ -63,6 +63,13 @@ type Releaser interface {
 	DeleteWorkload(ctx context.Context, workloadID string) error
 }
 
+// WorkloadProber 提供集群内探活地址（可选能力，engine 类型断言）。2026-10-13 一键暴露后
+// WorkloadDomain 语义变为「对外域名优先」（用户浏览器可达），但 core Pod 内解析不了外部
+// DNS——smoke 探活必须走集群内 FQDN（此前一直如此，当天即回归：探活全败）。
+type WorkloadProber interface {
+	ProbeAddr(ctx context.Context, workloadID string) string
+}
+
 // DeployResources 是 deploy stage 的容器资源规格（K8s Quantity 字符串）。
 // 与 workload.ResourceSpec / application.ResourceTemplate 同构——pipeline 不 import
 // workload/application（依赖倒置），cmd/core 桥接时转换。
@@ -113,6 +120,12 @@ type Engine struct {
 	AppResourceLookup AppResourceLookup
 	// EnvType 联调泳道副本降级的 prod 判定（nil 时保守按 prod 处理，不降级副本）。
 	EnvType EnvTypeResolver
+	// Agents 桥接 agentrun 执行域（agent stage）；nil=未配置（execAgent 明确报错，不 panic）。
+	Agents AgentRunner
+	// AgentChanges 可选：agent 产出分支注册 Change（路 B）；nil 时 registerChange 参数跳过。
+	AgentChanges ChangeRegistrar
+	// AgentBranches 可选：agent 产出分支存在性校验（幽灵分支防御，2026-10-13）；nil 跳过校验。
+	AgentBranches AgentBranchChecker
 
 	mu      sync.Mutex
 	cancels map[string]context.CancelFunc
@@ -326,6 +339,30 @@ func (e *Engine) Advance(ctx context.Context, runID string) error {
 	}
 }
 
+// flushStageLog 将 stage 运行中已产生的日志即时落库（2026-10-13）：长 stage（smoke 探活
+// 可达 3 分钟 / agent 轮询可达 30 分钟）的 logf 此前只写内存、随终态一并落库——运行中前端
+// 始终 0 字节，体感「无日志」。只同步 Log 字段（其余字段以库内为准，防覆盖并发 abort/
+// approve 落库）；ctx 已取消时跳过（终态由 Advance 守门落库）。
+func (e *Engine) flushStageLog(ctx context.Context, run *PipelineRun, sr *StageRun) {
+	if ctx.Err() != nil {
+		return
+	}
+	latest, err := e.Runs.GetRun(ctx, run.ID)
+	if err != nil || run.CurrentStage >= len(latest.StageRuns) {
+		return
+	}
+	// Input 与 Log 一起落库：execAgent 在 CreateRun 成功后把 prevRunName/agentAttempt 写进
+	// sr.Input（Retry 续接凭据），若此后进程滚动/崩溃，只同步 Log 会丢 Input → 下次 Retry
+	// 生成同名 agent run 撞对方 K8s CR（2026-10-13 实测 run-4c69ae55d9fa 三连 already exists）。
+	latest.StageRuns[run.CurrentStage].Log = sr.Log
+	if sr.Input != nil {
+		latest.StageRuns[run.CurrentStage].Input = sr.Input
+	}
+	if _, err := e.Runs.UpdateRun(ctx, latest); err != nil {
+		log.Printf("pipeline: stage 日志落库失败 run=%s stage=%d: %v", run.ID, run.CurrentStage, err) //nolint:gosec // runID 平台生成
+	}
+}
+
 // execStage 执行单个 stage，返回 (finished, error)。
 // finished=false 表示 paused（test-manual/approve），等外部恢复；
 // error 非 nil 表示 failed（中止整条 run，cause 已写 sr.Error）。
@@ -356,16 +393,46 @@ func (e *Engine) execStage(ctx context.Context, run *PipelineRun, stage StageDef
 		return e.execBaseline(ctx, run, stage, sr)
 	case StageCanary:
 		return e.execCanary(ctx, run, stage, sr)
+	case StageAgent:
+		return e.execAgent(ctx, run, stage, sr)
 	}
 	err := fmt.Errorf("未知 stage 类型 %s", stage.Type)
 	sr.Error = err.Error()
 	return true, err
 }
 
+// resolveBuildBranch build 分支来源：branchSource=priorAgent 取前序 agent stage 产出分支
+// （AI 编码→构建衔接，spec 2026-10-11 §3 ⑤）；缺省/branchOverride 保持原行为（静态覆盖 > run.Branch）。
+// 前序无 agent stage（模板复用单独跑 build）回落 run.Branch；**有 agent 前序但无产出分支**
+// 返回空串由调用方判负——曾静默回落 run.Branch 构建 main 初始页，全链假绿（2026-10-14 实测）。
+func resolveBuildBranch(run PipelineRun, stage StageDef) (string, error) {
+	if strOr(stage.Params, "branchSource", "") == "priorAgent" {
+		hasAgentPrior := false
+		for i := run.CurrentStage - 1; i >= 0; i-- {
+			if run.StageRuns[i].Type == StageAgent {
+				hasAgentPrior = true
+				break
+			}
+		}
+		if hasAgentPrior {
+			b, err := resolvePriorOutput(run, OutAgentBranch)
+			if err != nil {
+				return "", fmt.Errorf("branchSource=priorAgent 但前序 agent stage 未产出交付分支，拒绝回落 %s 构建（防假绿）", run.Branch)
+			}
+			return b, nil
+		}
+	}
+	return strOr(stage.Params, "branchOverride", run.Branch), nil
+}
+
 // execBuild 构建 stage：CreateBuildRun -> PollBuildRun 到终态 -> Output.imageId。
 func (e *Engine) execBuild(ctx context.Context, run *PipelineRun, stage StageDef, sr *StageRun) (bool, error) {
 	buildArgs := getStringMap(stage.Params, "buildArgs")
-	branch := strOr(stage.Params, "branchOverride", run.Branch)
+	branch, err := resolveBuildBranch(*run, stage)
+	if err != nil {
+		sr.Error = err.Error()
+		return true, err
+	}
 	br, err := e.Builds.CreateBuildRun(ctx, run.AppID, run.RepoID, branch, run.Commit, buildArgs)
 	if err != nil {
 		sr.Error = err.Error()
@@ -491,7 +558,7 @@ func (e *Engine) execDeploy(ctx context.Context, run *PipelineRun, stage StageDe
 	}
 	logf(sr, "Workload 就绪，访问地址 %s", domain)
 	// imageId 也写 Output：后序 canary stage 经 imageSource=priorBuild 消费同一镜像（与 deploy 部署的完全一致）。
-	sr.Output = map[string]any{OutReleaseID: deployment.ID, OutWorkloadDomain: domain, OutImageID: imageID}
+	sr.Output = map[string]any{OutReleaseID: deployment.ID, OutWorkloadDomain: domain, OutWorkloadID: deployment.WorkloadID, OutImageID: imageID}
 	sr.Status = StageSuccess
 	sr.FinishedAt = time.Now()
 	return true, nil
@@ -564,22 +631,37 @@ func (e *Engine) execTest(ctx context.Context, run *PipelineRun, stage StageDef,
 		sr.Input = map[string]any{"mode": TestManual, "message": strOr(stage.Params, "message", "请确认测试通过")}
 		return false, nil
 	}
-	// smoke：探活前序 deploy 的 domain + path
-	domain, err := resolvePriorOutput(*run, OutWorkloadDomain)
-	if err != nil {
+	// smoke：探活前序 deploy 的地址 + path。
+	// 地址优先级：集群内 FQDN（WorkloadProber，2026-10-13）> workloadDomain（对外域名，
+	// core Pod 内不可达仅作兜底——旧 run 无 workloadId Output 时的历史路径）。
+	host := ""
+	if id, err := resolvePriorOutput(*run, OutWorkloadID); err == nil {
+		if p, ok := e.Releases.(WorkloadProber); ok {
+			host = p.ProbeAddr(ctx, id)
+		}
+	}
+	if host == "" {
+		if d, err := resolvePriorOutput(*run, OutWorkloadDomain); err == nil {
+			host = d
+		}
+	}
+	if host == "" {
+		err := fmt.Errorf("无前序 deploy 产出地址（workloadDomain/workloadId 均缺失）")
 		sr.Error = err.Error()
 		return true, err
 	}
 	path := strOr(stage.Params, "path", "/livez")
-	url := fmt.Sprintf("http://%s%s", domain, path)
+	url := fmt.Sprintf("http://%s%s", host, path)
 	logf(sr, "探活 %s", url)
+	e.flushStageLog(ctx, run, sr)
 	// 两段探活：主路径先短探（15s，快速失败给降级让路），未过且非显式 / 时降级试根路径
 	//（静态页应用无 /healthz，白等 2 分钟才降级的体验优化），降级也未过再回到主路径长探
 	//（覆盖「应用启动慢」场景——短探失败可能是还没起完，不是路径不存在）。
-	err = pollHTTP(ctx, url, 15*time.Second)
+	err := pollHTTP(ctx, url, 15*time.Second)
 	if err != nil && path != "/" {
-		fallback := fmt.Sprintf("http://%s/", domain)
+		fallback := fmt.Sprintf("http://%s/", host)
 		logf(sr, "%s 短探未过，降级尝试 %s", path, fallback)
+		e.flushStageLog(ctx, run, sr)
 		if err2 := pollHTTP(ctx, fallback, 30*time.Second); err2 == nil {
 			err = nil
 			url = fallback
@@ -587,6 +669,7 @@ func (e *Engine) execTest(ctx context.Context, run *PipelineRun, stage StageDef,
 	}
 	if err != nil {
 		logf(sr, "回到主路径长探（最多 2 分钟，等待应用完全启动）")
+		e.flushStageLog(ctx, run, sr)
 		err = pollHTTP(ctx, url, 2*time.Minute)
 	}
 	if err != nil {
@@ -775,25 +858,40 @@ func (e *Engine) execBaseline(ctx context.Context, run *PipelineRun, stage Stage
 		sr.FinishedAt = time.Now()
 		return true, nil
 	}
-	// run 分支与主干相同（如直接从 main 触发 CD）时无变更可合，明确跳过——
+	// 合并来源：缺省 run.Branch；mergeFrom=priorAgent 取前序 agent 产出分支（AI 编码产物直合主干，路 A）。
+	head := run.Branch
+	if strOr(stage.Params, "mergeFrom", "") == "priorAgent" {
+		if b, err := resolvePriorOutput(*run, OutAgentBranch); err == nil {
+			head = b
+		}
+	}
+	// 合并分支与主干相同（如直接从 main 触发 CD）时无变更可合，明确跳过——
 	// 避免对 Gitea 发 head==base 的 PR 拿 422「无差异」，错误吞进 sr.Error 造成 stage 假绿、日志仅一行。
-	if run.Branch == mainBranch {
-		logf(sr, "run 分支 %s 与主干相同，无变更可合并，跳过", run.Branch)
+	if head == mainBranch {
+		logf(sr, "合并分支 %s 与主干相同，无变更可合并，跳过", head)
 		sr.Output = out
 		sr.Status = StageSuccess
 		sr.FinishedAt = time.Now()
 		return true, nil
 	}
-	logf(sr, "合并 %s -> %s", run.Branch, mainBranch)
+	logf(sr, "合并 %s -> %s", head, mainBranch)
 	owner, repo, err := e.Gitea.ResolveRepo(ctx, run.AppID)
 	if err == nil {
-		mergeSHA, merr := e.Gitea.Merge(ctx, owner, repo, run.Branch, mainBranch,
+		mergeSHA, merr := e.Gitea.Merge(ctx, owner, repo, head, mainBranch,
 			strOr(stage.Params, "mergeMode", "squash"))
 		if merr != nil {
 			if errors.Is(merr, gitea.ErrMergeConflict) {
 				sr.Error = "合并冲突，请手动解决"
 			} else {
+				// 基础设施瞬时故障（不可达/超时）判失败走 Retry——此前与冲突同款宽容标
+				// success，merge 超时也全绿假象（2026-10-14 实测：九段全绿但 PR 未合、
+				// main 未动、生产无新版）。Retry 重跑本段安全：上次若实际已合并，Merge
+				// 的 409 已合并幂等回查返 main HEAD。sr.Error 自写（engine 契约：
+				// 「execStage 已写 sr.Error」）。
 				sr.Error = merr.Error()
+				sr.Output = out
+				sr.FinishedAt = time.Now()
+				return true, merr
 			}
 		} else {
 			out[OutMergeSHA] = mergeSHA
@@ -1148,7 +1246,10 @@ func (e *Engine) SweepInterrupted(ctx context.Context) error {
 				r.StageRuns[i].FinishedAt = time.Now()
 			}
 		}
-		if _, err := e.Runs.UpdateRun(ctx, r); err != nil {
+		// UpdateRun 是租户强制语义（PG tenantOrErr 拒无租户 ctx）——ListAllRuns 跨租户读
+		// 到的 run 按 run.TenantID 派生 ctx 再写（2026-10-13 修复：裸 ctx 使 sweep 上线起
+		// 每条都 missing tenant context 失败，重启中断的 run 从未被真正清理）。
+		if _, err := e.Runs.UpdateRun(tenant.WithTenant(ctx, r.TenantID), r); err != nil {
 			log.Printf("pipeline: sweep run %s 失败: %v", run.ID, err)
 		} else {
 			log.Printf("pipeline: sweep 中断 run %s -> failed（进程重启）", run.ID)
@@ -1172,7 +1273,7 @@ func (e *Engine) SweepInterrupted(ctx context.Context) error {
 		if !touched {
 			continue
 		}
-		if _, err := e.Runs.UpdateRun(ctx, r); err != nil {
+		if _, err := e.Runs.UpdateRun(tenant.WithTenant(ctx, r.TenantID), r); err != nil {
 			log.Printf("pipeline: sweep paused run %s 失败: %v", run.ID, err)
 		} else {
 			log.Printf("pipeline: sweep 回退 run %s canary 认领残留 -> Waiting（进程重启）", run.ID)

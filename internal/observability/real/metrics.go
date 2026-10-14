@@ -79,6 +79,11 @@ func (s *MetricsStore) listMetrics(ctx context.Context, targetType, targetID, na
 	if targetType == observability.TargetApp {
 		return s.listAppMetrics(ctx, targetID, name)
 	}
+	// 工作负载级：单 Deployment（名 = wl-<id>）Pod 正则，与 app 级同款查询
+	// （2026-09-25 补齐：此前落兜底分支查不存在的 paas_* 埋点 → 建了规则永不触发）。
+	if targetType == observability.TargetWorkload {
+		return s.listWorkloadMetrics(ctx, targetID, name)
+	}
 	// 全局（targetType 空）：聚合租户内全部应用 + 全部数据服务（健康矩阵数据源）。
 	// 与 memory 路径「空参数=租户全部 series」契约对齐。
 	if targetType == "" {
@@ -265,6 +270,10 @@ func dataserviceDefs(ns, pod, dsID string) map[string]metricDef {
 		// 网络 IO：收+发速率合计（container_network 在 pod 级，不带 container label）。
 		observability.MetricNetIO: {fmt.Sprintf("sum(rate(container_network_receive_bytes_total{namespace=%q,pod=~%q}[5m]) + rate(container_network_transmit_bytes_total{namespace=%q,pod=~%q}[5m]))", ns, podRegex(pod), ns, podRegex(pod)), "KB/s", 1.0 / 1024},
 		// PVC 磁盘使用率 %（kubelet volume metrics，无需 exporter；PVC 名 data-<pod>）。
+		// ⚠ 依赖卷类型：kubelet 只为 CSI 卷产 kubelet_volume_stats_*；dev 集群 local-path
+		// provisioner 的 PV 是 hostPath 源，kubelet（v1.23）不产该系列 → 此处恒返空 series
+		// （诚实降级，勿用 node_filesystem 近似：bind mount 的 statfs 返回整分区用量会误导）。
+		// 换 CSI StorageClass（如 OpenEBS localpv）后此指标自然有数（2026-09-25 实测定论）。
 		observability.MetricDiskUsage: {fmt.Sprintf("max(kubelet_volume_stats_used_bytes{namespace=%q,persistentvolumeclaim=~%q} / clamp_min(kubelet_volume_stats_capacity_bytes{namespace=%q,persistentvolumeclaim=~%q}, 1) * 100)", ns, "data-"+podRegex(pod), ns, "data-"+podRegex(pod)), "%", 1},
 		// 引擎业务指标：exporter 自产不带 pod label，按 paas_aitoys_dataservice=<dsID> 过滤
 		// （prometheus relabel 注入）。全查所有引擎指标名，无该 metric → 返空降级。
@@ -272,12 +281,13 @@ func dataserviceDefs(ns, pod, dsID string) map[string]metricDef {
 		observability.MetricConnections: {fmt.Sprintf("max(pg_stat_activity_count{namespace=%q,paas_aitoys_dataservice=%q,state=\"active\"}) or max(redis_connected_clients{namespace=%q,paas_aitoys_dataservice=%q}) or max(mysql_threads_connected{namespace=%q,paas_aitoys_dataservice=%q}) or max(gnatsd_connz_num_connections{namespace=%q,paas_aitoys_dataservice=%q})", ns, dsID, ns, dsID, ns, dsID, ns, dsID), "", 1},
 		// qps：DB 事务 / 缓存命令（pg/redis）。
 		observability.MetricQPS: {fmt.Sprintf("sum(rate(pg_stat_database_xact_commit{namespace=%q,paas_aitoys_dataservice=%q}[5m])) or sum(rate(redis_commands_processed_total{namespace=%q,paas_aitoys_dataservice=%q}[5m]))", ns, dsID, ns, dsID), "/s", 1},
-		// hit_rate：缓存命中率（redis exporter）。
-		observability.MetricHitRate: {fmt.Sprintf("redis_keyspace_hit_rate{namespace=%q,paas_aitoys_dataservice=%q}", ns, dsID), "%", 1},
+		// hit_rate：缓存命中率（redis exporter 不产 hit_rate 指标，须由 hits/misses 计算；
+		// clamp_min 防零除：冷启动期 hits+misses 全 0 时返回 0 而非 NaN）。
+		observability.MetricHitRate: {fmt.Sprintf("100 * sum(rate(redis_keyspace_hits_total{namespace=%q,paas_aitoys_dataservice=%q}[5m])) / clamp_min(sum(rate(redis_keyspace_hits_total{namespace=%q,paas_aitoys_dataservice=%q}[5m])) + sum(rate(redis_keyspace_misses_total{namespace=%q,paas_aitoys_dataservice=%q}[5m])), 0.000001)", ns, dsID, ns, dsID, ns, dsID), "%", 1},
 		// lag：MQ 消息速率（nats gnatsd 入站消息）。
 		observability.MetricLag: {fmt.Sprintf("sum(rate(gnatsd_connz_in_msgs{namespace=%q,paas_aitoys_dataservice=%q}[5m]))", ns, dsID), "/s", 1},
-		// vectors：向量数（qdrant 内置 /metrics）。
-		observability.MetricVectors: {fmt.Sprintf("qdrant_collection_vectors_count{namespace=%q,paas_aitoys_dataservice=%q}", ns, dsID), "", 1},
+		// vectors：向量数（qdrant 原生指标名是 collections_vector_total，非 qdrant_collection_vectors_count）。
+		observability.MetricVectors: {fmt.Sprintf("collections_vector_total{namespace=%q,paas_aitoys_dataservice=%q}", ns, dsID), "", 1},
 	}
 }
 
@@ -370,19 +380,35 @@ func (s *MetricsStore) listDataserviceMetrics(ctx context.Context, targetID, nam
 //
 // 降级：lister 未注入 / app 无工作负载 / appID 空 → 返空切片（不报错）。
 func (s *MetricsStore) listAppMetrics(ctx context.Context, appID, name string) ([]observability.MetricSeries, error) {
-	out := make([]observability.MetricSeries, 0)
 	if appID == "" || s.lister == nil {
-		return out, nil // 应用级需指定 appID + lister 注入
+		return []observability.MetricSeries{}, nil // 应用级需指定 appID + lister 注入
 	}
 	ids, err := s.lister.AppWorkloadIDs(ctx, appID)
 	if err != nil || len(ids) == 0 {
-		return out, nil // app 无工作负载 / lister 错误：降级返空
+		return []observability.MetricSeries{}, nil // app 无工作负载 / lister 错误：降级返空
 	}
+	// Pod 名正则：wl-<id1>-.* | wl-<id2>-.* （Deployment 名 = wl-<id>，Pod = <deploy>-<hash>-<hash>）。
+	return s.listPodSeries(ctx, appPodRegex(ids), name, observability.TargetApp, appID)
+}
+
+// listWorkloadMetrics 查单个工作负载（Deployment 名 = wl-<id>，Pod = wl-<id>-<hash>-<hash>）
+// 的 Pod 指标。与 app 级同款查询（共享 listPodSeries），仅 pod 正则限定单 workload。
+// targetID 空 → 返空（「全部 workload」需平台实体列表，暂不支持聚合语义，诚实降级）。
+func (s *MetricsStore) listWorkloadMetrics(ctx context.Context, targetID, name string) ([]observability.MetricSeries, error) {
+	if targetID == "" {
+		return []observability.MetricSeries{}, nil
+	}
+	return s.listPodSeries(ctx, targetID+"-.*", name, observability.TargetWorkload, targetID)
+}
+
+// listPodSeries 按 pod 名正则聚合 Pod 指标（app 级多 workload 与 workload 级单实体的公共实现）。
+// 指标集 = 计算（cAdvisor cpu/mem）+ RED（rps/latency/errorRate，依赖应用暴露 /metrics，
+// 未暴露 → 返空 series 诚实降级）。tenant 从 ctx 取（ns 隔离防跨租户串数据）。
+func (s *MetricsStore) listPodSeries(ctx context.Context, podRegex, name, targetType, targetID string) ([]observability.MetricSeries, error) {
+	out := make([]observability.MetricSeries, 0)
 	tid, _ := tenant.TenantFrom(ctx)
 	ns := tenant.Namespace(tid) // paas-<tenant>，多租户隔离（空 tid 兜底 paas-x）
-	// Pod 名正则：wl-<id1>-.* | wl-<id2>-.* （Deployment 名 = wl-<id>，Pod = <deploy>-<hash>-<hash>）。
-	podRegex := appPodRegex(ids)
-	// cAdvisor 指标限定本租户 ns + 本应用 pod 名正则 + 排除 pause/空容器。
+	// cAdvisor 指标限定本租户 ns + pod 名正则 + 排除 pause/空容器。
 	lbl := fmt.Sprintf(`{namespace=%q,pod=~%q,container!="POD",container!=""}`, ns, podRegex)
 	// 应用自暴露的 RED 指标（http_requests_total / http_request_duration_seconds）按 ns + pod 正则聚合。
 	// 依赖：controller 给 service Pod 注 prometheus.io/scrape 注解（Prometheus kubernetes-pods job 发现）+
@@ -449,9 +475,9 @@ func (s *MetricsStore) listAppMetrics(ctx context.Context, appID, name string) (
 				current = scaled
 			}
 			out = append(out, observability.MetricSeries{
-				ID:         fmt.Sprintf("app|%s|%s", appID, mn),
-				TargetType: observability.TargetApp,
-				TargetID:   appID,
+				ID:         fmt.Sprintf("%s|%s|%s", targetType, targetID, mn),
+				TargetType: targetType,
+				TargetID:   targetID,
 				Name:       mn,
 				Unit:       def.unit,
 				Current:    current,

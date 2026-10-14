@@ -55,6 +55,11 @@ devops:
     password: ""                  # 平台账号密码（与 deploy/devops/gitea.yaml Secret 一致）
     externalURL: ""               # 外部可达地址（开发者本机 clone 用；空则 UI 不展示克隆命令）
 
+# Agent 编排执行域（agentrun，独立部署于 agent ns，paas 单向纳管）
+agentrun:
+  url: ""                        # agentrun console 地址（如 http://agent-console.agent.svc）；留空=模块禁用（agent stage 报错+观测 503）
+  token: ""                      # 编排通道静态 token（server-to-server；观测走用户 JWT 不用它）
+
 # MaaS 推理（airouter 示例 OpenAI 兼容网关；可替换为任意 OpenAI 兼容供应商）
 maas:
   airouterApiKey: ""              # airouter 网关 API Key；留空则推理通道返凭证缺失
@@ -110,6 +115,11 @@ security:
 # hostNetwork：true 时 core Pod 用节点网络（dev 集群访问外部 registry 用），生产保持 false。
 core:
   hostNetwork: false
+
+# 集群对外域名后缀（env PAAS_DOMAIN_SUFFIX）：服务治理「一键暴露」自动域名
+# `<应用名>-<服务名>.<后缀>` 的后缀真源（Ingress host + 用户侧 DNS 需把 *.<后缀> 解析到集群入口）。
+# 空 = 一键暴露降级为手工建路由提示。
+domainSuffix: ""
 
 # core 容器资源
 resources:

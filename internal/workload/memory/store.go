@@ -251,6 +251,25 @@ func (s *Store) SetResources(ctx context.Context, id string, res workload.Resour
 	return nil
 }
 
+// SetMetricsPath 覆盖指标端点路径（空串允许清除 = 不再注入 prometheus.io/scrape 注解）。
+// 存在的意义是**存量迁移**：语义反转为 opt-in 后，既有工作负载无法在创建时声明该字段，
+// 需经此路径补声明，否则其 Prometheus 抓取注解会在下次 reconcile 后消失（应用级 RED 面板失数据）。
+func (s *Store) SetMetricsPath(ctx context.Context, id, path string) error {
+	tid, err := tenant.IDOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w, hit := s.workloads[id]
+	if !hit || w.TenantID != tid {
+		return fmt.Errorf("工作负载不存在: %s", id)
+	}
+	w.MetricsPath = path
+	s.workloads[id] = w
+	return nil
+}
+
 // SetDomain 设置对外域名（canary 独立验证域名；与 SetResources 同模式）。
 func (s *Store) SetDomain(ctx context.Context, id, domain string) error {
 	tid, err := tenant.IDOrErr(ctx)

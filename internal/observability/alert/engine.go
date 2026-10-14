@@ -79,6 +79,12 @@ type alertState struct {
 	tickBreach int // 连续命中计数（达 breachToFireTicks 转 firing）
 }
 
+// webhookDispatch firing 告警与其出站 URL 的绑定对（告警与 URL 一一对应，杜绝平行切片索引错位）。
+type webhookDispatch struct {
+	alert observability.Alert
+	url   string
+}
+
 // NewEngine 创建评估引擎。interval<=0 用 DefaultInterval。
 // states2/events 可选持久化注入（PG 路径）；nil 时纯内存行为与历史版本一致。
 func NewEngine(rules RuleSource, metrics observability.MetricsReader, interval time.Duration, states2 StateStore, events EventStore) *Engine {
@@ -160,12 +166,19 @@ func (e *Engine) evaluate(ctx context.Context) {
 	}
 	// 按租户分组（ListMetrics 按 ctx tenant 过滤）。
 	byTenant := map[string][]observability.AlertRule{}
+	// ruleID → 规则全量映射（含 disabled）：resolved 出站要查规则的 webhook URL
+	// （alertState 只存 alert；规则禁用/删除后其 firing 告警恢复时仍应通知消费方）。
+	ruleByID := map[string]observability.AlertRule{}
 	for _, r := range rules {
 		byTenant[r.TenantID] = append(byTenant[r.TenantID], r)
+		ruleByID[r.ID] = r
 	}
 	seen := map[string]struct{}{} // 本轮命中的 state key（未命中的转 resolved）
 	now := time.Now()
-	var webhooks []observability.AlertRule
+	// webhook 派发对（alert 与其规则 URL 绑定）。曾用两个平行切片按索引取值，
+	// 但 fired 无条件 append、webhooks 仅 WebhookURL 非空才 append——索引错位后
+	// 会把租户 A 的告警 POST 到租户 B 的 webhook（跨租户泄漏，2026-09-25 审计 C1）。
+	var dispatches []webhookDispatch
 	var fired []observability.Alert
 
 	for tid, trs := range byTenant {
@@ -216,7 +229,7 @@ func (e *Engine) evaluate(ctx context.Context) {
 					}
 					fired = append(fired, st.alert)
 					if rule.WebhookURL != "" {
-						webhooks = append(webhooks, rule)
+						dispatches = append(dispatches, webhookDispatch{alert: st.alert, url: rule.WebhookURL})
 					}
 				} else if st.alert.Status == "" {
 					// 首次命中：pending。
@@ -250,6 +263,12 @@ func (e *Engine) evaluate(ctx context.Context) {
 			st.alert.LastSeen = now
 			st.tickBreach = 0
 			resolved = append(resolved, st.alert)
+			// resolved 也出站 webhook（status=resolved）：消费方（值班系统）需知道恢复，
+			// 否则 firing 通知后只能靠人盯平台确认——「只报忧不报喜」的告警系统不完整。
+			// 规则已删除（查无 ruleByID）时无 URL 可用，跳过（历史事件仍落库）。
+			if rule, ok := ruleByID[st.alert.RuleID]; ok && rule.WebhookURL != "" {
+				dispatches = append(dispatches, webhookDispatch{alert: st.alert, url: rule.WebhookURL})
+			}
 		case observability.AlertResolved:
 			expired = append(expired, key) // resolved 展示一轮后清理（防列表无限膨胀）
 		}
@@ -259,9 +278,9 @@ func (e *Engine) evaluate(ctx context.Context) {
 	}
 	e.mu.Unlock()
 
-	// webhook 出站（锁外，防慢 webhook 阻塞评估循环）：每条 firing 通知一次。
-	for i, rule := range webhooks {
-		e.postWebhook(fired[i], rule.WebhookURL)
+	// webhook 出站（锁外，防慢 webhook 阻塞评估循环）：firing 转变与 resolved 各通知一次。
+	for _, d := range dispatches {
+		e.postWebhook(d.alert, d.url)
 	}
 
 	// 持久化（锁外，WithoutCancel 防 SIGTERM 后用已 cancel ctx 落库）：

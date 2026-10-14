@@ -32,6 +32,8 @@ const batches = ref<IntegrationBatch[]>([])
 const pipelines = ref<Pipeline[]>([])
 const templates = ref<PipelineTemplate[]>([])
 const latestRun = ref<PipelineRun | null>(null)
+// 最近运行列表（应用维度找 run 的入口：run 详情页无菜单入口，从触发地/回访地直达）
+const recentRuns = ref<PipelineRun[]>([])
 const loading = ref(false)
 const busy = ref(false)
 
@@ -86,6 +88,7 @@ async function loadLatestRun() {
     const runs: PipelineRun[] = await fetchAuth('/api/pipelineruns?appId=' + props.appId)
       .then((r) => r.json()).then((j) => j.data ?? [])
     latestRun.value = runs[0] ?? null // 列表按时间倒序
+    recentRuns.value = runs.slice(0, 8)
   } catch { /* 非关键 */ }
 }
 
@@ -209,9 +212,9 @@ async function remove(p: Pipeline) {
   }
 }
 
-// CD 等手动流水线：收集 version + branch 触发（变更驱动发车只覆盖默认 CI）
+// CD/Agent 等手动流水线：收集 version + branch（+ agent 模板的需求文本）触发（变更驱动发车只覆盖默认 CI）
 const cdRunDlg = ref(false)
-const cdRunForm = ref<{ pipeline: Pipeline | null; branch: string; version: string }>({ pipeline: null, branch: 'main', version: '' })
+const cdRunForm = ref<{ pipeline: Pipeline | null; branch: string; version: string; request: string }>({ pipeline: null, branch: 'main', version: '', request: '' })
 // CI 直接触发（默认分支）：不经变更火车，服务首次部署/快速验证的主路径。
 async function runCI(p: Pipeline) {
   try {
@@ -223,18 +226,21 @@ async function runCI(p: Pipeline) {
   }
 }
 function runManual(p: Pipeline) {
-  cdRunForm.value = { pipeline: p, branch: p.trigger?.branch || 'main', version: '' }
+  cdRunForm.value = { pipeline: p, branch: p.trigger?.branch || 'main', version: '', request: '' }
   cdRunDlg.value = true
 }
 async function confirmCdRun() {
   const p = cdRunForm.value.pipeline
   if (!p) return
   if (!cdRunForm.value.branch.trim()) { ElMessage.error('请填写分支'); return }
+  if (p.kind === 'agent' && !cdRunForm.value.request.trim()) { ElMessage.error('请填写需求文本'); return }
   cdRunDlg.value = false
   try {
     const r = await triggerRun(props.appId, p.id, {
       branch: cdRunForm.value.branch.trim(),
       version: cdRunForm.value.version.trim() || undefined,
+      // agent 模板：需求文本经 run 级 stageParams 注入首个 agent stage（覆盖模板默认）
+      stageParams: p.kind === 'agent' ? { '0.request': cdRunForm.value.request.trim() } : undefined,
     })
     ElMessage.success('已触发运行')
     router.push(`/devops/runs/${r.id}`)
@@ -273,6 +279,19 @@ v-if="latestRun" size="small"
       </div>
     </div>
     <el-alert v-else type="info" :closable="false" title="应用尚无 CI 流水线（新建应用会自动绑定 tpl-ci，如缺失请联系管理员）" style="margin-bottom: 14px;" />
+
+    <!-- ② 最近运行（应用维度回访 run 的唯一列表入口） -->
+    <div v-if="recentRuns.length" class="recent-runs">
+      <span class="rr-label">最近运行</span>
+      <button
+v-for="r in recentRuns" :key="r.id" class="rr-chip"
+              :class="{ active: false }" @click="router.push(`/devops/runs/${r.id}`)"
+>
+        <span class="rr-dot" :class="r.status" />
+        <span class="rr-name">{{ r.branch }}<template v-if="r.version"> · {{ r.version }}</template></span>
+        <span class="rr-time">{{ fmtTime(r.createdAt) }}</span>
+      </button>
+    </div>
 
     <!-- ② 高级发布流程（变更火车：多变更集成→批次测试→整批上线）。默认折叠——
          概念成本高（变更/批次/集成分支/发车），仅在多变更协同时展开使用。 -->
@@ -406,12 +425,16 @@ v-if="latestRun" size="small"
     </div>
 
     <!-- CD 手动运行对话框 -->
-    <el-dialog v-model="cdRunDlg" :title="`运行发布流水线：${cdRunForm.pipeline?.name || ''}`" width="460px">
+    <el-dialog v-model="cdRunDlg" :title="`运行流水线：${cdRunForm.pipeline?.name || ''}`" width="460px">
       <el-form label-width="80px">
         <el-form-item label="分支">
           <el-input v-model="cdRunForm.branch" placeholder="如 main" />
         </el-form-item>
-        <el-form-item label="版本">
+        <el-form-item v-if="cdRunForm.pipeline?.kind === 'agent'" label="需求">
+          <el-input v-model="cdRunForm.request" type="textarea" :rows="3"
+            placeholder="需求文本（AI 研发任务的输入，如「实现取消订单功能」）" />
+        </el-form-item>
+        <el-form-item v-if="cdRunForm.pipeline?.kind !== 'agent'" label="版本">
           <el-input v-model="cdRunForm.version" placeholder="如 v1.2.0（留空则不写基线版本）" />
         </el-form-item>
       </el-form>
@@ -493,4 +516,22 @@ v-if="latestRun" size="small"
 .pipe-name { font-weight: 500; }
 .pipe-stages-hint { font-size: 12px; color: var(--el-text-color-placeholder); }
 .grow { flex: 1; }
+
+/* 最近运行 chips（横向一排，点击直达 run 详情） */
+.recent-runs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.rr-label { font-size: 12px; color: var(--el-text-color-secondary); flex-shrink: 0; }
+.rr-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1px solid var(--el-border-color-lighter); border-radius: 14px;
+  background: var(--el-bg-color); cursor: pointer; padding: 3px 10px;
+  font-family: inherit; font-size: 12px; color: var(--el-text-color-regular);
+}
+.rr-chip:hover { border-color: var(--el-color-primary-light-5); color: var(--el-color-primary); }
+.rr-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.rr-dot.succeeded { background: var(--el-color-success); }
+.rr-dot.failed { background: var(--el-color-danger); }
+.rr-dot.running, .rr-dot.paused { background: var(--el-color-warning); }
+.rr-dot.aborted { background: var(--el-color-info); }
+.rr-name { font-family: monospace; }
+.rr-time { color: var(--el-text-color-placeholder); font-size: 11px; }
 </style>

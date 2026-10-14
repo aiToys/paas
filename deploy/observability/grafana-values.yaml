@@ -1,11 +1,21 @@
-# Grafana values（统一面板，预配 Prometheus/Loki/Jaeger 三数据源 + sidecar 自动加载 dashboard）。
-# ⚠️ dev overlay：adminPassword 是本地 dev 集群演示凭证，开源部署请替换。
+# Grafana values（统一面板，预配 Prometheus/Loki/Jaeger 三数据源）。
+#
+# ⚠ 本文件含 ${...} 占位符，必须经 scripts/deploy-observability.sh 应用（它 envsubst 注入集群相关值）：
+#     ${NS_OBS}                    observability namespace（数据源 URL）
+#     ${STORAGE_CLASS}             PVC StorageClass
+#     ${GRAFANA_ADMIN_PASSWORD}    admin 口令（默认值是 dev 演示凭证，生产必须覆盖）
+#     ${GRAFANA_IMAGE_REGISTRY}    grafana 镜像 registry 主机
+#     ${GRAFANA_IMAGE_REPOSITORY}  grafana 镜像仓库路径（不含主机）
+#   直接 helm upgrade 会把 ${...} 原样传给集群 → 镜像/URL 全错。
+#
+# ⚠ chart 会拼 image.registry + "/" + image.repository（默认 registry=docker.io）。
+#   所以这里必须两段分开写：把完整路径塞进 repository 会渲染成 docker.io/hub.wang.dd:5000/...
 ---
-adminPassword: "paas-admin"
+adminPassword: "${GRAFANA_ADMIN_PASSWORD}"
 
 persistence:
   enabled: true
-  storageClassName: local-path
+  storageClassName: ${STORAGE_CLASS}
   size: 5Gi
 
 # 跳过 init-chown-data：grafana chart 的 init container 对 image 内 /var/lib/grafana/png|csv|pdf
@@ -14,28 +24,53 @@ persistence:
 initChownData:
   enabled: false
 
-# 内网化镜像（节点拉不到 docker.io）。
+# grafana 镜像（默认走内网中转 registry；换集群用 GRAFANA_IMAGE_REGISTRY/REPOSITORY 覆盖为可达仓库）。
 image:
-  repository: hub.wang.dd:5000/observability/grafana
+  registry: ${GRAFANA_IMAGE_REGISTRY}
+  repository: ${GRAFANA_IMAGE_REPOSITORY}
   tag: "12.3.1"
 
 resources:
   requests: { cpu: 100m, memory: 128Mi }
   limits: { cpu: 500m, memory: 512Mi }
 
-# sidecar dashboards：自动加载带 label grafana_dashboard=1 的 ConfigMap（见 grafana-dashboards.yaml）。
-# dashboard 独立 ConfigMap 维护，新增面板只需 apply ConfigMap，无需 helm upgrade。
-# sidecar image 节点直拉 daocloud（与 jaeger 同款，省中转；若 DENIED 换 quay.io/kiwigrid/k8s-sidecar）。
-sidecar:
-  image:
-    repository: docker.m.daocloud.io/kiwigrid/k8s-sidecar
-    tag: "1.27.0"
-  dashboards:
-    enabled: true
-    label: grafana_dashboard
-    labelValue: "1"
-    folder: /tmp/dashboards
-    searchNamespace: observability
+# 【勿开 sidecar】dashboard 走 provisioning + ConfigMap 直接挂载（grafana-dashboard-providers.yaml
+# 的 file provider 扫 /tmp/dashboards，grafana-dashboards.yaml 的两个面板 ConfigMap 挂到
+# /tmp/dashboards/{app,cp} 子目录），grafana 启动即加载，不依赖 sidecar 轮询。
+#
+# 曾误开 sidecar.dashboards.enabled=true，后果是同一套 dashboard 有两条加载路径（sidecar 拉 +
+# file provider 扫），且要多拉一个 kiwigrid/k8s-sidecar 镜像、多一个容器，故删除。
+#
+# ⚠ 挂载**必须**在下方 extraConfigmapMounts 声明（2026-09-24 审计修复：此前挂载只存在于
+# live 集群的带外 patch、values 里没有——helm 三方合并不删「新旧 manifest 都没有」的字段，
+# 所以升级永远看不出；但全新安装渲染出的 Grafana 既无 provider 目录也无面板目录，两块 PaaS
+# dashboard 静默缺失，且脚本 diff 不比 volumes 检不出）。
+#
+# 新增/改面板：改 grafana-dashboards.yaml 后 kubectl apply（脚本已含），grafana 自动重载，
+# 无需 helm upgrade。
+extraConfigmapMounts:
+  - name: dashboard-providers
+    configMap: grafana-dashboard-providers
+    mountPath: /etc/grafana/provisioning/dashboards
+    readOnly: true
+  - name: dashboard-app
+    configMap: grafana-dashboard-paas-app
+    mountPath: /tmp/dashboards/app
+    readOnly: true
+  - name: dashboard-cp
+    configMap: grafana-dashboard-paas-control-plane
+    mountPath: /tmp/dashboards/cp
+    readOnly: true
+  # 基础设施面板：节点总览 / 数据服务总览 / 集群与工作负载（2026-09-25 补齐对账缺口）
+  - name: dashboard-infra
+    configMap: grafana-dashboard-paas-infra
+    mountPath: /tmp/dashboards/infra
+    readOnly: true
+  # 数据服务每引擎官方面板（pg/redis/nats/qdrant/minio，2026-09-25）
+  - name: dashboard-ds-engines
+    configMap: grafana-dashboard-paas-ds-engines
+    mountPath: /tmp/dashboards/ds
+    readOnly: true
 
 # 数据源 Provisioning（开箱即用，三支柱全配好）
 datasources:
@@ -44,16 +79,16 @@ datasources:
     datasources:
       - name: Prometheus
         type: prometheus
-        url: http://prom-prometheus-server.observability.svc.cluster.local:80
+        url: http://prom-prometheus-server.${NS_OBS}.svc.cluster.local:80
         isDefault: true
         access: proxy
       - name: Loki
         type: loki
-        url: http://loki.observability.svc.cluster.local:3100
+        url: http://loki.${NS_OBS}.svc.cluster.local:3100
         access: proxy
       - name: Jaeger
         type: jaeger
-        url: http://jaeger.observability.svc.cluster.local:16686
+        url: http://jaeger.${NS_OBS}.svc.cluster.local:16686
         access: proxy
 
 service:

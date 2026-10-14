@@ -185,6 +185,14 @@ func staticMenus() []Menu {
 							Component: "pipeline-template/views/List",
 							Meta:      MenuMeta{Title: "流水线模板", Icon: "Stopwatch", ShowMenu: true},
 						},
+						{
+							// Agent 运行：agentrun 执行域全量 run 总览（委派/agent stage/auto 触发），
+							// 含 token 成本汇总（auto-* webhook 自动 run 是成本大头）；上游无租户维度按来源归类。
+							Path:      "/resources/agent-runs",
+							Name:      "resAgentRuns",
+							Component: "resources/views/AgentRuns",
+							Meta:      MenuMeta{Title: "Agent 运行", Icon: "Cpu", ShowMenu: true},
+						},
 					},
 				},
 			},

@@ -6,7 +6,7 @@ export interface Change {
   id: string; appId: string; repoId: string; title: string; type: 'feat' | 'hotfix'
   branch: string; branchCreated: boolean; baseBranch: string
   status: 'open' | 'integrated' | 'tested' | 'released' | 'reverted' | 'abandoned'
-  batchId: string; conflictWith: string; createdBy?: string; createdAt: string; updatedAt?: string
+  batchId: string; conflictWith: string; agentRunName?: string; createdBy?: string; createdAt: string; updatedAt?: string
 }
 export interface IntegrationBatch {
   id: string; appId: string; repoId: string; title: string; branch: string
@@ -28,6 +28,11 @@ export const createChange = (appId: string, body: ChangeInput) =>
   fetchAuth(`/api/applications/${appId}/changes`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => unwrap<Change>(r))
 export const abandonChange = (appId: string, id: string) =>
   fetchAuth(`/api/applications/${appId}/changes/${id}`, { method: 'DELETE' })
+// 委派智能研发（契约 v2 §3.3）：agent 在变更分支上工作并 push 回；request 缺省用变更 Title。
+export const delegateAgentRun = (appId: string, id: string, request?: string) =>
+  fetchAuth(`/api/applications/${appId}/changes/${id}/agent-run`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request ? { request } : {}),
+  }).then(r => unwrap<{ agentRunName: string }>(r))
 export const listBatches = (appId: string, status = '') =>
   fetchAuth(`/api/applications/${appId}/batches${status ? `?status=${status}` : ''}`).then(r => unwrap<IntegrationBatch[]>(r))
 export const getBatch = (appId: string, id: string) =>

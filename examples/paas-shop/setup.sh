@@ -191,11 +191,18 @@ print(img)" 2>/dev/null || true
 for svc in product recommend order chatbot bff frontend; do
   IMG=$(prod_svc_image "$svc")
   [ -z "$IMG" ] && { echo "  [警告] $svc 无 test 镜像可复用，跳过"; continue; }
+  # metricsPath：5 个 Go 服务在业务端口暴露 /metrics（internal/observ 挂 promhttp）→ 声明后平台给 Pod
+  # 注 prometheus.io/scrape 注解，Prometheus 自动抓取，应用级 RED 面板才有数据。
+  # frontend 是 nginx 静态站，/metrics 返回 HTML → **不声明**（声明即永久 down target，
+  # Prometheus 报 unsupported Content-Type "text/html"）。
+  MP_LINE=""
+  [ "$svc" != "frontend" ] && MP_LINE='"metricsPath": "/metrics",'
   cat > /tmp/wl-prod.json <<EOF
 {
   "appId": "$APP_ID", "envId": "$ENV_PROD", "laneId": "default",
   "service": "$svc", "type": "service", "name": "paas-shop-$svc-prod",
   "image": "$IMG", "replicas": 1,
+  $MP_LINE
   "port": $( [ "$svc" = "bff" ] && echo 8080 || ([ "$svc" = "frontend" ] && echo 80 || ([ "$svc" = "product" ] && echo 8081 || ([ "$svc" = "recommend" ] && echo 8082 || ([ "$svc" = "chatbot" ] && echo 8083 || echo 8084))))),
   "resources": {"cpuRequest": "100m", "cpuLimit": "500m", "memRequest": "128Mi", "memLimit": "256Mi"}
 }

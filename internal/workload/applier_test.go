@@ -59,6 +59,17 @@ func (f *fakeRepo) SetDomain(ctx context.Context, id string, domain string) erro
 	}
 	return nil
 }
+func (f *fakeRepo) SetMetricsPath(ctx context.Context, id string, path string) error {
+	if f.stored != nil {
+		if w, ok := f.stored[id]; ok {
+			w.MetricsPath = path
+			f.stored[id] = w
+			return nil
+		}
+		return fmt.Errorf("工作负载不存在: %s", id)
+	}
+	return nil
+}
 func (f *fakeRepo) Delete(ctx context.Context, id string) error {
 	f.deleted = append(f.deleted, id)
 	return nil

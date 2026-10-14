@@ -7,7 +7,10 @@
 // 全部进程内 mock，接口为未来接入真实采集铺路。
 package observability
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // 指标 target 类型。
 const (
@@ -60,6 +63,21 @@ var validSeverities = map[string]struct{}{
 	SeverityCritical: {}, SeverityWarning: {},
 }
 
+// validTargetTypes 规则目标维度合法集合。env 暂缺指标数据源（real 模式无生产者，
+// 建了规则永不触发=静默失效），fail-fast 拒绝而非入库后沉默。
+var validTargetTypes = map[string]struct{}{
+	TargetApp: {}, TargetWorkload: {}, TargetDataservice: {},
+}
+
+// validMetricNames 规则指标名合法集合（5 基础 + 6 数据服务业务指标）。
+// 不收口则 API 可直配任意值——real 模式查不存在的埋点，规则永不触发且无任何报错。
+var validMetricNames = map[string]struct{}{
+	MetricCPU: {}, MetricMem: {}, MetricRPS: {}, MetricLatency: {}, MetricErrorRate: {},
+	MetricDiskIO: {}, MetricNetIO: {},
+	MetricConnections: {}, MetricQPS: {}, MetricHitRate: {}, MetricLag: {}, MetricVectors: {},
+	MetricDiskUsage: {},
+}
+
 // MaxPoints 是单条 series 保留的最近点数（环形截断）。
 const MaxPoints = 60
 
@@ -105,15 +123,17 @@ const (
 )
 
 // Validate 校验规则字段。
+// targetType/metricName 收口到合法集合（2026-09-25 告警审计：PG 路径曾整段缺失 Validate，
+// 线上实证 2 条全空字段脏规则；且任意值静默失效是最差失败形态）。
 func (r AlertRule) Validate() error {
 	if r.Name == "" {
 		return errInvalid("name")
 	}
-	if r.MetricName == "" {
+	if _, ok := validMetricNames[r.MetricName]; !ok {
 		return errInvalid("metricName")
 	}
-	if r.TargetType == "" {
-		return errInvalid("targetType")
+	if _, ok := validTargetTypes[r.TargetType]; !ok {
+		return fmt.Errorf("无效的告警规则字段 targetType: %s（支持 app/workload/dataservice；env 暂无指标数据源）", r.TargetType)
 	}
 	if _, ok := validOps[r.Operator]; !ok {
 		return errInvalid("operator")
@@ -128,6 +148,24 @@ func (r AlertRule) Validate() error {
 func (r AlertRule) Matches(s MetricSeries) bool {
 	return s.TargetType == r.TargetType && r.MetricName == s.Name &&
 		(r.TargetID == "" || r.TargetID == s.TargetID)
+}
+
+// DefaultAlertRules 开箱默认告警规则（2026-09-25：此前全新部署零规则，告警模块形同虚设）。
+// TargetID 空 = 该维度全部 target（租户级默认基线）；阈值保守（明显异常才响，防开机即告警）。
+// 注意单位：cpu=cores、mem=MiB（cAdvisor 真实单位，非百分比）。
+// 由 cmd/core 启动时对「无任何规则」的租户灌入（demo seed 门控：生产 PAAS_DISABLE_DEMO_SEED=true 跳过，
+// 由用户自配）；租户已有自配规则则不覆盖。
+func DefaultAlertRules() []AlertRule {
+	return []AlertRule{
+		{Name: "应用 CPU 偏高", MetricName: MetricCPU, TargetType: TargetApp,
+			Operator: OpGT, Threshold: 2, Severity: SeverityWarning, Enabled: true},
+		{Name: "应用错误率高", MetricName: MetricErrorRate, TargetType: TargetApp,
+			Operator: OpGT, Threshold: 20, Severity: SeverityCritical, Enabled: true},
+		{Name: "应用 P95 延迟高", MetricName: MetricLatency, TargetType: TargetApp,
+			Operator: OpGT, Threshold: 3000, Severity: SeverityWarning, Enabled: true},
+		{Name: "数据服务 CPU 偏高", MetricName: MetricCPU, TargetType: TargetDataservice,
+			Operator: OpGT, Threshold: 1.5, Severity: SeverityWarning, Enabled: true},
+	}
 }
 
 // Breached 判断值是否超过阈值（命中规则条件）。

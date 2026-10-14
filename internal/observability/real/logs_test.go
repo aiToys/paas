@@ -88,3 +88,22 @@ func TestLogsStoreNoListerReturnsEmpty(t *testing.T) {
 		t.Fatalf("无 lister 应降级返空: %v len=%d", err, len(out))
 	}
 }
+
+// TestUnwrapDockerJSON 锁 docker json-file 包装行剥离（2026-10-13 走查实测：docker shim
+// 集群 promtail 只配 cri stage，包装 JSON 原样入 Loki，前端消息列显示原始 JSON）。
+func TestUnwrapDockerJSON(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		{"docker 包装行", `{"log":"2026/10/13 INFO 关单完成 closed=0\n","stream":"stderr","time":"2026-10-13T15:04:01.6Z"}`, "2026/10/13 INFO 关单完成 closed=0"},
+		{"无尾换行原样剥", `{"log":"plain","stream":"stdout"}`, "plain"},
+		{"普通行透传", `2026/10/13 INFO plain text`, "2026/10/13 INFO plain text"},
+		{"非日志 JSON 透传", `{"level":"info","msg":"x"}`, `{"level":"info","msg":"x"}`},
+		{"坏 JSON 透传", `{"log": broken`, `{"log": broken`},
+	}
+	for _, c := range cases {
+		if got := unwrapDockerJSON(c.in); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}

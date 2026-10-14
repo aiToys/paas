@@ -2,6 +2,7 @@ package real
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -153,7 +154,7 @@ func (s *LogsStore) listLogs(ctx context.Context, appID, targetType, targetID, l
 				continue
 			}
 			tsNs, _ := strconv.ParseInt(val[0], 10, 64)
-			msg := val[1]
+			msg := unwrapDockerJSON(val[1])
 			le := observability.LogEntry{
 				ID:        fmt.Sprintf("%s/%s", pod, val[0]),
 				Level:     inferLevel(msg),
@@ -176,6 +177,24 @@ func (s *LogsStore) listLogs(ctx context.Context, appID, targetType, targetID, l
 		out = out[:limit]
 	}
 	return out, nil
+}
+
+// unwrapDockerJSON 剥离 docker json-file 日志驱动的包装行（{"log":...,"stream":...,"time":...}）。
+// docker shim 集群 /var/log/pods 软链到 /data/docker/containers/<id>/<id>-json.log，promtail
+// pipeline 未配 docker stage 时包装 JSON 原样入 Loki（paas/Grafana 日志查询全显示原始 JSON）。
+// 这里兜底存量行（promtail pipelineStages 修复只管新行）：能解析出 log 字段则剥出并 trim
+// 尾部换行；非 JSON / 无 log 字段原样返回。
+func unwrapDockerJSON(line string) string {
+	if !strings.HasPrefix(line, "{") || !strings.Contains(line, `"log"`) {
+		return line
+	}
+	var wrap struct {
+		Log string `json:"log"`
+	}
+	if err := json.Unmarshal([]byte(line), &wrap); err != nil || wrap.Log == "" {
+		return line
+	}
+	return strings.TrimRight(wrap.Log, "\n")
 }
 
 // inferLevel 从日志内容 best-effort 推断级别（Pod stdout 无结构化 level label）。

@@ -307,3 +307,45 @@ func TestListLogsTraceIDFilter(t *testing.T) {
 		t.Fatalf("traceId 过滤期望只命中 l1，实际 %+v", got)
 	}
 }
+
+// TestUpdateAlertRule：更新保留 ID/TenantID、校验非法值、跨租户统一不存在。
+func TestUpdateAlertRule(t *testing.T) {
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	s := NewStore()
+	created, err := s.CreateAlertRule(ctx, observability.AlertRule{
+		Name: "CPU 高", MetricName: observability.MetricCPU, TargetType: observability.TargetApp,
+		Operator: observability.OpGT, Threshold: 80, Severity: observability.SeverityWarning, Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("创建失败: %v", err)
+	}
+	updated, err := s.UpdateAlertRule(ctx, created.ID, observability.AlertRule{
+		Name: "CPU 更高", MetricName: observability.MetricCPU, TargetType: observability.TargetApp,
+		Operator: observability.OpGTE, Threshold: 90, Severity: observability.SeverityCritical, Enabled: false,
+		TenantID: "t-evil", // 请求体租户应被忽略（以库内为准）
+	})
+	if err != nil {
+		t.Fatalf("更新失败: %v", err)
+	}
+	if updated.ID != created.ID || updated.TenantID != "t-acme" {
+		t.Fatalf("更新应保留 ID/TenantID, got id=%s tenant=%s", updated.ID, updated.TenantID)
+	}
+	if updated.Name != "CPU 更高" || updated.Threshold != 90 || updated.Enabled {
+		t.Fatalf("更新字段未生效: %+v", updated)
+	}
+	// 非法值被拒。
+	if _, err := s.UpdateAlertRule(ctx, created.ID, observability.AlertRule{
+		Name: "x", MetricName: "bogus", TargetType: observability.TargetApp,
+		Operator: observability.OpGT, Severity: observability.SeverityWarning,
+	}); err == nil {
+		t.Fatal("非法 metricName 应被拒")
+	}
+	// 跨租户统一不存在。
+	globex := tenant.WithTenant(context.Background(), "t-globex")
+	if _, err := s.UpdateAlertRule(globex, created.ID, observability.AlertRule{
+		Name: "x", MetricName: observability.MetricCPU, TargetType: observability.TargetApp,
+		Operator: observability.OpGT, Severity: observability.SeverityWarning,
+	}); err == nil {
+		t.Fatal("跨租户更新应报不存在")
+	}
+}

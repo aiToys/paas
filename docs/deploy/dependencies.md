@@ -38,9 +38,19 @@ PaaS 在 K8s 集群内**自建 Docker Registry**（`deploy/karts/registry.yaml`�
 | `minio:latest` | 数据服务引擎（storage=minio） | `docker.m.daocloud.io/minio/minio:latest` | `<nodeIP>:30050/library/minio:latest` |
 | `local-path-provisioner:v0.0.24` | StorageClass（local-path PVC） | `hub.wang.dd:5000/rancher/local-path-provisioner:v0.0.24` | （local-path.yaml 直接引用） |
 | `busybox:latest` | local-path helper（PV mount/umount） | `docker.m.daocloud.io/library/busybox:latest` | `<nodeIP>:30050/library/busybox:latest` |
-| observability 全套 | Prom/Loki/Jaeger/Grafana/Promtail/node-exporter | 见 `deploy/observability/` | `<nodeIP>:30050/observability/*` |
+| observability 全套 | Prom/Loki/Jaeger/Grafana/Promtail/node-exporter | 见 `deploy/observability/`（**唯一部署入口 `scripts/deploy-observability.sh`**） | `<nodeIP>:30050/observability/*` |
 
 > **data-service 引擎镜像**：reconciler 按 `PAAS_IMAGE_REGISTRY` env 拼 `<registry>/library/<name>`，引擎镜像需推到 `<nodeIP>:30050/library/`。占位引擎（kafka/rabbitmq/rocketmq/vector/search）不拉起，无需预推。
+
+> **观测栈离线交付（airsync `--with-observability`）**：包内只含**三个上游 chart + `deploy/observability/*` 清单 +
+> 部署脚本**（不含镜像）。离线目标机须满足两条前提，否则 install 会在 `--wait` 阶段报 ImagePullBackOff：
+> 1. **脚本随包分发** —— 离线机没有仓库，只有 tarball；包内 `scripts/deploy-observability.sh` 是这套栈的唯一部署入口。
+> 2. **目标机具备 `helm` / `kubectl` / `envsubst`(gettext) / `jq`** —— `airsync doctor` 已逐个前置检查（含补装提示）。
+>
+> 镜像仍需按上表方式预推到目标集群可拉的 registry（`prometheus` / `config-reloader` / `grafana` / `loki` / `promtail` /
+> `jaeger` / `node-exporter` / `kube-state-metrics` / `pushgateway` 等），并把脚本的
+> `GRAFANA_IMAGE_REGISTRY` / `LOKI_IMAGE_REPO` / `PROMTAIL_IMAGE_*` 指过去；离线环境另需 `MIRROR=none`
+> （install 未显式导出 MIRROR 时自动置 none，因国内中转站离线不可达）。
 
 ## 首次部署步骤
 
@@ -125,6 +135,9 @@ core Pod registry client 访问 `<nodeIP>:30050` 失败。查：① registry Pod
 - `deploy/devops/gitea.yaml`（gitea 镜像）—— 迁移：apply 前 `sed s|hub.wang.dd:5000|<nodeIP>:30050|` 或改 yaml 占位。
 - `deploy/k8s/local-path.yaml`（local-path-provisioner + busybox）—— 基础设施，先于 registry 存在，保留。
 - `deploy/observability/*`（observability 全套）—— 独立 helm chart，迁移改 values repository 前缀。
+  **部署入口是 `scripts/deploy-observability.sh`（勿手工 helm upgrade）**：它 envsubst 注入集群相关值
+  （`NS_OBS`/`STORAGE_CLASS`/`DOMAIN_SUFFIX`/镜像 registry）→ 渲染 → 与线上 diff → 应用（`--wait`）→ 抓取目标断言。
+  换集群只改环境变量，values 文件不动；`--check` 只预检不写集群。详见脚本头注释。
 
 ## registry 管理
 

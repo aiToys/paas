@@ -64,6 +64,30 @@ type Handler struct {
 	buildLister BuildLister
 	// appGuard 应用级权限 enforcement（受限应用 integrate/approve/release 需成员角色）；nil 跳过。
 	appGuard *application.AppGuard
+	// agentDelegator 委派智能研发（契约 v2 §3.3/§5.1）：变更页「智能研发」按钮的执行器；
+	// nil=未接入（503）。实现透传用户 JWT 调 agentrun POST /api/runs（归因用户 sub）。
+	agentDelegator AgentRunDelegator
+	// tokenFrom 从请求提取用户 access JWT（cookie 值或 Bearer；cmd/core 装配注入）。
+	tokenFrom func(r *http.Request) string
+}
+
+// AgentDelegateSpec 委派语义（契约 v2 §3.3）：change 域自持，不依赖 agentrun/pipeline 包
+// （依赖倒置——cmd/core 装配桥接到 agentrun client）。
+type AgentDelegateSpec struct {
+	AppID      string
+	WorkBranch string // 变更分支（agent 在其上工作并 push 回）
+	BaseBranch string // 基线（验收对照）
+	Request    string // 需求文本（缺省变更 Title）
+}
+
+// AgentRunDelegator 委派执行器：返回 agentrun run 名（回写 Change.AgentRunName）。
+type AgentRunDelegator interface {
+	Delegate(ctx context.Context, userJWT string, spec AgentDelegateSpec) (runName string, err error)
+}
+
+// WithAgentDelegator 注入委派执行器（未注入=功能未接入，端点 503）。
+func WithAgentDelegator(d AgentRunDelegator, tokenFrom func(r *http.Request) string) HandlerOpt {
+	return func(h *Handler) { h.agentDelegator, h.tokenFrom = d, tokenFrom }
 }
 
 // HandlerOpt 配置 Handler。
@@ -279,6 +303,11 @@ func (h *Handler) serveChanges(w http.ResponseWriter, r *http.Request, appID str
 		default:
 			httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		}
+		return
+	}
+	// /changes/{cid}/agent-run（委派智能研发，契约 v2 §3.3/§5.1：变更页「智能研发」按钮）
+	if len(parts) == 4 && parts[3] == "agent-run" && r.Method == http.MethodPost {
+		h.serveAgentRun(w, r, appID, parts[2])
 		return
 	}
 	// /changes/{cid}（详情 / 放弃）
@@ -589,4 +618,60 @@ func (h *Handler) recordAudit(r *http.Request, action, resourceType, resourceID,
 	}
 	tid, _ := tenant.TenantFrom(r.Context())
 	_ = h.audit.Record(r.Context(), tid, actor, action, resourceType, resourceID, detail)
+}
+
+// serveAgentRun 委派智能研发（契约 v2 §3.3/§5.1）：变更页「智能研发」按钮。
+// spec 从变更上下文组装（workBranch=变更分支/base=基线/request 缺省 Title），
+// 透传用户 JWT（归因 claims.sub，区别于编排通道静态 token）；成功回写 AgentRunName。
+func (h *Handler) serveAgentRun(w http.ResponseWriter, r *http.Request, appID, cid string) {
+	if !h.allow(w, r, PermPipelineWrite) {
+		return
+	}
+	// agentrun 域写权限（双域写：change 上下文 + agentrun 执行）
+	if !h.allow(w, r, "agentrun:write") {
+		return
+	}
+	if !h.allowApp(w, r, appID, application.AppActionWrite) {
+		return
+	}
+	if h.agentDelegator == nil || h.tokenFrom == nil {
+		httputil.WriteError(w, http.StatusServiceUnavailable, "Agent 编排未接入（PAAS_AGENTRUN_URL 未配置）")
+		return
+	}
+	c, ok := h.ownChange(w, r, appID, cid)
+	if !ok {
+		return
+	}
+	if c.Status != "open" {
+		httputil.WriteError(w, http.StatusConflict, "仅 open 状态的变更可委派智能研发（当前 "+c.Status+"）")
+		return
+	}
+	var body struct {
+		Request string `json:"request"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&body) // 空 body 合法（request 缺省变更 Title）
+	}
+	request := body.Request
+	if request == "" {
+		request = c.Title
+	}
+	ctx := r.Context()
+	runName, err := h.agentDelegator.Delegate(ctx, h.tokenFrom(r), AgentDelegateSpec{
+		AppID: appID, WorkBranch: c.Branch, BaseBranch: c.BaseBranch, Request: request,
+	})
+	if err != nil {
+		httputil.WriteServiceError(w, http.StatusBadGateway, err)
+		return
+	}
+	// 回写变更记录（v2 §5.3：状态块经 run 名精确查询的锚点）
+	c.AgentRunName = runName
+	if _, uerr := h.repo.UpdateChange(ctx, c); uerr != nil {
+		httputil.WriteServiceError(w, http.StatusInternalServerError, uerr)
+		return
+	}
+	if h.audit != nil {
+		h.recordAudit(r, "agent_run_delegate", "change", c.ID, "branch="+c.Branch+" run="+runName)
+	}
+	httputil.WriteData(w, map[string]string{"agentRunName": runName})
 }

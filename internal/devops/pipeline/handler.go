@@ -199,6 +199,15 @@ func (h *Handler) serveWebhook(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) serveAppPipelines(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/applications/")
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	// /api/applications/{id}/agent-ship/run —— 智能研发一条龙触发（2026-10-13）。
+	if len(parts) == 3 && parts[1] == "agent-ship" && parts[2] == "run" {
+		if r.Method != http.MethodPost {
+			httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		h.triggerAgentShipRun(w, r, parts[0])
+		return
+	}
 	// /api/applications/{id}/pipelines[/{pid}]
 	if len(parts) < 2 || parts[1] != "pipelines" {
 		httputil.WriteError(w, http.StatusNotFound, "not found")
@@ -783,6 +792,9 @@ func (h *Handler) triggerRun(w http.ResponseWriter, r *http.Request, appID, pid 
 		Branch  string `json:"branch"`
 		Commit  string `json:"commit"`
 		Version string `json:"version"`
+		// StageParams run 级一次性 stage 参数（需求文本载体）：key 格式同 ParamOverrides（"<stageIdx>.<paramKey>"），
+		// 后于 ParamOverrides 应用（run 级优先）。webhook 路径不接（机器触发无动态需求）。
+		StageParams map[string]any `json:"stageParams"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httputil.WriteError(w, http.StatusBadRequest, "invalid body")
@@ -814,23 +826,20 @@ func (h *Handler) triggerRun(w http.ResponseWriter, r *http.Request, appID, pid 
 		httputil.WriteServiceError(w, http.StatusBadRequest, rerr)
 		return
 	}
+	// run 级 stageParams 应用：必须在 validateDeployEnvs/appGuard/allowProdFlow 预演**之前**——
+	// 防经 stageParams 把 deploy envId 改指 prod 绕过 prod:write 静态预演（越权防线，review focus ②）。
+	for i := range resolved {
+		applyOverrides(resolved[i].Params, body.StageParams, i)
+	}
 	// deploy stage envId 必填校验（fail-fast，避免注定失败的 run 占住单实例串行槽位）。
 	// 占位符解析后 envId 仍空（app 无对应环境）则拒。
 	if msg := validateDeployEnvs(resolved); msg != "" {
 		httputil.WriteError(w, http.StatusBadRequest, msg)
 		return
 	}
-	// 应用级权限：受限应用触发需成员角色——含 deploy/release/promote/approve stage 的 CD 流水线
-	// 需 release 权限（app-maintainer+，测试人员被拦），纯 CI（build/test）需 write（app-developer+）。
+	// 应用级权限：受限应用触发需成员角色——按 stage 组合判定动作（见 pipelineGuardAction）。
 	if h.appGuard != nil {
-		action := application.AppActionWrite
-		for _, st := range resolved {
-			if st.Type == StageDeploy || st.Type == StageRelease || st.Type == StagePromote || st.Type == StageApprove || st.Type == StageCanary {
-				action = application.AppActionRelease
-				break
-			}
-		}
-		if !h.allowApp(w, r, appID, action) {
+		if !h.allowApp(w, r, appID, pipelineGuardAction(resolved)) {
 			return
 		}
 	}
@@ -845,6 +854,131 @@ func (h *Handler) triggerRun(w http.ResponseWriter, r *http.Request, appID, pid 
 		return
 	}
 	h.recordAudit(r, "run", "pipeline_run", created.ID, fmt.Sprintf("pipeline=%s branch=%s", pid, body.Branch))
+	httputil.WriteDataCreated(w, created)
+}
+
+// pipelineGuardAction 按含有的 stage 类型判定应用级权限动作（值=application.AppAction*）：
+// 含 deploy/release/promote/approve/canary 的 CD 流水线需 release（app-maintainer+，
+// 测试人员被拦），纯 CI（build/test）需 write（app-developer+）。
+func pipelineGuardAction(stages []StageDef) string {
+	for _, st := range stages {
+		if st.Type == StageDeploy || st.Type == StageRelease || st.Type == StagePromote || st.Type == StageApprove || st.Type == StageCanary {
+			return application.AppActionRelease
+		}
+	}
+	return application.AppActionWrite
+}
+
+// agentShipSegments tpl-agent-ship 可选段（stage Name → 段标识；不在表中的 stage
+// （AI 开发）恒留）。stage 改名需同步此表——TestBuiltinAgentShipSegments 锁一致性。
+var agentShipSegments = map[string]string{
+	"AI 代码审查": "review",
+	"构建":      "ship",
+	"部署到测试泳道": "ship",
+	"冒烟联调":    "ship",
+	"上线审批":    "release",
+	"金丝雀验证":   "release",
+	"发布版本":    "release",
+	"合并主干":    "release",
+}
+
+// trimAgentShipStages 按勾选段裁剪模板 stages（段外 stage 如 AI 开发恒留）。
+func trimAgentShipStages(stages []StageDef, review, ship, release bool) []StageDef {
+	on := map[string]bool{"review": review, "ship": ship, "release": release}
+	out := make([]StageDef, 0, len(stages))
+	for _, st := range stages {
+		if seg, ok := agentShipSegments[st.Name]; !ok || on[seg] {
+			out = append(out, st)
+		}
+	}
+	return out
+}
+
+// ensureAgentShipPipeline 幂等确保 app 绑定 tpl-agent-ship（已绑定复用；同 (app,name)
+// 唯一约束兜底并发建）。返回绑定实体（ParamOverrides 供解析）。
+func (h *Handler) ensureAgentShipPipeline(ctx context.Context, appID string) (Pipeline, error) {
+	list, err := h.pipes.ListPipelines(ctx, appID)
+	if err != nil {
+		return Pipeline{}, err
+	}
+	for _, p := range list {
+		if p.TemplateID == "tpl-agent-ship" {
+			return p, nil
+		}
+	}
+	return h.pipes.CreatePipeline(ctx, Pipeline{
+		AppID: appID, Name: "AI 研发交付", Kind: KindAgent, TemplateID: "tpl-agent-ship",
+		Trigger: PipelineTrigger{Type: TriggerManual},
+	})
+}
+
+// triggerAgentShipRun POST /api/applications/{id}/agent-ship/run —— 智能研发一条龙（2026-10-13）：
+// 需求文本 + 勾选段（review/ship/release）直触 tpl-agent-ship，免预建绑定（内部 Ensure 幂等）。
+// 门禁不降级：release 段自带上线审批；deploy/canary 走 triggerRun 同款 prod 预演与 appGuard。
+func (h *Handler) triggerAgentShipRun(w http.ResponseWriter, r *http.Request, appID string) {
+	if !h.allow(w, r, PermPipelineWrite) {
+		return
+	}
+	var body struct {
+		Request string `json:"request"`
+		Review  bool   `json:"review"`
+		Ship    bool   `json:"ship"`
+		Release bool   `json:"release"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if strings.TrimSpace(body.Request) == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "request required")
+		return
+	}
+	// 段依赖：canary/release 消费 ship 段产物（镜像），无 ship 必断链。
+	if body.Release && !body.Ship {
+		httputil.WriteError(w, http.StatusBadRequest, "发布上线依赖构建部署（ship），请同时勾选")
+		return
+	}
+	p, err := h.ensureAgentShipPipeline(r.Context(), appID)
+	if err != nil {
+		writePipeErr(w, err)
+		return
+	}
+	tpl, terr := h.templates.GetTemplate(r.Context(), p.TemplateID)
+	if terr != nil {
+		httputil.WriteError(w, http.StatusNotFound, "pipeline template not found")
+		return
+	}
+	stages := trimAgentShipStages(tpl.Stages, body.Review, body.Ship, body.Release)
+	// AI 基于 main 开发（registerChange 产出分支自动注册 Change，变更 tab 可见）。
+	resolved, rerr := ResolveStages(r.Context(), stages, p.ParamOverrides, h.paramResolver, appID, "main")
+	if rerr != nil {
+		httputil.WriteServiceError(w, http.StatusBadRequest, rerr)
+		return
+	}
+	// 需求文本注入首 stage（run 级 stageParams 语义，先于权限预演——防经 request 之外
+	// 的参数通道改 deploy 指向；此处只注入 request 单键，校验顺序与 triggerRun 一致）。
+	for i := range resolved {
+		applyOverrides(resolved[i].Params, map[string]any{"0.request": body.Request}, i)
+	}
+	if msg := validateDeployEnvs(resolved); msg != "" {
+		httputil.WriteError(w, http.StatusBadRequest, msg)
+		return
+	}
+	if h.appGuard != nil {
+		if !h.allowApp(w, r, appID, pipelineGuardAction(resolved)) {
+			return
+		}
+	}
+	if !h.allowProdFlow(w, r, resolved) {
+		return
+	}
+	created, err := h.triggerRunInternal(r.Context(), appID, p.ID, resolved, "main", "", "", TriggerManual)
+	if err != nil {
+		writePipeErr(w, err)
+		return
+	}
+	h.recordAudit(r, "run", "agent_ship_run", created.ID,
+		fmt.Sprintf("pipeline=%s request=%.60s review=%v ship=%v release=%v", p.ID, body.Request, body.Review, body.Ship, body.Release))
 	httputil.WriteDataCreated(w, created)
 }
 

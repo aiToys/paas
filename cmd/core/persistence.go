@@ -185,13 +185,17 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto
 		}
 		svcRepo := svcpg.NewStore(db)
 		billingRepo := billingpg.NewStore(db)
+		govRepo := govpg.NewStore(db)
+		// 部署即注册：service 型 workload 创建后自动注册治理服务（幂等；失败仅日志）。
+		// 装饰在 ApplyRepo 外层、devopsRepo 捕获前——handler 与 Release 内建基线两条创建
+		// 路径全覆盖；注册用裸 govRepo（治理 Service 纯 DB 元数据，不经 Route 投影）。
+		wlRepo = &workload.OnCreateRepo{Repository: wlRepo, OnCreate: govAutoRegister(govRepo)}
 		// WithQuotaInc：CreateRelease 新建基线 Workload 时经 billing 递增工作负载数配额
 		// （超限拒发）——堵 Release 内建基线绕过 handler QuotaCheck 的路径（对账审计 C1）。
 		devopsRepo := devopspg.NewStore(db, wlRepo,
 			devopspg.WithServiceLookup(serviceLookupBridge{repos: svcRepo}),
 			devopspg.WithQuotaInc(quotaIncBridge(billingRepo))) // Release 编排经 workload.Repository 接口透明
 		devopsRepo.SetPipeline(devopsPipeline) // PAAS_DEVOPS_REAL=true 接真实 git/docker
-		govRepo := govpg.NewStore(db)
 		// K8s 启用：governance Route 写投影聚合 Ingress（按 host 多 path，hermes/nginx 标准）。
 		// applier 持裸 govRepo（RouteStore+ServiceStore），ApplyRepo 包装后给 handler（无循环引用）。
 		var govRepoWithApply governance.Repository = govRepo
@@ -308,12 +312,14 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto
 	}
 	svcRepo0 := svcmemory.NewStore()
 	billingRepo := billingmemory.NewStore()
+	govRepo := govmemory.NewStore()
+	// 部署即注册（PG 路径同款注释）：装饰在 devopsRepo 捕获前，两条创建路径全覆盖。
+	wlRepo = &workload.OnCreateRepo{Repository: wlRepo, OnCreate: govAutoRegister(govRepo)}
 	// WithQuotaInc：CreateRelease 新建基线 Workload 时经 billing 递增工作负载数配额（PG 路径同款）。
 	devopsRepo := devopsmemory.NewStore(wlRepo,
 		devopsmemory.WithServiceLookup(serviceLookupBridge{repos: svcRepo0}),
 		devopsmemory.WithQuotaInc(quotaIncBridge(billingRepo)))
 	devopsRepo.SetPipeline(devopsPipeline) // PAAS_DEVOPS_REAL=true 接真实 git/docker
-	govRepo := govmemory.NewStore()
 	// K8s 启用：governance Route 写投影聚合 Ingress（内存路径同款，applier 持裸 govRepo）。
 	var govRepoWithApply governance.Repository = govRepo
 	if appliers.client != nil {

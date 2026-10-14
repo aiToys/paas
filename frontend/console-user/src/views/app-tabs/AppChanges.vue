@@ -11,6 +11,7 @@ import {
   listBatches, createBatch, getBatch, abandonBatch,
   addChangeToBatch, removeChangeFromBatch, integrateBatch, approveBatch, releaseBatch,
 } from '@/api/change'
+import { triggerAgentShipRun, listPipelines, listRuns, type PipelineRun } from '@/api/pipeline'
 import { apiError } from '@/api'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import { usePolling } from '@/composables/usePolling'
@@ -35,6 +36,7 @@ async function load() {
   } finally {
     loading.value = false
   }
+  loadShipRun() // 状态卡 best-effort（失败隐藏，不阻塞列表）
 }
 onMounted(load)
 
@@ -48,6 +50,40 @@ const createForm = ref<{ title: string; type: 'feat' | 'hotfix'; branchMode: 'cr
 function openCreate() {
   createForm.value = { title: '', type: 'feat', branchMode: 'create', branch: '', baseBranch: 'main' }
   createDlg.value = true
+}
+
+// ---- 智能研发一条龙（2026-10-13）：需求 + 勾选段直触 tpl-agent-ship → 跳 run 详情看时间线。
+// 变更由 agent stage registerChange 自动注册（产出分支 open 态入本 tab），无需手动预建；
+// 变更详情页「智能研发」按钮保留作单变更二次委派（delegateAgentRun 通道）。
+const agentDlg = ref(false)
+const agentSubmitting = ref(false)
+const agentForm = ref<{ request: string; review: boolean; ship: boolean; release: boolean }>({
+  request: '', review: true, ship: true, release: false,
+})
+
+function openAgentCreate() {
+  agentForm.value = { request: '', review: true, ship: true, release: false }
+  agentDlg.value = true
+}
+
+async function doAgentCreate() {
+  const f = agentForm.value
+  const req = f.request.trim()
+  if (!req) { ElMessage.warning('请描述需求'); return }
+  if (f.release && !f.ship) { ElMessage.warning('发布上线依赖构建部署（ship），请同时勾选'); return }
+  agentSubmitting.value = true
+  try {
+    const run = await triggerAgentShipRun(props.appId, {
+      request: req, review: f.review, ship: f.ship, release: f.release,
+    })
+    agentDlg.value = false
+    ElMessage.success('智能研发一条龙已启动，进度见流水线运行页')
+    router.push(`/devops/runs/${run.id}`)
+  } catch (e) {
+    ElMessage.error(apiError(e, '启动一条龙失败'))
+  } finally {
+    agentSubmitting.value = false
+  }
 }
 
 async function doCreate() {
@@ -108,9 +144,39 @@ watch(drawerBid, async (bid) => {
   } catch { /* 列表数据兜底 */ }
 })
 
-// testing/releasing 轮询（10s，silent；不可见自动暂停）
+// ---- 一条龙运行状态卡（2026-10-13）：run 详情页无固定菜单入口（独立页），触发后想回访
+// 难找——回访地放触发地：本 tab 顶部展示最近一条一条龙 run 的状态与当前 stage，点击深链。
+const shipRun = ref<PipelineRun | null>(null)
+const shipRunActive = computed(() => shipRun.value?.status === 'running' || shipRun.value?.status === 'paused')
+async function loadShipRun() {
+  try {
+    const pipes = await listPipelines(props.appId)
+    const p = pipes.find((x) => x.templateId === 'tpl-agent-ship')
+    if (!p) { shipRun.value = null; return }
+    const runs = await listRuns({ appId: props.appId, pipelineId: p.id })
+    shipRun.value = runs[0] ?? null
+  } catch { /* 状态卡降级隐藏 */ }
+}
+const SHIP_RUN_LABEL: Record<string, string> = {
+  running: '运行中', paused: '等待人工确认', succeeded: '已成功', failed: '失败', aborted: '已中止',
+}
+const shipRunLabel = computed(() => SHIP_RUN_LABEL[shipRun.value?.status || ''] ?? shipRun.value?.status ?? '')
+const shipRunTag = computed(() => {
+  const s = shipRun.value?.status
+  if (s === 'running') return 'primary'
+  if (s === 'paused') return 'warning'
+  if (s === 'succeeded') return 'success'
+  return 'danger'
+})
+const shipCurrentStage = computed(() => {
+  const cur = shipRun.value?.stageRuns[shipRun.value.currentStage]
+  return cur?.name ?? ''
+})
+
+// testing/releasing 轮询（10s，silent；不可见自动暂停）。一条龙 running 时同频刷状态卡。
 async function pollActive() {
   await load()
+  if (shipRunActive.value) loadShipRun()
   if (drawerBid.value) {
     try {
       const b = await getBatch(props.appId, drawerBid.value)
@@ -120,7 +186,8 @@ async function pollActive() {
   }
 }
 usePolling(pollActive, 10_000, {
-  active: () => batches.value.some((b) => b.status === 'testing' || b.status === 'releasing'),
+  active: () =>
+    batches.value.some((b) => b.status === 'testing' || b.status === 'releasing') || shipRunActive.value,
 })
 
 // 步骤条：collecting→testing→tested→released；conflict/failed 显异常态
@@ -240,8 +307,20 @@ const fmtTime = (t?: string) => (t ? formatDateTime(t) : '-')
   <div class="app-changes" v-loading="loading">
     <div class="actions">
       <el-button type="primary" @click="openCreate">＋ 新建变更</el-button>
+      <!-- 智能研发主入口（能力曝光对账：委派端点此前藏在变更详情两层下）：填需求一键三连
+           （建变更 → 委派 agentrun → 跳详情看进度），把四步旅程压成一步。 -->
+      <el-button type="primary" plain @click="openAgentCreate">✨ 智能研发</el-button>
       <el-button @click="openBatchCreate">创建集成批次</el-button>
       <el-button text @click="load">刷新</el-button>
+    </div>
+
+    <!-- 一条龙运行状态卡：触发地在变更 tab，回访地也在变更 tab（run 详情页无菜单入口） -->
+    <div v-if="shipRun" class="ship-run-card" @click="router.push(`/devops/runs/${shipRun.id}`)">
+      <span class="ship-run-icon">✨</span>
+      <span class="ship-run-title">智能研发一条龙</span>
+      <el-tag :type="shipRunTag" size="small">{{ shipRunLabel }}</el-tag>
+      <span v-if="shipRunActive && shipCurrentStage" class="ship-run-stage">当前：{{ shipCurrentStage }}</span>
+      <span class="ship-run-link">查看详情 →</span>
     </div>
 
     <!-- 变更列表：标题可点进收件箱详情页（全生命周期一站式视图） -->
@@ -330,6 +409,33 @@ const fmtTime = (t?: string) => (t ? formatDateTime(t) : '-')
     </el-table>
 
     <!-- 创建变更弹窗 -->
+    <!-- 智能研发一条龙：需求文本 + 勾选段 → tpl-agent-ship run → run 详情页看时间线 -->
+    <el-dialog v-model="agentDlg" title="智能研发一条龙" width="560px">
+      <el-form label-width="72px">
+        <el-form-item label="需求描述">
+          <el-input
+            v-model="agentForm.request"
+            type="textarea" :rows="5" maxlength="2000" show-word-limit
+            placeholder="描述要实现的需求，AI 从 main 拉出变更分支完成编码（如：给订单列表加一个按状态筛选的下拉框）。完成后自动注册变更。"
+          />
+        </el-form-item>
+        <el-form-item label="执行段">
+          <div class="ship-segments">
+            <el-checkbox v-model="agentForm.review">AI 代码审查</el-checkbox>
+            <el-checkbox v-model="agentForm.ship">构建 + 部署测试泳道 + 冒烟验证</el-checkbox>
+            <el-checkbox v-model="agentForm.release">发布上线（金丝雀 + 审批 + 版本 + 合主干）</el-checkbox>
+            <div class="ship-hint">
+              发布上线前固定有「上线审批」人工卡点；勾选发布需先勾选构建部署。
+            </div>
+          </div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="agentDlg = false">取消</el-button>
+        <el-button type="primary" :loading="agentSubmitting" @click="doAgentCreate">开始执行</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="createDlg" title="新建变更" width="480px">
       <el-form label-width="90px">
         <el-form-item label="标题">
@@ -468,4 +574,16 @@ v-if="!['released', 'abandoned'].includes(batch.status)"
 .chip { background: var(--el-fill-color-light); border-radius: 12px; padding: 3px 10px; font-size: 12px; display: inline-flex; align-items: center; gap: 4px; }
 .chip-x { cursor: pointer; color: var(--el-color-danger); font-weight: 700; }
 .detail-actions { margin-top: 12px; display: flex; gap: 8px; }
+.ship-segments { display: flex; flex-direction: column; gap: 8px; width: 100%; }
+.ship-hint { font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.5; }
+.ship-run-card {
+  display: flex; align-items: center; gap: 10px; padding: 10px 14px; margin-bottom: 12px;
+  background: var(--el-color-primary-light-9); border: 1px solid var(--el-color-primary-light-7);
+  border-radius: 8px; cursor: pointer;
+}
+.ship-run-card:hover { border-color: var(--el-color-primary-light-5); }
+.ship-run-icon { font-size: 16px; }
+.ship-run-title { font-weight: 600; font-size: 13px; }
+.ship-run-stage { font-size: 12px; color: var(--el-text-color-secondary); }
+.ship-run-link { margin-left: auto; font-size: 12px; color: var(--el-color-primary); }
 </style>

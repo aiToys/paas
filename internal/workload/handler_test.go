@@ -21,6 +21,7 @@ type stubRepo struct {
 	saved     Workload
 	deleted   string
 	updatedID string
+	domainSet string // SetDomain 最后一次入参（一键暴露 PUT 断言用）
 }
 
 func (s *stubRepo) List(context.Context, string, string, string, string, string) ([]Workload, error) {
@@ -59,7 +60,19 @@ func (s *stubRepo) SetServiceID(_ context.Context, id, serviceID string) error {
 }
 
 func (s *stubRepo) SetResources(_ context.Context, id string, res ResourceSpec) error { return nil }
-func (s *stubRepo) SetDomain(_ context.Context, id, domain string) error              { return nil }
+func (s *stubRepo) SetDomain(_ context.Context, id, domain string) error {
+	s.domainSet = domain
+	return nil
+}
+func (s *stubRepo) SetMetricsPath(_ context.Context, id, path string) error {
+	for i, w := range s.list {
+		if w.ID == id {
+			s.list[i].MetricsPath = path
+			return nil
+		}
+	}
+	return nil
+}
 func (s *stubRepo) UpdateImage(_ context.Context, id, image, imageRef string) (Workload, error) {
 	for _, w := range s.list {
 		if w.ID == id {
@@ -207,6 +220,42 @@ func TestUpdateHandler(t *testing.T) {
 	h.ServeHTTP(rec, acmeReq(http.MethodPut, "/api/workloads/wl-1", `{"replicas":5,"status":"running"}`))
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "wl-1", repo.updatedID)
+}
+
+// TestUpdateDomain 一键暴露的 PUT 通道：domain 指针语义（nil=不动、""=撤下）+ 非法 host 拒绝。
+func TestUpdateDomain(t *testing.T) {
+	t.Run("set", func(t *testing.T) {
+		repo := &stubRepo{list: []Workload{{ID: "wl-1", Type: TypeService, Replicas: 1}}}
+		h := newHandler(repo)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, acmeReq(http.MethodPut, "/api/workloads/wl-1", `{"domain":"web-app.k8s.dd"}`))
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "web-app.k8s.dd", repo.domainSet)
+	})
+	t.Run("clear", func(t *testing.T) {
+		repo := &stubRepo{list: []Workload{{ID: "wl-1", Type: TypeService, Replicas: 1}}}
+		h := newHandler(repo)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, acmeReq(http.MethodPut, "/api/workloads/wl-1", `{"domain":""}`))
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "", repo.domainSet)
+	})
+	t.Run("untouched", func(t *testing.T) {
+		repo := &stubRepo{list: []Workload{{ID: "wl-1", Type: TypeService, Replicas: 1}}}
+		repo.domainSet = "sentinel" // 区分「没调」与「调了空串」
+		h := newHandler(repo)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, acmeReq(http.MethodPut, "/api/workloads/wl-1", `{"replicas":2}`))
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "sentinel", repo.domainSet, "未传 domain 不应触发 SetDomain")
+	})
+	t.Run("invalid-host", func(t *testing.T) {
+		repo := &stubRepo{list: []Workload{{ID: "wl-1", Type: TypeService, Replicas: 1}}}
+		h := newHandler(repo)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, acmeReq(http.MethodPut, "/api/workloads/wl-1", `{"domain":"Web App"}`))
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
 }
 
 func TestDeleteHandler(t *testing.T) {

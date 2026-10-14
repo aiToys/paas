@@ -3,6 +3,7 @@ package change
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -393,5 +394,100 @@ func TestServeGlobalRoutingWiring(t *testing.T) {
 	mux.ServeHTTP(rec, acmeReq(http.MethodGet, "/api/changes/", ""))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("尾斜杠应落兜底 404，got %d", rec.Code)
+	}
+}
+
+// ---------- 委派智能研发（契约 v2 §3.3/§5.1） ----------
+
+type fakeDelegator struct {
+	gotJWT  string
+	gotSpec AgentDelegateSpec
+	runName string
+	err     error
+}
+
+func (f *fakeDelegator) Delegate(_ context.Context, userJWT string, spec AgentDelegateSpec) (string, error) {
+	f.gotJWT, f.gotSpec = userJWT, spec
+	return f.runName, f.err
+}
+
+func seedOpenChange(t *testing.T, store *MemoryStore, status string) Change {
+	t.Helper()
+	ctx := acmeCtx()
+	c, err := store.CreateChange(ctx, Change{
+		AppID: "app-1", RepoID: "repo-1", Title: "实现取消订单", Type: ChangeFeat,
+		Branch: "feat/agent-1", BaseBranch: "main", Status: ChangeOpen,
+	})
+	if err != nil {
+		t.Fatalf("CreateChange 失败: %v", err)
+	}
+	if status != ChangeOpen { // store 强制初始 open，非 open 场景经 UpdateChange 推进（生命周期语义）
+		c.Status = status
+		if _, err := store.UpdateChange(ctx, c); err != nil {
+			t.Fatalf("UpdateChange 失败: %v", err)
+		}
+	}
+	return c
+}
+
+func TestChangeAgentRunDelegate(t *testing.T) {
+	h, store, _, _ := newTestHandler(t, nil, nil)
+	c := seedOpenChange(t, store, "open")
+	fake := &fakeDelegator{runName: "chg-run-9"}
+	h.agentDelegator = fake
+	h.tokenFrom = func(r *http.Request) string { return "jwt-u1" }
+
+	type agentRunResp struct {
+		AgentRunName string `json:"agentRunName"`
+	}
+	got := doJSON[agentRunResp](t, h, http.MethodPost, "/api/applications/app-1/changes/"+c.ID+"/agent-run", `{}`, http.StatusOK)
+	if got.AgentRunName != "chg-run-9" {
+		t.Errorf("runName = %s", got.AgentRunName)
+	}
+	// 委派 spec：workBranch=变更分支、base=基线、request 缺省用变更 Title
+	if fake.gotSpec.WorkBranch != "feat/agent-1" || fake.gotSpec.BaseBranch != "main" {
+		t.Errorf("spec 分支 = %+v", fake.gotSpec)
+	}
+	if fake.gotSpec.Request != "实现取消订单" {
+		t.Errorf("request 缺省应取变更 Title, got %q", fake.gotSpec.Request)
+	}
+	if fake.gotJWT != "jwt-u1" {
+		t.Errorf("用户 JWT 未透传（归因用户 sub）: %q", fake.gotJWT)
+	}
+	// 回写变更记录（状态块精确查询锚点，v2 §5.3）
+	gc, _ := store.GetChange(acmeCtx(), c.ID)
+	if gc.AgentRunName != "chg-run-9" {
+		t.Errorf("Change.AgentRunName = %q, 期望回写", gc.AgentRunName)
+	}
+}
+
+func TestChangeAgentRunNotOpen(t *testing.T) {
+	h, store, _, _ := newTestHandler(t, nil, nil)
+	c := seedOpenChange(t, store, "integrated")
+	h.agentDelegator = &fakeDelegator{runName: "x"}
+	h.tokenFrom = func(r *http.Request) string { return "j" }
+	rec := doRaw(h, http.MethodPost, "/api/applications/app-1/changes/"+c.ID+"/agent-run", `{}`)
+	if rec.Code != http.StatusConflict {
+		t.Errorf("非 open 变更委派应 409, got %d", rec.Code)
+	}
+}
+
+func TestChangeAgentRunNotConfigured(t *testing.T) {
+	h, store, _, _ := newTestHandler(t, nil, nil)
+	c := seedOpenChange(t, store, "open")
+	rec := doRaw(h, http.MethodPost, "/api/applications/app-1/changes/"+c.ID+"/agent-run", `{}`)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("未配置委派应 503, got %d", rec.Code)
+	}
+}
+
+func TestChangeAgentRunDelegatorError(t *testing.T) {
+	h, store, _, _ := newTestHandler(t, nil, nil)
+	c := seedOpenChange(t, store, "open")
+	h.agentDelegator = &fakeDelegator{err: errors.New("Agent 编排平台不可达")}
+	h.tokenFrom = func(r *http.Request) string { return "j" }
+	rec := doRaw(h, http.MethodPost, "/api/applications/app-1/changes/"+c.ID+"/agent-run", `{}`)
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("委派失败应 502, got %d body %s", rec.Code, rec.Body.String())
 	}
 }

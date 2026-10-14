@@ -33,7 +33,7 @@ export interface Pipeline {
   tenantId?: string
   appId: string
   name: string
-  kind: 'ci' | 'cd'
+  kind: 'ci' | 'cd' | 'agent'
   templateId?: string
   paramOverrides?: Record<string, unknown>
   trigger: PipelineTrigger
@@ -44,7 +44,7 @@ export interface Pipeline {
 export interface PipelineTemplate {
   id: string
   name: string
-  kind: 'ci' | 'cd'
+  kind: 'ci' | 'cd' | 'agent'
   builtin: boolean
   description?: string
   stages: StageDef[]
@@ -108,7 +108,7 @@ const getPipeline = (appId: string, pid: string) =>
   fetchJSON<Pipeline>(`/api/applications/${appId}/pipelines/${pid}`)
 
 async function createPipeline(appId: string, body: {
-  name: string; kind: 'ci' | 'cd'; templateId?: string; paramOverrides?: Record<string, unknown>; trigger?: PipelineTrigger
+  name: string; kind: 'ci' | 'cd' | 'agent'; templateId?: string; paramOverrides?: Record<string, unknown>; trigger?: PipelineTrigger
 }): Promise<Pipeline> {
   const resp = await fetchAuth(`/api/applications/${appId}/pipelines`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -139,6 +139,8 @@ const listTemplates = () => fetchJSON<PipelineTemplate[]>('/api/pipeline-templat
 
 async function triggerRun(appId: string, pid: string, body: {
   branch: string; commit?: string; version?: string
+  /** run 级一次性 stage 参数（需求文本载体）：key "<stageIdx>.<paramKey>"，如 {"0.request":"实现XX"} */
+  stageParams?: Record<string, string>
 }): Promise<PipelineRun> {
   const resp = await fetchAuth(`/api/applications/${appId}/pipelines/${pid}/run`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -149,6 +151,19 @@ async function triggerRun(appId: string, pid: string, body: {
 }
 
 const getRun = (id: string) => fetchJSON<PipelineRun>(`/api/pipelineruns/${id}`)
+
+/** 智能研发一条龙触发（2026-10-13）：需求文本 + 勾选段直触 tpl-agent-ship，免预建绑定。
+ * 变更由 agent stage registerChange 自动注册（产出分支 open 态入变更 tab）。 */
+export async function triggerAgentShipRun(appId: string, body: {
+  request: string; review: boolean; ship: boolean; release: boolean
+}): Promise<PipelineRun> {
+  const resp = await fetchAuth(`/api/applications/${appId}/agent-ship/run`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  })
+  const json = await resp.json()
+  if (!resp.ok) throw new Error(json.error || '触发失败')
+  return json.data as PipelineRun
+}
 
 // BuildRun 详情（含全量日志），build stage 展开日志区调用。
 export interface BuildRunInfo {

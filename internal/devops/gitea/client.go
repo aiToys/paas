@@ -39,6 +39,9 @@ var (
 	// ErrTagExists tag 已存在（CreateTag 幂等回查后仍非同 commit 才返回；
 	// release stage Retry 同版本号重打 tag 的常见路径）。
 	ErrTagExists = errors.New("tag 已存在")
+	// errMergeNotReady Gitea merge 405 瞬态：PR 刚创建可合并性未算完（"Please try again later"）。
+	// 无差异场景已被 Merge 的同 SHA 防护拦截，命中即按瞬态短暂重试（mergeWithRetry）。
+	errMergeNotReady = errors.New("gitea merge 暂未就绪")
 )
 
 // Client 调 Gitea REST API（/api/v1）。baseURL 形如 http://gitea.paas.svc.cluster.local:3000。
@@ -345,26 +348,24 @@ func (c *Client) getTagSHA(ctx context.Context, owner, repo, tag string) (string
 // Gitea 不可达 -> ErrGiteaUnavailable。
 // 返回合并后 base 分支最新 commit SHA（mergeSHA，baseline stage 记录用）。
 func (c *Client) Merge(ctx context.Context, owner, repo, head, base, mode string) (string, error) {
-	// 1. 创建 PR
-	prBody := map[string]any{
-		"base":  base,
-		"head":  head,
-		"title": fmt.Sprintf("Merge %s into %s", head, base),
-	}
-	var pr struct {
-		Number int `json:"number"`
-		Head   struct {
-			SHA string `json:"sha"`
-		} `json:"head"`
-	}
-	prPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls", pathEscape(owner), pathEscape(repo))
-	err := c.doJSON(ctx, http.MethodPost, prPath, prBody, &pr)
-	if errors.Is(err, ErrPRExists) {
-		// 同 head→base 的 open PR 已存在（重试集成/发布时）：查回复用，不重复建。
-		if pr, err = c.findOpenPR(ctx, owner, repo, head, base); err != nil {
-			return "", err
+	// 1. 建 PR：已存在同 head→base 的 open PR（重试集成/发布时）则查回复用，不重复建。
+	// 提取为闭包供 404 竞态下重建 PR 复用（见步骤 2 注释）。
+	createPull := func() (prRef, error) {
+		var pr prRef
+		prBody := map[string]any{
+			"base":  base,
+			"head":  head,
+			"title": fmt.Sprintf("Merge %s into %s", head, base),
 		}
-	} else if err != nil {
+		prPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls", pathEscape(owner), pathEscape(repo))
+		err := c.doJSON(ctx, http.MethodPost, prPath, prBody, &pr)
+		if errors.Is(err, ErrPRExists) {
+			return c.findOpenPR(ctx, owner, repo, head, base)
+		}
+		return pr, err
+	}
+	pr, err := createPull()
+	if err != nil {
 		return "", err
 	}
 	// 无差异合并防护：head 与 base 指向同一 commit（平台代建分支未 push 新提交即入批集成）
@@ -375,14 +376,25 @@ func (c *Client) Merge(ctx context.Context, owner, repo, head, base, mode string
 			return bb.CommitSHA, nil
 		}
 	}
-	// 2. merge PR（Do=merge/squash）
+	// 2. merge PR（Do=merge/squash）。mergeWithRetry 容忍 405 可合并性竞态（新 PR 秒级 merge）。
 	mergeBody := map[string]any{
 		"Do":                mergeDo(mode),
 		"MergeTitleField":   "",
 		"MergeMessageField": "",
 	}
 	mergePath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/merge", pathEscape(owner), pathEscape(repo), pr.Number)
-	if err := c.doMerge(ctx, mergePath, mergeBody); err != nil {
+	err = c.mergeWithRetry(ctx, mergePath, mergeBody)
+	// 404 = 复用的 open PR 被并发关闭：批次集成重试「先删后建集成分支」，Gitea 删 base
+	// 分支会异步关旧 PR，与本次 merge 竞态（2026-10-12 实测）。重建 PR 一次再合。
+	if errors.Is(err, ErrRepoNotFound) {
+		log.Printf("gitea merge: PR #%d 已失效（被并发关闭），重建 PR 重试", pr.Number)
+		if pr, err = createPull(); err != nil {
+			return "", err
+		}
+		mergePath = fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/merge", pathEscape(owner), pathEscape(repo), pr.Number)
+		err = c.mergeWithRetry(ctx, mergePath, mergeBody)
+	}
+	if err != nil {
 		// 已合并幂等恢复：change.Release 半程失败（merge 全成但 TriggerAppRun 失败回 tested）
 		// 重试时对已合并分支再 merge，Gitea 返 409「已合并」——误判 ErrMergeConflict 会把
 		// 批次锁在 tested 死循环（每次重试都「冲突」）。回查 PR 状态，已合并视为成功。
@@ -403,6 +415,24 @@ func (c *Client) Merge(ctx context.Context, owner, repo, head, base, mode string
 		return pr.Head.SHA, nil
 	}
 	return commits[0].SHA, nil
+}
+
+// mergeWithRetry 合并请求容忍 405 瞬态（新 PR 可合并性计算竞态）：最多 5 次间隔 2s
+// （ctx 感知，总窗口 ~10s——2026-10-12 实测 agentrun 刚建的 PR 计算可超过 3s，3×1s 不够）；
+// 非 405 立即返回。Merge 与 MergePR 共用（agentrun 建 PR 后 paas 秒级合入同撞此竞态）。
+func (c *Client) mergeWithRetry(ctx context.Context, path string, body any) error {
+	var err error
+	for i := 0; i < 5; i++ {
+		if err = c.doMerge(ctx, path, body); !errors.Is(err, errMergeNotReady) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+	return err
 }
 
 // closePR 关闭 PR（无差异 PR 不留残留；PATCH state=closed）。
@@ -434,20 +464,18 @@ func (c *Client) isPRMerged(ctx context.Context, owner, repo string, number int)
 	return out.Merged, nil
 }
 
-// findOpenPR 查找同 head→base 的 open PR（ErrPRExists 时复用，不重复建）。
-// head+base 双匹配——仅按 base 匹配可能复用他人同 base 不同 head 的 PR（误合并无关分支）。
-func (c *Client) findOpenPR(ctx context.Context, owner, repo, head, base string) (struct {
+// prRef PR 最小引用（Merge 建 PR / 复用 open PR / 404 竞态重建共用形状）。
+type prRef struct {
 	Number int `json:"number"`
 	Head   struct {
 		SHA string `json:"sha"`
 	} `json:"head"`
-}, error) {
-	var out struct {
-		Number int `json:"number"`
-		Head   struct {
-			SHA string `json:"sha"`
-		} `json:"head"`
-	}
+}
+
+// findOpenPR 查找同 head→base 的 open PR（ErrPRExists 时复用，不重复建）。
+// head+base 双匹配——仅按 base 匹配可能复用他人同 base 不同 head 的 PR（误合并无关分支）。
+func (c *Client) findOpenPR(ctx context.Context, owner, repo, head, base string) (prRef, error) {
+	var out prRef
 	listPath := fmt.Sprintf("/api/v1/repos/%s/%s/pulls?state=open&limit=50", pathEscape(owner), pathEscape(repo))
 	type prItem = struct { // 与 out 同构 + head/base ref（双匹配用）
 		Number int `json:"number"`
@@ -644,6 +672,9 @@ func (c *Client) doMerge(ctx context.Context, path string, body any) error {
 	case http.StatusConflict, http.StatusUnprocessableEntity:
 		// 409 冲突；422 Gitea 不可合并（冲突/分叉），同归冲突语义
 		return ErrMergeConflict
+	case http.StatusMethodNotAllowed:
+		// 405 瞬态：PR 可合并性未算完（无差异已被 Merge 同 SHA 防护前置拦截），上层短暂重试
+		return errMergeNotReady
 	case http.StatusNotFound:
 		return ErrRepoNotFound
 	case http.StatusUnauthorized, http.StatusForbidden:
@@ -774,8 +805,8 @@ func (c *Client) ReviewPR(ctx context.Context, owner, repo string, number int, d
 	return c.doJSON(ctx, http.MethodPost, p, map[string]any{"Do": do, "body": body}, &out)
 }
 
-// MergePR 按 number 合并 PR（merge commit 模式）。复用 doMerge 的冲突映射。
+// MergePR 按 number 合并 PR（merge commit 模式）。复用 doMerge 的冲突映射 + 405 瞬态重试。
 func (c *Client) MergePR(ctx context.Context, owner, repo string, number int) error {
 	p := fmt.Sprintf("/api/v1/repos/%s/%s/pulls/%d/merge", pathEscape(owner), pathEscape(repo), number)
-	return c.doMerge(ctx, p, map[string]any{"Do": "merge", "MergeTitleField": "", "MergeMessageField": ""})
+	return c.mergeWithRetry(ctx, p, map[string]any{"Do": "merge", "MergeTitleField": "", "MergeMessageField": ""})
 }

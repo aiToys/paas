@@ -20,12 +20,21 @@ func usage() {
 
 用法:
   airsync bundle   --version <v> [--registry ghcr.io/aitoys] [--chart deploy/charts/paas] [--out paas-bundle-<v>.tar.gz]
+                   [--with-observability]   # 一并打包可观测栈（3 个上游 chart + 清单 + 部署脚本）
   airsync install  --bundle <file.tar.gz> --target-registry <reg> [--namespace paas]
+                   # 包内含观测栈时自动接着部署（无需额外开关）
   airsync verify   --bundle <file.tar.gz>
-  airsync doctor   # 检查 docker/helm/kubectl 依赖
+  airsync doctor   # 检查 docker/helm/kubectl；envsubst/jq 缺失仅告警（只有观测栈部署才需要）
 
 公网路径（在线）: helm install paas oci://ghcr.io/aitoys/charts/paas（或源码 helm install paas deploy/charts/paas）
-离线路径: airsync bundle 打包 → 物理介质传到客户 → airsync install 部署`)
+离线路径: airsync bundle 打包 → 物理介质传到客户 → airsync install 部署
+
+观测栈（--with-observability）在 install 侧读这些环境变量（缺省值见 scripts/deploy-observability.sh）：
+  NS_OBS / DOMAIN_SUFFIX / STORAGE_CLASS / INGRESS_CLASS / GRAFANA_ADMIN_PASSWORD / 各镜像 registry。
+  MIRROR 未显式导出时 install 置 none（离线环境无国内中转站）。
+  ⚠ 包内只含 chart 与清单，**不含观测栈镜像**：目标集群需能拉到 prometheus/config-reloader/
+    node-exporter/kube-state-metrics/pushgateway/grafana/loki/promtail/jaeger 等镜像
+    （内网 registry 预推，或镜像清单见 docs/deploy/dependencies.md）。`)
 	os.Exit(2)
 }
 
@@ -57,6 +66,9 @@ func cmdBundle(args []string) {
 	registry := fs.String("registry", "ghcr.io/aitoys", "源镜像 registry")
 	chart := fs.String("chart", "deploy/charts/paas", "Helm chart 目录")
 	out := fs.String("out", "", "输出 bundle 文件名（空则 paas-bundle-<version>.tar.gz）")
+	withObs := fs.Bool("with-observability", false, "一并打包可观测栈（chart + 清单 + 部署脚本）")
+	obsDir := fs.String("observability-dir", "deploy/observability", "可观测栈清单目录")
+	obsScript := fs.String("observability-script", "scripts/deploy-observability.sh", "可观测栈部署脚本")
 	fs.Parse(args) //nolint:errcheck // flag.ExitOnError 模式：解析错误已触发 os.Exit，无返回值可检查
 	if *version == "" {
 		log.Fatal("--version 必填")
@@ -64,7 +76,7 @@ func cmdBundle(args []string) {
 	if *out == "" {
 		*out = fmt.Sprintf("paas-bundle-%s.tar.gz", *version)
 	}
-	if err := airsyncBundle(*version, *registry, *chart, *out); err != nil {
+	if err := airsyncBundle(*version, *registry, *chart, *out, *withObs, *obsDir, *obsScript); err != nil {
 		log.Fatalf("bundle 失败: %v", err)
 	}
 	log.Printf("✓ bundle 生成: %s", *out)

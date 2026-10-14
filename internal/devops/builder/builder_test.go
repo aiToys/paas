@@ -177,3 +177,16 @@ func TestRealBuildFailsGracefullyOnMissingGitURL(t *testing.T) {
 		t.Fatal("无效仓库应返错（git clone 失败），不应成功")
 	}
 }
+
+// TestBuildTagSanitizesBranchSlash 带斜杠分支（feat/x、integration/x）必须产出合法 docker tag：
+// 历史行为直接拼分支名，docker build -t 报 invalid reference format（2026-10-12 批次集成实测）。
+func TestBuildTagSanitizesBranchSlash(t *testing.T) {
+	got := buildTag(Params{Branch: "integration/agent-accept-3", Commit: "abcdef1234567890"})
+	if got != "integration-agent-accept-3-abcdef12" {
+		t.Fatalf("斜杠分支 tag 期望 integration-agent-accept-3-abcdef12，got %q", got)
+	}
+	// 无斜杠分支 tag 形态零变化（存量兼容）
+	if got := buildTag(Params{Branch: "main", Commit: "abcdef1234567890"}); got != "main-abcdef12" {
+		t.Fatalf("main 分支 tag 形态不应变化，got %q", got)
+	}
+}

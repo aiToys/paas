@@ -522,13 +522,13 @@ func TestCreateReleaseMultiService(t *testing.T) {
 	if relProd.WorkloadID == relRec.WorkloadID {
 		t.Errorf("product/recommend 应落到不同 Workload，均得 %s", relProd.WorkloadID)
 	}
-	// 各自 Service 字段 + Name 正确
+	// 各自 Service 字段 + Name 正确（default 基线名含 env 短段，双环境不撞名）
 	prodWL, _ := wl.Get(ctx, relProd.WorkloadID)
-	if prodWL.Service != "product" || prodWL.Name != "paas-shop-product-svc" {
+	if prodWL.Service != "product" || prodWL.Name != devops.BaselineWorkloadName("paas-shop", "env-acme-test", "product", "default") {
 		t.Errorf("product Workload Service=%q Name=%q", prodWL.Service, prodWL.Name)
 	}
 	recWL, _ := wl.Get(ctx, relRec.WorkloadID)
-	if recWL.Service != "recommend" || recWL.Name != "paas-shop-recommend-svc" {
+	if recWL.Service != "recommend" || recWL.Name != devops.BaselineWorkloadName("paas-shop", "env-acme-test", "recommend", "default") {
 		t.Errorf("recommend Workload Service=%q Name=%q", recWL.Service, recWL.Name)
 	}
 

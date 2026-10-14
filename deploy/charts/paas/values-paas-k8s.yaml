@@ -90,3 +90,18 @@ kb:
 # 生产必填（PAAS_PROD 拒启兜底）；dev overlay 固定 key 便于密文路径验证，存量明文自动兼容。
 security:
   secretMasterKey: "e2c4cda30173dbd5f6ee005bc924abe8b5f5b5da7d698aa7673cf24e82fd5078"
+
+# ---------------- Agent 编排执行域（agentrun，契约 v2 双入口）----------------
+# 联调三步（对方部署就绪后）：
+#   1) 固定 JWT secret（下方 auth.jwtSecret，重启不变——agentrun 0.13.0 本地 HMAC 验签依赖）；
+#   2) 同步给 agentrun：kubectl -n agent create secret generic paas-jwt-public \
+#        --from-literal=secret='3909709567410de3d59283de429262659150ceaeff783b3bebe4a33caa9f6862' --dry-run=client -o yaml | kubectl apply -f -
+#   3) agentrun.token 填对方平台的静态 token（编排通道 server-to-server；观测/委派走用户 JWT 不用它）。
+auth:
+  jwtSecret: "3909709567410de3d59283de429262659150ceaeff783b3bebe4a33caa9f6862"   # 固定值（hex 32B）；改动需与 agent ns 的 paas-jwt-public 同步更新
+agentrun:
+  url: "http://agent-console.agent.svc"   # agent ns console（Service :80）
+  token: "769864ed16637e71e1ae24ab59c116a3"                           # agentrun 静态 token（编排通道；来源 agent ns agent-console-token）
+
+# 集群对外域名后缀：dev 集群 Ingress 域名空间 *.k8s.dd（本机访问需 /etc/hosts 或内网泛解析到节点 IP）。
+domainSuffix: "k8s.dd"

@@ -26,7 +26,7 @@ type Store struct {
 func NewStore(db *pg.DB) *Store { return &Store{db: db} }
 
 // wlCols 与 model.Workload 字段顺序对齐（scan 列顺序必须一致）。
-const wlCols = `id, tenant_id, app_id, env_id, lane_id, service, service_id, type, name, image, image_ref, replicas, ready, status, schedule, command, port, container_port, domain, resources, created_at`
+const wlCols = `id, tenant_id, app_id, env_id, lane_id, service, service_id, type, name, image, image_ref, replicas, ready, status, schedule, command, port, container_port, domain, metrics_path, resources, created_at`
 
 // marshalResources 把 ResourceSpec 序列化为 JSONB 字节；零值 -> '{}'（与列 DEFAULT 一致）。
 func marshalResources(r workload.ResourceSpec) []byte {
@@ -56,7 +56,7 @@ func scanWL(r pg.RowScanner, w *workload.Workload) error {
 	if err := r.Scan(
 		&w.ID, &w.TenantID, &w.AppID, &w.EnvID, &w.LaneID, &w.Service, &w.ServiceID, &w.Type,
 		&w.Name, &w.Image, &w.ImageRef, &w.Replicas, &w.Ready,
-		&w.Status, &w.Schedule, &w.Command, &w.Port, &w.ContainerPort, &w.Domain, &resRaw, &w.CreatedAt,
+		&w.Status, &w.Schedule, &w.Command, &w.Port, &w.ContainerPort, &w.Domain, &w.MetricsPath, &resRaw, &w.CreatedAt,
 	); err != nil {
 		return err
 	}
@@ -168,10 +168,10 @@ func (s *Store) Create(ctx context.Context, w workload.Workload) error {
 		w.LaneID = workload.LaneDefault
 	}
 	_, err = s.db.Pool().Exec(ctx,
-		`INSERT INTO workloads (`+wlCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)`,
+		`INSERT INTO workloads (`+wlCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
 		w.ID, w.TenantID, w.AppID, w.EnvID, w.LaneID, w.Service, w.ServiceID, w.Type,
 		w.Name, w.Image, w.ImageRef, w.Replicas, w.Ready,
-		w.Status, w.Schedule, w.Command, w.Port, w.ContainerPort, w.Domain, marshalResources(w.Resources), w.CreatedAt)
+		w.Status, w.Schedule, w.Command, w.Port, w.ContainerPort, w.Domain, w.MetricsPath, marshalResources(w.Resources), w.CreatedAt)
 	if pg.IsUniqueViolation(err) {
 		// 同租户 Name 唯一约束：Name 即 K8s Service 名，同名会让 reconciler 抢建同一
 		// K8s Service（AlreadyOwned）无限 requeue（审计第 6 轮 I2）。主键冲突同理。
@@ -289,6 +289,24 @@ func (s *Store) SetResources(ctx context.Context, id string, res workload.Resour
 	}
 	tag, err := s.db.Pool().Exec(ctx,
 		`UPDATE workloads SET resources=$3 WHERE id=$1 AND tenant_id=$2`, id, tid, marshalResources(res))
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("工作负载不存在: %s", id)
+	}
+	return nil
+}
+
+// SetMetricsPath 覆盖指标端点路径（空串允许清除）。存在意义是存量迁移：opt-in 语义下既有
+// 工作负载无法在创建时声明，需经此路径补声明（否则下次 reconcile 后抓取注解消失）。
+func (s *Store) SetMetricsPath(ctx context.Context, id, path string) error {
+	tid, err := pg.TenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	tag, err := s.db.Pool().Exec(ctx,
+		`UPDATE workloads SET metrics_path=$3 WHERE id=$1 AND tenant_id=$2`, id, tid, path)
 	if err != nil {
 		return err
 	}

@@ -672,7 +672,7 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 		if svcName == "" && svcDef != nil {
 			svcName = svcDef.Name
 		}
-		name := devops.BaselineWorkloadName(input.AppID, svcName, lane)
+		name := devops.BaselineWorkloadName(input.AppID, input.EnvID, svcName, lane)
 		// 端口来源（优先级）：① input.Port（deploy stage 显式 port 参数）> ② 同 app×env×service baseline 继承
 		// （泳道克隆基线端口）> ③ 0（不建 Service，向后兼容）。端口驱动 reconciler 建 Service，
 		// 否则 smoke 探活/跨泳道服务发现 DNS 不可达。

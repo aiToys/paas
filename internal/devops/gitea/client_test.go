@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -285,5 +287,89 @@ func TestMergePRConflict(t *testing.T) {
 		if err := c.MergePR(context.Background(), "bot", "app", 7); !errors.Is(err, ErrMergeConflict) {
 			t.Fatalf("status %d: want ErrMergeConflict, got %v", status, err)
 		}
+	}
+}
+
+// TestMergeNotReadyRetries 新 PR 秒级 merge 撞 Gitea 可合并性计算竞态（405 "Please try
+// again later"，2026-10-12 批次集成实测）：首次 405、重试后 200——Merge 应容忍并成功。
+func TestMergeNotReadyRetries(t *testing.T) {
+	mergeCalls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/repos/", func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"number":1,"head":{"sha":"head-sha"}}`)
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/merge"):
+			mergeCalls++
+			if mergeCalls == 1 {
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/commits"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `[{"sha":"merge-sha","commit":{"message":"m","author":{"name":"a","date":"d"}}}]`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	sha, err := New(srv.URL, "bot", "pass").Merge(context.Background(), "paas-bot", "repo1", "feature", "main", "ff")
+	if err != nil {
+		t.Fatalf("405 竞态应重试成功: %v", err)
+	}
+	if sha != "merge-sha" {
+		t.Fatalf("mergeSHA 期望 merge-sha，got %q", sha)
+	}
+	if mergeCalls != 2 {
+		t.Fatalf("merge 调用数期望 2（405 一次 + 成功一次），got %d", mergeCalls)
+	}
+}
+
+// TestMergeStalePRRecreated 批次集成重试竞态：先删后建集成分支时 Gitea 异步关闭旧 PR，
+// 复用旧 PR merge 返 404（2026-10-12 实测）——应重建 PR 一次再合，而非报「仓库不存在」。
+func TestMergeStalePRRecreated(t *testing.T) {
+	prNumber := 0
+	var merged []int
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/repos/", func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls"):
+			prNumber++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, fmt.Sprintf(`{"number":%d,"head":{"sha":"head-sha"}}`, prNumber))
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/merge"):
+			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/") // .../pulls/{n}/merge
+			n, _ := strconv.Atoi(parts[len(parts)-2])
+			if n == 1 { // 旧 PR 已被并发关闭
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			merged = append(merged, n)
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/commits"):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `[{"sha":"merge-sha","commit":{"message":"m","author":{"name":"a","date":"d"}}}]`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	sha, err := New(srv.URL, "bot", "pass").Merge(context.Background(), "paas-bot", "repo1", "feature", "main", "ff")
+	if err != nil {
+		t.Fatalf("404 陈旧 PR 应重建后成功: %v", err)
+	}
+	if sha != "merge-sha" {
+		t.Fatalf("mergeSHA 期望 merge-sha，got %q", sha)
+	}
+	if prNumber != 2 || len(merged) != 1 || merged[0] != 2 {
+		t.Fatalf("期望重建 PR#2 并合并之，got prNumber=%d merged=%v", prNumber, merged)
 	}
 }

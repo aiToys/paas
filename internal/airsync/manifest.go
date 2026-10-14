@@ -21,13 +21,32 @@ type ImageRef struct {
 	File   string `json:"file"`   // bundle 内的 OCI tar 文件名
 }
 
+// ChartRef 是 bundle 内的一个上游 chart（helm pull 产物）。
+type ChartRef struct {
+	Repo    string `json:"repo"`    // 仓库引用（如 prometheus-community/prometheus）
+	Version string `json:"version"` // chart 版本
+	RepoURL string `json:"repoURL"` // 仓库地址（留档：复现打包 / 排查 chart 来源）
+	File    string `json:"file"`    // bundle 内相对路径（charts/<name>-<ver>.tgz）
+}
+
+// ObservabilityManifest 是可观测栈条目（仅 --with-observability 打包时非空）。
+// 三个上游 chart + deploy/observability 清单 + 部署脚本随包分发——离线目标机没有仓库，
+// 只有 tarball，缺脚本则包内清单无任何部署路径（脚本是这套栈的唯一部署入口）。
+type ObservabilityManifest struct {
+	Charts []ChartRef `json:"charts"` // 3 个上游 chart
+	Files  []string   `json:"files"`  // observability/ 下的清单文件（bundle 内相对路径）
+	Script string     `json:"script"` // 部署脚本（bundle 内相对路径）
+}
+
 // Manifest 是 bundle 的清单（manifest.json）：版本 + 镜像 + chart + 每文件 sha256。
 type Manifest struct {
 	PaasVersion  string     `json:"paasVersion"`
 	ChartVersion string     `json:"chartVersion"`
 	ChartFile    string     `json:"chartFile"` // helm package 产物 .tgz
 	Images       []ImageRef `json:"images"`
-	// Files 文件名→sha256（含镜像 tar、chart tgz）。
+	// Observability 可观测栈条目（空 = 该 bundle 不含观测栈，install 时跳过其部署）。
+	Observability *ObservabilityManifest `json:"observability,omitempty"`
+	// Files 文件名→sha256（含镜像 tar、chart tgz、观测栈 chart 与清单）。
 	Files       map[string]string `json:"files"`
 	GeneratedAt string            `json:"generatedAt"`
 }
@@ -46,30 +65,52 @@ func ComputeSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// BuildManifest 在 bundleDir 内为给定 images/chart 计算 sha256 并写 manifest.json。
-// paasVersion / chartVersion 用于校验镜像 tag 对齐；chartFile 为空则跳过该文件。
-func BuildManifest(bundleDir, paasVersion, chartVersion, chartFile string, images []ImageRef, generatedAt string) (*Manifest, error) {
+// ManifestInput 是 BuildManifest 的输入。用具名结构体而非长参数列表：paasVersion /
+// chartVersion / chartFile 三个相邻字符串位置敏感，加观测栈后参数达 7 个，易错位。
+type ManifestInput struct {
+	BundleDir     string
+	PaasVersion   string
+	ChartVersion  string
+	ChartFile     string
+	Images        []ImageRef
+	Observability *ObservabilityManifest
+	GeneratedAt   string
+}
+
+// BuildManifest 在 BundleDir 内为给定 images/chart/观测栈计算 sha256 并写 manifest.json。
+// ChartFile 为空则跳过该文件。
+func BuildManifest(in ManifestInput) (*Manifest, error) {
 	m := &Manifest{
-		PaasVersion:  paasVersion,
-		ChartVersion: chartVersion,
-		ChartFile:    chartFile,
-		Images:       images,
-		Files:        map[string]string{},
-		GeneratedAt:  generatedAt,
+		PaasVersion:   in.PaasVersion,
+		ChartVersion:  in.ChartVersion,
+		ChartFile:     in.ChartFile,
+		Images:        in.Images,
+		Observability: in.Observability,
+		Files:         map[string]string{},
+		GeneratedAt:   in.GeneratedAt,
 	}
-	// 收集所有需校验的非空文件名（chart + 各镜像 tar）。
+	// 收集所有需校验的非空文件名（chart + 各镜像 tar + 观测栈 chart/清单/脚本）。
 	var candidates []string
-	if chartFile != "" {
-		candidates = append(candidates, chartFile)
+	if in.ChartFile != "" {
+		candidates = append(candidates, in.ChartFile)
 	}
-	for _, img := range images {
+	for _, img := range in.Images {
 		if img.File != "" {
 			candidates = append(candidates, img.File)
 		}
 	}
+	if obs := in.Observability; obs != nil {
+		for _, c := range obs.Charts {
+			candidates = append(candidates, c.File)
+		}
+		candidates = append(candidates, obs.Files...)
+		if obs.Script != "" {
+			candidates = append(candidates, obs.Script)
+		}
+	}
 	sort.Strings(candidates)
 	for _, f := range candidates {
-		sum, err := ComputeSHA256(filepath.Join(bundleDir, f))
+		sum, err := ComputeSHA256(filepath.Join(in.BundleDir, f))
 		if err != nil {
 			return nil, fmt.Errorf("hash %s: %w", f, err)
 		}
@@ -79,7 +120,7 @@ func BuildManifest(bundleDir, paasVersion, chartVersion, chartFile string, image
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(filepath.Join(bundleDir, "manifest.json"), data, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(in.BundleDir, "manifest.json"), data, 0o600); err != nil {
 		return nil, err
 	}
 	return m, nil

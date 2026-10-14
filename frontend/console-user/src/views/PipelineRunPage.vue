@@ -53,19 +53,27 @@ async function loadRuns() {
   }
 }
 
-// 切流水线 tab：默认选该流水线最新一次运行（经路由，保持 URL 可分享）
+// 切流水线 tab：默认选该流水线最新一次运行（经路由，保持 URL 可分享）。
+// 无历史 run 留在当前页，轨道区按 runInActivePipeline 显示空态——原实现 replace('/devops')
+// 把用户踹出详情页（点 tab 就跳走），改「留页」后轨道又与 tab 脱钩继续渲染旧 run，
+// 体感「点 tab 没反应」（2026-10-14 用户再实测切 CD tab）。
 async function switchPipeline(pid: string) {
   activePid.value = pid
   await loadRuns()
   const latest = runs.value[0]
   if (latest && latest.id !== runId.value) router.replace(`/devops/runs/${latest.id}`)
-  else if (!latest) router.replace('/devops')
 }
+
+// 当前 run 归属的流水线（bootstrap/watch 双路维护）：轨道只在本流水线 tab 下渲染。
+// 不依赖 runs 列表包含 runId（列表截断时会误判空态）。
+const runPipelineId = ref('')
+const runInActivePipeline = computed(() => !!runPipelineId.value && runPipelineId.value === activePid.value)
 
 async function bootstrap() {
   try {
     const r = await getRun(runId.value)
     appId.value = r.appId || ''
+    runPipelineId.value = r.pipelineId
     if (appId.value) {
       const resp = await fetchAuth(`/api/applications/${appId.value}`)
       if (resp.ok) {
@@ -94,9 +102,12 @@ onMounted(bootstrap)
 watch(runId, async (id, old) => {
   if (!id || id === old) return
   const r = runs.value.find((x) => x.id === id)
-  if (r && r.pipelineId !== activePid.value) {
-    activePid.value = r.pipelineId
-    await loadRuns()
+  if (r) {
+    runPipelineId.value = r.pipelineId
+    if (r.pipelineId !== activePid.value) {
+      activePid.value = r.pipelineId
+      await loadRuns()
+    }
   }
   // 新 run 可能属另一应用（深链直入）：appId 未初始化时补 bootstrap
   if (!appId.value) await bootstrap()
@@ -139,7 +150,7 @@ v-for="r in runs" :key="r.id" class="run-chip" :class="{ active: r.id === runId 
       <span v-if="!runsLoading && !runs.length" class="chip-empty">暂无运行记录</span>
     </div>
 
-    <PipelineRunView v-if="runId" :run-id="runId" />
+    <PipelineRunView v-if="runId && runInActivePipeline" :run-id="runId" />
     <el-empty v-else description="该流水线暂无运行" />
   </div>
 </template>

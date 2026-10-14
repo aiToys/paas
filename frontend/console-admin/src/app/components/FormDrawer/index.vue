@@ -55,8 +55,9 @@
                     </el-radio>
                   </template>
                   <template v-if="field.type === 'treeSelect'">
+                    <!-- formData 值为 unknown，组件对象化后 vue-tsc 真实检查 modelValue，此处窄化 -->
                     <el-tree-select
-                      v-model="formData[field.prop]"
+                      :model-value="formData[field.prop] as never"
                       :data="field.treeData"
                       :props="
                         field.treeProps || {
@@ -68,6 +69,7 @@
                       check-strictly
                       :placeholder="field.placeholder || t('common.placeholder.select', { label: field.label })"
                       :disabled="field.disabled || loading || mode === 'view'"
+                      @update:model-value="formData[field.prop] = $event"
                     />
                   </template>
                 </component>
@@ -102,8 +104,25 @@
 </template>
 
 <script lang="ts" setup>
-import { ref, computed } from 'vue'
+import { ref, computed, type Component } from 'vue'
 import { t } from '@/lib/i18n'
+// 动态映射必须用显式 import 的组件对象，不能用 'el-select' 字符串：Element Plus
+// 按需引入（unplugin 编译期解析）下运行时字符串解析不到真实组件，el-option 因
+// 缺 el-select 祖先 throwError（2026-10-13 实测创建用户页整页崩进 ErrorBoundary）。
+// 显式 import 经 tree-shake 只打包用到组件的 JS；样式不经模板编译需手动引入。
+import {
+  ElCascader, ElCheckboxGroup, ElDatePicker, ElInput, ElInputNumber,
+  ElRadioGroup, ElSelect, ElSwitch, ElTreeSelect,
+} from 'element-plus'
+import 'element-plus/es/components/cascader/style/css'
+import 'element-plus/es/components/checkbox/style/css'
+import 'element-plus/es/components/date-picker/style/css'
+import 'element-plus/es/components/input-number/style/css'
+import 'element-plus/es/components/input/style/css'
+import 'element-plus/es/components/radio/style/css'
+import 'element-plus/es/components/select/style/css'
+import 'element-plus/es/components/switch/style/css'
+import 'element-plus/es/components/tree-select/style/css'
 import type { FormInstance } from 'element-plus'
 import type { FormDrawerProps, FormField, FormFieldType } from './types'
 
@@ -120,22 +139,22 @@ const emit = defineEmits<{
 
 const formRef = ref<FormInstance>()
 
-const componentMap: Record<FormFieldType, string> = {
-  input: 'el-input',
-  textarea: 'el-input',
-  number: 'el-input-number',
-  select: 'el-select',
-  radio: 'el-radio-group',
-  checkbox: 'el-checkbox-group',
-  switch: 'el-switch',
-  date: 'el-date-picker',
-  password: 'el-input',
-  treeSelect: 'el-tree-select',
-  cascader: 'el-cascader'
+const componentMap: Record<FormFieldType, Component> = {
+  input: ElInput,
+  textarea: ElInput,
+  number: ElInputNumber,
+  select: ElSelect,
+  radio: ElRadioGroup,
+  checkbox: ElCheckboxGroup,
+  switch: ElSwitch,
+  date: ElDatePicker,
+  password: ElInput,
+  treeSelect: ElTreeSelect,
+  cascader: ElCascader
 }
 
-const resolveComponent = (type: FormField['type']): string =>
-  componentMap[type] || 'el-input'
+const resolveComponent = (type: FormField['type']): Component =>
+  componentMap[type] || ElInput
 
 const resolveExtraProps = (field: FormField): Record<string, unknown> => {
   if (field.type === 'textarea') return { type: 'textarea', rows: 3 }

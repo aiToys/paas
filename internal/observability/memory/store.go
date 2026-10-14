@@ -149,6 +149,29 @@ func (s *Store) CreateAlertRule(ctx context.Context, rule observability.AlertRul
 	return rule, nil
 }
 
+// UpdateAlertRule 更新规则（仅当前租户；ID/TenantID 不变，校验与 Create 同源）。
+// 跨租户统一「规则不存在」不泄漏存在性。
+func (s *Store) UpdateAlertRule(ctx context.Context, id string, rule observability.AlertRule) (observability.AlertRule, error) {
+	tid, err := tenant.IDOrErr(ctx)
+	if err != nil {
+		return observability.AlertRule{}, err
+	}
+	if err := rule.Validate(); err != nil {
+		return observability.AlertRule{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.rules[id]
+	if !ok || cur.TenantID != tid {
+		return observability.AlertRule{}, fmt.Errorf("规则不存在: %s", id)
+	}
+	rule.ID = cur.ID
+	rule.TenantID = cur.TenantID
+	rule.UpdatedAt = time.Now()
+	s.rules[id] = rule
+	return rule, nil
+}
+
 func (s *Store) DeleteAlertRule(ctx context.Context, id string) error {
 	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {

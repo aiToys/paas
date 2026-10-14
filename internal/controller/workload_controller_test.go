@@ -198,7 +198,7 @@ func TestReconcileServiceCreatesService(t *testing.T) {
 	w := &v1alpha1.Workload{
 		ObjectMeta: metav1.ObjectMeta{Name: "wl-svc", Namespace: "default"},
 		Spec: v1alpha1.WorkloadSpec{Type: "service", Name: "wl-svc", Image: "nginx", Replicas: 1,
-			Port: 80, ContainerPort: 8080},
+			Port: 80, ContainerPort: 8080, MetricsPath: "/metrics"},
 	}
 	cl := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(w).WithStatusSubresource(&v1alpha1.Workload{}).Build()
 	r := &WorkloadReconciler{Client: cl, Scheme: scheme}
@@ -234,10 +234,11 @@ func TestReconcileServiceCreatesService(t *testing.T) {
 	if c.ReadinessProbe == nil || c.ReadinessProbe.TCPSocket == nil {
 		t.Fatalf("container 应有 TCP readiness probe")
 	}
-	// service + port>0 应注入 Prometheus 自动发现注解（抓业务端口 /metrics，应用级 RED 指标数据源）
+	// service + port>0 + 声明 metricsPath 才注入 Prometheus 自动发现注解
+	// （抓业务端口上的该路径，应用级 RED 指标数据源）。未声明的不注入见 TestPrometheusAnnotationsEmptyNotInjected。
 	ann := dep.Spec.Template.Annotations
 	if ann["prometheus.io/scrape"] != "true" || ann["prometheus.io/port"] != "8080" || ann["prometheus.io/path"] != "/metrics" {
-		t.Fatalf("service Pod 应注 prometheus.io/scrape|port|path 注解, 实际 %v", ann)
+		t.Fatalf("声明 metricsPath 的 service Pod 应注 prometheus.io/scrape|port|path 注解, 实际 %v", ann)
 	}
 }
 
@@ -452,5 +453,127 @@ func TestPodSpecEmptyResourcesBestEffort(t *testing.T) {
 	}
 	if spec.Containers[0].Resources.Requests != nil || spec.Containers[0].Resources.Limits != nil {
 		t.Fatal("空 resources 应 BestEffort（无 Requests/Limits）")
+	}
+}
+
+// metricsPath 声明为非空：注入 scrape 注解，path 取声明值、port 取 ContainerPort。
+func TestPrometheusAnnotationsDeclared(t *testing.T) {
+	w := &v1alpha1.Workload{Spec: v1alpha1.WorkloadSpec{
+		Type: "service", Port: 80, ContainerPort: 8080, MetricsPath: "/metrics"}}
+	got := prometheusAnnotations(w)
+	if got["prometheus.io/scrape"] != "true" || got["prometheus.io/path"] != "/metrics" {
+		t.Fatalf("应注入 scrape/path 注解，实际 %v", got)
+	}
+	if got["prometheus.io/port"] != "8080" {
+		t.Fatalf("port 应取 ContainerPort=8080，实际 %q", got["prometheus.io/port"])
+	}
+}
+
+// ContainerPort 缺省（0）时端口回退到 Port（Service 对外端口）。
+func TestPrometheusAnnotationsPortFallsBackToPort(t *testing.T) {
+	w := &v1alpha1.Workload{Spec: v1alpha1.WorkloadSpec{
+		Type: "service", Port: 80, MetricsPath: "/metrics"}}
+	if got := prometheusAnnotations(w); got["prometheus.io/port"] != "80" {
+		t.Fatalf("ContainerPort 为 0 时 port 应回退 Port=80，实际 %q", got["prometheus.io/port"])
+	}
+}
+
+// 未声明 metricsPath（空）：**不注入任何注解**——语义反转的核心断言。
+// 无条件注入会让不暴露 /metrics 的应用（如 nginx frontend）成为永久 down target。
+func TestPrometheusAnnotationsEmptyNotInjected(t *testing.T) {
+	w := &v1alpha1.Workload{Spec: v1alpha1.WorkloadSpec{
+		Type: "service", Port: 80, ContainerPort: 8080}}
+	if got := prometheusAnnotations(w); got != nil {
+		t.Fatalf("未声明 metricsPath 应返回 nil（不注入），实际 %v", got)
+	}
+}
+
+// job/cronjob 无常驻 HTTP server：即便声明了 metricsPath 也不注入。
+func TestPrometheusAnnotationsNonServiceSkipped(t *testing.T) {
+	for _, typ := range []string{"job", "cronjob"} {
+		w := &v1alpha1.Workload{Spec: v1alpha1.WorkloadSpec{
+			Type: typ, Port: 80, MetricsPath: "/metrics"}}
+		if got := prometheusAnnotations(w); got != nil {
+			t.Fatalf("%s 不应注入注解，实际 %v", typ, got)
+		}
+	}
+}
+
+// 语义反转的存量影响：CRD 曾声明 metricsPath 后清空，reconcile 应把注解**摘掉**
+// （PodTemplate 整体替换，nil 注解即清除），不能残留旧值。
+func TestReconcileRemovesAnnotationsWhenMetricsPathCleared(t *testing.T) {
+	scheme := newScheme(t)
+	w := &v1alpha1.Workload{
+		ObjectMeta: metav1.ObjectMeta{Name: "wl-ann", Namespace: "default"},
+		Spec: v1alpha1.WorkloadSpec{Type: "service", Name: "wl-ann", Image: "nginx",
+			Replicas: 1, Port: 80, ContainerPort: 8080, MetricsPath: "/metrics"},
+	}
+	cl := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(w).WithStatusSubresource(&v1alpha1.Workload{}).Build()
+	r := &WorkloadReconciler{Client: cl, Scheme: scheme}
+	key := types.NamespacedName{Name: "wl-ann", Namespace: "default"}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("首轮 reconcile 失败: %v", err)
+	}
+	var dep appsv1.Deployment
+	if err := cl.Get(context.Background(), key, &dep); err != nil {
+		t.Fatalf("应创建 Deployment: %v", err)
+	}
+	if dep.Spec.Template.Annotations["prometheus.io/path"] != "/metrics" {
+		t.Fatalf("首轮应注入注解，实际 %v", dep.Spec.Template.Annotations)
+	}
+	// 清空 metricsPath 后重新 reconcile（模拟 SetMetricsPath(id, "") 的投影结果）
+	if err := cl.Get(context.Background(), key, w); err != nil {
+		t.Fatal(err)
+	}
+	w.Spec.MetricsPath = ""
+	if err := cl.Update(context.Background(), w); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key}); err != nil {
+		t.Fatalf("次轮 reconcile 失败: %v", err)
+	}
+	if err := cl.Get(context.Background(), key, &dep); err != nil {
+		t.Fatal(err)
+	}
+	if _, hit := dep.Spec.Template.Annotations["prometheus.io/scrape"]; hit {
+		t.Fatalf("清空 metricsPath 后应摘掉 scrape 注解，实际 %v", dep.Spec.Template.Annotations)
+	}
+}
+
+// TestApplyIngressDomainWithdrawal：撤域名（spec.domain 清空）后 applyIngress 应回收已建
+// Ingress——此前空 domain 仅跳过不删，撤域名后旧 Ingress 残留继续路由流量（2026-10-14
+// 实测生产域名双 Ingress 同 host 并存，流量落在旧 workload 的 Service 上）。
+func TestApplyIngressDomainWithdrawal(t *testing.T) {
+	scheme := newScheme(t)
+	w := &v1alpha1.Workload{
+		ObjectMeta: metav1.ObjectMeta{Name: "wl-dom", Namespace: "default"},
+		Spec: v1alpha1.WorkloadSpec{TenantID: "t-acme", AppID: "app-dom", Type: "service",
+			Name: "wl-dom", Image: "nginx", Replicas: 1, Port: 80, Domain: "app.example.com"},
+	}
+	cl := clientfake.NewClientBuilder().WithScheme(scheme).WithObjects(w).WithStatusSubresource(&v1alpha1.Workload{}).Build()
+	r := &WorkloadReconciler{Client: cl, Scheme: scheme, IngressClass: "hermes"}
+	ctx := context.Background()
+
+	// 有域名：建 Ingress
+	if err := r.applyIngress(ctx, w); err != nil {
+		t.Fatalf("applyIngress(有域名) 失败: %v", err)
+	}
+	var ing networkingv1.Ingress
+	if err := cl.Get(ctx, types.NamespacedName{Name: "wl-dom", Namespace: "default"}, &ing); err != nil {
+		t.Fatalf("应创建 Ingress: %v", err)
+	}
+
+	// 撤域名：回收 Ingress
+	w.Spec.Domain = ""
+	if err := r.applyIngress(ctx, w); err != nil {
+		t.Fatalf("applyIngress(撤域名) 失败: %v", err)
+	}
+	if err := cl.Get(ctx, types.NamespacedName{Name: "wl-dom", Namespace: "default"}, &ing); err == nil {
+		t.Fatal("撤域名后 Ingress 应被回收")
+	}
+
+	// 幂等：再次撤（无 Ingress 可删）不报错
+	if err := r.applyIngress(ctx, w); err != nil {
+		t.Fatalf("重复撤域名应幂等: %v", err)
 	}
 }

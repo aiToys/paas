@@ -26,6 +26,33 @@ func TestValidateResourcesQuantity(t *testing.T) {
 	}
 }
 
+// metricsPath 校验：空合法（默认不采集）；非空须以 / 开头的绝对路径。
+// 写成 "metrics" 会被拼成相对路径静默 404，与「不声明」难区分，故在入口拦下。
+func TestValidateMetricsPath(t *testing.T) {
+	base := func() Workload {
+		return Workload{ID: "wl-1", AppID: "app-1", EnvID: "env-1", Type: TypeService,
+			Name: "wl-1", Image: "nginx"}
+	}
+	w := base()
+	if err := w.Validate(); err != nil {
+		t.Errorf("metricsPath 空应合法（默认不采集）: %v", err)
+	}
+	for _, v := range []string{"/metrics", "/actuator/prometheus", "/"} {
+		w := base()
+		w.MetricsPath = v
+		if err := w.Validate(); err != nil {
+			t.Errorf("metricsPath=%q 应合法: %v", v, err)
+		}
+	}
+	for _, v := range []string{"metrics", "http://x/metrics", " /metrics"} {
+		w := base()
+		w.MetricsPath = v
+		if err := w.Validate(); err == nil {
+			t.Errorf("metricsPath=%q 应非法（须绝对路径）", v)
+		}
+	}
+}
+
 func TestResourceSpecIsEmpty(t *testing.T) {
 	var zero ResourceSpec
 	if !zero.IsEmpty() {

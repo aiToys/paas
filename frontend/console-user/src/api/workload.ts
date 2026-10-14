@@ -7,6 +7,9 @@ export interface Workload {
   type: 'service' | 'job' | 'cronjob'; name: string
   image: string; imageRef?: string; replicas: number; ready: number; status: string; createdAt?: string
   schedule?: string; command?: string; port?: number; containerPort?: number; domain?: string
+  // metricsPath 非空时平台给 Pod 注入 prometheus.io/scrape 注解（Prometheus 自动发现抓取该路径）。
+  // 默认空 = 不注入：应用不暴露 /metrics 时留空，否则会产生永久 down target。
+  metricsPath?: string
 }
 
 export interface Instance {
@@ -35,7 +38,7 @@ export const listLanes = () =>
 export const getWorkload = (id: string) =>
   fetchAuth(`/api/workloads/${id}`).then(r => unwrap<WorkloadDetail>(r))
 
-export const updateWorkload = (id: string, body: { replicas?: number; status?: string }) =>
+export const updateWorkload = (id: string, body: { replicas?: number; status?: string; domain?: string }) =>
   fetchAuth(`/api/workloads/${id}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   }).then(r => unwrap<Workload>(r))

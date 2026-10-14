@@ -12,6 +12,8 @@ package devops
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/url"
 	"strings"
 	"time"
@@ -317,13 +319,21 @@ func errInvalid(field string) error { return fieldErr{field: field} }
 // lane=default 不带后缀；非 default（feature 泳道/集成分支名）追加 `-<lane>` 并清洗为
 // DNS-1035 合法字符（集成分支名含 /，如 integration/20260815-1 → integration-20260815-1），
 // 因该名即 K8s Service 名（DNS-1035）。同 app×env×lane×service 唯一。
-func BaselineWorkloadName(appID, service, lane string) string {
+// BaselineWorkloadName 生成基线 Workload 名（CreateRelease 新建时用，memory+pg 共享，DRY）。
+// default 泳道名含 env 短段（sha256(envID) 前 8 位）：同租户单 K8s ns 下 workload 名全局唯一，
+// 同一应用跨环境（test/prod）基线不含 env 段必同名互撞（2026-10-14 canary promote 实测）；
+// 查找按 (app,env,lane,service) 属性不受名字影响，存量基线名字保留零迁移。非 default 泳道
+// 名不含 env 段（泳道靠 lane 段隔离，规则不变）。
+func BaselineWorkloadName(appID, envID, service, lane string) string {
 	base := appID + "-svc"
 	if service != "" {
 		base = appID + "-" + service + "-svc"
 	}
 	if lane != "" && lane != "default" {
 		base = base + "-" + lane
+	} else if envID != "" {
+		sum := sha256.Sum256([]byte(envID))
+		base = base + "-e" + hex.EncodeToString(sum[:4])
 	}
 	return dns1035(base)
 }

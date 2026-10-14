@@ -65,6 +65,37 @@ func (c InstallConfig) Run() error {
 		"--wait"); err != nil {
 		return fmt.Errorf("helm install: %w", err)
 	}
+	// 包内含观测栈则接着部署（控制面先行：观测栈的 paas-core 抓取 job 依赖控制面已就绪）。
+	// 逻辑不在 Go 里重写——包内脚本是这套栈的唯一部署入口（渲染 → 预检 diff → 应用 → 断言）。
+	if m.Observability != nil {
+		if err := c.installObservability(work, m.Observability); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// installObservability 调包内脚本部署可观测栈：chart 目录与清单目录都用解包后的绝对路径，
+// 故脚本 cwd 无关（离线目标机没有仓库，脚本必须能在任意目录跑）。
+//
+// 其余配置（NS_OBS / DOMAIN_SUFFIX / STORAGE_CLASS / GRAFANA_ADMIN_PASSWORD / 镜像 registry）
+// 由脚本自带默认值 + 调用方导出的环境变量决定——本函数用 env(1) 显式传，不覆盖调用方已导出的值，
+// 唯一例外是 MIRROR：离线环境默认 daocloud 中转站必然不可达，未显式指定时置 none。
+//
+// 固定带 --yes：install 无人值守（常在 CI/无 TTY），脚本预检发现漂移时 read 在 stdin EOF
+// 返回非零、配合 set -e 会中断安装；包内文件均已过 sha256 verify，无需人工确认。
+func (c InstallConfig) installObservability(work string, obs *ObservabilityManifest) error {
+	args := []string{
+		"OBS_CHART_DIR=" + filepath.Join(work, bundleChartsDir),
+		"OBS_MANIFEST_DIR=" + filepath.Join(work, bundleObsDir),
+	}
+	if os.Getenv("MIRROR") == "" {
+		args = append(args, "MIRROR=none")
+	}
+	args = append(args, "bash", filepath.Join(work, obs.Script), "--yes")
+	if _, err := c.Runner.Run("env", args...); err != nil {
+		return fmt.Errorf("部署可观测栈（%s）: %w", obs.Script, err)
+	}
 	return nil
 }
 
@@ -127,6 +158,11 @@ func UnTarGz(bundlePath, dst string) error {
 		}
 		if n > maxExtractBytes {
 			return fmt.Errorf("条目过大（疑似解压炸弹）: %s", hdr.Name)
+		}
+		// 还原权限位（os.Create 恒为 0644，会丢掉包内脚本的执行位）。
+		// 掩 0o777 显式排除 setuid/setgid/sticky——打包方可信（sha256 已校验），但不该由 tar 决定特权位。
+		if err := os.Chmod(out, os.FileMode(hdr.Mode&0o777)); err != nil {
+			return err
 		}
 	}
 	return nil

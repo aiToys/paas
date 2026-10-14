@@ -40,6 +40,11 @@ type WorkloadSpec struct {
 	// host=Domain，path / -> 本工作负载 Service:Port）。空则不建 Ingress（仅集群内 DNS 可达）。
 	// ingressClassName 取 reconciler.IngressClass（env PAAS_INGRESS_CLASS，默认 hermes）。
 	Domain string `json:"domain,omitempty"`
+	// MetricsPath 是业务端口上 Prometheus 指标端点的路径（如 "/metrics"）。非空时 reconciler 给 Pod
+	// 注入 prometheus.io/scrape=true / prometheus.io/path=MetricsPath / prometheus.io/port=<ContainerPort|Port>，
+	// Prometheus 的 kubernetes-pods job 据此自动发现抓取；空则不注入任何注解（应用级 RED 指标不可用）。
+	// 默认空是刻意的：多数应用不暴露 /metrics，无条件注入会让这些 Pod 成为永久 down target。
+	MetricsPath string `json:"metricsPath,omitempty"`
 	// Resources 是容器资源规格（CPU/内存 requests/limits，K8s Quantity 字符串）。
 	// 空字段跳过映射（BestEffort）；生产环境由控制面 handler 强制非空（禁 BestEffort）。
 	Resources ResourceSpec `json:"resources,omitempty"`

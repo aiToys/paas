@@ -3,7 +3,6 @@ import { mount, flushPromises } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
 import RoleSelector from '@/app/components/Selectors/RoleSelector.vue'
 import UserSelector from '@/app/components/Selectors/UserSelector.vue'
-import DeptSelector from '@/app/components/Selectors/DeptSelector.vue'
 
 vi.mock('@/modules/system/role/api', () => ({
   fetchRoleList: vi.fn(async () => ({
@@ -111,16 +110,5 @@ describe('UserSelector', () => {
     })
     await flushPromises()
     expect(fetchUserList.mock.calls[0][0]).toMatchObject({ status: 'active' })
-  })
-})
-
-describe('DeptSelector', () => {
-  beforeEach(() => vi.clearAllMocks())
-
-  it('挂载后加载部门树', async () => {
-    const { fetchDeptTree } = await import('@/modules/system/dept/api')
-    mount(DeptSelector, { global })
-    await flushPromises()
-    expect(fetchDeptTree).toHaveBeenCalled()
   })
 })

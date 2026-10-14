@@ -893,3 +893,66 @@ func TestCanaryPromoteProdRequiresProdWrite(t *testing.T) {
 		t.Fatalf("admin promote 后期望 succeeded，got %s", run.Status)
 	}
 }
+
+// TestRunTriggerStageParams 触发 run 的 stageParams 注入（需求文本载体）：
+// ① 注入 0.request 进 StageRuns[0].Input；② stageParams 把 deploy envId 改到 prod 时仍被 prod 预演拦截。
+func TestRunTriggerStageParams(t *testing.T) {
+	s := NewMemoryStore()
+	ctx := acmeCtxEngine()
+	_, _ = s.CreateTemplate(ctx, PipelineTemplate{
+		ID: "tpl-agent-test", Name: "测试Agent", Kind: KindCI,
+		Stages: []StageDef{
+			{Name: "开发", Type: StageAgent, Params: map[string]any{"request": "默认需求", "runtime": "codex"}},
+			{Name: "构建", Type: StageBuild},
+		},
+	})
+	p, _ := s.CreatePipeline(ctx, Pipeline{
+		Name: "p-agent-t", AppID: "app-at", Kind: KindCI, TemplateID: "tpl-agent-test",
+	})
+	eng := &Engine{Pipelines: s, Runs: s, Builds: fakeBuilder{buildStatus: devops.BuildSuccess, imageID: "img-1"}, Releases: &fakeReleaser{}}
+	h := NewHandler(s, s, s, eng)
+	h.Authorize = allowAll
+
+	req := acmeReq(http.MethodPost, "/api/applications/app-at/pipelines/"+p.ID+"/run",
+		`{"branch":"main","stageParams":{"0.request":"实现取消订单"}}`)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("run 期望 201，got %d body %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data PipelineRun `json:"data"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	// engine 直调不等异步：从 store 读回首 stage Input 断言注入
+	run, _ := s.GetRun(ctx, resp.Data.ID)
+	if got := run.StageRuns[0].Input["request"]; got != "实现取消订单" {
+		t.Errorf("stageParams 注入 0.request = %v, 期望「实现取消订单」（覆盖模板默认）", got)
+	}
+
+	// ② 越权改 prod：stageParams 把 deploy envId 改到 env-prod，developer 应被 allowProdFlow 403
+	_, _ = s.CreateTemplate(ctx, PipelineTemplate{
+		ID: "tpl-sp-prod", Name: "测试SPProd", Kind: KindCD,
+		Stages: []StageDef{{Name: "部署", Type: StageDeploy, Params: map[string]any{
+			"envId": "env-dev", "imageSource": ImageSelected, "imageId": "img-1",
+		}}},
+	})
+	p2, _ := s.CreatePipeline(ctx, Pipeline{
+		Name: "p-sp-prod", AppID: "app-at2", Kind: KindCD, TemplateID: "tpl-sp-prod",
+	})
+	h2 := NewHandler(s, s, s, eng)
+	h2.Authorize = func(r *http.Request, perm string) bool { return perm != PermProdWrite }
+	h2.envType = func(ctx context.Context, envID string) (string, error) {
+		if envID == "env-prod" {
+			return environment.TypeProd, nil
+		}
+		return "test", nil
+	}
+	req2 := acmeReq(http.MethodPost, "/api/applications/app-at2/pipelines/"+p2.ID+"/run",
+		`{"branch":"main","stageParams":{"0.envId":"env-prod"}}`)
+	rec2 := httptest.NewRecorder()
+	h2.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusForbidden {
+		t.Fatalf("stageParams 改 deploy 到 prod 应被 prod 预演拦截（403），got %d body %s", rec2.Code, rec2.Body.String())
+	}
+}

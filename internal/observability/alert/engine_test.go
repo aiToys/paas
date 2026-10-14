@@ -131,6 +131,55 @@ func TestEngineWebhookOnFiring(t *testing.T) {
 	}
 }
 
+// TestEngineWebhookMixedRules：同一轮评估中「无 webhook 规则」与「有 webhook 规则」同时 firing，
+// webhook 必须收到自己的告警（回归锚点：曾用 fired/webhooks 平行切片按索引取值，错位后
+// 租户 A 的告警会 POST 到租户 B 的 webhook——跨租户泄漏 + 自己的漏发，2026-09-25 审计 C1）。
+func TestEngineWebhookMixedRules(t *testing.T) {
+	var mu sync.Mutex
+	var payloads []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&p)
+		mu.Lock()
+		payloads = append(payloads, p)
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	// 规则顺序刻意「无 webhook 在前」：修复前该顺序会让 fired[0]（无 webhook 规则的告警）
+	// 被发给 webhooks[0] 的 URL。两规则各限定 TargetID，确保 fired 首条是 plain 的告警。
+	plain := testRule() // 无 webhook
+	plain.TargetID = "app-plain"
+	hooked := testRule() // 带 webhook
+	hooked.ID = "rule-hook"
+	hooked.Name = "CPU 高（带通知）"
+	hooked.TargetID = "app-hook"
+	hooked.WebhookURL = srv.URL
+	rules := &fakeRules{rules: []observability.AlertRule{plain, hooked}}
+	series := []observability.MetricSeries{
+		{TargetType: observability.TargetApp, TargetID: "app-plain", Name: observability.MetricCPU, Current: 95},
+		{TargetType: observability.TargetApp, TargetID: "app-hook", Name: observability.MetricCPU, Current: 95},
+	}
+	metrics := &fakeMetrics{byTenant: map[string][]observability.MetricSeries{"t-acme": series}}
+	e := NewEngine(rules, metrics, time.Hour, nil, nil)
+
+	e.evaluate(context.Background()) // pending
+	e.evaluate(context.Background()) // 两条同时 firing，仅 hooked 出站
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(payloads) != 1 {
+		t.Fatalf("应恰好 1 次 webhook（仅带 URL 的规则）, got %d", len(payloads))
+	}
+	if payloads[0]["ruleId"] != "rule-hook" {
+		t.Fatalf("webhook 应收到带 URL 规则自己的告警 rule-hook, got %v", payloads[0]["ruleId"])
+	}
+	if payloads[0]["targetId"] != "app-hook" {
+		t.Fatalf("webhook 告警 targetId 应 app-hook（修复前会错位成 app-plain）, got %v", payloads[0]["targetId"])
+	}
+}
+
 // TestEngineDisabledRuleSkipped：disabled 规则不评估。
 func TestEngineDisabledRuleSkipped(t *testing.T) {
 	rule := testRule()
@@ -316,4 +365,45 @@ func TestEvaluateConcurrentListAlertsRace(t *testing.T) {
 		}
 	}
 	<-done
+}
+
+// TestEngineWebhookOnResolved：firing 恢复时 webhook 收到 status=resolved 通知
+// （消费方需知道恢复，否则 firing 通知后只能靠人盯平台确认）。
+func TestEngineWebhookOnResolved(t *testing.T) {
+	var mu sync.Mutex
+	var payloads []map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&p)
+		mu.Lock()
+		payloads = append(payloads, p)
+		mu.Unlock()
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	rule := testRule()
+	rule.WebhookURL = srv.URL
+	rules := &fakeRules{rules: []observability.AlertRule{rule}}
+	metrics := &fakeMetrics{byTenant: map[string][]observability.MetricSeries{}}
+	e := NewEngine(rules, metrics, time.Hour, nil, nil)
+
+	metrics.byTenant["t-acme"] = []observability.MetricSeries{highCPU(95)}
+	e.evaluate(context.Background())
+	e.evaluate(context.Background()) // firing → 第 1 次 webhook
+
+	metrics.byTenant["t-acme"] = []observability.MetricSeries{highCPU(30)}
+	e.evaluate(context.Background()) // resolved → 第 2 次 webhook（status=resolved）
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(payloads) != 2 {
+		t.Fatalf("firing + resolved 应各 1 次 webhook, got %d", len(payloads))
+	}
+	if payloads[0]["status"] != observability.AlertFiring {
+		t.Fatalf("第 1 次应 firing, got %v", payloads[0]["status"])
+	}
+	if payloads[1]["status"] != observability.AlertResolved {
+		t.Fatalf("第 2 次应 resolved, got %v", payloads[1]["status"])
+	}
 }

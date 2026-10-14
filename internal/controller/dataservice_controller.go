@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -22,6 +23,11 @@ import (
 	"github.com/aitoys/paas/internal/dataservice"
 	"github.com/aitoys/paas/pkg/labels"
 )
+
+// exporterPort 是 exporter sidecar 的统一监听端口（容器端口声明 + 各 exporter 启动参数对齐）。
+// 不用业界默认的 9100：本 dev 集群物理网对 TCP 9100（HP JetDirect 打印端口，企业网常屏蔽）
+// 做了端口级阻断，跨节点抓取全部超时；9200 经实测跨节点可达（2026-09-24 端口矩阵验证）。
+const exporterPort = 9200
 
 // engineImage 按 Kind+Engine 选默认容器镜像。
 // 6 类真实引擎（db=mysql/postgres、cache=redis/valkey、mq=nats、storage=minio、vector=qdrant、search=meilisearch）返非空镜像；
@@ -93,6 +99,29 @@ func dataServiceLabels(d *v1alpha1.DataService) map[string]string {
 		labels.KeyTenant:               d.Spec.TenantID,
 		labels.KeyDataservice:          d.Name,
 		labels.KeyKind:                 d.Spec.Kind,
+	}
+}
+
+// builtinMetricsAnnotations 给内置 /metrics 的引擎（qdrant/minio）注入 prometheus.io 注解，
+// 由 chart 内置 kubernetes-pods job 抓取（keep prometheus.io/scrape=true 注解的 Pod，
+// 经 labelmap 透传 paas_aitoys_dataservice/tenant label，多租户过滤与 exporter 指标同构）。
+// meilisearch 不在此列：/metrics 需 --experimental-metrics 启动参数 + master key 鉴权，
+// 注解方式带不了 Authorization header，须 exporter sidecar（留后续）。
+func builtinMetricsAnnotations(d *v1alpha1.DataService) map[string]string {
+	var path string
+	switch d.Spec.Kind {
+	case "vector": // qdrant：REST 端口 6333 同端口暴露 /metrics
+		path = "/metrics"
+	case "storage": // minio：指标端点非根路径，且需 MINIO_PROMETHEUS_AUTH_TYPE=public（containerFor 注入）
+		path = "/minio/v2/metrics/cluster"
+	default:
+		return nil
+	}
+	port := dataservice.EnginePort(d.Spec.Kind, d.Spec.Engine)
+	return map[string]string{
+		"prometheus.io/scrape": "true",
+		"prometheus.io/port":   strconv.Itoa(int(port)),
+		"prometheus.io/path":   path,
 	}
 }
 
@@ -219,6 +248,9 @@ func containerFor(d *v1alpha1.DataService, image string) corev1.Container {
 		c.Env = []corev1.EnvVar{
 			envFrom("MINIO_ROOT_USER", "accessKey"),
 			envFrom("MINIO_ROOT_PASSWORD", "secretKey"),
+			// 内置 /minio/v2/metrics/cluster 默认要求 bearer 认证（Prometheus 注解方式带不了
+			// header），public 关掉抓取认证让 kubernetes-pods job 直抓（2026-09-25 采集补齐）。
+			{Name: "MINIO_PROMETHEUS_AUTH_TYPE", Value: "public"},
 		}
 	case "vector": // qdrant：API key 鉴权（默认镜像 entrypoint 即起服务，无需 Args）
 		c.Env = []corev1.EnvVar{envFrom("QDRANT__SERVICE_API_KEY", "api_key")}
@@ -263,7 +295,7 @@ func exporterImage(kind, engine, registry string) string {
 }
 
 // exporterSidecar 按 Kind+Engine 构造 exporter sidecar 容器（无则返 nil）。
-// 凭证复用主容器 Secret（secretKeyRef，不重新生成）；sidecar 名固定 exporter，端口 9100。
+// 凭证复用主容器 Secret（secretKeyRef，不重新生成）；sidecar 名固定 exporter，端口 exporterPort。
 // exporter 经 localhost 连主容器（同 Pod），故凭证 env 既供 exporter 连库又供其自身读取。
 func exporterSidecar(d *v1alpha1.DataService, registry string) *corev1.Container {
 	img := exporterImage(d.Spec.Kind, d.Spec.Engine, registry)
@@ -282,7 +314,7 @@ func exporterSidecar(d *v1alpha1.DataService, registry string) *corev1.Container
 		Name:            "exporter",
 		Image:           img,
 		ImagePullPolicy: corev1.PullAlways,
-		Ports:           []corev1.ContainerPort{{Name: "exporter", ContainerPort: 9100}},
+		Ports:           []corev1.ContainerPort{{Name: "exporter", ContainerPort: exporterPort}},
 		Resources:       defaultResources(),
 	}
 	switch d.Spec.Kind {
@@ -296,28 +328,28 @@ func exporterSidecar(d *v1alpha1.DataService, registry string) *corev1.Container
 				envFrom("POSTGRES_DB", "database"),
 				{Name: "DATA_SOURCE_NAME", Value: fmt.Sprintf("postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@localhost:%d/$(POSTGRES_DB)?sslmode=disable", port)},
 			}
-			// postgres-exporter 默认监听 9187，强制 9100 与声明端口 + scrape job 对齐。
-			c.Args = []string{"--web.listen-address=:9100"}
+			// postgres-exporter 默认监听 9187，强制 exporterPort 与声明端口 + scrape job 对齐。
+			c.Args = []string{"--web.listen-address=:" + strconv.Itoa(exporterPort)}
 		} else { // mysql
 			c.Env = []corev1.EnvVar{
 				envFrom("MYSQL_ROOT_PASSWORD", "password"),
 				{Name: "DATA_SOURCE_NAME", Value: fmt.Sprintf("root:$(MYSQL_ROOT_PASSWORD)@(localhost:%d)/", port)},
 			}
-			// mysqld-exporter 默认 9104，强制 9100 对齐。
-			c.Args = []string{"--web.listen-address=:9100"}
+			// mysqld-exporter 默认 9104，强制 exporterPort 对齐。
+			c.Args = []string{"--web.listen-address=:" + strconv.Itoa(exporterPort)}
 		}
 	case "cache": // redis/valkey
 		c.Env = []corev1.EnvVar{
 			{Name: "REDIS_ADDR", Value: fmt.Sprintf("redis://localhost:%d", port)},
 			envFrom("REDIS_PASSWORD", "password"),
 		}
-		// redis_exporter 默认 9121，强制 9100 对齐。
-		c.Args = []string{"--web.listen-address=:9100"}
+		// redis_exporter 默认 9121，强制 exporterPort 对齐。
+		c.Args = []string{"--web.listen-address=:" + strconv.Itoa(exporterPort)}
 	case "mq": // nats exporter：连 nats 的 HTTP 监控端口（默认 8222）采集 varz/connz。
 		// 用法：prometheus-nats-exporter <flags> url（server URL 是末尾位置参数）。
-		// -port 9100 对齐声明端口 + scrape job；-varz/-connz/-serverz 指定采集端点。
+		// -port exporterPort 对齐声明端口 + scrape job；-varz/-connz/-serverz 指定采集端点。
 		// 监控端口由主容器 -m 8222 开启。
-		c.Args = []string{"-port", "9100", "-varz", "-connz", "-serverz", "http://localhost:8222"}
+		c.Args = []string{"-port", strconv.Itoa(exporterPort), "-varz", "-connz", "-serverz", "http://localhost:8222"}
 	}
 	return c
 }
@@ -326,6 +358,11 @@ func exporterSidecar(d *v1alpha1.DataService, registry string) *corev1.Container
 type DataServiceReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+	// PlatformExists 平台侧数据服务存在性判定（依赖倒置）：孤儿 CR 回收用——CR 在平台侧
+	// 已不存在时周期级联删除（防「平台删了 K8s 残留」的僵尸 STS 白耗资源、污染监控数据，
+	// 2026-09-25 对账实测 9 个孤儿后补齐）。nil 则不回收（dev/无 stores 场景，不误删）。
+	// 桥接在 cmd/core，与 WorkloadReconciler.Platform 同款延迟注入。
+	PlatformExists PlatformExistsFunc
 }
 
 // Reconcile 期望->实际：取 CRD -> 解析镜像 -> 无镜像跳过(failed) -> 建 Secret+headless/ClusterIP Svc+STS -> 回写 status。
@@ -459,6 +496,9 @@ func (r *DataServiceReconciler) applyStatefulSet(ctx context.Context, d *v1alpha
 			Spec:       corev1.PodSpec{Containers: containers},
 		}
 		setDisplayName(&tmpl.ObjectMeta, d.Spec.Name) // Pod 继承注解，kubectl get pod -o wide 可见
+		for k, v := range builtinMetricsAnnotations(d) {
+			tmpl.Annotations[k] = v // 内置 metrics 引擎（qdrant/minio）注入抓取注解
+		}
 		sts.Spec.Template = tmpl
 		return controllerutil.SetControllerReference(d, sts, r.Scheme)
 	})

@@ -59,6 +59,9 @@ type Handler struct {
 	discoverer  InstanceDiscoverer
 	Authorize   func(r *http.Request, perm string) bool
 	auditLog    AuditRecorder
+	// domainSuffix 集群对外域名后缀（env PAAS_DOMAIN_SUFFIX，dev=k8s.dd）：一键暴露自动域名
+	// `<应用名>-<服务名>.<suffix>` 的后缀真源；空=未配置（前端降级为手工建路由）。
+	domainSuffix string
 	// CallerUserID 取调用者用户 ID（main.go 注入 gateway.UserIDFrom，依赖倒置避免 governance -> gateway import）。
 	CallerUserID func(ctx context.Context) string
 }
@@ -83,6 +86,11 @@ type AuditRecorder interface {
 // WithAudit 注入审计记录器（服务拓扑变更是高敏感操作，写操作全记：service_/route_/breaker_/instance_ 前缀）。
 func WithAudit(a AuditRecorder) HandlerOpt {
 	return func(h *Handler) { h.auditLog = a }
+}
+
+// WithDomainSuffix 注入集群对外域名后缀（一键暴露自动域名用）。
+func WithDomainSuffix(s string) HandlerOpt {
+	return func(h *Handler) { h.domainSuffix = s }
 }
 
 // audit best-effort 记审计（失败仅日志，不阻断主流程；与 admin_handler.recordAudit 同款）。
@@ -153,6 +161,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveBreakerCollection(w, r)
 	case strings.HasPrefix(path, "/api/breakers/"):
 		h.serveBreakerItem(w, r)
+	case path == "/api/governance/domain":
+		// 一键暴露的域名后缀查询（登录即可读，无租户数据；未配置返空由前端降级）。
+		if r.Method != http.MethodGet {
+			httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		httputil.WriteData(w, map[string]string{"suffix": h.domainSuffix})
 	default:
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}

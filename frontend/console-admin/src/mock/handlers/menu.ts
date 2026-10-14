@@ -143,6 +143,12 @@ export const ALL_MENUS = [
             name: 'pipeline-template',
             component: 'pipeline-template/views/List',
             meta: { title: '流水线模板', icon: 'Stopwatch', showMenu: true }
+          },
+          {
+            path: '/resources/agent-runs',
+            name: 'resAgentRuns',
+            component: 'resources/views/AgentRuns',
+            meta: { title: 'Agent 运行', icon: 'Cpu', showMenu: true }
           }
         ]
       },

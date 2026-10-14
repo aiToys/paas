@@ -279,6 +279,14 @@ const routes: RouteRecordRaw[] = [
     meta: { title: 'Playground' },
   },
   {
+    // Agent 运行详情（agentrun 观测）：列表在 DevOps「Agent 运行」tab，此处独立全屏详情
+    // （对齐 /devops/runs/:runId 模式；name 为 agentrun 侧 run 名，URL 编码）。
+    path: '/devops/agent-runs/:name',
+    name: 'agent-run-detail',
+    component: () => import('@/views/AgentRunDetail.vue'),
+    meta: { title: 'Agent 运行详情' },
+  },
+  {
     path: '/settings/api-keys',
     name: 'api-keys',
     component: () => import('@/views/ApiKeys.vue'),
@@ -322,6 +330,25 @@ router.beforeEach(async (to) => {
     return { path: '/login', query: { redirect: to.fullPath } }
   }
   return true
+})
+
+// 部署后旧页面动态 chunk 加载失败自愈（2026-10-13 实测：新镜像上线后未刷新的浏览器 SPA 内
+// 跳转拉旧 hash chunk 404 → 路由组件加载失败页面空白，手动刷新即恢复）。捕获后整页 reload
+// 拿新 index.html 引用的新 chunk；sessionStorage 标记防刷新后仍失败时的死循环。
+// "Unexpected token" 兜底：chunk 请求被 SPA fallback 吞成 200+HTML 时浏览器按 JS 执行
+// 抛 SyntaxError（后端已修 assets 404 直通，此分支防其他反代形态复发）。
+router.onError((error) => {
+  const chunkFailed = /Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module|Unexpected token/i
+    .test(error.message)
+  if (!chunkFailed) return
+  const key = 'paas-chunk-reloaded'
+  if (sessionStorage.getItem(key)) return // 已刷过仍失败：不再刷，交由错误页/用户处理
+  sessionStorage.setItem(key, '1')
+  window.location.reload()
+})
+// 导航成功后清除标记（下次部署的失效窗口重新可用）
+router.afterEach(() => {
+  sessionStorage.removeItem('paas-chunk-reloaded')
 })
 
 export default router

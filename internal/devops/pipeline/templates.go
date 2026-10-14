@@ -70,6 +70,51 @@ func BuiltinTemplates() []PipelineTemplate {
 				}},
 			},
 		},
+		// AI 研发一条龙（agentrun 执行域接入，spec 2026-10-11；2026-10-13 v2 全链）：
+		// 需求→AI编码→AI审查→构建→测试泳道→冒烟→上线审批→金丝雀→发布→合主干。
+		// 编排权归 paas：多个 agent stage 在 paas 侧串联（审查经 branchSource=priorAgent
+		// 在 AI 产出分支上工作，非 agentrun AgentPipeline 嵌套）。
+		// 段裁剪（agent-ship/run 端点）：AI 开发恒留，review/ship/release 三段按需勾选；
+		// 勾选段映射 agentShipSegments（改名需同步）。lane 固定 agent-ship（单实例串行下
+		// 复用=「AI 交付验证泳道」语义，不随 run 变）。v1 的「合入审批」去掉：测试部署
+		// 无需卡点，release 段自带上线审批保命（门禁语义不降级）。
+		{
+			ID: "tpl-agent-ship", Name: "AI 研发交付流水线", Kind: KindAgent, Builtin: true, Version: 2,
+			Description: "需求→AI编码→AI审查→构建→测试泳道部署→冒烟→上线审批→金丝雀→发布→合主干（一段龙按需勾选，产出分支自动注册 Change）",
+			Stages: []StageDef{
+				{Name: "AI 开发", Type: StageAgent, Params: map[string]any{
+					"request": "在此填写需求", "runtime": "codex", "registerChange": "true", "deadlineSeconds": 1800,
+				}},
+				{Name: "AI 代码审查", Type: StageAgent, Params: map[string]any{
+					"stage": "review", "runtime": "codex", "branchSource": "priorAgent", "deadlineSeconds": 900,
+					"request": "审查上一阶段 AI 产出的变更：正确性、风险、测试覆盖，给出结论与建议",
+				}},
+				{Name: "构建", Type: StageBuild, Params: map[string]any{"branchSource": "priorAgent"}},
+				{Name: "部署到测试泳道", Type: StageDeploy, Params: map[string]any{
+					"envId": "{{app.env.test}}", "lane": "agent-ship", "imageSource": ImagePriorBuild, "strategy": "rolling",
+				}},
+				{Name: "冒烟联调", Type: StageTest, Params: map[string]any{"mode": TestSmoke, "path": "/healthz"}},
+				{Name: "上线审批", Type: StageApprove, Params: map[string]any{"message": "确认 AI 产出发布上线（参考 AI 审查结论与测试泳道验证结果）"}},
+				{Name: "金丝雀验证", Type: StageCanary, Params: map[string]any{
+					"envId": "{{app.env.prod}}", "imageSource": ImageLatestReady,
+				}},
+				{Name: "发布版本", Type: StageRelease, Params: map[string]any{
+					"versionStrategy": "auto-increment", // git tag + Image.version，不部署
+				}},
+				{Name: "合并主干", Type: StageBaseline, Params: map[string]any{
+					"mainBranch": "main", "mergeFrom": "priorAgent", "mergeMode": "squash",
+				}},
+			},
+		},
+		{
+			ID: "tpl-agent-review", Name: "AI 代码审查", Kind: KindAgent, Builtin: true, Version: 1,
+			Description: "对当前分支发起 AI 审查（产出结论与建议，不部署）",
+			Stages: []StageDef{
+				{Name: "AI 审查", Type: StageAgent, Params: map[string]any{
+					"stage": "review", "runtime": "codex", "request": "审查当前分支变更", "deadlineSeconds": 900,
+				}},
+			},
+		},
 	}
 }
 

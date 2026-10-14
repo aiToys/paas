@@ -79,6 +79,21 @@ func safeShort(s string, n int) string {
 	return s[:n] // 取前 n 位（commit 短哈希，与历史 mock 行为一致）
 }
 
+// sanitizeTagSeg 分支名转 docker tag 合法段（tag 字符集 [A-Za-z0-9_.-]，docker 参考格式约束）。
+// 分支惯例含 `/`（feat/x、integration/x）——非法字符逐个替换为 -，否则 docker build -t 直接
+// 报 invalid reference format（2026-10-12 批次集成分支 integration/* 构建实测）。
+func sanitizeTagSeg(branch string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '_', r == '.', r == '-':
+			return r
+		default:
+			return '-'
+		}
+	}, branch)
+}
+
 func mockBuildLog(tag string) string {
 	return fmt.Sprintf(`[mock] clone repository
 [mock] resolve commit
@@ -125,7 +140,7 @@ func buildTag(p Params) string {
 	if tagCommit == "" {
 		tagCommit = p.BuildID
 	}
-	tag := p.Branch + "-" + safeShort(tagCommit, 8)
+	tag := sanitizeTagSeg(p.Branch) + "-" + safeShort(tagCommit, 8)
 	if len(p.BuildArgs) > 0 {
 		tag += "-" + argsHash(p.BuildArgs)
 	}

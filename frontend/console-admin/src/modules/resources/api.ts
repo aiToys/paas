@@ -213,6 +213,52 @@ export const fetchPipelineRunList = (params: ResSearchRequest) =>
     )
   )
 
+// Agent 运行（agentrun 执行域全量总览）：上游 ns=agent 单一命名空间无租户维度，
+// source 按名称前缀归类（auto-review/auto-test=agentrun 侧 webhook 自动触发，paas=委派/agent stage）。
+export interface AdminAgentRun {
+  id: string // = name（useCrud 列表主键约定）
+  name: string
+  runtime: string
+  stage: string
+  phase: string // Pending|Running|Succeeded|Failed
+  verdict?: string
+  tokens: number
+  podName?: string
+  createdAt?: string
+  age?: string
+  request?: string // 服务端截断 200 字
+  summary?: string
+  error?: string
+  source: 'auto-review' | 'auto-test' | 'paas'
+  workspaceFrom?: string
+  producedBranch?: string
+}
+export interface AdminAgentRunStats {
+  total: number
+  succeeded: number
+  failed: number
+  running: number
+  pending: number
+  tokensTotal: number
+  tokensAuto: number
+  tokensPaas: number
+}
+export interface AdminAgentRunOverview {
+  runs: AdminAgentRun[]
+  stats: AdminAgentRunStats
+}
+export const fetchAgentRunList = (
+  params: ResSearchRequest,
+  onOverview?: (ov: AdminAgentRunOverview) => void
+) =>
+  api.get<AdminAgentRunOverview>('/api/admin/agentrun/runs').then((ov) => {
+    onOverview?.(ov) // 汇总卡片用全量统计（不受表格过滤影响）
+    const runs = ov.runs.map((r) => ({ ...r, id: r.name }))
+    return filterPage(runs, params, (r) =>
+      has(r.name, params.keyword ?? '') || has(r.stage, params.keyword ?? '') ||
+      has(r.phase, params.keyword ?? '') || has(r.source, params.keyword ?? ''))
+  })
+
 // -- 配置中心 --
 export interface AdminNamespace {
   id: string

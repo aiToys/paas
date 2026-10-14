@@ -70,7 +70,7 @@ pnpm docs:preview   # VitePress 文档站预览
 
 9. **Layout 配置中心（M7-B）**：`@/app/stores/layout` 提供 7 个持久化字段（showTagsView / showBreadcrumb / showLogo / showFooter / primaryColor / componentSize / locale），由 `layout/components/SettingsDrawer.vue` 暴露给用户。Layout 组件（TagsView/Footer/Breadcrumb/IconLogo）通过 `v-if` 消费 store；main.ts watch `primaryColor` 调 `lib/theme/colors` 的 `applyPrimaryColor`，按 Element Plus 官方 SCSS mix 语义生成主色 + light-3/5/7/8/9 + dark-2 6 阶派生色写入 `:root`；App.vue 用 `el-config-provider` 注入 `componentSize`。
 
-10. **业务页面标准（M7-C）**：所有 List 页面必须用 `SearchTable` + `useCrud` + `PageContainer` + `FormDrawer` 四件套。FormDrawer 支持 `mode`（add/edit/view）+ `dependencies`（声明式显隐联动）+ `rules`（field-level 校验）+ `password`/`treeSelect` 字段类型。复杂联动（如权限分配 el-tree）用独立 drawer，不塞进 FormDrawer。FormDrawer 提供 `field-${prop}` 插槽，可嵌入任意自定义控件（含下述 Selector 族）。
+10. **业务页面标准（M7-C）**：所有 List 页面必须用 `SearchTable` + `useCrud` + `PageContainer` + `FormDrawer` 四件套。FormDrawer 支持 `mode`（add/edit/view）+ `dependencies`（声明式显隐联动）+ `rules`（field-level 校验）+ `password`/`treeSelect` 字段类型。复杂联动（如权限分配 el-tree）用独立 drawer，不塞进 FormDrawer。FormDrawer 提供 `field-${prop}` 插槽，可嵌入任意自定义控件（含下述 Selector 族）。**FormDrawer 动态组件映射必须用显式 import 的组件对象，禁止 'el-select' 等字符串**——EP 按需引入（unplugin 编译期解析）下运行时字符串解析不到真实组件，el-option 因缺 el-select 祖先直接 throwError（2026-10-13 实测创建用户整页崩，回归锁 `FormDrawer/index.spec.ts`）。
 
 10b. **Selector 选择器族**：`@/app/components` 导出 `RoleSelector` / `UserSelector` / `DeptSelector`，封装角色/用户/部门的高频选择场景。统一 props：`modelValue` / `multiple` / `disabled` / `clearable` / `placeholder` / `onlyActive`。UserSelector 支持远程搜索（300ms 防抖）；DeptSelector 为 el-tree-select。选部门/角色/用户外键时优先用 Selector，禁止在业务页手动 `fetchXxxList` + 内联 el-select。
 

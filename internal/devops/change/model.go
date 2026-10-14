@@ -51,7 +51,8 @@ type Change struct {
 	BaseBranch    string    `json:"baseBranch"`
 	Status        string    `json:"status"` // open|integrated|tested|released|reverted|abandoned
 	BatchID       string    `json:"batchId"`
-	ConflictWith  string    `json:"conflictWith"` // integrate 冲突时记前一个变更 ID
+	ConflictWith  string    `json:"conflictWith"`           // integrate 冲突时记前一个变更 ID
+	AgentRunName  string    `json:"agentRunName,omitempty"` // 委派模式回写：agentrun run 名（变更页状态块精确查询用，契约 v2 §5.3）
 	CreatedBy     string    `json:"createdBy,omitempty"`
 	CreatedAt     time.Time `json:"createdAt"`
 	UpdatedAt     time.Time `json:"updatedAt"`

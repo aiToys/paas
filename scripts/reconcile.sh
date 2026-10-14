@@ -12,7 +12,8 @@
 #
 # 输出分节：[A] 孤儿引用  [B] 幽灵记录  [C] 配额漂移  [D] 重复记录  [E] 规模概览
 #           [F] 幽灵 workload（DB 有行无 CR，drift 补投影失效）  [G] 孤儿 CR（CR 有 DB 无行，OrphanGC 失效）
-# 退出码：发现需处理的不一致（A1/B1/C1/D1/F1/G1）时非零，可挂 CI。F/G 依赖 kubectl，不可达时跳过不算失败。
+#           [H] dataservice 孤儿/幽灵（CR↔DB 双向，ds OrphanGC 失效探针）
+# 退出码：发现需处理的不一致（A1/B1/C1/D1/F1/G1/H1）时非零，可挂 CI。F/G/H 依赖 kubectl，不可达时跳过不算失败。
 
 set -u
 REG="${REG:-http://192.168.41.122:30050}"
@@ -99,11 +100,26 @@ if kubectl get workloads.core.aitoys.github.com -A -o jsonpath='{range .items[*]
   comm -13 "$TMP/wl_all.txt" "$TMP/cr_norm.txt" | while IFS='|' read -r tid wid; do
     echo "  [G1-孤儿CR] ${tid}/${wid}（CR 有、DB 无——OrphanGC 未回收，僵尸资源）"
   done
+
+  # 数据服务同款对账（2026-09-25 立项：dataservice 曾无 OrphanGC，一次对账实测 9 个孤儿
+  # CR+STS 白跑 Pod 并污染监控数据；平台侧已补 OrphanGC，本节为其失效探针）。
+  if kubectl get dataservices.core.aitoys.github.com -A -o jsonpath='{range .items[*]}{.metadata.namespace}{"|"}{.metadata.name}{"\n"}{end}' > "$TMP/ds_cr.txt" 2>/dev/null; then
+    sed 's/^paas-//' "$TMP/ds_cr.txt" | grep . | sort > "$TMP/ds_cr_norm.txt"
+    $PG "select tenant_id, id from data_services order by tenant_id, id" 2>/dev/null | grep . | sort > "$TMP/ds_all.txt"
+    echo "===== [H] 孤儿 dataservice：K8s 有 DataService CR 但 DB 无行 ====="
+    # CR 名即平台数据服务 ID（ds-<ts>-<n>），双向对账：H1=孤儿 CR（OrphanGC 失效）；H2=幽灵（drift 类，暂无补投影机制，提示性）。
+    comm -13 "$TMP/ds_all.txt" "$TMP/ds_cr_norm.txt" | while IFS='|' read -r tid did; do
+      echo "  [H1-孤儿ds] ${tid}/${did}（CR 有、DB 无——ds OrphanGC 未回收，STS 白耗资源）"
+    done
+    comm -23 "$TMP/ds_all.txt" "$TMP/ds_cr_norm.txt" | while IFS='|' read -r tid did; do
+      echo "  [H2-幽灵ds] ${tid}/${did}（DB 有、CR 无——期望状态未投影）"
+    done
+  fi
 else
-  echo "===== [F]/[G] K8s 实态对账：跳过（kubectl 不可达） ====="
+  echo "===== [F]/[G]/[H] K8s 实态对账：跳过（kubectl 不可达） ====="
 fi
 
-# 退出码：A1/B1/C1/D1/F1/G1 任一存在即非零（子 shell FAIL 不传递，改 grep 结果文件）。
-grep -qE "\[(A1|B1|C1|D1|F1|G1)-" "$OUT" && { echo; echo "==> 对账不通过（存在 A1/B1/C1/D1/F1/G1）"; exit 1; }
+# 退出码：A1/B1/C1/D1/F1/G1/H1 任一存在即非零（子 shell FAIL 不传递，改 grep 结果文件）。
+grep -qE "\[(A1|B1|C1|D1|F1|G1|H1)-" "$OUT" && { echo; echo "==> 对账不通过（存在 A1/B1/C1/D1/F1/G1/H1）"; exit 1; }
 echo; echo "==> 对账通过"
 exit 0

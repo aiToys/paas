@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { formatDateTime } from '@/utils/format'
-import { statusOf as statusOfCore, tagTypeToCls, WORKLOAD_STATUS, POD_STATUS } from '@/composables/useStatus'
+import { statusOf as statusOfCore, tagTypeToCls, WORKLOAD_STATUS } from '@/composables/useStatus'
 // 工作负载视图：跨应用列表，按类型分 Tab（服务/Job/CronJob）。
 // 数据来自 /api/workloads?type=；扩缩容 PUT、删除 DELETE。换 Key（租户）自动重载。
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
@@ -8,10 +8,10 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import Icon from '@/components/Icon.vue'
 import EmptyState from '@/components/EmptyState.vue'
+import WorkloadDetailDrawer from '@/components/WorkloadDetailDrawer.vue'
 import { fetchAuth, apiError } from '@/api'
 import {
-  listWorkloads, updateWorkload, updateSchedule, deleteWorkload,
-  getWorkload, getWorkloadLogs, createWorkload,
+  listWorkloads, updateWorkload, updateSchedule, deleteWorkload, createWorkload,
   type Workload, type WorkloadDetail,
 } from '@/api/workload'
 import { useEnvStore } from '@/stores/env'
@@ -182,65 +182,14 @@ function switchType(key: string) {
   load()
 }
 
-// —— 工作负载详情（运行实例 + 日志）——
-// GET /api/workloads/{id} 返回 {workload, instances}；Job/CronJob 的每次执行对应一个 Pod（实例），
-// 点「详情」查看实例列表（状态/重启/节点），每行可查运行日志（GET /api/workloads/{id}/logs?pod=）。
+// —— 工作负载详情（运行实例 + 日志）：抽屉组件单一真源（WorkloadDetailDrawer）——
+// GET /api/workloads/{id} 返回 {workload, instances}；Job/CronJob 的每次执行对应一个 Pod（实例）。
 const showDetail = ref(false)
-const detailLoading = ref(false)
-const detail = ref<WorkloadDetail | null>(null)
+const detailWlId = ref('')
 
-// 日志查看（按实例/Pod）
-const showLogs = ref(false)
-const logsLoading = ref(false)
-const logsPod = ref('')
-const logsText = ref('')
-const logsPrevious = ref(false)
-
-function podStatusOf(s: string): { label: string; cls: string } {
-  const m = statusOfCore(POD_STATUS, s)
-  return { label: m.label, cls: tagTypeToCls(m.type) }
-}
-const fmtTime = (t?: string) => {
-  if (!t) return '-'
-  const d = new Date(t)
-  return Number.isNaN(d.getTime()) ? '-' : formatDateTime(d)
-}
-
-async function openDetail(w: Workload) {
+function openDetail(w: Workload) {
+  detailWlId.value = w.id
   showDetail.value = true
-  detailLoading.value = true
-  detail.value = null
-  try {
-    detail.value = await getWorkload(w.id)
-  } catch (e) {
-    ElMessage.error(apiError(e, '加载详情失败'))
-  } finally {
-    detailLoading.value = false
-  }
-}
-
-async function viewLogs(pod: string) {
-  showLogs.value = true
-  logsLoading.value = true
-  logsPod.value = pod
-  logsText.value = ''
-  try {
-    const params: Record<string, string> = { pod, tail: '1000' }
-    if (logsPrevious.value) params.previous = 'true'
-    const resp = await getWorkloadLogs(detail.value?.workload.id ?? '', params)
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    logsText.value = await resp.text()
-    if (!logsText.value) logsText.value = '（暂无日志输出）'
-  } catch (e) {
-    logsText.value = apiError(e, '日志加载失败') + '\n（非集群部署或 Pod 已清理时不可用）'
-  } finally {
-    logsLoading.value = false
-  }
-}
-
-async function togglePrevious() {
-  logsPrevious.value = !logsPrevious.value
-  if (logsPod.value) await viewLogs(logsPod.value)
 }
 
 // 创建工作负载：跨应用视图需选应用 + 环境；提交 POST /api/applications/{appId}/workloads。
@@ -254,6 +203,8 @@ const createForm = ref({
   image: '',
   replicas: 1,
   port: 0,
+  // 指标端点路径：留空 = 平台不注入 prometheus.io/scrape 注解（默认，避免无指标端点的 Pod 变永久 down target）
+  metricsPath: '',
   schedule: '',
 })
 
@@ -291,6 +242,7 @@ function openCreate() {
     image: '',
     replicas: activeType.value === 'service' ? 1 : 1,
     port: activeType.value === 'service' ? 80 : 0,
+    metricsPath: '',
     schedule: activeType.value === 'cronjob' ? '*/5 * * * *' : '',
   }
   imageRef.value = ''
@@ -305,33 +257,26 @@ function validCron(s: string): boolean {
 }
 
 // 创建后部署进度反馈（对标 Vercel Building→Ready）：自动打开详情抽屉，
-// 轮询副本就绪，就绪/失败给终态提示，抽屉关闭即停。
-let deployWatchTimer: number | undefined
-async function watchDeploy(id: string) {
+// 抽屉以 pollMs=2000 周期刷新，就绪/失败给终态提示并停轮询，抽屉关闭即停（R3-6）。
+// 轮询本体在 WorkloadDetailDrawer 组件内（页面不可见跳过、关闭/卸载自动清理）。
+const deploying = ref(false)
+function watchDeploy(id: string) {
+  detailWlId.value = id
+  deploying.value = true
   showDetail.value = true
-  detailLoading.value = true
-  detail.value = null
-  if (deployWatchTimer) window.clearInterval(deployWatchTimer)
-  deployWatchTimer = window.setInterval(async () => {
-    if (document.hidden) return
-    try {
-      const d = await getWorkload(id)
-      detail.value = d
-      detailLoading.value = false
-      const w = d.workload
-      if (w.status === 'running' && w.ready >= w.replicas) {
-        window.clearInterval(deployWatchTimer); deployWatchTimer = undefined
-        ElMessage.success(`「${w.name}」已就绪（${w.ready}/${w.replicas}）`)
-      } else if (w.status === 'failed') {
-        window.clearInterval(deployWatchTimer); deployWatchTimer = undefined
-        ElMessage.error(`「${w.name}」部署失败`)
-      }
-    } catch { /* 短暂网络错误继续轮询 */ }
-  }, 2000)
 }
-// 停部署观察轮询：抽屉关闭/组件卸载均停（R3-6：pending/deploying 卡住时此前会永久轮询）。
-function stopDeployWatch() { if (deployWatchTimer) { window.clearInterval(deployWatchTimer); deployWatchTimer = undefined } }
-onUnmounted(stopDeployWatch)
+function stopDeployWatch() { deploying.value = false }
+function onDetail(d: WorkloadDetail) {
+  if (!deploying.value) return
+  const w = d.workload
+  if (w.status === 'running' && w.ready >= w.replicas) {
+    deploying.value = false
+    ElMessage.success(`「${w.name}」已就绪（${w.ready}/${w.replicas}）`)
+  } else if (w.status === 'failed') {
+    deploying.value = false
+    ElMessage.error(`「${w.name}」部署失败`)
+  }
+}
 
 async function submitCreate() {
   const f = createForm.value
@@ -352,6 +297,8 @@ async function submitCreate() {
     envId: activeEnv.value?.id || '',
   }
   if (activeType.value === 'cronjob') body.schedule = f.schedule.trim()
+  // 指标路径：仅 service 且非空才传（空串等同不声明；后端 Validate 要求以 / 开头）
+  if (activeType.value === 'service' && f.metricsPath.trim()) body.metricsPath = f.metricsPath.trim()
   submitting.value = true
   try {
     const created = await createWorkload(f.appId, body as Partial<Workload>)
@@ -538,6 +485,10 @@ v-if="!imageOptions.length || !imageRef" v-model="createForm.image"
           <el-input-number v-model="createForm.port" :min="0" :max="65535" />
           <span class="hint">0 = 不建 Service</span>
         </el-form-item>
+        <el-form-item v-if="activeType === 'service'" label="指标路径">
+          <el-input v-model="createForm.metricsPath" placeholder="/metrics" />
+          <span class="hint">留空 = 不采集（应用无指标端点时留空）</span>
+        </el-form-item>
         <el-form-item v-if="activeType === 'cronjob'" label="调度" required>
           <el-input v-model="createForm.schedule" placeholder="*/5 * * * *" />
         </el-form-item>
@@ -548,78 +499,14 @@ v-if="!imageOptions.length || !imageRef" v-model="createForm.image"
       </template>
     </el-dialog>
 
-    <!-- 工作负载详情：期望态 + 运行实例（Pod 级）+ 实例日志 -->
-    <el-drawer v-model="showDetail" title="工作负载详情" size="640px" direction="rtl" @close="stopDeployWatch">
-      <div v-loading="detailLoading">
-        <template v-if="detail">
-          <div class="detail-info">
-            <div class="info-row"><span class="k">名称</span><span class="v">{{ detail.workload.name }}</span></div>
-            <div class="info-row"><span class="k">ID</span><span class="v mono">{{ detail.workload.id }}</span></div>
-            <div class="info-row"><span class="k">镜像</span><span class="v mono">{{ detail.workload.image }}</span></div>
-            <div class="info-row">
-              <span class="k">副本</span>
-              <span class="v mono">{{ detail.workload.ready }}/{{ detail.workload.replicas }}</span>
-            </div>
-            <div class="info-row">
-<span class="k">状态</span>
-              <span class="status" :class="statusOf(detail.workload.status).cls">{{ statusOf(detail.workload.status).label }}</span>
-            </div>
-          </div>
-
-          <div class="section-title">运行实例（{{ detail.instances.length }}）</div>
-          <div v-if="detail.instances.length === 0" class="empty-hint">
-            暂无运行实例（非集群部署或 Pod 未就绪）
-          </div>
-          <table v-else class="instances-table">
-            <thead>
-              <tr>
-                <th>实例（Pod）</th>
-                <th>状态</th>
-                <th>就绪</th>
-                <th>重启</th>
-                <th>节点</th>
-                <th>启动时间</th>
-                <th class="col-act"></th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="ins in detail.instances" :key="ins.name">
-                <td>
-                  <div class="name-cell">
-                    <span class="name mono">{{ ins.name }}</span>
-                    <span v-if="ins.message" class="msg">{{ ins.message }}</span>
-                  </div>
-                </td>
-                <td>
-                  <span class="status" :class="podStatusOf(ins.status).cls">{{ podStatusOf(ins.status).label }}</span>
-                </td>
-                <td class="mono">{{ ins.ready || '-' }}</td>
-                <td class="mono" :class="{ err: ins.restarts > 0 }">{{ ins.restarts }}</td>
-                <td class="mono">{{ ins.node || '-' }}</td>
-                <td class="mono small">{{ fmtTime(ins.startedAt) }}</td>
-                <td class="col-act">
-                  <button class="act" @click="viewLogs(ins.name)">日志</button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </template>
-      </div>
-    </el-drawer>
-
-    <!-- 实例日志 -->
-    <el-dialog v-model="showLogs" :title="`日志：${logsPod}`" width="780px" top="6vh">
-      <div class="logs-toolbar">
-        <span class="pod-name mono">{{ logsPod }}</span>
-        <el-button size="small" :type="logsPrevious ? 'warning' : 'default'" @click="togglePrevious">
-          {{ logsPrevious ? '查看当前日志' : '查看上次终止日志' }}
-        </el-button>
-        <span v-if="logsPrevious" class="prev-hint">（已退出/重启容器的上次日志，排查崩溃关键）</span>
-      </div>
-      <div v-loading="logsLoading" class="logs-body">
-        <pre>{{ logsText }}</pre>
-      </div>
-    </el-dialog>
+    <!-- 工作负载详情：期望态 + 运行实例（Pod 级）+ 实例日志（组件单一真源） -->
+    <WorkloadDetailDrawer
+      v-model="showDetail"
+      :workload-id="detailWlId"
+      :poll-ms="deploying ? 2000 : 0"
+      @detail="onDetail"
+      @close="stopDeployWatch"
+    />
   </div>
 </template>
 
@@ -954,109 +841,5 @@ v-if="!imageOptions.length || !imageRef" v-model="createForm.image"
 .empty p {
   margin: 0;
   font-size: 13px;
-}
-
-/* 详情抽屉 */
-.detail-info {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 4px 0 16px;
-  border-bottom: 1px solid var(--border);
-}
-.info-row {
-  display: flex;
-  gap: 12px;
-  font-size: 13px;
-  align-items: center;
-}
-.info-row .k {
-  width: 48px;
-  color: var(--text-faint);
-  flex-shrink: 0;
-}
-.info-row .v {
-  color: var(--text);
-  word-break: break-all;
-}
-.section-title {
-  margin: 18px 0 10px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
-}
-.empty-hint {
-  padding: 24px;
-  text-align: center;
-  font-size: 12px;
-  color: var(--text-faint);
-  background: var(--surface);
-  border-radius: var(--radius);
-}
-.instances-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12px;
-}
-.instances-table th {
-  text-align: left;
-  padding: 8px 8px;
-  color: var(--text-faint);
-  font-weight: 500;
-  border-bottom: 1px solid var(--border);
-  white-space: nowrap;
-}
-.instances-table td {
-  padding: 8px 8px;
-  border-bottom: 1px solid var(--border);
-  vertical-align: top;
-  color: var(--text);
-}
-.instances-table .msg {
-  display: block;
-  font-size: 11px;
-  color: var(--danger, #f43f5e);
-  margin-top: 2px;
-  word-break: break-all;
-}
-.instances-table .err {
-  color: var(--danger, #f43f5e);
-}
-.mono.small {
-  font-size: 11px;
-  color: var(--text-faint);
-}
-
-/* 日志对话框 */
-.logs-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 10px;
-}
-.logs-toolbar .pod-name {
-  font-size: 12px;
-  color: var(--text-faint);
-}
-.logs-toolbar .prev-hint {
-  font-size: 11px;
-  color: var(--text-faint);
-}
-.logs-body {
-  max-height: 60vh;
-  overflow: auto;
-  background: var(--surface);
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
-}
-.logs-body pre {
-  margin: 0;
-  padding: 12px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--text);
-  white-space: pre-wrap;
-  word-break: break-all;
 }
 </style>

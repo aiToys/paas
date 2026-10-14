@@ -13,6 +13,7 @@ import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import { usePolling } from '@/composables/usePolling'
 import { listRuns, type PipelineRun } from '@/api/pipeline'
+import AgentRuns from '@/views/AgentRuns.vue'
 import { listAllChanges, listAllBatches, listNotifications, type Change, type IntegrationBatch, type Notification } from '@/api/change'
 import { listGlobalPulls, type GlobalPull } from '@/api/pulls'
 import { imageLink, repoLink } from '@/composables/useDevopsLinks'
@@ -264,6 +265,10 @@ v-for="p in boardPulls" :key="p.repoId + ':' + p.pr.number" class="board-item"
       </el-tab-pane>
 
       <!-- 运行记录：跨应用最近流水线运行。点「查看详情」进独立运行详情页。 -->
+      <el-tab-pane label="Agent 运行" name="agent">
+        <p class="tab-hint">Agent 编排（agentrun）运行记录：AI 研发任务与自动验收（不经 pipeline 的 webhook 运行也在此）。点行进详情（产物/结论/取消）。</p>
+        <AgentRuns />
+      </el-tab-pane>
       <el-tab-pane label="运行记录" name="runs">
         <p class="tab-hint">最近流水线运行，点「查看详情」进运行详情页（全节点时间线 + 日志）。运行中/等待审批自动轮询（10s）。</p>
         <el-table :data="recentRuns" size="small" v-loading="loading" empty-text="暂无运行记录">

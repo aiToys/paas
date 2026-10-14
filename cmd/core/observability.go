@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"log"
 	"os"
 
 	"github.com/aitoys/paas/internal/core/application"
+	"github.com/aitoys/paas/internal/core/identity"
 	"github.com/aitoys/paas/internal/dataservice"
 	"github.com/aitoys/paas/internal/observability"
 	alertengine "github.com/aitoys/paas/internal/observability/alert"
@@ -12,6 +14,7 @@ import (
 	obsmemory "github.com/aitoys/paas/internal/observability/memory"
 	obreal "github.com/aitoys/paas/internal/observability/real"
 	"github.com/aitoys/paas/internal/workload"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // buildObservabilityStore 按环境变量构造 observability.Repository：
@@ -160,4 +163,41 @@ func (l tenantEntityLister) TenantServiceNames(ctx context.Context) ([]string, e
 		}
 	}
 	return names, nil
+}
+
+// seedDefaultAlertRules 给「无任何告警规则」的租户灌入开箱默认规则
+// （observability.DefaultAlertRules，2026-09-25：此前全新部署零规则，告警模块形同虚设）。
+// 幂等语义：租户已有规则（含自建/删剩的）不覆盖不重复灌——仅「零规则」租户首次补齐，
+// 用户删光后重启会再灌回（无「已 seed」持久标记，权衡后接受：默认集可再删，代价低）。
+// demo seed 门控：PAAS_DISABLE_DEMO_SEED=true（生产）跳过，默认告警基线由用户自配。
+func seedDefaultAlertRules(ctx context.Context, idRepo identity.Repository, ruleRepo observability.RuleStore) {
+	if os.Getenv("PAAS_DISABLE_DEMO_SEED") == "true" {
+		return
+	}
+	tenants, err := idRepo.ListTenants(ctx)
+	if err != nil {
+		log.Printf("[seed] 列租户（默认告警规则）失败: %v", err)
+		return
+	}
+	all, err := ruleRepo.ListAllAlertRules(ctx)
+	if err != nil {
+		log.Printf("[seed] 列告警规则（默认告警规则）失败: %v", err)
+		return
+	}
+	hasRules := make(map[string]bool, len(all))
+	for _, r := range all {
+		hasRules[r.TenantID] = true
+	}
+	for _, t := range tenants {
+		if hasRules[t.ID] {
+			continue
+		}
+		tctx := tenant.WithTenant(ctx, t.ID)
+		for _, r := range observability.DefaultAlertRules() {
+			if _, err := ruleRepo.CreateAlertRule(tctx, r); err != nil {
+				log.Printf("[seed] 默认告警规则 %s（%s）失败: %v", r.Name, t.ID, err)
+			}
+		}
+		log.Printf("[seed] 租户 %s 灌入 %d 条默认告警规则", t.ID, len(observability.DefaultAlertRules()))
+	}
 }

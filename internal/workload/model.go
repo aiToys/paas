@@ -6,6 +6,7 @@ package workload
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -58,6 +59,12 @@ type Workload struct {
 	// Domain 是对外暴露域名（service 类型且非空时，reconciler 自动建 Ingress，host=Domain -> Service:Port）。
 	// 让平台用户经「工作负载 spec.domain」声明应用域名，无需手写 Ingress yaml。
 	Domain string `json:"domain,omitempty"`
+	// MetricsPath 是业务端口上 Prometheus 指标端点的路径（如 "/metrics"）。非空时 reconciler 给 Pod
+	// 注入 prometheus.io/scrape 注解（port 取 ContainerPort，缺省取 Port），Prometheus 的
+	// kubernetes-pods job 据此自动发现并抓取；空则不注入（应用级 RED 指标不可用）。
+	// 默认空是刻意的：多数应用不暴露 /metrics，无条件注入会让这些 Pod 变成永久 down target
+	// （报 unsupported Content-Type "text/html"），将来 up==0 告警即假告警源。
+	MetricsPath string `json:"metricsPath,omitempty"`
 	// Resources 是容器资源规格（CPU/内存 requests/limits，K8s Quantity 字符串如 "500m"/"1"/"512Mi"）。
 	// 空 = BestEffort（不设 requests/limits）；生产环境创建时 handler 强制要求非空（禁 BestEffort）。
 	Resources ResourceSpec `json:"resources,omitempty"`
@@ -72,6 +79,30 @@ type ResourceSpec struct {
 	CPULimit   string `json:"cpuLimit,omitempty"`   // CPU 上限（如 "2"）
 	MemRequest string `json:"memRequest,omitempty"` // 内存请求（如 "512Mi"）
 	MemLimit   string `json:"memLimit,omitempty"`   // 内存上限（如 "1Gi"）
+}
+
+// ValidHost 校验对外域名格式：小写字母/数字/中划线段，点分隔，每段 1-63 字符（RFC 1123 子集，
+// Ingress host 要求）。域名对外暴露（Domain 字段→reconciler 建 Ingress）前把关。
+func ValidHost(s string) bool {
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(s, ".") {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+		for _, c := range label {
+			isLower := c >= 'a' && c <= 'z'
+			isDigit := c >= '0' && c <= '9'
+			if !isLower && !isDigit && c != '-' {
+				return false
+			}
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+	}
+	return true
 }
 
 // IsEmpty 判断资源规格是否全空（BestEffort）。
@@ -114,6 +145,11 @@ func (w Workload) Validate() error {
 	if w.Type == TypeCronJob && w.Schedule == "" {
 		return errInvalid("schedule")
 	}
+	// domain 非空须合法 host（Create 与 PUT SetDomain 共用；防非法 Ingress host 被
+	// apiserver 拒后 reconciler 静默重试）。
+	if w.Domain != "" && !ValidHost(w.Domain) {
+		return errInvalid("domain")
+	}
 	// 资源规格 Quantity 格式校验（K8s ParseQuantity 同款语法；reconciler 侧同函数解析）
 	for field, v := range map[string]string{
 		"cpuRequest": w.Resources.CPURequest,
@@ -124,6 +160,11 @@ func (w Workload) Validate() error {
 		if err := ValidateQuantity(field, v); err != nil {
 			return err
 		}
+	}
+	// MetricsPath 非空时必须是绝对路径（Prometheus 抓取 path 须以 / 开头；写成 "metrics"
+	// 会被拼成相对路径，抓取静默 404，与「不声明」难区分）。
+	if w.MetricsPath != "" && !strings.HasPrefix(w.MetricsPath, "/") {
+		return errInvalid("metricsPath")
 	}
 	return nil
 }

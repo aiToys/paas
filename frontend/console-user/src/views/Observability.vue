@@ -12,7 +12,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchAuth, apiError } from '@/api'
 import {
-  listMetrics, listAlertRules, createAlertRule, deleteAlertRule, listAlerts, listAlertEvents, listLogs,
+  listMetrics, listAlertRules, createAlertRule, updateAlertRule, deleteAlertRule, listAlerts, listAlertEvents, listLogs,
   listTraces, getTrace,
   type MetricPoint, type MetricSeries, type AlertRule, type Alert, type AlertEvent, type LogEntry,
 } from '@/api/observability'
@@ -47,6 +47,8 @@ const dimDS = ref('') // dataservice 维度选中值
 
 const apps = ref<App[]>([])
 const dataServices = ref<DataService[]>([])
+// 告警规则「工作负载」维度下拉用（loadApps 已拉 /api/workloads?type=service，复用不额外请求）。
+const workloads = ref<{ id: string; name: string; service?: string }[]>([])
 const metrics = ref<MetricSeries[]>([])
 const rules = ref<AlertRule[]>([])
 const alerts = ref<Alert[]>([])
@@ -192,6 +194,7 @@ async function loadApps() {
   const respWl = await fetchAuth('/api/workloads?type=service')
   if (respWl.ok) {
     const wls = (await respWl.json()).data ?? []
+    workloads.value = wls
     envAppIDs.value = new Set(wls.filter((w: { envId?: string; appId?: string }) => w.envId && w.appId).map((w: { envId: string; appId: string }) => w.envId + '|' + w.appId))
   }
   // URL 深链恢复维度上下文：?app=（应用详情「监控」入口）/ ?env= / ?ds=
@@ -367,19 +370,40 @@ async function loadAll(silent = false) {
 }
 
 const showRule = ref(false)
+// 编辑态规则 ID（空=创建态）。编辑复用同一弹窗，PUT 保持规则 ID 不变（不 break 告警历史关联）。
+const editingRuleId = ref('')
 const ruleForm = ref({
-  name: '', metricName: 'cpu', targetType: 'app' as 'app' | 'env' | 'dataservice' | 'workload', targetId: '',
+  name: '', metricName: 'cpu', targetType: 'app' as 'app' | 'dataservice' | 'workload', targetId: '',
   operator: '>', threshold: 80, severity: 'warning', enabled: true, webhookUrl: '',
 })
 const ruleSubmitting = ref(false)
 
-const metricsOpts = [
-  { value: 'cpu', label: 'CPU (%)' },
-  { value: 'mem', label: '内存 (%)' },
+// 基础指标（app/workload 维度）：CPU/内存（cAdvisor，单位核/MiB 非 %）+ RED（依赖应用暴露 /metrics）。
+const baseMetricOpts = [
+  { value: 'cpu', label: 'CPU (核)' },
+  { value: 'mem', label: '内存 (MiB)' },
   { value: 'rps', label: '请求/秒' },
   { value: 'latency', label: 'P95 延迟 (ms)' },
   { value: 'errorRate', label: '错误率 (%)' },
 ]
+// 数据服务业务指标（后端 real 已生产、2026-09-25 才接入前端——此前建规则只能选 5 基础指标，
+// 连接数/磁盘水位/lag 等最该告警的量反而配不了）。
+const dsMetricOpts = [
+  { value: 'cpu', label: 'CPU (核)' },
+  { value: 'mem', label: '内存 (MiB)' },
+  { value: 'disk_io', label: '磁盘 IO (KB/s)' },
+  { value: 'net_io', label: '网络 IO (KB/s)' },
+  { value: 'disk_usage', label: '磁盘使用率 (%)' },
+  { value: 'connections', label: '连接数' },
+  { value: 'qps', label: 'QPS' },
+  { value: 'hit_rate', label: '缓存命中率 (%)' },
+  { value: 'lag', label: '消息速率 (条/s)' },
+  { value: 'vectors', label: '向量数' },
+]
+// 指标选项随目标维度联动（与后端 Validate 合法集合一致，杜绝选了配不了的组合）。
+const metricsOpts = computed(() =>
+  ruleForm.value.targetType === 'dataservice' ? dsMetricOpts : baseMetricOpts,
+)
 const ops = [
   { value: '>', label: '> 大于' },
   { value: '>=', label: '≥ 大于等于' },
@@ -390,26 +414,55 @@ const severities = [
   { value: 'critical', label: '严重' },
   { value: 'warning', label: '警告' },
 ]
-// 规则目标维度：app/dataservice 提供实体下拉；env/workload 手填 ID（简单覆盖，不造选择器）
+// 规则目标维度：app/dataservice/workload 均提供实体下拉；env 暂无指标数据源
+// （后端 Validate fail-fast 拒绝），不再提供。
 const ruleTargetTypes = [
   { value: 'app', label: '应用' },
   { value: 'dataservice', label: '数据服务' },
-  { value: 'env', label: '环境' },
   { value: 'workload', label: '工作负载' },
 ]
 const ruleTargetOpts = computed(() => {
   if (ruleForm.value.targetType === 'app') return apps.value.map((a) => ({ value: a.id, label: a.name }))
   if (ruleForm.value.targetType === 'dataservice') return dataServices.value.map((d) => ({ value: d.id, label: `${d.name}（${dsKindLabel[d.kind] ?? d.kind}）` }))
+  if (ruleForm.value.targetType === 'workload') return workloads.value.map((w) => ({ value: w.id, label: w.service ? `${w.service}（${w.id}）` : w.id }))
   return []
 })
+// 切换目标维度时同步校正指标：新维度不支持当前指标则回落 cpu（防「选了配不了的组合」提交被 400）。
+function onRuleTargetTypeChange() {
+  ruleForm.value.targetId = ''
+  if (!metricsOpts.value.some((m) => m.value === ruleForm.value.metricName)) {
+    ruleForm.value.metricName = 'cpu'
+  }
+}
 
 function openRule() {
   // 默认目标跟随当前维度（全部视图默认 app 维度第一个）
   const tt = dim.value === 'dataservice' ? 'dataservice' : dim.value === 'app' ? 'app' : 'app'
   const tid = tt === 'dataservice' ? dimDS.value : tt === 'app' ? dimApp.value : ''
+  editingRuleId.value = ''
   ruleForm.value = {
     name: '', metricName: 'cpu', targetType: tt as typeof ruleForm.value.targetType, targetId: tid,
     operator: '>', threshold: 80, severity: 'warning', enabled: true, webhookUrl: '',
+  }
+  showRule.value = true
+}
+
+// 编辑规则：复用创建弹窗回填现值（历史规则 targetType 可能为已下架的 env、metricName 可能为
+// 收口前的任意值——不合法值回落安全默认，保存时按新值提交而非原样 400）。
+function openEditRule(rule: { id: string; name: string; metricName: string; targetType: string; targetId: string; operator: string; threshold: number; severity: string; enabled: boolean; webhookUrl?: string }) {
+  editingRuleId.value = rule.id
+  // 合法指标全集（base ∪ ds）：回填值不在集合内回落 cpu。
+  const allMetrics = [...baseMetricOpts, ...dsMetricOpts].map((m) => m.value)
+  ruleForm.value = {
+    name: rule.name,
+    metricName: (allMetrics.includes(rule.metricName) ? rule.metricName : 'cpu') as typeof ruleForm.value.metricName,
+    targetType: (['app', 'dataservice', 'workload'].includes(rule.targetType) ? rule.targetType : 'app') as typeof ruleForm.value.targetType,
+    targetId: rule.targetId,
+    operator: rule.operator as typeof ruleForm.value.operator,
+    threshold: rule.threshold,
+    severity: rule.severity as typeof ruleForm.value.severity,
+    enabled: rule.enabled,
+    webhookUrl: rule.webhookUrl ?? '',
   }
   showRule.value = true
 }
@@ -421,7 +474,7 @@ async function saveRule() {
   }
   ruleSubmitting.value = true
   try {
-    await createAlertRule({
+    const body = {
       name: ruleForm.value.name,
       metricName: ruleForm.value.metricName,
       targetType: ruleForm.value.targetType,
@@ -431,8 +484,14 @@ async function saveRule() {
       severity: ruleForm.value.severity,
       enabled: ruleForm.value.enabled,
       webhookUrl: ruleForm.value.webhookUrl.trim() || undefined,
-    })
-    ElMessage.success('规则已创建')
+    }
+    if (editingRuleId.value) {
+      await updateAlertRule(editingRuleId.value, body)
+      ElMessage.success('规则已更新')
+    } else {
+      await createAlertRule(body)
+      ElMessage.success('规则已创建')
+    }
     showRule.value = false
     loadRules()
     loadAlerts()
@@ -657,8 +716,9 @@ v-model="traceIdQuery" placeholder="🔍 TraceID 直查" style="width: 240px; ma
             <el-tag :type="row.enabled ? 'success' : 'info'" size="small">{{ row.enabled ? '启用' : '停用' }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="80">
+        <el-table-column label="操作" width="110">
           <template #default="{ row }">
+            <el-button text type="primary" size="small" @click="openEditRule(row)">编辑</el-button>
             <el-button text type="danger" size="small" @click="deleteRule(row)">删除</el-button>
           </template>
         </el-table-column>
@@ -838,13 +898,13 @@ v-for="node in spanRows(row)" :key="node.span.id"
     </section>
 
     <!-- 规则创建弹窗 -->
-    <el-dialog v-model="showRule" title="创建告警规则" width="480px">
+    <el-dialog v-model="showRule" :title="editingRuleId ? '编辑告警规则' : '创建告警规则'" width="480px">
       <el-form label-width="80px">
         <el-form-item label="规则名">
           <el-input v-model="ruleForm.name" placeholder="如 CPU 偏高" />
         </el-form-item>
         <el-form-item label="目标维度">
-          <el-select v-model="ruleForm.targetType" style="width: 100%" @change="ruleForm.targetId = ''">
+          <el-select v-model="ruleForm.targetType" style="width: 100%" @change="onRuleTargetTypeChange">
             <el-option v-for="t in ruleTargetTypes" :key="t.value" :label="t.label" :value="t.value" />
           </el-select>
         </el-form-item>

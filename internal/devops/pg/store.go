@@ -885,7 +885,7 @@ func (s *Store) CreateRelease(ctx context.Context, input devops.ReleaseInput) (d
 		if svcName == "" && svcDef != nil {
 			svcName = svcDef.Name
 		}
-		name := devops.BaselineWorkloadName(input.AppID, svcName, lane)
+		name := devops.BaselineWorkloadName(input.AppID, input.EnvID, svcName, lane)
 		// 端口来源：① input.Port（deploy 显式）> ② ServiceDef > ③ baseline 继承 > ④ 0——对齐内存版
 		port, cport := input.Port, input.ContainerPort
 		if port == 0 && svcDef != nil {

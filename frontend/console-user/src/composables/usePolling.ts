@@ -6,6 +6,9 @@ import { onMounted, onUnmounted } from 'vue'
 // opts.active：条件轮询（如「有 pending 构建才拉」「run 未终态才拉」）。
 // 返回 false 时跳过本次 tick（不发请求），定时器保留——替代各页手写的
 // 「启动/停止 setInterval」条件轮询模式，语义等价且自带不可见暂停。
+// 注意：active 只拦后续 tick，首拉无条件执行——active 条件多依赖数据自身状态
+// （如「列表里有 Running 才继续轮询」），数据需首拉建立，否则死锁永不发请求
+// （2026-10-13 实锤：Agent 运行列表 runs 空触发 active=false，页面永远 loading）。
 export function usePolling(
   fn: () => void | Promise<void>,
   intervalMs: number,
@@ -13,9 +16,9 @@ export function usePolling(
 ): void {
   let timer: number | undefined
   let inFlight = false // 上一次 fn 未返回时跳过本次 tick，防慢请求堆叠
-  const tick = async () => {
+  const tick = async (force = false) => {
     if (inFlight) return
-    if (opts?.active && !opts.active()) return
+    if (!force && opts?.active && !opts.active()) return
     inFlight = true
     try {
       await fn()
@@ -26,8 +29,8 @@ export function usePolling(
 
   function start() {
     if (timer === undefined) {
-      tick() // 启动/恢复立即执行一次
-      timer = window.setInterval(tick, intervalMs)
+      tick(true) // 启动/恢复立即执行一次（force：恢复可见补拉同样无条件，回页刷新是用户预期）
+      timer = window.setInterval(() => tick(), intervalMs)
     }
   }
   function stop() {

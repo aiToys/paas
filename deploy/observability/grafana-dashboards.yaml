@@ -1,4 +1,7 @@
-# Grafana 应用可观测 dashboard（sidecar 自动加载：带 label grafana_dashboard=1 的 ConfigMap）。
+# Grafana 应用可观测 dashboard（加载路径：grafana file provider 扫 /tmp/dashboards，
+# 本 ConfigMap 由 scripts/deploy-observability.sh kubectl apply，挂到 /tmp/dashboards/{app,cp}）。
+# label grafana_dashboard=1 是早期 sidecar 方案的遗留，当前无消费方（sidecar 已关，见 grafana-values.yaml），
+# 保留仅为将来若启用 sidecar 时零改动可用。
 #
 # paas-shop 应用总览：RED（RPS/P95/错误率）+ 资源（CPU/内存）+ 状态码分布 + 趋势。
 # 数据源：Prometheus（paas-shop /metrics 的 http_requests_total + http_request_duration_seconds）
@@ -7,7 +10,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: grafana-dashboard-paas-app
-  namespace: observability
+  namespace: ${NS_OBS}
   labels:
     grafana_dashboard: "1"
     app.kubernetes.io/part-of: observability-stack
@@ -103,7 +106,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: grafana-dashboard-paas-control-plane
-  namespace: observability
+  namespace: ${NS_OBS}
   labels:
     grafana_dashboard: "1"
     app.kubernetes.io/part-of: observability-stack
@@ -166,6 +169,6201 @@ data:
             {"expr": "sum(container_memory_working_set_bytes{namespace=\"paas\",pod=~\"paas-core-.*\",container!=\"POD\"}) / 1024 / 1024", "legendFormat": "Memory MiB"}
           ],
           "fieldConfig": {"defaults": {"unit": "short"}}
+        }
+      ]
+    }
+
+---
+# 基础设施面板（节点/数据服务/集群，2026-09-25 补齐「Grafana 面板 × Prometheus 指标」对账缺口：
+# 此前面板仅消费 4 个指标族，node-exporter 155 族 / 数据服务 exporter / KSM 均零面板）。
+# 设计对标 Grafana 官方 node-exporter-full(1860) 与 Kubernetes Views(15757/15760)。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-paas-infra
+  namespace: ${NS_OBS}
+  labels:
+    app.kubernetes.io/part-of: observability-stack
+data:
+  paas-node-overview.json: |
+    {
+      "title": "PaaS 节点总览",
+      "uid": "paas-node-overview",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "tags": [
+        "paas"
+      ],
+      "time": {
+        "from": "now-1h",
+        "to": "now"
+      },
+      "templating": {
+        "list": [
+          {
+            "name": "node",
+            "label": "节点",
+            "type": "query",
+            "query": "label_values(node_uname_info, node)",
+            "refresh": 1,
+            "sort": 1,
+            "current": {
+              "text": "All",
+              "value": "$__all"
+            },
+            "includeAll": true,
+            "multi": true
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "在线节点数",
+          "datasource": null,
+          "description": "node-exporter 抓取存活的节点数",
+          "gridPos": {
+            "x": 0,
+            "y": 0,
+            "w": 6,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "count(node_uname_info{node=~\"$node\"})",
+              "legendFormat": "{{node}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "CPU 逻辑核数",
+          "datasource": null,
+          "description": "所选节点 CPU 核数合计",
+          "gridPos": {
+            "x": 6,
+            "y": 0,
+            "w": 6,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "count(node_cpu_seconds_total{mode=\"idle\",node=~\"$node\"})",
+              "legendFormat": "{{node}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "内存总量",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 0,
+            "w": 6,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "sum(node_memory_MemTotal_bytes{node=~\"$node\"})",
+              "legendFormat": "{{node}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "根分区使用率",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 18,
+            "y": 0,
+            "w": 6,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "#EAB839",
+                    "value": 70
+                  },
+                  {
+                    "color": "red",
+                    "value": 85
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "100 - node_filesystem_avail_bytes{node=~\"$node\",mountpoint=\"/\"} / node_filesystem_size_bytes{node=~\"$node\",mountpoint=\"/\"} * 100",
+              "legendFormat": "{{node}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "CPU 使用率（按节点）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 4,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "#EAB839",
+                    "value": 70
+                  },
+                  {
+                    "color": "red",
+                    "value": 85
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "100 - avg by (node) (rate(node_cpu_seconds_total{mode=\"idle\",node=~\"$node\"}[5m])) * 100",
+              "legendFormat": "{{node}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "内存使用率（按节点）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 4,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "#EAB839",
+                    "value": 70
+                  },
+                  {
+                    "color": "red",
+                    "value": 85
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "(1 - node_memory_MemAvailable_bytes{node=~\"$node\"} / node_memory_MemTotal_bytes{node=~\"$node\"}) * 100",
+              "legendFormat": "{{node}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "CPU 构成（按 mode 堆叠）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 12,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 20,
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (mode) (rate(node_cpu_seconds_total{mode!~\"idle\",node=~\"$node\"}[5m])) * 100",
+              "legendFormat": "{{mode}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "内存构成（堆叠）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 12,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 20,
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "node_memory_MemTotal_bytes{node=~\"$node\"} - node_memory_MemAvailable_bytes{node=~\"$node\"}",
+              "legendFormat": "已用",
+              "refId": "A"
+            },
+            {
+              "expr": "node_memory_Cached_bytes{node=~\"$node\"}",
+              "legendFormat": "缓存",
+              "refId": "B"
+            },
+            {
+              "expr": "node_memory_Buffers_bytes{node=~\"$node\"}",
+              "legendFormat": "缓冲",
+              "refId": "C"
+            },
+            {
+              "expr": "node_memory_MemAvailable_bytes{node=~\"$node\"}",
+              "legendFormat": "可用",
+              "refId": "D"
+            }
+          ]
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "磁盘使用率（按挂载点）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 20,
+            "w": 8,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "#EAB839",
+                    "value": 70
+                  },
+                  {
+                    "color": "red",
+                    "value": 85
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "100 - node_filesystem_avail_bytes{node=~\"$node\",fstype!~\"overlay|tmpfs|squashfs|iso9660\"} / node_filesystem_size_bytes{node=~\"$node\",fstype!~\"overlay|tmpfs|squashfs|iso9660\"} * 100",
+              "legendFormat": "{{node}} {{mountpoint}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "磁盘读写带宽",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 8,
+            "y": 20,
+            "w": 8,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "Bps",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "rate(node_disk_read_bytes_total{node=~\"$node\",device!~\"^(ram|loop|fd|sr)\"}[5m])",
+              "legendFormat": "{{node}} {{device}} 读",
+              "refId": "A"
+            },
+            {
+              "expr": "rate(node_disk_written_bytes_total{node=~\"$node\",device!~\"^(ram|loop|fd|sr)\"}[5m])",
+              "legendFormat": "{{node}} {{device}} 写",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "网络带宽（物理网卡）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 16,
+            "y": 20,
+            "w": 8,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "Bps",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "rate(node_network_receive_bytes_total{node=~\"$node\",device!~\"lo|veth.*|cali.*|tunl.*|docker.*|cni.*\"}[5m])",
+              "legendFormat": "{{node}} {{device}} 下行",
+              "refId": "A"
+            },
+            {
+              "expr": "rate(node_network_transmit_bytes_total{node=~\"$node\",device!~\"lo|veth.*|cali.*|tunl.*|docker.*|cni.*\"}[5m])",
+              "legendFormat": "{{node}} {{device}} 上行",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "系统负载",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 28,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "node_load1{node=~\"$node\"}",
+              "legendFormat": "{{node}} load1",
+              "refId": "A"
+            },
+            {
+              "expr": "node_load5{node=~\"$node\"}",
+              "legendFormat": "{{node}} load5",
+              "refId": "B"
+            },
+            {
+              "expr": "node_load15{node=~\"$node\"}",
+              "legendFormat": "{{node}} load15",
+              "refId": "C"
+            }
+          ]
+        },
+        {
+          "id": 13,
+          "type": "timeseries",
+          "title": "交换分区（Swap）使用",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 28,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "node_memory_SwapTotal_bytes{node=~\"$node\"} - node_memory_SwapFree_bytes{node=~\"$node\"}",
+              "legendFormat": "{{node}} 已用",
+              "refId": "A"
+            },
+            {
+              "expr": "node_memory_SwapTotal_bytes{node=~\"$node\"}",
+              "legendFormat": "{{node}} 总量",
+              "refId": "B"
+            }
+          ]
+        }
+      ]
+    }
+  paas-dataservice-overview.json: |
+    {
+      "title": "PaaS 数据服务总览",
+      "uid": "paas-dataservice-overview",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "tags": [
+        "paas"
+      ],
+      "time": {
+        "from": "now-1h",
+        "to": "now"
+      },
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "label": "命名空间",
+            "type": "query",
+            "query": "label_values(up{job=\"kubernetes-pods-exporter\"}, namespace)",
+            "refresh": 1,
+            "sort": 1,
+            "current": {
+              "text": "paas-t-acme",
+              "value": "paas-t-acme"
+            },
+            "includeAll": false
+          },
+          {
+            "name": "dataservice",
+            "label": "数据服务",
+            "type": "query",
+            "query": "label_values(up{job=\"kubernetes-pods-exporter\",namespace=\"$namespace\"}, paas_aitoys_dataservice)",
+            "refresh": 1,
+            "sort": 1,
+            "current": {
+              "text": "All",
+              "value": "$__all"
+            },
+            "includeAll": true,
+            "multi": true
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "服务在线",
+          "datasource": null,
+          "description": "各数据服务 exporter 抓取状态",
+          "gridPos": {
+            "x": 0,
+            "y": 0,
+            "w": 6,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red"
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "up{job=\"kubernetes-pods-exporter\",namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "活跃连接数",
+          "datasource": null,
+          "description": "pg 取 active 会话 / redis 取客户端连接 / nats 取连接数",
+          "gridPos": {
+            "x": 6,
+            "y": 0,
+            "w": 6,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (pg_stat_activity_count{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",state=\"active\"}) or max by (paas_aitoys_dataservice) (redis_connected_clients{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}) or max by (paas_aitoys_dataservice) (gnatsd_connz_num_connections{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "吞吐 QPS",
+          "datasource": null,
+          "description": "pg 事务提交率 / redis 命令率 / nats 入消息率",
+          "gridPos": {
+            "x": 12,
+            "y": 0,
+            "w": 6,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(pg_stat_database_xact_commit{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])) or sum by (paas_aitoys_dataservice) (rate(redis_commands_processed_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])) or sum by (paas_aitoys_dataservice) (rate(gnatsd_connz_in_msgs{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])) or sum by (paas_aitoys_dataservice) (rate(rest_responses_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "Redis 命中率",
+          "datasource": null,
+          "description": "命中 / (命中+未命中)，由 keyspace hits/misses 计算",
+          "gridPos": {
+            "x": 18,
+            "y": 0,
+            "w": 6,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "#EAB839",
+                    "value": 70
+                  },
+                  {
+                    "color": "red",
+                    "value": 85
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "100 * sum(rate(redis_keyspace_hits_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])) / clamp_min(sum(rate(redis_keyspace_hits_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])) + sum(rate(redis_keyspace_misses_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])), 0.000001)",
+              "legendFormat": "命中率",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "连接数趋势",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 4,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": null,
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (pg_stat_activity_count{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",state=\"active\"}) or max by (paas_aitoys_dataservice) (redis_connected_clients{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}) or max by (paas_aitoys_dataservice) (gnatsd_connz_num_connections{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "吞吐趋势（QPS）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 4,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(pg_stat_database_xact_commit{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])) or sum by (paas_aitoys_dataservice) (rate(redis_commands_processed_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])) or sum by (paas_aitoys_dataservice) (rate(gnatsd_connz_in_msgs{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])) or sum by (paas_aitoys_dataservice) (rate(rest_responses_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "Redis 内存使用",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 12,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "redis_memory_used_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}",
+              "legendFormat": "{{paas_aitoys_dataservice}} 已用",
+              "refId": "A"
+            },
+            {
+              "expr": "redis_memory_max_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}",
+              "legendFormat": "{{paas_aitoys_dataservice}} 上限",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "Redis 键数量",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 12,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice, db) (redis_db_keys{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} {{db}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "PG 数据库大小",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 20,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "pg_database_size_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"}",
+              "legendFormat": "{{paas_aitoys_dataservice}} {{datname}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "PG 最长活跃事务时长",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 20,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "#EAB839",
+                    "value": 60
+                  },
+                  {
+                    "color": "red",
+                    "value": 300
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "pg_stat_activity_max_tx_duration{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "阻塞与死锁",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 28,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "redis_blocked_clients{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}",
+              "legendFormat": "{{paas_aitoys_dataservice}} redis 阻塞客户端",
+              "refId": "A"
+            },
+            {
+              "expr": "increase(pg_stat_database_deadlocks{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])",
+              "legendFormat": "{{paas_aitoys_dataservice}} pg 死锁(+5m)",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "NATS 消息速率",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 28,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "rate(gnatsd_connz_in_msgs{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])",
+              "legendFormat": "{{paas_aitoys_dataservice}} 入",
+              "refId": "A"
+            },
+            {
+              "expr": "rate(gnatsd_connz_out_msgs{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])",
+              "legendFormat": "{{paas_aitoys_dataservice}} 出",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 13,
+          "type": "stat",
+          "title": "向量总数（qdrant）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 36,
+            "w": 8,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "sum(collections_vector_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 14,
+          "type": "stat",
+          "title": "对象数（minio）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 8,
+            "y": 36,
+            "w": 8,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "sum(minio_cluster_usage_object_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 15,
+          "type": "stat",
+          "title": "存储已用（minio）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 16,
+            "y": 36,
+            "w": 8,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "sum(minio_cluster_usage_total_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 16,
+          "type": "timeseries",
+          "title": "向量数 / 对象数趋势",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 40,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (collections_vector_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 向量",
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (minio_cluster_usage_object_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 对象",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 17,
+          "type": "timeseries",
+          "title": "MinIO 存储用量趋势",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 40,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (minio_cluster_usage_total_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 已用",
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (minio_cluster_capacity_usable_total_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 总量",
+              "refId": "B"
+            }
+          ]
+        }
+      ]
+    }
+  paas-cluster-overview.json: |
+    {
+      "title": "PaaS 集群与工作负载",
+      "uid": "paas-cluster-overview",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "tags": [
+        "paas"
+      ],
+      "time": {
+        "from": "now-1h",
+        "to": "now"
+      },
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "label": "命名空间",
+            "type": "query",
+            "query": "label_values(kube_pod_info, namespace)",
+            "refresh": 1,
+            "sort": 1,
+            "current": {
+              "text": "All",
+              "value": "$__all"
+            },
+            "includeAll": true,
+            "multi": true
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "Pod 总数",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 0,
+            "w": 6,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "count(kube_pod_info{namespace=~\"$namespace\"})",
+              "legendFormat": "{{node}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "异常 Pod",
+          "datasource": null,
+          "description": "Pending / Failed / Unknown 状态的 Pod 数，>0 需关注",
+          "gridPos": {
+            "x": 6,
+            "y": 0,
+            "w": 6,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "sum(kube_pod_status_phase{phase=~\"Pending|Failed|Unknown\",namespace=~\"$namespace\"})",
+              "legendFormat": "{{node}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "24h 容器重启",
+          "datasource": null,
+          "description": "过去 24 小时容器重启次数（CrashLoop / 探针失败 / OOM 都计入）",
+          "gridPos": {
+            "x": 12,
+            "y": 0,
+            "w": 6,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "sum(increase(kube_pod_container_status_restarts_total{namespace=~\"$namespace\"}[24h]))",
+              "legendFormat": "{{node}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "OOM 终止",
+          "datasource": null,
+          "description": "当前记录为 OOMKilled 终止的容器数",
+          "gridPos": {
+            "x": 18,
+            "y": 0,
+            "w": 6,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "sum(kube_pod_container_status_terminated_reason{reason=\"OOMKilled\",namespace=~\"$namespace\"}) or vector(0)",
+              "legendFormat": "{{node}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "Pod 状态分布",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 4,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 20,
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (phase) (kube_pod_status_phase{namespace=~\"$namespace\"})",
+              "legendFormat": "{{phase}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "容器重启趋势（按命名空间，1h 增量）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 4,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (namespace) (increase(kube_pod_container_status_restarts_total{namespace=~\"$namespace\"}[1h]))",
+              "legendFormat": "{{namespace}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "CPU：请求 / 限额 / 实际",
+          "datasource": null,
+          "description": "请求/限额来自工作负载声明（KSM），实际来自 cAdvisor",
+          "gridPos": {
+            "x": 0,
+            "y": 12,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum(kube_pod_container_resource_requests{resource=\"cpu\",unit=\"core\",namespace=~\"$namespace\"})",
+              "legendFormat": "请求",
+              "refId": "A"
+            },
+            {
+              "expr": "sum(kube_pod_container_resource_limits{resource=\"cpu\",unit=\"core\",namespace=~\"$namespace\"})",
+              "legendFormat": "限额",
+              "refId": "B"
+            },
+            {
+              "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=~\"$namespace\",container!=\"POD\"}[5m]))",
+              "legendFormat": "实际",
+              "refId": "C"
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "内存：请求 / 限额 / 实际",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 12,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum(kube_pod_container_resource_requests{resource=\"memory\",unit=\"byte\",namespace=~\"$namespace\"})",
+              "legendFormat": "请求",
+              "refId": "A"
+            },
+            {
+              "expr": "sum(kube_pod_container_resource_limits{resource=\"memory\",unit=\"byte\",namespace=~\"$namespace\"})",
+              "legendFormat": "限额",
+              "refId": "B"
+            },
+            {
+              "expr": "sum(container_memory_working_set_bytes{namespace=~\"$namespace\",container!=\"POD\"})",
+              "legendFormat": "实际",
+              "refId": "C"
+            }
+          ]
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "Deployment 副本：就绪 / 不可用",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 20,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum(kube_deployment_status_replicas_ready{namespace=~\"$namespace\"})",
+              "legendFormat": "就绪",
+              "refId": "A"
+            },
+            {
+              "expr": "sum(kube_deployment_status_replicas_unavailable{namespace=~\"$namespace\"})",
+              "legendFormat": "不可用",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "不健康 Pod 数趋势",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 20,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (phase) (kube_pod_status_phase{phase=~\"Pending|Failed|Unknown\",namespace=~\"$namespace\"})",
+              "legendFormat": "{{phase}}",
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    }
+
+---
+# 数据服务「每引擎官方面板」（2026-09-25）：聚合面板之外，各引擎指标维度差异大，
+# 对标官方 dashboard（PostgreSQL Database 9628 / Redis Dashboard 11835 / NATS / MinIO / Qdrant 原生指标）。
+# 采集口径：pg/redis/nats 走 exporter sidecar（kubernetes-pods-exporter job），
+# qdrant/minio 走引擎内置 /metrics + Pod 抓取注解（kubernetes-pods job，reconciler 注入）。
+# meilisearch 暂无面板：/metrics 需 --experimental-metrics + master key 鉴权，注解方式带不了 header（留后续）。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-paas-ds-engines
+  namespace: ${NS_OBS}
+  labels:
+    grafana_dashboard: "1"
+data:
+  paas-ds-postgres.json: |
+    {
+      "title": "PaaS PostgreSQL",
+      "uid": "paas-ds-postgres",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "tags": [
+        "paas",
+        "dataservice"
+      ],
+      "time": {
+        "from": "now-1h",
+        "to": "now"
+      },
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "label": "命名空间",
+            "type": "query",
+            "query": "label_values(pg_up, namespace)",
+            "refresh": 1,
+            "sort": 1,
+            "current": {
+              "text": "paas-t-acme",
+              "value": "paas-t-acme"
+            },
+            "includeAll": false
+          },
+          {
+            "name": "dataservice",
+            "label": "数据服务",
+            "type": "query",
+            "query": "label_values(pg_up{namespace=~\"$namespace\"}, paas_aitoys_dataservice)",
+            "refresh": 1,
+            "sort": 1,
+            "current": {
+              "text": "All",
+              "value": "$__all"
+            },
+            "includeAll": true,
+            "multi": true
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "实例存活",
+          "datasource": null,
+          "description": "postgres-exporter 抓取与连接状态",
+          "gridPos": {
+            "x": 0,
+            "y": 0,
+            "w": 4,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red"
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "max(pg_up{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "后端连接数",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 4,
+            "y": 0,
+            "w": 5,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "sum(pg_stat_database_numbackends{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "数据库总大小",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 9,
+            "y": 0,
+            "w": 5,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "sum(pg_database_size_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "缓存命中率",
+          "datasource": null,
+          "description": "shared buffer 命中 / (命中+读盘)，官方口径 95%+ 为健康",
+          "gridPos": {
+            "x": 14,
+            "y": 0,
+            "w": 5,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "#EAB839",
+                    "value": 70
+                  },
+                  {
+                    "color": "red",
+                    "value": 85
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "100 * sum(rate(pg_stat_database_blks_hit{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"}[5m])) / clamp_min(sum(rate(pg_stat_database_blks_hit{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"}[5m])) + sum(rate(pg_stat_database_blks_read{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"}[5m])), 0.000001)",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "stat",
+          "title": "事务/秒",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 19,
+            "y": 0,
+            "w": 5,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(pg_stat_database_xact_commit{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"}[5m]))",
+              "legendFormat": "",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "会话状态（按 state 堆叠）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 4,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 20,
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice, state) (pg_stat_activity_count{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} {{state}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "事务吞吐：提交 / 回滚",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 4,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(pg_stat_database_xact_commit{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 提交",
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(pg_stat_database_xact_rollback{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 回滚",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "元组操作速率（insert/update/delete）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 12,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(pg_stat_database_tup_inserted{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 插入",
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(pg_stat_database_tup_updated{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 更新",
+              "refId": "B"
+            },
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(pg_stat_database_tup_deleted{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 删除",
+              "refId": "C"
+            }
+          ]
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "查询量：返回行 / 索引取行 / 读盘行",
+          "datasource": null,
+          "description": "返回行=顺序扫描量级；索引取行≪返回行说明大量全表扫描",
+          "gridPos": {
+            "x": 12,
+            "y": 12,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(pg_stat_database_tup_returned{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 返回行",
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(pg_stat_database_tup_fetched{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 索引取行",
+              "refId": "B"
+            },
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(pg_stat_database_tup_fetched{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"}[5m]) - rate(pg_stat_database_tup_fetched{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"}[5m]) + rate(pg_stat_database_blks_read{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 读盘块",
+              "refId": "C"
+            }
+          ]
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "各数据库大小趋势",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 20,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "pg_database_size_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"}",
+              "legendFormat": "{{paas_aitoys_dataservice}} {{datname}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "临时文件（大查询溢出）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 20,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (pg_stat_database_temp_files{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 文件数",
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (pg_stat_database_temp_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 字节",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "锁数量（按 mode）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 28,
+            "w": 8,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice, mode) (pg_locks_count{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} {{mode}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 13,
+          "type": "timeseries",
+          "title": "死锁与取消冲突",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 8,
+            "y": 28,
+            "w": 8,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "increase(pg_stat_database_deadlocks{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"}[5m])",
+              "legendFormat": "{{paas_aitoys_dataservice}} 死锁(+5m)",
+              "refId": "A"
+            },
+            {
+              "expr": "increase(pg_stat_database_conflicts{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\",datname!~\"template0|template1\"}[5m])",
+              "legendFormat": "{{paas_aitoys_dataservice}} 冲突(+5m)",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 14,
+          "type": "timeseries",
+          "title": "最长活跃事务时长",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 16,
+            "y": 28,
+            "w": 8,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "#EAB839",
+                    "value": 60
+                  },
+                  {
+                    "color": "red",
+                    "value": 300
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (pg_stat_activity_max_tx_duration{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 15,
+          "type": "timeseries",
+          "title": "Checkpoint：定时 / 请求触发",
+          "datasource": null,
+          "description": "请求触发占比高 = checkpoint 间隔不够 / 写入突刺",
+          "gridPos": {
+            "x": 0,
+            "y": 36,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "increase(pg_stat_bgwriter_checkpoints_timed_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[15m])",
+              "legendFormat": "{{paas_aitoys_dataservice}} 定时(+15m)",
+              "refId": "A"
+            },
+            {
+              "expr": "increase(pg_stat_bgwriter_checkpoints_req_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[15m])",
+              "legendFormat": "{{paas_aitoys_dataservice}} 请求(+15m)",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 16,
+          "type": "timeseries",
+          "title": "Buffer 写出构成（bgwriter/checkpoint/backend）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 36,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "Bps",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 20,
+                "stacking": {
+                  "mode": "normal",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "rate(pg_stat_bgwriter_buffers_checkpoint_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])",
+              "legendFormat": "checkpoint",
+              "refId": "A"
+            },
+            {
+              "expr": "rate(pg_stat_bgwriter_buffers_clean_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])",
+              "legendFormat": "bgwriter",
+              "refId": "B"
+            },
+            {
+              "expr": "rate(pg_stat_bgwriter_buffers_backend_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])",
+              "legendFormat": "backend 直写",
+              "refId": "C"
+            }
+          ]
+        },
+        {
+          "id": 17,
+          "type": "timeseries",
+          "title": "死元组 Top 表（健康度）",
+          "datasource": null,
+          "description": "死元组多的表需要 autovacuum 关注",
+          "gridPos": {
+            "x": 0,
+            "y": 44,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "topk(8, pg_stat_user_tables_n_dead_tup{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{relname}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 18,
+          "type": "timeseries",
+          "title": "索引扫描 vs 顺序扫描（Top 表）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 44,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "topk(8, rate(pg_stat_user_tables_idx_scan{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[15m]))",
+              "legendFormat": "{{relname}} 索引扫描",
+              "refId": "A"
+            },
+            {
+              "expr": "topk(8, rate(pg_stat_user_tables_seq_scan{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[15m]))",
+              "legendFormat": "{{relname}} 顺序扫描",
+              "refId": "B"
+            }
+          ]
+        }
+      ]
+    }
+  paas-ds-redis.json: |
+    {
+      "title": "PaaS Redis",
+      "uid": "paas-ds-redis",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "tags": [
+        "paas",
+        "dataservice"
+      ],
+      "time": {
+        "from": "now-1h",
+        "to": "now"
+      },
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "label": "命名空间",
+            "type": "query",
+            "query": "label_values(redis_up, namespace)",
+            "refresh": 1,
+            "sort": 1,
+            "current": {
+              "text": "paas-t-acme",
+              "value": "paas-t-acme"
+            },
+            "includeAll": false
+          },
+          {
+            "name": "dataservice",
+            "label": "数据服务",
+            "type": "query",
+            "query": "label_values(redis_up{namespace=~\"$namespace\"}, paas_aitoys_dataservice)",
+            "refresh": 1,
+            "sort": 1,
+            "current": {
+              "text": "All",
+              "value": "$__all"
+            },
+            "includeAll": true,
+            "multi": true
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "实例存活",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 0,
+            "w": 4,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red"
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "max(redis_up{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "客户端连接",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 4,
+            "y": 0,
+            "w": 5,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (redis_connected_clients{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "内存使用率",
+          "datasource": null,
+          "description": "used / maxmemory；无 maxmemory 时该值恒 0",
+          "gridPos": {
+            "x": 9,
+            "y": 0,
+            "w": 5,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "#EAB839",
+                    "value": 70
+                  },
+                  {
+                    "color": "red",
+                    "value": 85
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "100 * max by (paas_aitoys_dataservice) (redis_memory_used_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}) / clamp_min(max by (paas_aitoys_dataservice) (redis_memory_max_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}), 1)",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "命中率",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 14,
+            "y": 0,
+            "w": 5,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "#EAB839",
+                    "value": 70
+                  },
+                  {
+                    "color": "red",
+                    "value": 85
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "100 * sum by (paas_aitoys_dataservice) (rate(redis_keyspace_hits_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])) / clamp_min(sum by (paas_aitoys_dataservice) (rate(redis_keyspace_hits_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])) + sum by (paas_aitoys_dataservice) (rate(redis_keyspace_misses_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])), 0.000001)",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "stat",
+          "title": "内存碎片率",
+          "datasource": null,
+          "description": "<1 内存换页，>1.5 碎片浪费，官方建议 1.0~1.5",
+          "gridPos": {
+            "x": 19,
+            "y": 0,
+            "w": 5,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "#EAB839",
+                    "value": 1.5
+                  },
+                  {
+                    "color": "red",
+                    "value": 2
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (redis_allocator_frag_ratio{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "内存：used / RSS / maxmemory",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 4,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (redis_memory_used_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} used",
+              "refId": "A"
+            },
+            {
+              "expr": "max by (paas_aitoys_dataservice) (redis_memory_used_rss_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} rss",
+              "refId": "B"
+            },
+            {
+              "expr": "max by (paas_aitoys_dataservice) (redis_memory_max_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} maxmemory",
+              "refId": "C"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "命令速率（总量）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 4,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(redis_commands_processed_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "Top 命令速率（by cmd）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 12,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "topk(10, sum by (paas_aitoys_dataservice, cmd) (rate(redis_commands_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])))",
+              "legendFormat": "{{paas_aitoys_dataservice}} {{cmd}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "命中 / 未命中速率",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 12,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(redis_keyspace_hits_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 命中",
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(redis_keyspace_misses_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 未命中",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "键数量（by db）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 20,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice, db) (redis_db_keys{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} {{db}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "键淘汰 / 过期速率",
+          "datasource": null,
+          "description": "淘汰 >0 说明内存到达 maxmemory 开始驱逐键",
+          "gridPos": {
+            "x": 12,
+            "y": 20,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(redis_evicted_keys_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 淘汰",
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(redis_expired_keys_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 过期",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "网络吞吐",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 28,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "Bps",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(redis_net_input_bytes_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 入",
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(redis_net_output_bytes_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 出",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 13,
+          "type": "timeseries",
+          "title": "阻塞客户端 / 拒绝连接",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 28,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (redis_blocked_clients{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 阻塞客户端",
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (increase(redis_rejected_connections_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 拒绝连接(+5m)",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 14,
+          "type": "timeseries",
+          "title": "RDB 持久化：距上次保存的变更数 / 保存时长",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 36,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (redis_rdb_changes_since_last_save{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 未落盘变更数",
+              "refId": "A"
+            },
+            {
+              "expr": "max by (paas_aitoys_dataservice) (redis_rdb_last_bgsave_duration_sec{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 上次保存时长(s)",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 15,
+          "type": "timeseries",
+          "title": "慢查询积压长度",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 36,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (redis_slowlog_length{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 16,
+          "type": "timeseries",
+          "title": "命令延迟 P50 / P95 / P99",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 44,
+            "w": 24,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "µs",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, sum by (paas_aitoys_dataservice, le) (rate(redis_commands_latencies_usec_bucket{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])))",
+              "legendFormat": "{{paas_aitoys_dataservice}} P50",
+              "refId": "A"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum by (paas_aitoys_dataservice, le) (rate(redis_commands_latencies_usec_bucket{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])))",
+              "legendFormat": "{{paas_aitoys_dataservice}} P95",
+              "refId": "B"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum by (paas_aitoys_dataservice, le) (rate(redis_commands_latencies_usec_bucket{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])))",
+              "legendFormat": "{{paas_aitoys_dataservice}} P99",
+              "refId": "C"
+            }
+          ]
+        },
+        {
+          "id": 17,
+          "type": "timeseries",
+          "title": "CPU（主线程 sys/user）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 52,
+            "w": 24,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "rate(redis_cpu_sys_main_thread_seconds_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])",
+              "legendFormat": "{{paas_aitoys_dataservice}} sys",
+              "refId": "A"
+            },
+            {
+              "expr": "rate(redis_cpu_user_main_thread_seconds_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])",
+              "legendFormat": "{{paas_aitoys_dataservice}} user",
+              "refId": "B"
+            }
+          ]
+        }
+      ]
+    }
+  paas-ds-nats.json: |
+    {
+      "title": "PaaS NATS",
+      "uid": "paas-ds-nats",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "tags": [
+        "paas",
+        "dataservice"
+      ],
+      "time": {
+        "from": "now-1h",
+        "to": "now"
+      },
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "label": "命名空间",
+            "type": "query",
+            "query": "label_values(gnatsd_varz_connections, namespace)",
+            "refresh": 1,
+            "sort": 1,
+            "current": {
+              "text": "paas-t-acme",
+              "value": "paas-t-acme"
+            },
+            "includeAll": false
+          },
+          {
+            "name": "dataservice",
+            "label": "数据服务",
+            "type": "query",
+            "query": "label_values(gnatsd_varz_connections{namespace=~\"$namespace\"}, paas_aitoys_dataservice)",
+            "refresh": 1,
+            "sort": 1,
+            "current": {
+              "text": "All",
+              "value": "$__all"
+            },
+            "includeAll": true,
+            "multi": true
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "连接数",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 0,
+            "w": 6,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (gnatsd_varz_connections{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "订阅数",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 6,
+            "y": 0,
+            "w": 6,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (gnatsd_varz_subscriptions{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "慢消费者",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 0,
+            "w": 6,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (gnatsd_varz_slow_consumers{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "累计连接数",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 18,
+            "y": 0,
+            "w": 6,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (gnatsd_varz_total_connections{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "消息速率：入 / 出",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 4,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(gnatsd_varz_in_msgs{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 入",
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(gnatsd_varz_out_msgs{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 出",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "字节速率：入 / 出",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 4,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "Bps",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(gnatsd_varz_in_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 入",
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(gnatsd_varz_out_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 出",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "连接数趋势",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 12,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (gnatsd_varz_connections{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 当前",
+              "refId": "A"
+            },
+            {
+              "expr": "max by (paas_aitoys_dataservice) (gnatsd_varz_total_connections{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 累计",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "订阅数趋势",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 12,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (gnatsd_varz_subscriptions{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "慢消费者（客户端）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 20,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (gnatsd_varz_slow_consumer_stats_clients{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 慢消费者",
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (gnatsd_varz_stale_connection_stats_clients{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 僵尸连接",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "Top 连接消息速率（per connection）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 20,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "topk(10, sum by (paas_aitoys_dataservice, name) (rate(gnatsd_connz_in_msgs{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])))",
+              "legendFormat": "{{paas_aitoys_dataservice}} {{name}} 入",
+              "refId": "A"
+            },
+            {
+              "expr": "topk(10, sum by (paas_aitoys_dataservice, name) (rate(gnatsd_connz_out_msgs{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])))",
+              "legendFormat": "{{paas_aitoys_dataservice}} {{name}} 出",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "进程内存",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 28,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (gnatsd_varz_mem{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "Pending 字节（发送缓冲积压，Top 连接）",
+          "datasource": null,
+          "description": "单连接 pending 过大 = 消费者处理不过来",
+          "gridPos": {
+            "x": 12,
+            "y": 28,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 10000000
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "topk(10, gnatsd_connz_pending_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} {{name}}",
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    }
+  paas-ds-qdrant.json: |
+    {
+      "title": "PaaS Qdrant",
+      "uid": "paas-ds-qdrant",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "tags": [
+        "paas",
+        "dataservice"
+      ],
+      "time": {
+        "from": "now-1h",
+        "to": "now"
+      },
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "label": "命名空间",
+            "type": "query",
+            "query": "label_values(collections_total, namespace)",
+            "refresh": 1,
+            "sort": 1,
+            "current": {
+              "text": "paas-t-acme",
+              "value": "paas-t-acme"
+            },
+            "includeAll": false
+          },
+          {
+            "name": "dataservice",
+            "label": "数据服务",
+            "type": "query",
+            "query": "label_values(collections_total{namespace=~\"$namespace\"}, paas_aitoys_dataservice)",
+            "refresh": 1,
+            "sort": 1,
+            "current": {
+              "text": "All",
+              "value": "$__all"
+            },
+            "includeAll": true,
+            "multi": true
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "集合数",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 0,
+            "w": 6,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (collections_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "向量总数",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 6,
+            "y": 0,
+            "w": 6,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (collections_vector_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "恢复模式",
+          "datasource": null,
+          "description": "1 = 集合正在恢复（启动/wal 回放），长时间为 1 需关注",
+          "gridPos": {
+            "x": 12,
+            "y": 0,
+            "w": 6,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (app_status_recovery_mode{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "检索 QPS",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 18,
+            "y": 0,
+            "w": 6,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(rest_responses_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "检索速率（by endpoint）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 4,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice, endpoint) (rate(rest_responses_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} {{endpoint}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "检索延迟 P50 / P95 / P99",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 4,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.50, sum by (paas_aitoys_dataservice, le) (rate(rest_responses_duration_seconds_bucket{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])))",
+              "legendFormat": "{{paas_aitoys_dataservice}} P50",
+              "refId": "A"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum by (paas_aitoys_dataservice, le) (rate(rest_responses_duration_seconds_bucket{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])))",
+              "legendFormat": "{{paas_aitoys_dataservice}} P95",
+              "refId": "B"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum by (paas_aitoys_dataservice, le) (rate(rest_responses_duration_seconds_bucket{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m])))",
+              "legendFormat": "{{paas_aitoys_dataservice}} P99",
+              "refId": "C"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "失败请求速率（by status）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 12,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "red",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice, status) (rate(rest_responses_fail_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} {{status}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "内存：active / allocated / resident / retained",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 12,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (memory_active_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} active",
+              "refId": "A"
+            },
+            {
+              "expr": "max by (paas_aitoys_dataservice) (memory_allocated_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} allocated",
+              "refId": "B"
+            },
+            {
+              "expr": "max by (paas_aitoys_dataservice) (memory_resident_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} resident",
+              "refId": "C"
+            },
+            {
+              "expr": "max by (paas_aitoys_dataservice) (memory_retained_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} retained",
+              "refId": "D"
+            },
+            {
+              "expr": "max by (paas_aitoys_dataservice) (memory_metadata_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} metadata",
+              "refId": "E"
+            }
+          ]
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "集合数 / 向量总数趋势",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 20,
+            "w": 24,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (collections_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 集合",
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (collections_vector_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 向量",
+              "refId": "B"
+            }
+          ]
+        }
+      ]
+    }
+  paas-ds-minio.json: |
+    {
+      "title": "PaaS MinIO",
+      "uid": "paas-ds-minio",
+      "schemaVersion": 39,
+      "version": 1,
+      "refresh": "30s",
+      "tags": [
+        "paas",
+        "dataservice"
+      ],
+      "time": {
+        "from": "now-1h",
+        "to": "now"
+      },
+      "templating": {
+        "list": [
+          {
+            "name": "namespace",
+            "label": "命名空间",
+            "type": "query",
+            "query": "label_values(minio_cluster_health_status, namespace)",
+            "refresh": 1,
+            "sort": 1,
+            "current": {
+              "text": "paas-t-acme",
+              "value": "paas-t-acme"
+            },
+            "includeAll": false
+          },
+          {
+            "name": "dataservice",
+            "label": "数据服务",
+            "type": "query",
+            "query": "label_values(minio_cluster_health_status{namespace=~\"$namespace\"}, paas_aitoys_dataservice)",
+            "refresh": 1,
+            "sort": 1,
+            "current": {
+              "text": "All",
+              "value": "$__all"
+            },
+            "includeAll": true,
+            "multi": true
+          }
+        ]
+      },
+      "panels": [
+        {
+          "id": 1,
+          "type": "stat",
+          "title": "集群健康",
+          "datasource": null,
+          "description": "1 = 健康（单节点部署亦为 1）",
+          "gridPos": {
+            "x": 0,
+            "y": 0,
+            "w": 5,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red"
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (minio_cluster_health_status{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "stat",
+          "title": "对象数",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 5,
+            "y": 0,
+            "w": 5,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (minio_cluster_usage_object_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "stat",
+          "title": "已用容量",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 10,
+            "y": 0,
+            "w": 5,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (minio_cluster_usage_total_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "可用容量占比",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 15,
+            "y": 0,
+            "w": 5,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red"
+                  },
+                  {
+                    "color": "#EAB839",
+                    "value": 20
+                  },
+                  {
+                    "color": "green",
+                    "value": 50
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "100 * max by (paas_aitoys_dataservice) (minio_cluster_capacity_usable_free_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}) / clamp_min(max by (paas_aitoys_dataservice) (minio_cluster_capacity_usable_total_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}), 1)",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "stat",
+          "title": "节点在线",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 20,
+            "y": 0,
+            "w": 4,
+            "h": 4
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "color": {
+                "mode": "thresholds"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "blue"
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "colorMode": "value",
+            "graphMode": "area",
+            "textMode": "auto"
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (minio_cluster_nodes_online_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "容量：已用 / 可用总量",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 4,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (minio_cluster_usage_total_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 已用",
+              "refId": "A"
+            },
+            {
+              "expr": "max by (paas_aitoys_dataservice) (minio_cluster_capacity_usable_total_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 总量",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 7,
+          "type": "timeseries",
+          "title": "对象数 / 桶数趋势",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 4,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (minio_cluster_usage_object_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 对象",
+              "refId": "A"
+            },
+            {
+              "expr": "max by (paas_aitoys_dataservice) (minio_cluster_bucket_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 桶",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 8,
+          "type": "timeseries",
+          "title": "S3 流量：发送 / 接收",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 12,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "Bps",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(minio_s3_traffic_sent_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 发送",
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(minio_s3_traffic_received_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 接收",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 9,
+          "type": "timeseries",
+          "title": "S3 请求：进行中 / 排队 / 拒绝",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 12,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (minio_s3_requests_incoming_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 进行中",
+              "refId": "A"
+            },
+            {
+              "expr": "max by (paas_aitoys_dataservice) (minio_s3_requests_waiting_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 排队",
+              "refId": "B"
+            },
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (minio_s3_requests_rejected_auth_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"} or minio_s3_requests_rejected_invalid_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} 拒绝",
+              "refId": "C"
+            }
+          ]
+        },
+        {
+          "id": 10,
+          "type": "timeseries",
+          "title": "磁盘 IO：读 / 写",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 20,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "Bps",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(minio_node_io_read_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 读",
+              "refId": "A"
+            },
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(minio_node_io_write_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 写",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 11,
+          "type": "timeseries",
+          "title": "进程资源：内存 / goroutine",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 20,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "max by (paas_aitoys_dataservice) (minio_node_process_resident_memory_bytes{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} RSS",
+              "refId": "A"
+            },
+            {
+              "expr": "max by (paas_aitoys_dataservice) (minio_node_go_routine_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"})",
+              "legendFormat": "{{paas_aitoys_dataservice}} goroutines",
+              "refId": "B"
+            }
+          ]
+        },
+        {
+          "id": 12,
+          "type": "timeseries",
+          "title": "文件描述符使用率",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 0,
+            "y": 28,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green"
+                  },
+                  {
+                    "color": "#EAB839",
+                    "value": 70
+                  },
+                  {
+                    "color": "red",
+                    "value": 85
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "100 * max by (paas_aitoys_dataservice) (minio_node_file_descriptor_open_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}) / clamp_min(max by (paas_aitoys_dataservice) (minio_node_file_descriptor_limit_total{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}), 1)",
+              "legendFormat": "{{paas_aitoys_dataservice}}",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "id": 13,
+          "type": "timeseries",
+          "title": "扫描进度（对象扫描速率）",
+          "datasource": null,
+          "description": "",
+          "gridPos": {
+            "x": 12,
+            "y": 28,
+            "w": 12,
+            "h": 8
+          },
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "stacking": {
+                  "mode": "none",
+                  "group": "A"
+                },
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "targets": [
+            {
+              "expr": "sum by (paas_aitoys_dataservice) (rate(minio_node_scanner_objects_scanned{namespace=~\"$namespace\",paas_aitoys_dataservice=~\"$dataservice\"}[5m]))",
+              "legendFormat": "{{paas_aitoys_dataservice}} 对象扫描",
+              "refId": "A"
+            }
+          ]
         }
       ]
     }
