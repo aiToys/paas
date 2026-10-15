@@ -1,5 +1,6 @@
 packages:
   - console-admin
   - console-user
+  - console-user-v2
   - landing
   - docs

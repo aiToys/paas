@@ -31,16 +31,19 @@ RUN pnpm config set registry "$NPM_REGISTRY"
 # 先拷 lockfile + workspace 清单，利用层缓存加速 install
 COPY frontend/package.json frontend/pnpm-workspace.yaml frontend/pnpm-lock.yaml ./
 COPY frontend/console-user/package.json ./console-user/package.json
+COPY frontend/console-user-v2/package.json ./console-user-v2/package.json
 COPY frontend/console-admin/package.json ./console-admin/package.json
 COPY frontend/landing/package.json ./landing/package.json
 COPY frontend/docs/package.json ./docs/package.json
 RUN pnpm install --frozen-lockfile
 # 拷源码（含已配置的 base path）
 COPY frontend/ ./
-# 三套构建：用目录路径 filter（与 frontend/package.json 一致；console-admin 包名非 console-admin）。
-# console-admin 传 VITE_BASE='/admin/'（子路径）；console-user 已在 vite.config 固定 '/console/'；landing 默认 '/'
+# 四套构建：用目录路径 filter（与 frontend/package.json 一致；console-admin 包名非 console-admin）。
+# console-admin 传 VITE_BASE='/admin/'（子路径）；console-user 已在 vite.config 固定 '/console/'；
+# console-user-v2 固定 '/next/'（新 IA 试验版）；landing 默认 '/'
 RUN pnpm --filter ./console-user build && \
     VITE_BASE='/admin/' pnpm --filter ./console-admin build && \
+    pnpm --filter ./console-user-v2 build && \
     pnpm --filter ./landing build && \
     pnpm --filter paas-docs build
 
@@ -60,6 +63,7 @@ RUN go mod download
 COPY . .
 # 前端产物覆盖 internal/web/dist 占位（embed 编译期吸收）
 COPY --from=frontend /fe/console-user/dist ./internal/web/dist/console-user
+COPY --from=frontend /fe/console-user-v2/dist ./internal/web/dist/console-user-v2
 COPY --from=frontend /fe/console-admin/dist ./internal/web/dist/console-admin
 COPY --from=frontend /fe/landing/dist ./internal/web/dist/landing
 COPY --from=frontend /fe/docs/.vitepress/dist ./internal/web/dist/docs

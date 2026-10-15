@@ -43,9 +43,10 @@ pkg/plugin/                     # 插件契约（对外可见）
 internal/core/                  # Core 内部：plugin/identity/health/gateway
 internal/controller/            # K8s WorkloadReconciler + K8sApplier
 internal/airsync/               # 离线交付核心逻辑
-frontend/                       # pnpm workspace（三套前端）
+frontend/                       # pnpm workspace（四套前端）
 ├── console-admin/              # 后台管理（基于 vue-admin 基座，MIT）
-├── console-user/               # 用户控制台
+├── console-user/               # 用户控制台（经典版 /console/）
+├── console-user-v2/            # 用户控制台 v2（新 IA 试验版 /next/，详见「身份 + 前端」章）
 └── landing/                    # 官网展示页
 deploy/charts/paas/             # Helm chart
 config/crds/                    # controller-gen 生成的 CRD YAML
@@ -61,7 +62,7 @@ CONTRIBUTING.md SECURITY.md CODE_OF_CONDUCT.md LICENSE
 
 - **离线交付（airsync）**：公网 `helm install paas deploy/charts/paas`；私有 `airsync bundle` 打包 → 物理介质 → `airsync install`（verify sha256 → load/retag/push → helm install）。`make airsync` 编译；`make manifests` 生成 CRD。
 - **观测栈离线打包（`bundle --with-observability`，默认关）**：把 3 个上游 chart（`helm pull`）+ `deploy/observability/*` 清单 + **`scripts/deploy-observability.sh` 脚本本身**打进包；install 侧若 manifest 含观测栈条目则自动接着调包内脚本（`OBS_CHART_DIR`/`OBS_MANIFEST_DIR` 指向解包目录，MIRROR 默认 none）。chart 名/版本/仓库 URL 的**真源是脚本**（`--chart-versions` 机器可读输出），Go 侧不重复硬编码（两处各写一份必然漂移）。**包内不含镜像**——目标机需能拉到观测栈各镜像，见 `docs/deploy/dependencies.md`。
-- **K8s 集群部署**：core 单镜像同源 serve 前端 + API（无 CORS）；集群内自建 registry（NodePort 30050，Pod 镜像用 `<nodeIP>:30050`，kubelet 解析不了 svc DNS）；`scripts/deploy-k8s.sh` 检测 worker nodeIP + envsubst 注入 values。前端三套 SPA `//go:embed` 进 core 二进制（`internal/web/`），路由：`/console/*` → console-user、`/admin/*` → console-admin、`/*` → landing、`/api|/v1/*` → API。
+- **K8s 集群部署**：core 单镜像同源 serve 前端 + API（无 CORS）；集群内自建 registry（NodePort 30050，Pod 镜像用 `<nodeIP>:30050`，kubelet 解析不了 svc DNS）；`scripts/deploy-k8s.sh` 检测 worker nodeIP + envsubst 注入 values。前端四套 SPA `//go:embed` 进 core 二进制（`internal/web/`），路由：`/console/*` → console-user、`/next/*` → console-user-v2、`/admin/*` → console-admin、`/*` → landing、`/api|/v1/*` → API。
 - **Dockerfile**：多阶段（node:22-alpine 前端 → golang 交叉编译 → distroless）；国内源默认，`--build-arg` 覆盖。**必须 `DOCKER_BUILDKIT=1` + builder `FROM --platform=$BUILDPLATFORM`**（否则 arm64 Mac QEMU 下 Go SIGSEGV）。
 - **可观测栈部署**：唯一入口 `scripts/deploy-observability.sh`（Prom/Loki/Grafana/Jaeger/Ingress；**勿手工 helm upgrade**）。`deploy/observability/*` 全带 `${...}` 占位符（NS_OBS/STORAGE_CLASS/DOMAIN_SUFFIX/镜像 registry），脚本 envsubst 注入 → 渲染 → 与线上 diff → **先 `kubectl apply` 原始清单再 helm upgrade**（grafana 挂载面板 CM，顺序反了则 FailedMount → `--wait` 超时中断 → CM 永远建不出来）→ 抓取目标断言；`--check` 只预检不写集群。换集群只改环境变量，values 不动。脚本存在的理由 = 该栈曾无部署路径，导致带外 `kubectl set image`/`kubectl apply prometheus.yml` 被 helm 静默打回、失效死键潜伏（`kubeStateMetrics.*`）、冗余抓取 job 与内置 job 重复致指标翻倍。Grafana 预配 10 个面板（file provisioning，4 个 CM 挂 /tmp/dashboards/{app,cp,infra,ds}）：应用总览 / 控制面 / 节点总览 / 数据服务总览 / 集群与工作负载 / **每引擎官方面板 PostgreSQL·Redis·NATS·Qdrant·MinIO**（2026-09-25，对标 9628/11835 等官方 dashboard；聚合面板管跨引擎关键健康量，引擎面板管深度指标）。node-exporter 与 dataservice exporter 端口 9200（9100 被 dev 物理网阻断，见 prometheus-values 注释）。**promtail pipelineStages 必须 cri+docker 双解析**（docker shim 集群 /var/log/pods 软链到 docker json 日志，单 cri 时包装 JSON 原样入 Loki，paas/Grafana 日志全显示原始 JSON；paas 侧 `unwrapDockerJSON` 兜底存量行，2026-10-13）。
 - **helm 注意**：chart templates/ 内 CRD 不随 upgrade 应用，需显式 `kubectl apply -f config/crds/`；镜像 tag 不变不触发 rollout，需 `kubectl rollout restart`；手动 helm 前必须 `export NODE_IP`（否则 envsubst 写坏 registry 地址）。**子 chart 镜像变量拼法不一**：grafana/promtail 子 chart 拼 `image.registry + "/" + image.repository`（默认 registry=docker.io），loki 子 chart 用整串 `image.repository`——塞错位置会渲染出 `docker.io/<host>/...`，helm 不报错、Pod ImagePullBackOff。
@@ -233,6 +234,7 @@ pnpm build                    # 构建三套
 - `internal/core/identity/`：Tenant/User/Role/APIKey CRUD（`/api/admin/*` super_admin）+ 租户自助 `/api/api-keys`（capRoles 求交零提权）+ `/api/users`（本租户）+ DeleteTenant 非空 409；写操作全审计。
 - console-admin：20 管理页（身份/推理/资源总览 14 三级菜单）+ AI 编排总览 + 流水线模板管理（builtin 只读锁）；admin 跨租户写规范：独立端点 + adminGuard + tenant.WithTenant 派生 + 绕过 prod:write 但全审计 + 代建消耗目标租户配额。
 - console-user：应用工作台（10 tab 三组）+ 三层 IA（资源中心=数据服务 / 工作负载 / 平台能力）+ 顶栏环境 scope（生产 gated 15min 自动回退 + 视觉强隔离）+ `useDangerConfirm`（生产输入名称确认，isProd 显式入参防顶栏漂移）+ ESLint（新代码禁 `as any`，错误文案走 `apiError/respError`）。
+- console-user-v2（新 IA 试验版，`/next/`）：IA 终点 spec 第一期——产品为主线（首页=产品+待办三列抽屉；产品三面=服务/交付/设置，服务面运行主语 ServiceRunDrawer 实例/日志/伸缩/暴露闭环，交付面智能研发一条龙+最近运行，设置面绑定资源原生）；**核心旅程不跳老版**：新建产品/新建服务 v2 原生表单、CdDeployDialog 部署（未部署行+运行抽屉复用，成功跳交付面）、`/runs/:runId` 简版 run 详情（阶段表+日志展开+审批/终止/重试闭环，待办 run 深链落此）；侧栏一级=首页/模型/数据服务/可观测/更多（用户反馈：常用必须一级）；域名列正式域名真源=治理 Route host（workload.domain 是开发域名降级带标）；低频能力（batch/build/change 详情、侧栏平台页、API 密钥）并行期跳老版深链 ↗；基建从经典版复制独立演进；未达简单度验收可整体删除（目录/URL/状态零共享）。
 - 主模块 vs 应用详情原则：主模块=全局视图 + 维度是过滤器不是门槛 + 告警漏斗式下钻。
 
 ## API 契约

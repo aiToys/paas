@@ -4,6 +4,7 @@
 //
 //	/api/* /v1/* /openapi.json /docs /livez  → API（cmd/core 注册，ServeMux 精确匹配优先）
 //	/console/*  → console-user（dist/console-user）
+//	/next/*     → console-user-v2（dist/console-user-v2，新 IA 试验版）
 //	/admin/*    → console-admin（dist/console-admin）
 //	/*          → landing（dist/landing，兜底）
 //

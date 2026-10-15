@@ -1440,9 +1440,10 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 
 	// 嵌入式前端 SPA（core 单镜像同域 serve，无 CORS）。API 路由已在上文注册，
 	// ServeMux 最长前缀匹配使 /api/* /v1/* /openapi.json /docs /livez 优先命中；
-	// 以下三者为剩余路径的前端入口，/ 兜底 landing。
-	//   /console/* → console-user   /admin/* → console-admin   /* → landing
+	// 以下为剩余路径的前端入口，/ 兜底 landing。
+	//   /console/* → console-user   /next/* → console-user-v2（新 IA 试验版）   /admin/* → console-admin   /* → landing
 	mux.Handle("/console/", web.ServeStatic("/console/", "console-user"))
+	mux.Handle("/next/", web.ServeStatic("/next/", "console-user-v2"))
 	mux.Handle("/admin/", web.ServeStatic("/admin/", "console-admin"))
 	mux.Handle("/", web.ServeStatic("/", "landing"))
 
