@@ -89,6 +89,7 @@ export const useEnvStore = defineStore('env', () => {
     isProd,
     currentEnvId,
     prodRemainingSec,
+    prodDeadline,
     loadEnvs,
     switchEnv,
     checkProdTimeout,

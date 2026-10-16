@@ -1,3 +1,4 @@
+import { asList } from './response'
 // 可观测 API（metrics/alerts/logs/traces + 维度过滤），集中端点定义（审计第 10 轮）。
 // 模式照抄 change.ts：fetchAuth + {data:T} 解包。
 import { fetchAuth } from '@/api'
@@ -31,14 +32,14 @@ export interface LogEntry {
 const unwrap = async <T>(resp: Response): Promise<T> => {
   const j = await resp.json().catch(() => null)
   if (!resp.ok) throw new Error(j?.error || `HTTP ${resp.status}`)
-  return j?.data ?? j as T
+  return (j && typeof j === 'object' && 'data' in j ? j.data : j) as T
 }
 
 export const listMetrics = (params: Record<string, string>) =>
-  fetchAuth(`/api/observability/metrics?${new URLSearchParams(params).toString()}`).then(r => unwrap<MetricSeries[]>(r))
+  fetchAuth(`/api/observability/metrics?${new URLSearchParams(params).toString()}`).then(r => unwrap<unknown>(r)).then(v => asList<MetricSeries>(v))
 
 export const listAlertRules = () =>
-  fetchAuth('/api/observability/alert-rules').then(r => unwrap<AlertRule[]>(r))
+  fetchAuth('/api/observability/alert-rules').then(r => unwrap<unknown>(r)).then(v => asList<AlertRule>(v))
 
 export const createAlertRule = (body: Partial<AlertRule>) =>
   fetchAuth('/api/observability/alert-rules', {
@@ -56,18 +57,18 @@ export const deleteAlertRule = (id: string) =>
 
 export const listAlerts = (params: Record<string, string> = {}) => {
   const q = new URLSearchParams(params).toString()
-  return fetchAuth(`/api/observability/alerts${q ? `?${q}` : ''}`).then(r => unwrap<Alert[]>(r))
+  return fetchAuth(`/api/observability/alerts${q ? `?${q}` : ''}`).then(r => unwrap<unknown>(r)).then(v => asList<Alert>(v))
 }
 
 export const listAlertEvents = (limit = 50) =>
-  fetchAuth(`/api/observability/alerts/events?limit=${limit}`).then(r => unwrap<AlertEvent[]>(r))
+  fetchAuth(`/api/observability/alerts/events?limit=${limit}`).then(r => unwrap<unknown>(r)).then(v => asList<AlertEvent>(v))
 
 export const listLogs = (params: Record<string, string>) =>
-  fetchAuth(`/api/observability/logs?${new URLSearchParams(params).toString()}`).then(r => unwrap<LogEntry[]>(r))
+  fetchAuth(`/api/observability/logs?${new URLSearchParams(params).toString()}`).then(r => unwrap<unknown>(r)).then(v => asList<LogEntry>(v))
 
 // traces 列表与单条按 ID 查（形状由调用方声明：Trace 含 spans 树）。
 export const listTraces = <T>(params: Record<string, string>) =>
-  fetchAuth(`/api/observability/traces?${new URLSearchParams(params).toString()}`).then(r => unwrap<T[]>(r))
+  fetchAuth(`/api/observability/traces?${new URLSearchParams(params).toString()}`).then(r => unwrap<unknown>(r)).then(v => asList<T>(v))
 
 export const getTrace = <T>(id: string) =>
   fetchAuth(`/api/observability/traces/${encodeURIComponent(id)}`).then(r => unwrap<T>(r))

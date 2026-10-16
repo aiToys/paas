@@ -1,5 +1,5 @@
 // 广场共享 API 与常量（Skill/Prompt/Tool/Agent 发布-浏览-安装）。
-import { fetchJSON, fetchAuth } from '@/api'
+import { fetchJSON, fetchAuth, fetchList } from '@/api'
 
 // 广场分类（后端透传不校验死，前端常量作展示真源）
 export const CATEGORIES = [
@@ -37,7 +37,7 @@ export function listMarket(entityType = '', category = '', q = '') {
   if (category) params.set('category', category)
   if (q) params.set('q', q)
   const qs = params.toString()
-  return fetchJSON<MarketItem[]>(`/api/marketplace${qs ? '?' + qs : ''}`)
+  return fetchList<MarketItem>(`/api/marketplace${qs ? '?' + qs : ''}`)
 }
 
 export function getMarketItem(id: string) {

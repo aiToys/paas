@@ -1,7 +1,7 @@
 // agentrun 观测 API（经 /api/agentrun 代理，用户 JWT 由 cookie 自动携带）。
 // 响应为 agentrun 裸 JSON（非 {data:T} 包裹），fetchJSON 智能解包已兼容。
 // 503=平台未配置 PAAS_AGENTRUN_URL（页面显示引导态）；401=会话需要登录。
-import { fetchAuth, fetchJSON } from '@/api'
+import { fetchAuth, fetchJSON, fetchList } from '@/api'
 
 export interface AgentRunItem {
   name: string
@@ -25,7 +25,7 @@ export interface AgentArtifact {
   modifiedAt?: string
 }
 
-export const listRuns = (): Promise<AgentRunItem[]> => fetchJSON<AgentRunItem[]>('/api/agentrun/runs')
+export const listRuns = (): Promise<AgentRunItem[]> => fetchList<AgentRunItem>('/api/agentrun/runs')
 
 export const getRun = (name: string): Promise<AgentRunItem> =>
   fetchJSON<AgentRunItem>(`/api/agentrun/runs/${encodeURIComponent(name)}`)
@@ -36,7 +36,7 @@ export const cancelRun = (name: string): Promise<void> =>
   })
 
 export const listArtifacts = (name: string): Promise<AgentArtifact[]> =>
-  fetchJSON<AgentArtifact[]>(`/api/agentrun/runs/${encodeURIComponent(name)}/artifacts`)
+  fetchList<AgentArtifact>(`/api/agentrun/runs/${encodeURIComponent(name)}/artifacts`)
 
 export const getArtifact = (name: string, key: string): Promise<string> =>
   // key 含斜杠（console 0.14.2 多级通配支持原样路径）：按段编码保留分隔符

@@ -1,11 +1,15 @@
 <script setup lang="ts">
-// 产品设置面（spec §9.4 facet=settings）：绑定资源 v2 原生化（中频：新服务接库/缓存来这），
-// 其余低频设置（运行配置/成员/用量）并行期桥接老版。
+// 产品设置面（spec §9.4 facet=settings）：绑定资源 / 动态配置 / 运行配置 / 成员与权限
+// 全 v2 原生（2026-10-16 全量化，零跳老版）。
 // 绑定/解绑成功后 emit('updated') 回传最新应用实体（父组件刷新绑定计数）。
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { listDataServices, listModels, type DataServiceEntity, type ModelInfo } from '@/api/platform'
 import { ElMessage } from 'element-plus'
 import { fetchJSON, apiError } from '@/api'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
+import ProductDynamicConfig from '@/components/ProductDynamicConfig.vue'
+import ProductRunConfig from '@/components/ProductRunConfig.vue'
+import ProductMembers from '@/components/ProductMembers.vue'
 
 interface Binding {
   type: string
@@ -15,8 +19,9 @@ interface Binding {
 interface App {
   id: string
   bindings?: Binding[]
+  restricted?: boolean
 }
-const props = defineProps<{ app: App }>()
+const props = defineProps<{ app: App; section?: string }>()
 const emit = defineEmits<{ (e: 'updated', app: App): void }>()
 
 // 类型元信息（v2 极简版：标签 + 是否数据服务——绑定后自动注入连接信息）。
@@ -43,11 +48,22 @@ const groups = computed(() => {
 const showAdd = ref(false)
 const form = ref<{ type: string; name: string }>({ type: 'db', name: '' })
 const submitting = ref(false)
-const namePlaceholder = computed(() =>
-  DS_KINDS.includes(form.value.type)
-    ? '数据服务名称或 ID'
-    : '如 qwen-cs-route',
-)
+const candidates = ref<DataServiceEntity[]>([])
+const models = ref<ModelInfo[]>([])
+const optionsLoading = ref(false)
+const optionsError = ref('')
+const options = computed(() => form.value.type === 'models'
+  ? models.value.map((m) => ({ value: m.id, label: m.name || m.id }))
+  : candidates.value.filter((d) => d.kind === form.value.type).map((d) => ({ value: d.id, label: d.name })))
+async function loadOptions() {
+  optionsLoading.value = true
+  optionsError.value = ''
+  try { [candidates.value, models.value] = await Promise.all([listDataServices(), listModels()]) }
+  catch (e) { optionsError.value = apiError(e, '可绑定资源加载失败') }
+  finally { optionsLoading.value = false }
+}
+watch(showAdd, (open) => { if (open) { form.value.name = ''; void loadOptions() } })
+watch(() => form.value.type, () => { form.value.name = '' })
 
 async function submitBind() {
   const name = form.value.name.trim()
@@ -91,20 +107,18 @@ async function unbind(b: Binding) {
   }
 }
 
-// 低频设置：桥接老版（to=产品 tab 深链；href=老版完整路径）。
-const BRIDGE_LINKS: { label: string; desc: string; to?: string; href?: string }[] = [
-  { label: '运行配置', desc: '启动注入的环境变量，改完重启生效', to: 'configs' },
-  { label: '动态配置', desc: '运行时热更新，带版本与回滚', href: '/console/platform/config-center' },
-  { label: '密钥引用', desc: '产品级密钥与证书（平台密钥库）', href: '/console/platform/security' },
-  { label: '成员与权限', desc: '产品成员角色 / 受限开关', to: 'members' },
-  { label: '用量', desc: '配额 / 用量归因 / 账单', to: 'usage' },
-]
+// 绑定项「详情」内链（v2 原生页）：模型 → /models；数据服务六类 → /dataservices。
+function v2Link(type: string): string {
+  if (type === 'models') return '/models'
+  if (DS_KINDS.includes(type)) return '/dataservices'
+  return ''
+}
 </script>
 
 <template>
   <div class="settings">
     <!-- 绑定资源（v2 原生） -->
-    <div class="card">
+    <div v-if="!section || section === 'resources'" class="card">
       <div class="card-head">
         <span class="card-title">绑定资源</span>
         <span class="card-sub">数据服务绑定后自动注入连接信息（DATABASE_URL / REDIS_URL …）</span>
@@ -118,11 +132,7 @@ const BRIDGE_LINKS: { label: string; desc: string; to?: string; href?: string }[
             <div v-for="b in g.items" :key="b.type + b.name" class="bind-item">
               <span class="b-name mono">{{ b.name }}</span>
               <span v-if="b.note" class="b-note">{{ b.note }}</span>
-              <a
-                :href="`/console/resources/${g.key}`"
-                class="b-link"
-                title="在经典版资源中心查看"
-              >详情 ↗</a>
+              <RouterLink v-if="v2Link(g.key)" :to="v2Link(g.key)" class="b-link">详情 →</RouterLink>
               <button class="b-unbind" @click="unbind(b)">解绑</button>
             </div>
           </div>
@@ -139,34 +149,26 @@ const BRIDGE_LINKS: { label: string; desc: string; to?: string; href?: string }[
           </select>
         </el-form-item>
         <el-form-item label="资源名称">
-          <input v-model="form.name" class="name-input mono" :placeholder="namePlaceholder" @keyup.enter="submitBind" />
+          <el-select v-model="form.name" filterable :loading="optionsLoading" placeholder="选择已存在的资源" style="width:100%"><el-option v-for="item in options" :key="item.value" :value="item.value" :label="item.label" /></el-select>
+          <p v-if="optionsError" role="alert">{{ optionsError }} <button class="text-button" @click="loadOptions">重试</button></p>
         </el-form-item>
       </el-form>
       <template #footer>
         <button class="act" @click="showAdd = false">取消</button>
-        <button class="act primary" :disabled="submitting" @click="submitBind">
+        <button class="act primary" :disabled="submitting || !form.name || !!optionsError || optionsLoading" @click="submitBind">
           {{ submitting ? '绑定中…' : '绑定' }}
         </button>
       </template>
     </el-dialog>
 
-    <!-- 低频设置：桥接 -->
-    <div class="card">
-      <div class="card-head">
-        <span class="card-title">更多设置</span>
-        <span class="card-sub">低频管理面，在经典版中打开</span>
-      </div>
-      <div class="bridge-grid">
-        <a
-          v-for="l in BRIDGE_LINKS" :key="l.label"
-          :href="l.href ?? `/console/applications/${app.id}?tab=${l.to}`"
-          class="bridge-item"
-        >
-          <span class="b-label">{{ l.label }} ↗</span>
-          <span class="b-desc">{{ l.desc }}</span>
-        </a>
-      </div>
-    </div>
+    <!-- 动态配置（v2 原生：key/value + 版本化发布 + 回滚，跟随顶栏环境） -->
+    <ProductDynamicConfig v-if="!section || section === 'configuration'" :app-id="app.id" />
+
+    <!-- 运行配置（v2 原生：env/Secret 启动注入，重启生效） -->
+    <ProductRunConfig v-if="!section || section === 'configuration'" :app-id="app.id" />
+
+    <!-- 成员与权限（v2 原生：应用级角色 + 受限开关） -->
+    <ProductMembers v-if="!section || section === 'members'" :app-id="app.id" :restricted="!!app.restricted" />
   </div>
 </template>
 
@@ -176,34 +178,8 @@ const BRIDGE_LINKS: { label: string; desc: string; to?: string; href?: string }[
   flex-direction: column;
   gap: 14px;
 }
-.card {
-  padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-}
-.card-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 12px;
-}
-.card-title {
-  font-size: 14px;
-  font-weight: 600;
-}
-.card-sub {
-  font-size: 12px;
-  color: var(--text-faint);
-}
 .add-btn {
   margin-left: auto;
-}
-.empty-hint {
-  padding: 22px 0;
-  font-size: 12.5px;
-  color: var(--text-faint);
-  text-align: center;
 }
 .bind-groups {
   display: flex;
@@ -285,51 +261,4 @@ const BRIDGE_LINKS: { label: string; desc: string; to?: string; href?: string }[
   outline: none;
   border-color: var(--brand);
 }
-.act {
-  padding: 6px 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: transparent;
-  color: var(--text-dim);
-  font-family: inherit;
-  font-size: 12.5px;
-  cursor: pointer;
-}
-.act.primary {
-  border-color: var(--brand);
-  background: var(--brand);
-  color: #fff;
-}
-.act.primary:hover { opacity: 0.9; }
-.act:disabled { opacity: 0.5; cursor: not-allowed; }
-/* 桥接 */
-.bridge-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 10px;
-}
-.bridge-item {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text);
-  text-decoration: none;
-  transition: border-color 0.12s, background 0.12s;
-}
-.bridge-item:hover {
-  border-color: var(--border-strong);
-  background: var(--surface-2);
-}
-.bridge-item .b-label {
-  font-size: 13px;
-  color: var(--brand);
-}
-.bridge-item .b-desc {
-  font-size: 11.5px;
-  color: var(--text-faint);
-}
-.mono { font-family: 'JetBrains Mono', monospace; }
 </style>

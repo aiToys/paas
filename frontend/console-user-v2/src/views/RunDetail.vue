@@ -5,7 +5,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { getRun, approveStage, abortRun, retryRun, type PipelineRun, type StageRun } from '@/api/pipeline'
+import { buildRunIdOf, getRun, approveStage, abortRun, retryRun, type PipelineRun, type StageRun } from '@/api/pipeline'
 import { statusOf, tagTypeToCls, RUN_STATUS, STAGE_STATUS } from '@/composables/useStatus'
 import { apiError } from '@/api'
 
@@ -25,6 +25,7 @@ const ACTIVE = new Set(['pending', 'running', 'paused'])
 async function load() {
   try {
     run.value = await getRun(route.params.runId as string)
+    if (expandedIdx.value === null) expandedIdx.value = run.value.stageRuns.find((s) => s.status === 'failed' || s.status === 'waiting')?.index ?? null
     document.title = `运行 ${run.value.id.slice(0, 12)} · 控制台`
   } catch (e) {
     const msg = apiError(e)
@@ -136,7 +137,8 @@ async function doRetry() {
         </div>
       </div>
 
-      <table class="stage-table">
+      <div class="table-scroll" data-table-scroll tabindex="0">
+<table class="stage-table">
         <thead>
           <tr>
             <th class="col-idx">#</th>
@@ -163,13 +165,15 @@ async function doRetry() {
             </tr>
             <tr v-if="expandedIdx === s.index" class="log-row">
               <td colspan="6">
+                <RouterLink v-if="buildRunIdOf(s)" :to="'/builds/' + buildRunIdOf(s)" class="text-button">打开完整构建日志 →</RouterLink>
                 <pre v-if="s.log" class="log-pre mono">{{ s.log }}</pre>
-                <p v-else class="log-empty">（该阶段暂无事件日志；完整构建日志可在经典版运行详情查看）</p>
+                <p v-else class="log-empty">该阶段暂无事件日志。若为构建阶段，可打开完整构建日志。</p>
               </td>
             </tr>
           </template>
         </tbody>
       </table>
+</div>
     </template>
   </div>
 </template>
@@ -226,16 +230,6 @@ async function doRetry() {
   flex-wrap: wrap;
   min-width: 0;
 }
-.r-status {
-  padding: 2px 10px;
-  border-radius: 4px;
-  font-size: 12.5px;
-  font-weight: 600;
-}
-.r-status.ok { background: rgba(22, 163, 74, 0.12); color: var(--success, #16a34a); }
-.r-status.warn { background: rgba(245, 158, 11, 0.12); color: var(--warning, #f59e0b); }
-.r-status.err { background: rgba(244, 63, 94, 0.12); color: var(--danger, #f43f5e); }
-.r-status.idle { background: var(--surface-2); color: var(--text-faint); }
 .h-kv {
   font-size: 12.5px;
   color: var(--text-faint);
@@ -248,35 +242,6 @@ async function doRetry() {
   display: flex;
   gap: 8px;
   flex-shrink: 0;
-}
-.act {
-  padding: 6px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: transparent;
-  color: var(--text-dim);
-  font-family: inherit;
-  font-size: 12.5px;
-  cursor: pointer;
-  transition: all 0.12s;
-}
-.act:hover { border-color: var(--brand); color: var(--brand); }
-.act.primary {
-  border-color: var(--brand);
-  background: var(--brand);
-  color: #fff;
-}
-.act.primary:hover { opacity: 0.9; }
-.act.danger { border-color: var(--danger, #f43f5e); color: var(--danger, #f43f5e); }
-.act:disabled { opacity: 0.5; cursor: not-allowed; }
-.stage-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
 }
 .stage-table th {
   text-align: left;
@@ -303,12 +268,6 @@ async function doRetry() {
   font-size: 10.5px;
   color: var(--text-faint);
 }
-.status { font-size: 12.5px; }
-.status.ok { color: var(--success, #16a34a); }
-.status.warn { color: var(--warning, #f59e0b); }
-.status.err { color: var(--danger, #f43f5e); }
-.status.idle { color: var(--text-faint); }
-.s-note { max-width: 320px; }
 .err-text {
   color: var(--danger, #f43f5e);
   font-size: 12px;

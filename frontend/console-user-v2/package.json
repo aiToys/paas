@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "gen:api": "openapi-typescript http://localhost:8080/openapi.json -o src/api/types.gen.ts",
     "lint": "eslint .",
-    "lint:fix": "eslint . --fix"
+    "lint:fix": "eslint . --fix",
+    "test:ux": "node --experimental-strip-types --test test/ux-contracts.test.mjs"
   },
   "dependencies": {
     "element-plus": "^2.8.0",

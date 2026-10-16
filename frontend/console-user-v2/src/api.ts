@@ -1,4 +1,5 @@
 import { ElMessage } from 'element-plus'
+import { asList, unwrapData } from './api/response'
 
 // 会话走 httpOnly cookie（后端 Set-Cookie），前端不存不读 token。
 // 401 -> 自动 refresh（cookie 自带 refresh token）-> 重试原请求一次 -> 仍 401 触发会话过期事件。
@@ -62,10 +63,7 @@ export async function fetchJSON<T>(path: string, opts?: RequestInit): Promise<T>
   const json = await resp.json().catch(() => {
     throw new Error('响应格式错误（非 JSON）')
   })
-  if (json && typeof json === 'object' && 'data' in json) {
-    return (json as { data: T }).data
-  }
-  return json as T
+  return unwrapData(json) as T
 }
 
 // apiError 从 fetchJSON/fetchAuth 抛出的 unknown 错误中提取用户可读文案，
@@ -84,4 +82,9 @@ export async function respError(resp: Response, prefix = ''): Promise<string> {
       ? (j as { error: string }).error
       : `HTTP ${resp.status}`
   return prefix ? `${prefix}${msg}` : msg
+}
+
+// List API 显式接住 Go nil slice，同时拒绝非数组响应，避免假空态。
+export async function fetchList<T>(path: string, opts?: RequestInit): Promise<T[]> {
+  return asList<T>(await fetchJSON<unknown>(path, opts))
 }

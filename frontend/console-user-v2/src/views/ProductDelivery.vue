@@ -1,375 +1,100 @@
 <script setup lang="ts">
-// 产品交付面（spec §9.4 facet=delivery）：回答「代码怎么变成线上服务」。
-// 三块：智能研发一条龙（差异化入口，需求文本直触 tpl-agent-ship）/ 最近运行（状态一览，
-// 轮询运行中的 run，条目落 v2 简版 RunDetail）/ 深度操作（构建/镜像/发布/变更批次低频管理，并行期桥接老版）。
-import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { apiError } from '@/api'
-import { listRuns, triggerAgentShipRun, type PipelineRun, type RunStatus } from '@/api/pipeline'
-
-const router = useRouter()
-
+import { listRuns, triggerAgentShipRun, type PipelineRun } from '@/api/pipeline'
+import { usePolling } from '@/composables/usePolling'
+import { useListFilters } from '@/composables/useListFilters'
+import { statusOf, tagTypeToCls, RUN_STATUS } from '@/composables/useStatus'
+import DeliveryChanges from '@/components/DeliveryChanges.vue'
+import DeliveryBuilds from '@/components/DeliveryBuilds.vue'
+import DeliveryReleases from '@/components/DeliveryReleases.vue'
+import DeliveryPipelines from '@/components/DeliveryPipelines.vue'
+import DeliveryRepos from '@/components/DeliveryRepos.vue'
+import StatePanel from '@/components/StatePanel.vue'
+import TablePager from '@/components/TablePager.vue'
+import Icon from '@/components/Icon.vue'
 const props = defineProps<{ appId: string }>()
-
-// —— 最近运行（高频信号：跑没跑/过没过；运行中 5s 轮询，全终态停）——
+const route = useRoute()
+const router = useRouter()
+const { filters } = useListFilters({ section: 'runs', q: '', status: '' })
+const tabs = [{ id: 'runs', label: '运行记录' }, { id: 'agent', label: '智能研发' }, { id: 'changes', label: '变更与批次' }, { id: 'pipelines', label: '流水线' }, { id: 'builds', label: '构建与镜像' }, { id: 'releases', label: '发布' }, { id: 'repos', label: '代码仓库' }]
+const legacy: Record<string, string> = { repositories: 'repos', images: 'builds', pipelines: 'pipelines', changes: 'changes', builds: 'builds', releases: 'releases' }
+const section = computed(() => !route.query.section && legacy[String(route.query.tab)] ? legacy[String(route.query.tab)] : tabs.some((t) => t.id === filters.section) ? filters.section : 'runs')
+function pick(id: string) { void router.replace({ query: { ...route.query, tab: 'delivery', section: id, focus: undefined } }) }
 const runs = ref<PipelineRun[]>([])
-const runsLoading = ref(true)
-const runsFailed = ref(false)
-let timer: number | undefined
-
+const loading = ref(true)
+const error = ref('')
+const page = ref(1)
 async function loadRuns() {
-  try {
-    runs.value = await listRuns({ appId: props.appId })
-    runsFailed.value = false
-  } catch {
-    runsFailed.value = true
-  } finally {
-    runsLoading.value = false
-  }
+  try { runs.value = await listRuns({ appId: props.appId }); error.value = '' }
+  catch (e) { error.value = apiError(e, '运行记录加载失败') }
+  finally { loading.value = false }
 }
-onMounted(async () => {
-  await loadRuns()
-  // 有进行中（running/paused）的 run 才轮询；页面不可见跳过；全终态停表。
-  timer = window.setInterval(() => {
-    if (document.hidden) return
-    if (!runs.value.some((r) => r.status === 'running' || r.status === 'paused')) return
-    void loadRuns()
-  }, 5000)
-})
-onUnmounted(() => { if (timer) window.clearInterval(timer) })
-
-// 默认收 8 条，「全部 N 条」本地展开（产品内全量，不跳老版）。
-const showAllRuns = ref(false)
-const recentRuns = computed(() => {
-  const sorted = [...runs.value].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-  return showAllRuns.value ? sorted : sorted.slice(0, 8)
-})
-const activeCount = computed(
-  () => runs.value.filter((r) => r.status === 'running' || r.status === 'paused').length,
-)
-
-const RUN_STATUS: Record<RunStatus, { label: string; cls: string }> = {
-  running: { label: '运行中', cls: 'warn' },
-  paused: { label: '等待审批', cls: 'warn' },
-  succeeded: { label: '成功', cls: 'ok' },
-  failed: { label: '失败', cls: 'err' },
-  aborted: { label: '已中止', cls: 'idle' },
-}
-
-function fmtAgo(iso: string): string {
-  const t = new Date(iso).getTime()
-  if (Number.isNaN(t)) return ''
-  const m = Math.floor(Math.max(0, Date.now() - t) / 60000)
-  if (m < 1) return '刚刚'
-  if (m < 60) return `${m} 分钟前`
-  const h = Math.floor(m / 60)
-  if (h < 24) return `${h} 小时前`
-  return `${Math.floor(h / 24)} 天前`
-}
-
-// —— 智能研发一条龙（2026-10-13 能力，v2 首页级入口）：需求 + 勾选段直触 ——
+usePolling(loadRuns, 5000, { active: () => section.value === 'runs' && runs.value.some((r) => r.status === 'running' || r.status === 'paused') })
+const filtered = computed(() => runs.value.filter((r) => (!filters.status || r.status === filters.status) && (!filters.q || (r.id + r.branch + r.trigger).toLowerCase().includes(filters.q.trim().toLowerCase()))).sort((a, b) => b.createdAt.localeCompare(a.createdAt)))
+const rows = computed(() => filtered.value.slice((page.value - 1) * 20, page.value * 20))
+watch(filters, () => { page.value = 1 })
 const shipRequest = ref('')
 const shipBusy = ref(false)
-// 段语义（tpl-agent-ship v2）：AI 开发恒留；审查/上线（部署+冒烟+审批+金丝雀）/发布（release+合主干）可选。
 const shipReview = ref(true)
 const shipShip = ref(true)
 const shipRelease = ref(false)
-
+watch(shipShip, (v) => { if (!v) shipRelease.value = false })
 async function runAgentShip() {
-  if (!shipRequest.value.trim()) {
-    ElMessage.warning('请描述你要交付的需求')
-    return
-  }
-  if (!shipShip.value && shipRelease.value) {
-    ElMessage.warning('「发布」依赖「上线」，请先勾选上线')
-    return
-  }
+  if (!shipRequest.value.trim()) { ElMessage.warning('请描述要交付的需求'); return }
   shipBusy.value = true
   try {
-    const run = await triggerAgentShipRun(props.appId, {
-      request: shipRequest.value.trim(),
-      review: shipReview.value,
-      ship: shipShip.value,
-      release: shipRelease.value,
-    })
-    ElMessage.success('已触发智能研发，正在跳转运行详情…')
-    shipRequest.value = ''
-    router.push(`/runs/${run.id}`)
-    await loadRuns()
-  } catch (e) {
-    ElMessage.error(apiError(e, '触发失败'))
-  } finally {
-    shipBusy.value = false
-  }
+    const run = await triggerAgentShipRun(props.appId, { request: shipRequest.value.trim(), review: shipReview.value, ship: shipShip.value, release: shipRelease.value })
+    ElMessage.success('已创建智能研发运行')
+    await router.push('/runs/' + run.id)
+  } catch (e) { ElMessage.error(apiError(e, '触发失败')) }
+  finally { shipBusy.value = false }
 }
-
-// 深度操作（低频管理面）：并行期桥接老版对应 tab。
-const BRIDGE_LINKS = [
-  { label: '变更与发车', desc: '变更登记 / 集成批次 / 火车发车', to: 'changes' },
-  { label: '流水线管理', desc: '模板绑定 / 参数覆盖 / 触发器', to: 'pipelines' },
-  { label: '构建与镜像', desc: '构建记录 / 镜像 digest', to: 'builds' },
-  { label: '发布', desc: '版本里程碑 / 回滚 / 晋升链', to: 'releases' },
-  { label: '代码仓库', desc: '仓库接入 / 分支 / PR', to: 'repositories' },
-]
+onMounted(() => { document.title = '产品交付 · PaaS' })
 </script>
-
 <template>
-  <div class="delivery">
-    <!-- 智能研发一条龙 -->
-    <div class="card ship-card">
-      <div class="card-head">
-        <span class="card-title">✨ 智能研发</span>
-        <span class="card-sub">描述需求 → AI 写代码 → 审查 → 上线，一条龙交付</span>
-      </div>
-      <textarea
-        v-model="shipRequest"
-        class="ship-input"
-        rows="3"
-        placeholder="用一句话描述要交付的需求，例如：商品详情页增加「猜你喜欢」推荐位，数据来自向量检索 top5"
-      />
-      <div class="ship-segs">
-        <label class="seg"><input v-model="shipReview" type="checkbox" /> AI 代码审查</label>
-        <label class="seg"><input v-model="shipShip" type="checkbox" /> 上线（部署测试 → 审批 → 金丝雀）</label>
-        <label class="seg"><input v-model="shipRelease" type="checkbox" /> 发布（版本里程碑 + 合主干）</label>
-        <button class="act primary run-btn" :disabled="shipBusy" @click="runAgentShip">
-          {{ shipBusy ? '触发中…' : '开始交付' }}
-        </button>
-      </div>
-    </div>
-
-    <!-- 最近运行（条目落 v2 简版 RunDetail，审批/终止/重试在详情页闭环） -->
-    <div class="card">
-      <div class="card-head">
-        <span class="card-title">最近运行</span>
-        <span v-if="activeCount" class="card-live">● {{ activeCount }} 个进行中</span>
-        <a v-if="runs.length > 8" class="card-more" @click="showAllRuns = !showAllRuns">
-          {{ showAllRuns ? '收起' : `全部 ${runs.length} 条 ▸` }}
-        </a>
-      </div>
-      <div v-if="runsLoading" class="loading-block" v-loading="true"></div>
-      <div v-else-if="runsFailed" class="empty-hint">运行记录加载失败 <a class="retry" @click="loadRuns">重试</a></div>
-      <div v-else-if="!recentRuns.length" class="empty-hint">
-        还没有运行——从上方「智能研发」开始第一次交付
-      </div>
-      <div v-else class="run-list">
-        <a
-          v-for="r in recentRuns" :key="r.id"
-          class="run-row"
-          @click="router.push(`/runs/${r.id}`)"
-        >
-          <span class="r-status" :class="RUN_STATUS[r.status]?.cls">{{ RUN_STATUS[r.status]?.label ?? r.status }}</span>
-          <span class="r-branch mono">{{ r.branch || '-' }}</span>
-          <span class="r-trigger">{{ r.trigger }}</span>
-          <span class="r-stage">阶段 {{ r.currentStage + 1 }}/{{ r.stageRuns.length }}</span>
-          <span class="r-time">{{ fmtAgo(r.createdAt) }}</span>
-          <span class="r-open">→</span>
-        </a>
-      </div>
-    </div>
-
-    <!-- 深度操作：桥接老版 -->
-    <div class="card">
-      <div class="card-head">
-        <span class="card-title">深度操作</span>
-        <span class="card-sub">低频管理面，在经典版中打开</span>
-      </div>
-      <div class="bridge-grid">
-        <a
-          v-for="l in BRIDGE_LINKS" :key="l.to"
-          :href="`/console/applications/${appId}?tab=${l.to}`"
-          class="bridge-item"
-        >
-          <span class="b-label">{{ l.label }} ↗</span>
-          <span class="b-desc">{{ l.desc }}</span>
-        </a>
-      </div>
-    </div>
+  <div class="delivery-workspace">
+    <nav class="delivery-navigation" aria-label="产品交付功能"><button v-for="t in tabs" :key="t.id" :class="{ active: section === t.id }" :aria-current="section === t.id ? 'page' : undefined" @click="pick(t.id)">{{ t.label }}</button></nav>
+    <section v-if="section === 'runs'">
+      <div class="section-heading"><div><h2>运行记录</h2><p>跟进执行进度，从失败阶段直接查看日志。</p></div><button class="act" @click="loadRuns">刷新</button></div>
+      <div class="filter-bar"><label class="search-field"><Icon name="search" :size="17" /><input v-model="filters.q" placeholder="搜索分支或运行 ID" aria-label="搜索产品交付记录" /></label><select v-model="filters.status" class="filter-select" aria-label="运行状态"><option value="">全部状态</option><option v-for="s in ['running', 'paused', 'succeeded', 'failed', 'aborted']" :key="s" :value="s">{{ statusOf(RUN_STATUS, s).label }}</option></select></div>
+      <div v-if="loading" class="loading-block" v-loading="true"></div>
+      <StatePanel v-else-if="error" title="运行记录加载失败" :description="error" error><button class="act" @click="loadRuns">重试</button></StatePanel>
+      <StatePanel v-else-if="!filtered.length" title="没有匹配的运行记录" description="通过流水线运行现有代码，或从智能研发提交新需求。"><button class="act" @click="pick('pipelines')">查看流水线</button><button class="act" @click="pick('agent')">智能研发</button></StatePanel>
+      <template v-else><div class="table-scroll" data-table-scroll tabindex="0"><table class="list-table runs-table"><thead><tr><th scope="col">运行</th><th scope="col">状态</th><th scope="col">分支</th><th scope="col">阶段</th><th scope="col">触发方式</th><th scope="col">创建时间</th></tr></thead><tbody><tr v-for="r in rows" :key="r.id"><td><RouterLink :to="'/runs/' + r.id" class="text-button mono">{{ r.id }}</RouterLink></td><td><span class="status" :class="tagTypeToCls(statusOf(RUN_STATUS, r.status).type)">{{ statusOf(RUN_STATUS, r.status).label }}</span></td><td class="mono">{{ r.branch || '—' }}</td><td>{{ Math.min(r.currentStage + 1, r.stageRuns.length) }}/{{ r.stageRuns.length }}</td><td class="dim">{{ r.trigger }}</td><td class="dim">{{ new Date(r.createdAt).toLocaleString('zh-CN') }}</td></tr></tbody></table></div><TablePager v-model="page" :total="filtered.length" /></template>
+    </section>
+    <section v-else-if="section === 'agent'" class="card agent-form">
+      <div class="section-heading"><div><h2>智能研发</h2><p>提交需求，生成代码分支。审查、上线和版本发布可按需选择，结果在运行详情中跟进。</p></div></div>
+      <label for="ship-request" class="field-label">需求描述</label><textarea id="ship-request" v-model="shipRequest" rows="5" placeholder="描述预期行为、涉及的服务，以及可验证的验收条件。" />
+      <fieldset><legend>执行范围</legend><label><input type="checkbox" checked disabled /> AI 开发（生成代码分支）</label><label><input v-model="shipReview" type="checkbox" /> AI 代码审查</label><label><input v-model="shipShip" type="checkbox" /> 上线验证（测试部署、审批、金丝雀）</label><label><input v-model="shipRelease" type="checkbox" :disabled="!shipShip" /> 版本发布（合入主干，需先选择上线验证）</label></fieldset>
+      <p class="operation-note">实际服务和环境由此产品的智能研发流水线配置决定。运行完成后，仍需检查构建、部署与验证结果。</p>
+      <button class="act primary" :disabled="shipBusy || !shipRequest.trim()" @click="runAgentShip">{{ shipBusy ? '创建运行中…' : '提交研发需求' }}</button>
+    </section>
+    <DeliveryChanges v-else-if="section === 'changes'" :app-id="appId" />
+    <DeliveryBuilds v-else-if="section === 'builds'" :app-id="appId" />
+    <DeliveryReleases v-else-if="section === 'releases'" :app-id="appId" />
+    <DeliveryPipelines v-else-if="section === 'pipelines'" :app-id="appId" />
+    <DeliveryRepos v-else :app-id="appId" />
   </div>
 </template>
-
 <style scoped>
-.delivery {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-.card {
-  padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-}
-.card-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 12px;
-}
-.card-title {
-  font-size: 14px;
-  font-weight: 600;
-}
-.card-sub {
-  font-size: 12px;
-  color: var(--text-faint);
-}
-.card-live {
-  margin-left: auto;
-  font-size: 12px;
-  color: var(--warning, #f59e0b);
-}
-.card-more {
-  margin-left: auto;
-  font-size: 12px;
-  color: var(--brand);
-  text-decoration: none;
-}
-.card-live + .card-more { margin-left: 0; }
-/* 智能研发 */
-.ship-input {
-  width: 100%;
-  box-sizing: border-box;
-  margin-bottom: 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  background: var(--surface-2);
-  color: var(--text);
-  font-family: inherit;
-  font-size: 13px;
-  line-height: 1.6;
-  resize: vertical;
-}
-.ship-input:focus {
-  outline: none;
-  border-color: var(--brand);
-}
-.ship-input::placeholder {
-  color: var(--text-faint);
-}
-.ship-segs {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 14px;
-  font-size: 12.5px;
-  color: var(--text-dim);
-}
-.seg {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  cursor: pointer;
-}
-.run-btn {
-  margin-left: auto;
-}
-.act {
-  padding: 6px 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: transparent;
-  color: var(--text-dim);
-  font-family: inherit;
-  font-size: 12.5px;
-  cursor: pointer;
-}
-.act.primary {
-  border-color: var(--brand);
-  background: var(--brand);
-  color: #fff;
-}
-.act.primary:hover { opacity: 0.9; }
-.act:disabled { opacity: 0.5; cursor: not-allowed; }
-/* 运行列表 */
-.loading-block { height: 120px; }
-.empty-hint {
-  padding: 22px 0;
-  font-size: 12.5px;
-  color: var(--text-faint);
-  text-align: center;
-}
-.retry {
-  color: var(--brand);
-  cursor: pointer;
-}
-.run-list {
-  display: flex;
-  flex-direction: column;
-}
-.run-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 9px 6px;
-  border-bottom: 1px solid var(--border);
-  font-size: 12.5px;
-  color: var(--text);
-  text-decoration: none;
-}
-.run-row:last-child { border-bottom: none; }
-.run-row:hover { background: var(--surface-2); }
-.r-status { width: 64px; flex-shrink: 0; font-weight: 600; }
-.r-status.ok { color: var(--success, #16a34a); }
-.r-status.warn { color: var(--warning, #f59e0b); }
-.r-status.err { color: var(--danger, #f43f5e); }
-.r-status.idle { color: var(--text-faint); }
-.r-branch {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.r-trigger {
-  flex-shrink: 0;
-  color: var(--text-faint);
-  font-size: 11.5px;
-}
-.r-stage {
-  flex-shrink: 0;
-  color: var(--text-dim);
-  font-size: 11.5px;
-}
-.r-time {
-  margin-left: auto;
-  flex-shrink: 0;
-  color: var(--text-faint);
-  font-size: 11.5px;
-}
-.r-open {
-  flex-shrink: 0;
-  color: var(--brand);
-  font-size: 11px;
-}
-/* 桥接 */
-.bridge-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 10px;
-}
-.bridge-item {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text);
-  text-decoration: none;
-  transition: border-color 0.12s, background 0.12s;
-}
-.bridge-item:hover {
-  border-color: var(--border-strong);
-  background: var(--surface-2);
-}
-.b-label {
-  font-size: 13px;
-  color: var(--brand);
-}
-.b-desc {
-  font-size: 11.5px;
-  color: var(--text-faint);
-}
-.mono { font-family: 'JetBrains Mono', monospace; }
+.delivery-navigation { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 24px; }
+.delivery-navigation button { border: 1px solid transparent; background: transparent; color: var(--text-faint); padding: 7px 12px; border-radius: 5px; font-size: 13px; }
+.delivery-navigation button:hover { background: var(--surface-hover); }
+.delivery-navigation button.active { background: var(--surface); color: var(--text); border-color: var(--border-strong); font-weight: 600; }
+.section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; margin-bottom: 20px; }
+.section-heading h2 { font-size: 17px; margin: 0; }
+.section-heading p { color: var(--text-faint); font-size: 13px; margin: 6px 0 0; }
+.runs-table { min-width: 900px; }
+.runs-table td:first-child { max-width: 250px; overflow-wrap: anywhere; }
+.loading-block { height: 200px; }
+.agent-form { max-width: 900px; }
+.field-label { display: block; font-size: 13px; margin-bottom: 8px; font-weight: 500; }
+.agent-form textarea { width: 100%; padding: 12px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); resize: vertical; }
+.agent-form fieldset { margin: 24px 0; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius-sm); display: flex; flex-direction: column; gap: 12px; }
+.agent-form legend { font-size: 13px; padding: 0 7px; }
+.agent-form fieldset label { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.operation-note { color: var(--text-faint); font-size: 12px; margin-bottom: 20px; }
 </style>

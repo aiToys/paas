@@ -1,3 +1,4 @@
+import { asList } from './response'
 // 配置中心 API（ns 共享维度 + 应用维度动态配置）。
 // 应用维度（scope=app）是主路径：配置归属应用，经 /api/applications/{id}/dynamic-configs 消费，
 // 后端自动 EnsureByApp 懒建应用专属 namespace，前端无需感知 namespace 实体。
@@ -28,7 +29,7 @@ export interface LaneOverride {
 const unwrap = async <T>(resp: Response): Promise<T> => {
   const j = await resp.json().catch(() => ({}))
   if (!resp.ok) throw new Error(j?.error || `HTTP ${resp.status}`)
-  return j?.data ?? j as T
+  return (j && typeof j === 'object' && 'data' in j ? j.data : j) as T
 }
 
 // ---------- 应用维度动态配置（scope=app，主路径） ----------
@@ -38,7 +39,7 @@ const qs = (envId?: string) => (envId ? `?envId=${encodeURIComponent(envId)}` : 
 
 // 列 draft 项（GET 列表同时触发后端 EnsureByAppEnv 懒建，发布历史/当前生效用只读端点）
 export const fetchAppDynamicConfigs = (appId: string, envId?: string) =>
-  fetchAuth(`/api/applications/${appId}/dynamic-configs${qs(envId)}`).then(r => unwrap<DynamicConfigItem[]>(r))
+  fetchAuth(`/api/applications/${appId}/dynamic-configs${qs(envId)}`).then(r => unwrap<unknown>(r)).then(v => asList<DynamicConfigItem>(v))
 export const upsertAppDynamicConfig = (appId: string, body: { key: string; value: string; type?: string }, envId?: string) =>
   fetchAuth(`/api/applications/${appId}/dynamic-configs${qs(envId)}`, { method: 'POST', body: JSON.stringify(body) }).then(r => unwrap<DynamicConfigItem>(r))
 export const deleteAppDynamicConfig = (appId: string, itemId: string, envId?: string) =>
@@ -46,7 +47,7 @@ export const deleteAppDynamicConfig = (appId: string, itemId: string, envId?: st
 export const publishAppDynamicConfigs = (appId: string, envId?: string) =>
   fetchAuth(`/api/applications/${appId}/dynamic-configs/publish${qs(envId)}`, { method: 'POST' }).then(r => unwrap<ConfigPublish>(r))
 export const fetchAppPublishes = (appId: string, envId?: string) =>
-  fetchAuth(`/api/applications/${appId}/dynamic-configs/publishes${qs(envId)}`).then(r => unwrap<ConfigPublish[]>(r))
+  fetchAuth(`/api/applications/${appId}/dynamic-configs/publishes${qs(envId)}`).then(r => unwrap<unknown>(r)).then(v => asList<ConfigPublish>(v))
 // 当前生效是裸 JSON {published,version,snapshot[,overrideHash]}（发现协议 shape），unwrap 兼容。
 // 注意：本端点 query 名为 envId（与 dynamic-configs 全家一致）；
 // 按应用名发现端点 /api/configcenter/apps/{name}/published 才是 env（发现协议约定）。
@@ -66,7 +67,7 @@ export const rollbackAppPublish = (appId: string, publishId: string, envId?: str
 // lane 必填（后端 400 兜底）；写权限 application:write + 生产闸门（prod env 需 prod:write）
 export const fetchLaneOverrides = (appId: string, envId: string, lane: string) =>
   fetchAuth(`/api/applications/${appId}/dynamic-configs/lane-overrides?envId=${encodeURIComponent(envId)}&lane=${encodeURIComponent(lane)}`)
-    .then(r => unwrap<LaneOverride[]>(r))
+    .then(r => unwrap<unknown>(r)).then(v => asList<LaneOverride>(v))
 export const upsertLaneOverride = (appId: string, envId: string, lane: string, body: { key: string; value: string }) =>
   fetchAuth(`/api/applications/${appId}/dynamic-configs/lane-overrides?envId=${encodeURIComponent(envId)}&lane=${encodeURIComponent(lane)}`, { method: 'POST', body: JSON.stringify(body) })
     .then(r => unwrap<LaneOverride>(r))
@@ -91,7 +92,7 @@ export interface RefUser {
   appNsName?: string
 }
 export const fetchSharedRefs = (appId: string, envId?: string) =>
-  fetchAuth(`/api/applications/${appId}/dynamic-configs/shared-refs${qs(envId)}`).then(r => unwrap<SharedRef[]>(r))
+  fetchAuth(`/api/applications/${appId}/dynamic-configs/shared-refs${qs(envId)}`).then(r => unwrap<unknown>(r)).then(v => asList<SharedRef>(v))
 export const addSharedRef = (appId: string, sharedNsId: string, envId?: string) =>
   fetchAuth(`/api/applications/${appId}/dynamic-configs/shared-refs${qs(envId)}`, { method: 'POST', body: JSON.stringify({ sharedNsId }) }).then(r => unwrap<SharedRef>(r))
 export const deleteSharedRef = (appId: string, refId: string, envId?: string) =>

@@ -881,6 +881,12 @@ internal/dataservice/  领域(DataService + 6 Kind 常量 + KindMeta 表单元�
 - **横切**：新端点 OpenAPI 登记 + `{data:T}` + camelCase；notifications 权限 pipeline:read（登录态）；轮询全部 onUnmounted clearInterval。
 
 
+## 新版控制台组织方式（2026-10-16）
+
+`frontend/console-user-v2` 的 `/next/` 采用任务域导航：应用交付、AI 平台、基础设施、组织与访问；首页为跨产品事项与快捷入口，产品列表独立 `/products`。产品内分为服务运行、交付、共享资源、配置、成员与权限。导航和命令搜索共用 `src/navigation/index.ts`。详细设计及验证边界见 `docs/superpowers/specs/2026-10-16-console-next-ux-refactor.md`。
+
+新增或调整页面优先复用 PageHeader / StatePanel / TablePager 和 theme.css 语义 token；列表接口使用 fetchList，严格区分 null 空列表、请求失败和格式错误；原生表格放入 table-scroll。顶栏是浏览环境，写操作以资源实际环境或流水线配置为准，不得把运行 CD 流水线标成“部署到当前环境”。经典版仍独立维护，后续“前端架构”段的三层导航描述适用于经典版。
+
 ## 前端架构
 
 三套独立 SPA，共享设计系统（Element Plus + 暗黑模式）：

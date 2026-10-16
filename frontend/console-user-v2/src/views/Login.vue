@@ -26,7 +26,10 @@ async function submit() {
     // loadProfile/loadEnvs 已 401 失败——此处必须重拉，否则顶栏头像/环境下拉空到下次刷新。
     void session.loadProfile()
     void envStore.loadEnvs()
-    router.push((route.query.redirect as string) || '/')
+    const redirect = route.query.redirect
+    router.push(typeof redirect === 'string' && redirect.startsWith('/') && !redirect.startsWith('//') ? redirect : '/')
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '登录失败')
   } finally {
     loading.value = false
   }
@@ -46,17 +49,18 @@ async function demoLogin(u: string, p: string) {
         <span class="brand-mark">P</span>
         <div class="brand-text">
           <div class="brand-name">一站式 PaaS 平台</div>
-          <div class="brand-sub">新版控制台（试验）</div>
+          <div class="brand-sub">开发者控制台</div>
         </div>
       </div>
       <el-form :model="form" label-position="top" @submit.prevent="submit">
         <el-form-item label="用户名">
-          <el-input v-model="form.username" placeholder="用户名" autofocus @keyup.enter="submit" />
+          <el-input v-model="form.username" placeholder="用户名" autocomplete="username" autofocus @keyup.enter="submit" />
         </el-form-item>
         <el-form-item label="密码">
           <el-input
             v-model="form.password"
             type="password"
+            autocomplete="current-password"
             placeholder="密码"
             show-password
             @keyup.enter="submit"
@@ -77,9 +81,6 @@ async function demoLogin(u: string, p: string) {
 </el-button>
         </div>
       </div>
-      <div class="alt-entry">
-        <a href="/console/">继续使用经典版 →</a>
-      </div>
     </div>
   </div>
 </template>
@@ -93,7 +94,7 @@ async function demoLogin(u: string, p: string) {
   padding: 20px;
 }
 .login-card {
-  width: 360px;
+  width: min(400px, 100%);
   padding: 32px;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -111,7 +112,7 @@ async function demoLogin(u: string, p: string) {
   display: grid;
   place-items: center;
   border-radius: 10px;
-  background: var(--brand);
+  background: var(--brand-solid);
   color: #fff;
   font-size: 18px;
   font-weight: 700;
@@ -139,17 +140,5 @@ async function demoLogin(u: string, p: string) {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-}
-.alt-entry {
-  margin-top: 16px;
-  text-align: center;
-  font-size: 12.5px;
-}
-.alt-entry a {
-  color: var(--text-dim);
-  text-decoration: none;
-}
-.alt-entry a:hover {
-  color: var(--brand);
 }
 </style>

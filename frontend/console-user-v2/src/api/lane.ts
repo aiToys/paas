@@ -1,3 +1,4 @@
+import { asList } from './response'
 // 泳道实体 API（一等实体：创建/关闭/详情聚合）。模式照抄 workload.ts：fetchAuth + {data:T} 解包。
 import { fetchAuth } from '@/api'
 import type { Workload } from '@/api/workload'
@@ -34,11 +35,11 @@ export interface LaneDetail {
 const unwrap = async <T>(resp: Response): Promise<T> => {
   const j = await resp.json().catch(() => null)
   if (!resp.ok) throw new Error(j?.error || `HTTP ${resp.status}`)
-  return j?.data ?? j as T
+  return (j && typeof j === 'object' && 'data' in j ? j.data : j) as T
 }
 
 export const listLanes = (envId?: string) =>
-  fetchAuth(`/api/lanes${envId ? `?envId=${encodeURIComponent(envId)}` : ''}`).then(r => unwrap<Lane[]>(r))
+  fetchAuth(`/api/lanes${envId ? `?envId=${encodeURIComponent(envId)}` : ''}`).then(r => unwrap<unknown>(r)).then(v => asList<Lane>(v))
 
 export const getLane = (id: string) =>
   fetchAuth(`/api/lanes/${id}`).then(r => unwrap<LaneDetail>(r))

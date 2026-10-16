@@ -1,3 +1,4 @@
+import { asList } from './response'
 // 工作流编排 API（智能体工作流：定义 CRUD + 运行触发/历史/审批/中止）。
 // 模式与 lane.ts 一致：fetchAuth + {data:T} 解包。
 import { fetchAuth } from '@/api'
@@ -58,7 +59,7 @@ export interface WorkflowRun {
 const unwrap = async <T>(resp: Response): Promise<T> => {
   const j = await resp.json().catch(() => null)
   if (!resp.ok) throw new Error(j?.error || `HTTP ${resp.status}`)
-  return j?.data ?? j as T
+  return (j && typeof j === 'object' && 'data' in j ? j.data : j) as T
 }
 
 const unwrapNoContent = async (resp: Response): Promise<void> => {
@@ -68,7 +69,7 @@ const unwrapNoContent = async (resp: Response): Promise<void> => {
 }
 
 export const listWorkflows = () =>
-  fetchAuth('/api/workflows').then(r => unwrap<WorkflowDef[]>(r))
+  fetchAuth('/api/workflows').then(r => unwrap<unknown>(r)).then(v => asList<WorkflowDef>(v))
 
 export const createWorkflow = (body: Omit<WorkflowDef, 'id'>) =>
   fetchAuth('/api/workflows', {
@@ -89,7 +90,7 @@ export const triggerRun = (id: string, inputs: Record<string, string>) =>
   }).then(r => unwrap<WorkflowRun>(r))
 
 export const listRuns = (workflowId: string) =>
-  fetchAuth(`/api/workflows/${workflowId}/runs`).then(r => unwrap<WorkflowRun[]>(r))
+  fetchAuth(`/api/workflows/${workflowId}/runs`).then(r => unwrap<unknown>(r)).then(v => asList<WorkflowRun>(v))
 
 export const getRun = (runId: string) =>
   fetchAuth(`/api/workflows/runs/${runId}`).then(r => unwrap<WorkflowRun>(r))

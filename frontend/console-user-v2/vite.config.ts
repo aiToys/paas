@@ -23,9 +23,9 @@ export default defineConfig({
   server: {
     port: 5176,
     proxy: {
-      // 开发期代理到 Platform Core Gateway（:8080）
-      '/v1': { target: 'http://localhost:8080', changeOrigin: true },
-      '/api': { target: 'http://localhost:8080', changeOrigin: true },
+      // 开发代理保留浏览器 Host，使后端的 Origin/Host 同源校验成立。生产同源部署不受影响。
+      '/v1': { target: 'http://localhost:8080', changeOrigin: false },
+      '/api': { target: 'http://localhost:8080', changeOrigin: false },
     },
   },
   build: {

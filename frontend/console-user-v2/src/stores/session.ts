@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { fetchAuth, fetchJSON } from '@/api'
+import { fetchAuth, fetchJSON, resetSessionExpiredFlag } from '@/api'
 
 // 会话 store：登录态走 httpOnly cookie，前端只缓存 profile（不存 token）。
 // 会话探测复用 /api/auth/users/me；401 由 api.ts 自动 refresh，refresh 失败触发 session-expired。
@@ -55,6 +55,7 @@ export const useSessionStore = defineStore('session', () => {
       const msg = (await resp.json().catch(() => ({}))).error || '登录失败'
       throw new Error(msg)
     }
+    resetSessionExpiredFlag()
     await loadProfile()
   }
 

@@ -1,6 +1,6 @@
 // pipeline.ts 流水线类型 + API（对接 Plan 1 已交付的 8 端点）。
 // fetchJSON 自动解包 {data:T}；写操作用 fetchAuth + 手动取 .data（需处理 4xx 错误体）。
-import { fetchJSON, fetchAuth } from '@/api'
+import { fetchJSON, fetchAuth, fetchList } from '@/api'
 
 // ---------- 枚举常量 ----------
 export type StageType = 'build' | 'deploy' | 'test' | 'approve' | 'release' | 'promote' | 'baseline' | 'canary'
@@ -102,7 +102,7 @@ export interface PipelineRun {
 
 // ---------- API ----------
 const listPipelines = (appId: string) =>
-  fetchJSON<Pipeline[]>(`/api/applications/${appId}/pipelines`)
+  fetchList<Pipeline>(`/api/applications/${appId}/pipelines`)
 
 const getPipeline = (appId: string, pid: string) =>
   fetchJSON<Pipeline>(`/api/applications/${appId}/pipelines/${pid}`)
@@ -135,7 +135,7 @@ async function deletePipeline(appId: string, pid: string): Promise<void> {
   }
 }
 
-const listTemplates = () => fetchJSON<PipelineTemplate[]>('/api/pipeline-templates')
+const listTemplates = () => fetchList<PipelineTemplate>('/api/pipeline-templates')
 
 async function triggerRun(appId: string, pid: string, body: {
   branch: string; commit?: string; version?: string
@@ -182,7 +182,7 @@ const listRuns = (q: { appId?: string; pipelineId?: string; status?: string } = 
   if (q.pipelineId) qs.set('pipelineId', q.pipelineId)
   if (q.status) qs.set('status', q.status)
   const s = qs.toString()
-  return fetchJSON<PipelineRun[]>(`/api/pipelineruns${s ? '?' + s : ''}`)
+  return fetchList<PipelineRun>(`/api/pipelineruns${s ? '?' + s : ''}`)
 }
 
 async function approveStage(runId: string, stageIdx: number): Promise<void> {
@@ -223,8 +223,32 @@ async function retryRun(runId: string): Promise<void> {
   }
 }
 
+// ---------- 构建域列表（交付面深度卡片：构建/镜像/发布/仓库） ----------
+export interface BuildRun {
+  id: string; appId: string; repoId: string
+  trigger: string; commit?: string; branch: string; message?: string
+  status: string; createdAt: string; finishedAt?: string
+}
+export interface Image {
+  id: string; registry: string; tag: string; digest: string
+  source: ImageSource; branch?: string; buildRunId?: string
+  version?: string; createdAt?: string
+}
+export interface Release {
+  id: string; envId: string; imageId: string; imageDigest: string
+  strategy: string; status: string; workloadId: string
+  previousImageId?: string; promotedFrom?: string; createdAt: string
+}
+export interface Repo {
+  id: string; name: string; url?: string; internal?: boolean; defaultBranch?: string
+}
+const listBuildRuns = (appId: string) => fetchList<BuildRun>(`/api/applications/${appId}/buildruns`)
+const listImages = (appId: string) => fetchList<Image>(`/api/applications/${appId}/images`)
+const listReleases = (appId: string) => fetchList<Release>(`/api/applications/${appId}/releases`)
+const listRepositories = (appId: string) => fetchList<Repo>(`/api/applications/${appId}/repositories`)
+
 export {
   listPipelines, getPipeline, createPipeline, updatePipeline, deletePipeline,
   listTemplates, triggerRun, getRun, listRuns, approveStage, abortRun, retryRun, getBuildRun,
-  canaryDecision,
+  canaryDecision, listBuildRuns, listImages, listReleases, listRepositories,
 }

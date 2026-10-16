@@ -1,3 +1,4 @@
+import { asList } from './response'
 // 工作负载 API（Workload + lanes 聚合 + 实例/日志），集中端点定义（审计第 10 轮：视图层端点收敛）。
 // 模式照抄 change.ts：fetchAuth + {data:T} 解包。
 import { fetchAuth } from '@/api'
@@ -24,16 +25,16 @@ export interface LaneSummary { laneId: string; workloadCount: number; applicatio
 const unwrap = async <T>(resp: Response): Promise<T> => {
   const j = await resp.json()
   if (!resp.ok) throw new Error(j?.error || `HTTP ${resp.status}`)
-  return j?.data ?? j as T
+  return (j && typeof j === 'object' && 'data' in j ? j.data : j) as T
 }
 
 export const listWorkloads = (params: Record<string, string>) => {
   const q = new URLSearchParams(params).toString()
-  return fetchAuth(`/api/workloads${q ? `?${q}` : ''}`).then(r => unwrap<Workload[]>(r))
+  return fetchAuth(`/api/workloads${q ? `?${q}` : ''}`).then(r => unwrap<unknown>(r)).then(v => asList<Workload>(v))
 }
 
 export const listLanes = () =>
-  fetchAuth('/api/workloads/lanes').then(r => unwrap<LaneSummary[]>(r))
+  fetchAuth('/api/workloads/lanes').then(r => unwrap<unknown>(r)).then(v => asList<LaneSummary>(v))
 
 export const getWorkload = (id: string) =>
   fetchAuth(`/api/workloads/${id}`).then(r => unwrap<WorkloadDetail>(r))

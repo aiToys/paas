@@ -4,7 +4,7 @@
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { createService, type ServiceType } from '@/api/service'
-import { fetchJSON, apiError } from '@/api'
+import { apiError, fetchList } from '@/api'
 
 const props = defineProps<{ modelValue: boolean; appId: string }>()
 const emit = defineEmits<{ (e: 'update:modelValue', v: boolean): void; (e: 'created'): void }>()
@@ -28,7 +28,7 @@ const form = ref({
 async function loadRepos() {
   repos.value = []
   try {
-    repos.value = await fetchJSON<Repo[]>(`/api/applications/${props.appId}/repositories`)
+    repos.value = await fetchList<Repo>(`/api/applications/${props.appId}/repositories`)
   } catch { /* 静默降级：仅无选项 */ }
 }
 watch(() => props.modelValue, (open) => {

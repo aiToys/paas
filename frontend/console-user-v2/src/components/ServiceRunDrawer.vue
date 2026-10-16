@@ -7,6 +7,7 @@
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { apiError } from '@/api'
+import { useEnvStore } from '@/stores/env'
 import { getWorkload, getWorkloadLogs, updateWorkload, type WorkloadDetail } from '@/api/workload'
 import { listPipelines, type PipelineRun } from '@/api/pipeline'
 import CdDeployDialog from '@/components/CdDeployDialog.vue'
@@ -20,10 +21,11 @@ const props = withDefaults(
     workloadId?: string
     /** 所属应用 ID（部署按钮找应用的 CD 流水线） */
     appId?: string
+    appName?: string
     /** > 0 时周期刷新（部署观察场景）；页面不可见跳过，关闭/卸载自动停 */
     pollMs?: number
   }>(),
-  { workloadId: '', appId: '', pollMs: 0 },
+  { workloadId: '', appId: '', appName: '', pollMs: 0 },
 )
 const emit = defineEmits<{
   (e: 'update:modelValue', v: boolean): void
@@ -33,6 +35,7 @@ const emit = defineEmits<{
   (e: 'deployed', run: PipelineRun): void
 }>()
 
+const envStore = useEnvStore()
 const detailLoading = ref(false)
 const detail = ref<WorkloadDetail | null>(null)
 
@@ -198,6 +201,7 @@ async function togglePrevious() {
       <template v-if="detail">
         <div class="detail-info">
           <div class="info-row"><span class="k">名称</span><span class="v">{{ detail.workload.name }}</span></div>
+          <div class="info-row"><span class="k">环境</span><span class="v">{{ envStore.envs.find((e) => e.id === detail?.workload.envId)?.name ?? detail.workload.envId }} · {{ detail.workload.laneId === 'default' ? '基线' : detail.workload.laneId }}</span></div>
           <div class="info-row"><span class="k">镜像</span><span class="v mono">{{ detail.workload.image }}</span></div>
           <div class="info-row">
             <span class="k">状态</span>
@@ -259,7 +263,8 @@ async function togglePrevious() {
         <div v-if="detail.instances.length === 0" class="empty-hint">
           暂无运行实例（Pod 未就绪或副本为 0）
         </div>
-        <table v-else class="instances-table">
+        <div class="table-scroll" data-table-scroll tabindex="0" v-else>
+<table class="instances-table">
           <thead>
             <tr>
               <th>实例（Pod）</th>
@@ -284,6 +289,7 @@ async function togglePrevious() {
             </tr>
           </tbody>
         </table>
+</div>
       </template>
     </div>
   </el-drawer>
@@ -401,12 +407,6 @@ async function togglePrevious() {
   font-size: 13px;
   font-weight: 600;
 }
-.empty-hint {
-  padding: 24px 0;
-  font-size: 12.5px;
-  color: var(--text-faint);
-  text-align: center;
-}
 .instances-table {
   width: 100%;
   border-collapse: collapse;
@@ -433,42 +433,9 @@ async function togglePrevious() {
   font-size: 11px;
   color: var(--warning);
 }
-.status.ok { color: var(--success, #16a34a); }
-.status.warn { color: var(--warning, #f59e0b); }
-.status.err { color: var(--danger, #f43f5e); }
-.status.done { color: var(--success, #16a34a); }
-.status.idle { color: var(--text-faint); }
-.mono { font-family: 'JetBrains Mono', monospace; }
 .small { font-size: 11px; }
 .err { color: var(--danger, #f43f5e); }
 .col-act { text-align: right; }
-.act {
-  padding: 4px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: transparent;
-  color: var(--text-dim);
-  font-family: inherit;
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.12s;
-}
-.act:hover {
-  border-color: var(--brand);
-  color: var(--brand);
-}
-.act.primary {
-  border-color: var(--brand);
-  background: var(--brand);
-  color: #fff;
-}
-.act.primary:hover {
-  opacity: 0.9;
-}
-.act:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
 .logs-toolbar {
   display: flex;
   align-items: center;

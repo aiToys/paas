@@ -1,3 +1,4 @@
+import { asList } from './response'
 // 变更管理 API（Change/IntegrationBatch，火车发车模型）。
 // 模式照抄 pipeline.ts：fetchAuth + {data:T} 解包。
 import { fetchAuth } from '@/api'
@@ -19,11 +20,11 @@ export interface ChangeInput { title: string; type: 'feat' | 'hotfix'; branch: s
 const unwrap = async <T>(resp: Response): Promise<T> => {
   const j = await resp.json().catch(() => null)
   if (!resp.ok) throw new Error(j?.error || `HTTP ${resp.status}`)
-  return j?.data ?? j as T
+  return (j && typeof j === 'object' && 'data' in j ? j.data : j) as T
 }
 
 export const listChanges = (appId: string, status = '') =>
-  fetchAuth(`/api/applications/${appId}/changes${status ? `?status=${status}` : ''}`).then(r => unwrap<Change[]>(r))
+  fetchAuth(`/api/applications/${appId}/changes${status ? `?status=${status}` : ''}`).then(r => unwrap<unknown>(r)).then(v => asList<Change>(v))
 export const createChange = (appId: string, body: ChangeInput) =>
   fetchAuth(`/api/applications/${appId}/changes`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(r => unwrap<Change>(r))
 export const abandonChange = (appId: string, id: string) =>
@@ -34,7 +35,7 @@ export const delegateAgentRun = (appId: string, id: string, request?: string) =>
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(request ? { request } : {}),
   }).then(r => unwrap<{ agentRunName: string }>(r))
 export const listBatches = (appId: string, status = '') =>
-  fetchAuth(`/api/applications/${appId}/batches${status ? `?status=${status}` : ''}`).then(r => unwrap<IntegrationBatch[]>(r))
+  fetchAuth(`/api/applications/${appId}/batches${status ? `?status=${status}` : ''}`).then(r => unwrap<unknown>(r)).then(v => asList<IntegrationBatch>(v))
 export const getBatch = (appId: string, id: string) =>
   fetchAuth(`/api/applications/${appId}/batches/${id}`).then(r => unwrap<IntegrationBatch>(r))
 export const createBatch = (appId: string, body: { title: string; branch: string }) =>
@@ -60,10 +61,10 @@ export interface Notification {
 }
 
 export const listAllChanges = (appId = '', status = '') =>
-  fetchAuth(`/api/changes${appId || status ? `?${new URLSearchParams({ ...(appId && { appId }), ...(status && { status }) }).toString()}` : ''}`).then(r => unwrap<Change[]>(r))
+  fetchAuth(`/api/changes${appId || status ? `?${new URLSearchParams({ ...(appId && { appId }), ...(status && { status }) }).toString()}` : ''}`).then(r => unwrap<unknown>(r)).then(v => asList<Change>(v))
 export const getChange = (appId: string, id: string) =>
   fetchAuth(`/api/applications/${appId}/changes/${id}`).then(r => unwrap<Change>(r))
 export const listAllBatches = (appId = '', status = '') =>
-  fetchAuth(`/api/batches${appId || status ? `?${new URLSearchParams({ ...(appId && { appId }), ...(status && { status }) }).toString()}` : ''}`).then(r => unwrap<IntegrationBatch[]>(r))
+  fetchAuth(`/api/batches${appId || status ? `?${new URLSearchParams({ ...(appId && { appId }), ...(status && { status }) }).toString()}` : ''}`).then(r => unwrap<unknown>(r)).then(v => asList<IntegrationBatch>(v))
 export const listNotifications = () =>
-  fetchAuth('/api/notifications').then(r => unwrap<Notification[]>(r))
+  fetchAuth('/api/notifications').then(r => unwrap<unknown>(r)).then(v => asList<Notification>(v))

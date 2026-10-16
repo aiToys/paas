@@ -1,434 +1,138 @@
 <script setup lang="ts">
-// 产品页（spec §9.4）：三面 = 服务（默认）/ 交付 / 设置。
-// 第一批：服务面真实现（服务表 + 本环境运行态 + 域名 + 下一步动作）；
-// 交付/设置低频能力并行期桥接老版对应 tab（诚实占位，不造假数据）。
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { fetchJSON, apiError, fetchList } from '@/api'
+import { baselineRunsFor } from '@/domain/runtime'
+import { listServices, type ServiceEntity } from '@/api/service'
+import type { Workload } from '@/api/workload'
+import { useEnvStore } from '@/stores/env'
+import { statusOf, tagTypeToCls, WORKLOAD_STATUS } from '@/composables/useStatus'
+import PageHeader from '@/components/PageHeader.vue'
+import StatePanel from '@/components/StatePanel.vue'
 import Icon from '@/components/Icon.vue'
 import ServiceRunDrawer from '@/components/ServiceRunDrawer.vue'
 import ServiceCreateDialog from '@/components/ServiceCreateDialog.vue'
 import CdDeployDialog from '@/components/CdDeployDialog.vue'
 import ProductDelivery from './ProductDelivery.vue'
 import ProductSettings from './ProductSettings.vue'
-import { fetchJSON, apiError } from '@/api'
-import { listServices, type ServiceEntity } from '@/api/service'
-import type { Workload } from '@/api/workload'
-import { useEnvStore } from '@/stores/env'
-
+interface Product { id: string; name: string; desc?: string; restricted?: boolean; bindings?: { type: string; name: string; note?: string }[] }
 const route = useRoute()
 const router = useRouter()
 const envStore = useEnvStore()
-
-interface Product {
-  id: string
-  name: string
-  desc?: string
-  status?: 'healthy' | 'degraded' | 'idle'
-  bindings?: { type: string; name: string; note?: string }[]
-}
 const product = ref<Product | null>(null)
-const loading = ref(true)
-const notFound = ref(false)
-
 const services = ref<ServiceEntity[]>([])
 const workloads = ref<Workload[]>([])
-// 治理 Route host 按服务名索引（正式对外域名真源；workload.domain 是开发/泳道域名）。
-const routeHosts = ref<Map<string, Set<string>>>(new Map())
-
-async function load() {
-  loading.value = true
-  notFound.value = false
-  const id = route.params.id as string
-  try {
-    const p = await fetchJSON<Product>(`/api/applications/${id}`)
-    product.value = p
-    document.title = `${p.name} · 控制台`
-    const [svcs, wls, govSvc, rts] = await Promise.allSettled([
-      listServices(id),
-      fetchJSON<Workload[]>(`/api/applications/${id}/workloads`),
-      fetchJSON<{ id: string; name: string }[]>('/api/services'),
-      fetchJSON<{ host: string; serviceId: string; enabled: boolean }[]>('/api/routes'),
-    ])
-    services.value = svcs.status === 'fulfilled' ? svcs.value : []
-    workloads.value = wls.status === 'fulfilled' ? wls.value : []
-    // 关联链 Route.serviceId → 治理 Service.name（部署即注册：Name=工作负载名）→ hosts。
-    if (govSvc.status === 'fulfilled' && rts.status === 'fulfilled') {
-      const nameById = new Map(govSvc.value.map((s) => [s.id, s.name]))
-      const m = new Map<string, Set<string>>()
-      for (const r of rts.value) {
-        if (!r.enabled) continue
-        const name = nameById.get(r.serviceId)
-        if (!name) continue
-        const set = m.get(name) ?? new Set<string>()
-        set.add(r.host)
-        m.set(name, set)
-      }
-      routeHosts.value = m
-    }
-  } catch (e) {
-    const msg = apiError(e)
-    if (msg.includes('not found') || msg.includes('404')) {
-      notFound.value = true
-      return
-    }
-    ElMessage.error(apiError(e, '加载产品失败'))
-  } finally {
-    loading.value = false
-  }
-}
-onMounted(load)
-watch(() => route.params.id, load)
-
-// 每服务的本环境基线运行态（当前环境 × 基线泳道的工作负载）。
-function runOf(s: ServiceEntity): Workload | undefined {
-  return workloads.value.find(
-    (w) => w.serviceId === s.id && (!envStore.currentEnv || w.envId === envStore.currentEnv.id),
-  )
-}
-
-// 每服务的正式域名（治理 Route host；关联键=运行工作负载名，泳道/金丝雀副本同享基线 host）。
-function hostsOf(s: ServiceEntity): string[] {
-  const wl = runOf(s)
-  if (!wl) return []
-  const hosts = routeHosts.value.get(wl.name)
-  return hosts ? [...hosts] : []
-}
-
-// 服务运行抽屉：点行打开（spec §9.5 运行主语——实例/日志/伸缩/暴露在 v2 内闭环）。
-// 未部署行点击直接弹 CD 部署确认（v2 内闭环，不跳老版）。
+const routeHosts = ref(new Map<string, string[]>())
+const loading = ref(true)
+const error = ref('')
+const servicesError = ref('')
+const workloadsError = ref('')
+const addressError = ref(false)
+const q = ref('')
 const showRun = ref(false)
 const runWlId = ref('')
 const showDeploy = ref(false)
 const deployHint = ref('')
-function openRun(s: ServiceEntity) {
-  const wl = runOf(s)
-  if (!wl) {
-    deployHint.value = s.name
-    showDeploy.value = true
-    return
-  }
-  runWlId.value = wl.id
-  showRun.value = true
-}
-// 部署触发成功 → 跳 v2 交付面看运行进度（最近运行列表带轮询）。
-function onDeployed() {
-  facet.value = '交付'
-}
-// 新建服务（v2 原生表单）；创建成功后回填服务列表。
-const showCreateSvc = ref(false)
-async function refreshServices() {
+const showCreate = ref(false)
+const tabs = [{ id: 'services', label: '服务运行' }, { id: 'delivery', label: '交付' }, { id: 'resources', label: '共享资源' }, { id: 'configuration', label: '配置' }, { id: 'members', label: '成员与权限' }]
+const LEGACY: Record<string, string> = { services: 'services', overview: 'services', deploy: 'services', settings: 'resources', bindings: 'resources', configs: 'configuration', members: 'members', pipelines: 'delivery', changes: 'delivery', repositories: 'delivery', builds: 'delivery', images: 'delivery', releases: 'delivery' }
+const facet = computed(() => { const tab = String(route.query.tab || 'services'); return tabs.some((t) => t.id === tab) ? tab : LEGACY[tab] || 'services' })
+function pickTab(id: string) { void router.replace({ query: { ...route.query, tab: id, section: undefined, focus: undefined } }) }
+let seq = 0
+async function load() {
+  const cur = ++seq
+  loading.value = true
+  error.value = ''
+  const id = String(route.params.id)
   try {
-    services.value = await listServices(route.params.id as string)
-  } catch { /* 刷新失败不打断；下次进页面重拉 */ }
+    const p = await fetchJSON<Product>('/api/applications/' + id)
+    if (cur !== seq) return
+    product.value = p
+    const results = await Promise.allSettled([listServices(id), fetchList<Workload>('/api/applications/' + id + '/workloads'), fetchList<{ id: string; name: string }>('/api/services'), fetchList<{ host: string; serviceId: string; enabled: boolean }>('/api/routes')])
+    if (cur !== seq) return
+    const [ss, ws, gs, rs] = results
+    servicesError.value = ss.status === 'rejected' ? apiError(ss.reason) : ''
+    workloadsError.value = ws.status === 'rejected' ? apiError(ws.reason) : ''
+    if (ss.status === 'fulfilled') services.value = ss.value
+    if (ws.status === 'fulfilled') workloads.value = ws.value
+    addressError.value = gs.status === 'rejected' || rs.status === 'rejected'
+    if (gs.status === 'fulfilled' && rs.status === 'fulfilled') {
+      const names = new Map(gs.value.map((s) => [s.id, s.name]))
+      const hosts = new Map<string, string[]>()
+      for (const r of rs.value) {
+        const name = names.get(r.serviceId)
+        if (r.enabled && r.host && name) hosts.set(name, [...(hosts.get(name) ?? []), r.host])
+      }
+      routeHosts.value = hosts
+    }
+    openFromLink()
+  } catch (e) { if (cur === seq) error.value = apiError(e, '无法加载产品') }
+  finally { if (cur === seq) loading.value = false }
 }
-// 抽屉写操作（伸缩/暴露）后刷新服务表。
-async function refreshWorkloads() {
-  try {
-    workloads.value = await fetchJSON<Workload[]>(`/api/applications/${route.params.id}/workloads`)
-  } catch {
-    // 刷新失败不打断抽屉；下次进页面重拉
-  }
+onMounted(async () => { await Promise.all([load(), envStore.loadEnvs()]) })
+watch(() => route.params.id, () => { product.value = null; services.value = []; workloads.value = []; showRun.value = false; void load() })
+const TYPE_LABEL: Record<string, string> = { web: 'Web', backend: '后端', agent: '智能体', static: '静态站点', cron: '定时任务' }
+const rows = computed(() => services.value.filter((s) => s.name.toLowerCase().includes(q.value.trim().toLowerCase())).flatMap((s) => {
+  const runs = baselineRunsFor(s.id, workloads.value, envStore.currentEnvId)
+  return runs.length ? runs.map((w) => ({ key: s.id + ':' + w.id, service: s, workload: w as Workload | undefined })) : [{ key: s.id, service: s, workload: undefined as Workload | undefined }]
+}))
+const envName = (id?: string) => envStore.envs.find((e) => e.id === id)?.name ?? id ?? envStore.currentEnv?.name ?? '—'
+function addresses(w?: Workload): string[] { if (!w) return []; return routeHosts.value.get(w.name) ?? (w.domain ? [w.domain] : []) }
+function open(w: Workload) { runWlId.value = w.id; showRun.value = true }
+function openFromLink() {
+  const id = route.query.workload
+  if (typeof id === 'string' && workloads.value.some((w) => w.id === id)) { runWlId.value = id; showRun.value = true }
 }
-
-const TYPE_LABEL: Record<string, string> = {
-  web: 'Web', backend: 'Backend', agent: 'Agent', static: 'Static', cron: 'Cron',
-}
-
-// —— 三面 ——
-type Facet = '服务' | '交付' | '设置'
-const FACET_Q: Record<Facet, string> = { 服务: 'services', 交付: 'delivery', 设置: 'settings' }
-// 老版 15 tab 深链兼容（spec §9.4：旧 tab=builds 打开「交付」）：旧 q 值 → 三面。
-// 含 v2 自身三个值（services/delivery/settings）——否则 query.tab=delivery 初始解析落「服务」
-// 且被 watch(facet) 覆写回 services（RunDetail 返回交付面必现）。
-const LEGACY_TAB_FACET: Record<string, Facet> = {
-  services: '服务', delivery: '交付', settings: '设置',
-  deploy: '服务', instances: '服务', logs: '服务', governance: '服务',
-  pipelines: '交付', changes: '交付', builds: '交付', images: '交付', releases: '交付', repositories: '交付',
-  bindings: '设置', configs: '设置', members: '设置', usage: '设置',
-}
-function facetOfQ(q: unknown): Facet {
-  if (typeof q !== 'string') return '服务'
-  return LEGACY_TAB_FACET[q] ?? '服务'
-}
-const facet = ref<Facet>(facetOfQ(route.query.tab))
-watch(facet, (f) => {
-  const q = FACET_Q[f]
-  if ((route.query.tab as string) !== q) router.replace({ query: { ...route.query, tab: q } })
-})
-watch(() => route.query.tab, (q) => {
-  const f = facetOfQ(q)
-  if (f !== facet.value) facet.value = f
-})
-
-// 设置面绑定变更后合并回产品实体（刷新绑定计数）。
-function onBindingsUpdated(a: { id: string; bindings?: Product['bindings'] }) {
-  if (product.value && a.id === product.value.id) {
-    product.value = { ...product.value, bindings: a.bindings }
-  }
-}
+watch(() => route.query.workload, openFromLink)
+async function refreshWorkloads() { await load() }
+function deploy(name: string) { deployHint.value = name; showDeploy.value = true }
+function updated(a: { id: string; bindings?: Product['bindings'] }) { if (product.value?.id === a.id) product.value = { ...product.value, bindings: a.bindings } }
 </script>
-
 <template>
   <div class="product-page">
-    <div v-if="loading" class="loading-block" v-loading="true" element-loading-text="加载产品…"></div>
-
-    <div v-else-if="notFound" class="empty">
-      <Icon name="rocket" :size="28" />
-      <p>产品不存在或已删除</p>
-      <a class="ghost-btn" @click="router.push('/')">← 返回首页</a>
-    </div>
-
+    <div class="product-breadcrumb"><RouterLink to="/products">产品</RouterLink><span aria-hidden="true">/</span><span>{{ product?.name || '产品详情' }}</span></div>
+    <div v-if="loading && !product" class="loading-block" v-loading="true"></div>
+    <StatePanel v-else-if="error" title="无法打开产品" :description="error" error><button class="act" @click="load">重试</button><RouterLink to="/products" class="act">返回产品列表</RouterLink></StatePanel>
     <template v-else-if="product">
-      <div class="crumb">
-        <a @click="router.push('/')">← 首页</a><span>/</span><span>{{ product.name }}</span>
-        <span v-if="product.status" class="p-status" :class="product.status">
-          {{ product.status === 'healthy' ? '健康' : product.status === 'degraded' ? '有异常' : '空闲' }}
-        </span>
-        <a class="new-svc-btn" @click="showCreateSvc = true">新建服务</a>
-      </div>
-
-      <div class="facets">
-        <button
-          v-for="f in (['服务', '交付', '设置'] as Facet[])"
-          :key="f"
-          class="facet"
-          :class="{ on: facet === f }"
-          @click="facet = f"
-        >
-          {{ f }}
-        </button>
-      </div>
-
-      <!-- 服务面：运行主语表 -->
-      <div v-if="facet === '服务'" class="svc-face">
-        <div v-if="!services.length" class="empty">
-          <Icon name="server" :size="28" />
-          <p>产品还没有服务——服务是真正部署运行的东西</p>
-          <a class="primary-btn" @click="showCreateSvc = true">去创建服务</a>
-        </div>
-        <table v-else class="svc-table">
-          <thead>
-            <tr>
-              <th>服务</th>
-              <th>类型</th>
-              <th>本环境</th>
-              <th>域名</th>
-              <th class="col-next"></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="s in services" :key="s.id"
-              :class="{ clickable: !!runOf(s) }"
-              @click="openRun(s)"
-            >
-              <td><span class="s-name mono">{{ s.name }}</span></td>
-              <td><span class="s-type" :class="s.type">{{ TYPE_LABEL[s.type] ?? s.type }}</span></td>
-              <td>
-                <template v-if="runOf(s)">
-                  <span class="s-run" :class="{ bad: (runOf(s)!.ready ?? 0) < (runOf(s)!.replicas ?? 0) }">
-                    {{ runOf(s)!.ready }}/{{ runOf(s)!.replicas }}
-                  </span>
-                </template>
-                <span v-else class="s-idle">未部署</span>
-              </td>
-              <td>
-                <!-- 正式域名（治理 Route）优先；开发域名（workload.domain，泳道/一键暴露）降级显示并标注 -->
-                <template v-if="hostsOf(s).length">
-                  <a
-                    v-for="h in hostsOf(s)" :key="h"
-                    :href="`http://${h}`" target="_blank" rel="noopener"
-                    class="s-domain mono" @click.stop
-                  >{{ h }} ↗</a>
-                </template>
-                <a
-                  v-else-if="runOf(s)?.domain"
-                  :href="`http://${runOf(s)!.domain}`" target="_blank" rel="noopener"
-                  class="s-domain dev mono" @click.stop
-                >{{ runOf(s)!.domain }} <span class="dev-tag">开发</span></a>
-                <span v-else class="s-idle">—</span>
-              </td>
-              <td class="col-next"><span class="s-next" :class="{ idle: !runOf(s) }">{{ runOf(s) ? '查看运行' : '去部署' }}</span></td>
-            </tr>
+      <PageHeader :title="product.name" :description="product.desc || '在这里管理服务运行、交付过程和共享资源。'">
+        <button v-if="facet === 'services'" class="act primary" @click="showCreate = true">＋ 新建服务</button>
+        <RouterLink v-else-if="facet === 'delivery'" to="/delivery" class="act">跨产品交付</RouterLink>
+      </PageHeader>
+      <nav class="section-nav" aria-label="产品工作区"><button v-for="t in tabs" :key="t.id" :class="{ active: facet === t.id }" :aria-current="facet === t.id ? 'page' : undefined" @click="pickTab(t.id)">{{ t.label }}</button></nav>
+      <section v-if="facet === 'services'">
+        <div class="filter-bar"><label class="search-field"><Icon name="search" :size="17" /><input v-model="q" aria-label="搜索产品内服务" placeholder="搜索服务名称" /></label><span class="scope-description">{{ envStore.currentEnv?.name || '全部环境' }} · 基线运行</span><button class="act" :disabled="loading" @click="load">刷新</button><RouterLink :to="{ path: '/workloads', query: { app: product.id } }" class="text-button">全部实例与泳道 →</RouterLink></div>
+        <StatePanel v-if="servicesError" title="服务列表加载失败" :description="servicesError" error><button class="act" @click="load">重新加载</button></StatePanel>
+        <template v-else>
+          <div v-if="workloadsError" class="inline-warning" role="alert">运行状态暂时无法加载，不代表服务未部署。<button class="text-button" @click="load">重试</button></div>
+          <StatePanel v-if="!services.length" title="为产品添加第一个服务" description="服务是可部署的单元，可以是 Web、后端、智能体或定时任务。"><button class="act primary" @click="showCreate = true">新建服务</button></StatePanel>
+          <StatePanel v-else-if="!rows.length" title="没有匹配的服务"><button class="act" @click="q = ''">清除搜索</button></StatePanel>
+          <div class="table-scroll" data-table-scroll tabindex="0" v-else>
+<table class="list-table service-table">
+<thead><tr><th scope="col">服务</th><th scope="col">类型</th><th scope="col">环境</th><th scope="col">运行状态</th><th scope="col">访问地址</th><th scope="col">操作</th></tr></thead><tbody>
+            <tr v-for="row in rows" :key="row.key"><td><button v-if="row.workload" class="text-button service-name" @click="open(row.workload)">{{ row.service.name }}</button><strong v-else>{{ row.service.name }}</strong></td><td class="dim">{{ TYPE_LABEL[row.service.type] || row.service.type }}</td><td>{{ row.workload ? envName(row.workload.envId) : envName() }}</td><td><span v-if="workloadsError" class="status warn">状态未知</span><template v-else-if="row.workload"><span class="status" :class="tagTypeToCls(statusOf(WORKLOAD_STATUS, row.workload.status).type)">{{ statusOf(WORKLOAD_STATUS, row.workload.status).label }}</span><small class="replica-info">{{ row.workload.ready }}/{{ row.workload.replicas }} 副本就绪</small></template><span v-else class="status idle">未部署</span></td><td><template v-if="addresses(row.workload).length"><a v-for="h in addresses(row.workload)" :key="h" :href="'http://' + h" target="_blank" rel="noopener" class="domain-link" :title="h">{{ h }} ↗</a></template><span v-else class="dim">{{ addressError ? '地址暂不可用' : '未暴露' }}</span></td><td><button v-if="row.workload" class="act small" @click="open(row.workload)">实例与日志</button><button v-else class="act small" :disabled="!!workloadsError" @click="deploy(row.service.name)">运行部署流水线</button></td></tr>
           </tbody>
-        </table>
-        <p class="env-hint">
-          环境信号随顶栏切换（当前：{{ envStore.currentEnv?.name ?? '全部环境' }}；未部署 = 该环境尚无基线运行）。
-        </p>
-      </div>
-
-      <!-- 交付面：一条龙 + 最近运行（v2 原生）+ 深度操作桥接 -->
-      <ProductDelivery v-else-if="facet === '交付'" :app-id="product.id" />
-
-      <!-- 设置面：绑定资源（v2 原生）+ 低频设置桥接 -->
-      <ProductSettings v-else :app="product" @updated="onBindingsUpdated" />
+</table>
+</div>
+          <p class="view-note">每行对应一个服务在具体环境中的基线运行；泳道和任务实例可从“全部实例与泳道”查看。</p>
+        </template>
+      </section>
+      <ProductDelivery v-else-if="facet === 'delivery'" :app-id="product.id" />
+      <ProductSettings v-else :key="facet" :app="product" :section="facet" @updated="updated" />
     </template>
-
-    <!-- 服务运行抽屉：实例/日志/部署/伸缩/对外暴露（v2 内闭环，不跳老版） -->
-    <ServiceRunDrawer
-      v-model="showRun"
-      :workload-id="runWlId"
-      :app-id="product?.id"
-      @changed="refreshWorkloads"
-      @deployed="onDeployed"
-    />
-    <!-- 新建服务 / CD 部署（v2 原生，创作路径不跳老版） -->
-    <ServiceCreateDialog v-model="showCreateSvc" :app-id="product?.id ?? ''" @created="refreshServices" />
-    <CdDeployDialog v-model="showDeploy" :app-id="product?.id" :hint="deployHint" @deployed="onDeployed" />
+    <ServiceRunDrawer v-model="showRun" :workload-id="runWlId" :app-id="product?.id" :app-name="product?.name" @changed="refreshWorkloads" @deployed="pickTab('delivery')" />
+    <ServiceCreateDialog v-model="showCreate" :app-id="product?.id || ''" @created="load" />
+    <CdDeployDialog v-model="showDeploy" :app-id="product?.id" :app-name="product?.name" :hint="deployHint" @deployed="pickTab('delivery')" />
   </div>
 </template>
-
 <style scoped>
-.product-page {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
+.product-breadcrumb { display: flex; gap: 10px; align-items: center; color: var(--text-faint); font-size: 12px; margin-bottom: 20px; }
+.product-breadcrumb a { color: var(--brand); text-decoration: none; }
+.service-table { min-width: 900px; }
+.service-name { font-weight: 600; }
+.replica-info { display: block; font-size: 11px; color: var(--text-faint); margin-top: 5px; }
+.domain-link { display: block; color: var(--brand); font-size: 12px; text-decoration: none; max-width: 270px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.scope-description, .view-note { color: var(--text-faint); font-size: 12px; }
+.view-note { margin-top: 14px; }
 .loading-block { height: 240px; }
-.crumb {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12.5px;
-  color: var(--text-faint);
-}
-.crumb a {
-  color: var(--brand);
-  cursor: pointer;
-}
-.p-status {
-  padding: 1px 8px;
-  border-radius: 4px;
-  font-size: 11px;
-}
-.p-status.healthy { background: rgba(22, 163, 74, 0.12); color: var(--success, #16a34a); }
-.p-status.degraded { background: rgba(244, 63, 94, 0.12); color: var(--danger, #f43f5e); }
-.p-status.idle { background: var(--surface-2); color: var(--text-faint); }
-.new-svc-btn {
-  margin-left: auto;
-  padding: 6px 14px;
-  border-radius: var(--radius);
-  background: var(--brand);
-  color: #fff !important;
-  font-size: 12.5px;
-  text-decoration: none;
-  cursor: pointer;
-}
-.new-svc-btn:hover {
-  opacity: 0.9;
-}
-.facets {
-  display: flex;
-  gap: 2px;
-  border-bottom: 1px solid var(--border);
-}
-.facet {
-  position: relative;
-  padding: 10px 14px;
-  border: none;
-  background: transparent;
-  color: var(--text-dim);
-  font-family: inherit;
-  font-size: 13.5px;
-  cursor: pointer;
-}
-.facet.on {
-  color: var(--text);
-  font-weight: 600;
-}
-.facet.on::after {
-  content: '';
-  position: absolute;
-  left: 14px;
-  right: 14px;
-  bottom: -1px;
-  height: 2px;
-  background: var(--brand);
-  border-radius: 2px;
-}
-.empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  padding: 56px 0;
-  color: var(--text-faint);
-  text-align: center;
-}
-.empty p { margin: 0; font-size: 13px; }
-.ghost-btn {
-  padding: 7px 14px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  color: var(--text);
-  font-size: 13px;
-  cursor: pointer;
-}
-.primary-btn {
-  padding: 7px 14px;
-  border-radius: var(--radius);
-  background: var(--brand);
-  color: #fff;
-  font-size: 13px;
-  text-decoration: none;
-  cursor: pointer;
-}
-.svc-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-}
-.svc-table th {
-  text-align: left;
-  padding: 8px 10px;
-  color: var(--text-faint);
-  font-weight: 500;
-  font-size: 12px;
-  border-bottom: 1px solid var(--border);
-}
-.svc-table td {
-  padding: 12px 10px;
-  border-bottom: 1px solid var(--border);
-  vertical-align: middle;
-}
-.svc-table tr.clickable { cursor: pointer; }
-.svc-table tr.clickable:hover td { background: var(--surface-2); }
-.s-name { font-weight: 600; }
-.s-type {
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-size: 11px;
-  background: var(--brand-soft);
-  color: var(--brand);
-}
-.s-type.agent { background: rgba(245, 158, 11, 0.12); color: #f59e0b; }
-.s-type.cron { background: rgba(6, 182, 212, 0.12); color: #06b6d4; }
-.s-run { font-weight: 600; color: var(--success, #16a34a); font-family: 'JetBrains Mono', monospace; }
-.s-run.bad { color: var(--warning, #f59e0b); }
-.s-idle { color: var(--text-faint); font-size: 12px; }
-.s-domain {
-  display: block;
-  font-size: 12px;
-  color: var(--success, #16a34a);
-  text-decoration: none;
-  line-height: 1.6;
-}
-.s-domain.dev { color: var(--text-dim); }
-.dev-tag {
-  padding: 0 4px;
-  border: 1px solid var(--border);
-  border-radius: 3px;
-  font-size: 10px;
-  color: var(--text-faint);
-}
-.s-next { font-size: 12px; color: var(--brand); }
-.s-next.idle { color: var(--text-faint); }
-.col-next { text-align: right; }
-.env-hint {
-  margin: 0;
-  font-size: 12px;
-  color: var(--text-faint);
-}
-.mono { font-family: 'JetBrains Mono', monospace; }
+.inline-warning { background: var(--warning-soft); color: var(--warning); padding: 12px; border-radius: var(--radius); margin-bottom: 16px; font-size: 13px; }
 </style>
