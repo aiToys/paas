@@ -4,11 +4,12 @@ import { formatDateTime } from '@/utils/format'
 // 平台能力 → 安全（密钥/证书 + 审计日志）。
 // Secret/证书是租户级平台资产（区别于 appconfig 应用级 Secret）。
 // 值后端明文存储、API 掩码返回；写操作（创建/删除）自动记审计，删除走二次确认。
-import { onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { fetchAuth } from '@/api'
 import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
+import TablePager from '@/components/TablePager.vue'
 
 type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
 
@@ -31,6 +32,11 @@ const secrets = ref<Secret[]>([])
 const audits = ref<AuditLog[]>([])
 const loading = ref(false)
 const auditFilter = ref('') // action 过滤
+// 前端分页：dev 集群实测 1000+ 条密钥全量渲染卡顿（后端 API 无分页参数，slice 同其他列表页模式）。
+const page = ref(1)
+const pagedSecrets = computed(() => secrets.value.slice((page.value - 1) * 20, page.value * 20))
+const auditPage = ref(1)
+const pagedAudits = computed(() => audits.value.slice((auditPage.value - 1) * 20, auditPage.value * 20))
 
 const showCreate = ref(false)
 const form = ref({ name: '', type: TYPE_SECRET, scope: SCOPE_TENANT, value: '', desc: '' })
@@ -127,7 +133,7 @@ watch(() => envStore.currentEnvId, () => load())
     <!-- 密钥/证书 -->
     <section class="block" v-loading="loading">
       <div class="block-title">密钥与证书</div>
-      <el-table :data="secrets" size="small" empty-text="暂无密钥资产">
+      <el-table :data="pagedSecrets" size="small" empty-text="暂无密钥资产">
         <el-table-column label="名称" min-width="180">
           <template #default="{ row }"><span class="mono">{{ row.name }}</span></template>
         </el-table-column>
@@ -157,6 +163,7 @@ watch(() => envStore.currentEnvId, () => load())
           </template>
         </el-table-column>
       </el-table>
+      <TablePager v-model="page" :total="secrets.length" />
     </section>
 
     <!-- 审计日志 -->
@@ -167,7 +174,7 @@ watch(() => envStore.currentEnvId, () => load())
           <el-option v-for="o in actionOpts" :key="o.value" :label="o.label" :value="o.value" />
         </el-select>
       </div>
-      <el-table :data="audits" size="small" empty-text="暂无审计记录">
+      <el-table :data="pagedAudits" size="small" empty-text="暂无审计记录">
         <el-table-column label="时间" width="170">
           <template #default="{ row }">{{ formatDateTime(row.at) }}</template>
         </el-table-column>
@@ -184,6 +191,7 @@ watch(() => envStore.currentEnvId, () => load())
         </el-table-column>
         <el-table-column prop="detail" label="详情" min-width="200" show-overflow-tooltip />
       </el-table>
+      <TablePager v-model="auditPage" :total="audits.length" />
     </section>
 
     <!-- 创建弹窗 -->
