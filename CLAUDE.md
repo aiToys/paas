@@ -176,8 +176,14 @@ pnpm build                    # 构建三套
 
 ### 泳道（Lane）
 
-- `internal/lane/`：Lane 一等实体（standard=可 TTL 回收 / permanent；Weight 留位恒 0）；`/api/lanes`（DELETE=closed + 级联回收全部工作负载 + 前置校验进行中 run 409；生产泳道 DELETE/PUT 需 prod:write）。
-- L2 跨泳道发现：`/dp/instances?service=x&lane=feature-x` 先查 `<service>-<lane>` 降级 `<service>`，均经 tenant label 校验防泄漏；SDK `LaneMiddleware`/`ApplyLaneHeader` 染色透传（入口染色归 SDK，平台 gateway 不做）。
+- `internal/lane/`：Lane 一等实体（standard=可 TTL 回收 / permanent；Weight 留位恒 0）；`/api/lanes`（DELETE=结构化 CloseResult `{lane, reclaimed, failedIds}`——部分回收失败不假报成功，已 closed 重试 DELETE 幂等重扫遗留；前置校验进行中 run 409；生产泳道 DELETE/PUT 需 prod:write）。
+- **基线三层保护（2026-10-17，spec `docs/superpowers/specs/2026-10-17-lane-access-experience-design.md`）**：ValidateName 拒 default（`ErrLaneProtected` 403）+ handler DELETE 拒遗留 default 实体 + `ReclaimLane` 拒 default/空串——「不能只靠 UI 隐藏按钮」。
+- **dataplane 三态回退（反转旧静默降级）**：`fetchInstances` 返 (insts, svcExists, err)——①Service 在且有 ready 实例→泳道版本；②在但无 ready（缩 0/Pending）→**显式空不回退**（不把失败藏进基线成功）；③不存在（未覆盖）→回退本环境基线；apiserver 错误透传不静默回退。
+- **SDK 显式 default 哨兵**：`WithLane("default")` 存 `\x00default` 哨兵，`resolveLane` 据哨兵返基线**不回落 SelfLane**（容器在 feature 泳道时显式请求基线不再被吞）；未指定仍回落 SelfLane（零改动染色不变）。
+- **run.Lane 真源**：触发时 `deployLaneOf` 从解析 stages 提取首个 deploy 段非 default lane 固化进 `PipelineRun.Lane`（migration 0050）；泳道关联（详情 RecentRuns/关闭前置/GC 活跃判定）一律 `run.Lane==name ∪ run.Branch==name` 双通道，不再纯字符串匹配（遗漏显式命名泳道：branch=main+lane=feature-x 关联不上）。
+- **可恢复回收**：`LaneStatusStore.Closed` 查实体状态——Sweep 对 closed 泳道遗留**立即清扫不等 TTL 也不受 permanent 跳过约束**（关闭语义优先，常驻失败重试不依赖普通 TTL 路径）；GC 删除失败 ID 进 `ReclaimResult.FailedIDs` 上报。
+- **地址分类读模型**：`GET /api/lanes/{id}/access` 返回 `AccessEndpoint[]`（kind=business 基线域名/preview 泳道域名带「浏览器直达不染色」诚实 note/internal FQDN 仅集群内；source=domain 声明已下发/fqdn 派生未验证；URL 固定 http:// 如实标注不猜协议）。前端 LaneDetail 访问入口分区 + Workloads `?lane=` 深链过滤（裸分支泳道读路径零副作用不建实体）。
+- L2 跨泳道发现：`/dp/instances?service=x&lane=feature-x` 按三态规则（见上），均经 tenant label 校验防泄漏；SDK `LaneMiddleware`/`ApplyLaneHeader` 染色透传（入口染色归 SDK，平台 gateway 不做）。
 
 ### DevOps CI/CD
 
@@ -192,6 +198,7 @@ pnpm build                    # 构建三套
 - **泳道部署独立域名（2026-10-13，deployDomain）**：非 default 泳道（联调/一条龙 `agent-ship`/canary）deploy 时若配 `PAAS_DOMAIN_SUFFIX` 自动派生 `<wl-name>.<suffix>` 并 SetDomain 写回（wl.Name 含 lane 段天然不撞基线 host，reconciler 建独立 Ingress）——此前泳道版本无任何对外域名，部署后验证断链（用户实测「域名都是同一个无法区分」）。port=0（无 Service）返空串防死链；default 泳道沿用 Domain 优先/FQDN 兜底。实现在 `cmd/core/pipeline_adapters.go` deployDomain（原 DeployCanary 域名段下沉合并，canary/泳道同款）。
 - **委派智能研发（契约 v2 §3.3 双入口主入口，2026-10-12，D10 裁决）**：变更页「智能研发」按钮 → `POST /api/applications/{id}/changes/{cid}/agent-run`（`AgentRunDelegator` 依赖倒置，cmd/core 桥接 agentrun client 的 `CreateRunAsUser` 用户 JWT 通道——归因 claims.sub，区别于 stage 编排通道静态 token 归因 agent:<run名>）；spec 从变更上下文组装（workBranch=变更分支/base=基线/request 缺省 Title，run 名由 agentrun 自动生成）；仅 open 状态可委派；run 名回写 `Change.AgentRunName`（migration 0047）供变更页状态块精确查询（不依赖列表过滤参数）。前端 ChangeDetail 按钮+需求对话框+运行状态块（5s 轮询）。联调前置：固定 `PAAS_JWT_SECRET`（chart `auth.jwtSecret`）+ 同步 agent ns `paas-jwt-public`（agentrun 0.13.0 本地 HMAC 验签）。
 - **变更管理火车发车**（`internal/devops/change/`）：Change（分支粒度）+ IntegrationBatch（临时集成分支，冲突/测试/发车状态机，惰性终态推进无后台 goroutine）+ 既有 Release；批次触发 CI branch=集成分支名（即泳道）。
+- **研发交付闭环（2026-10-17，spec `docs/superpowers/specs/2026-10-17-development-delivery-design.md`）**：四件套——①**执行计划预演**：`POST .../pipelines/{pid}/preview`（只读，resolveForRun 与 trigger 共用解析链）返回中文逐段计划 + 预锁定候选 + missing 配置项 + `planHash`；trigger 带 planHash 则触发时重算比对，不一致 409 `ErrPlanChanged`（预览到执行之间候选/参数变化可感知；webhook/无 hash 路径不受影响）。②**产物锁定（F3）**：latestReady 的镜像消费 stage（deploy/canary/promote/release）**触发时**预解析一次写 `Params["lockedImageId"]`（固化进 StageRun.Input）+ `run.Artifact` 五元组（serviceId/repoId/commit/imageId/digest/buildRunId，digest/commit 经 `ImageMetaResolver` 桥接装配层）；resolveImage 执行期优先锁定值；Retry 复用 Input 天然同源——审批等待期间新构建不再漂移实际发布产物。③**结构化决策**：`POST /api/pipelineruns/{id}/stages/{idx}/decisions`（manual-test/approve 的 confirm/reject，reject 必填理由）+ `DecisionRecord` 落 run.Decisions（type/action/reason/actor/at）；manual-test reject 走 `RejectManual`（stage fail + 理由进 Error + fail Check）；approve reject 走 Abort；canary 仍走专属端点（decisions 对 canary 400）但补记 DecisionRecord；旧 approve 端点保留同语义。smoke 探活 `CheckResult` 结构化（type/target/expected/actual/note/status）。④**交付矩阵**：`GET /api/applications/{id}/delivery-matrix` 跨域聚合 workload×env×release（relKey{envID,workloadId}，只取 default 泳线基线 service 型），前端 DeliveryMatrix 服务×环境 digest 矩阵 + 跨环境一致 chip + 发布单深链。PG：migration 0049（plan_hash/template 元数据/artifact/decisions/checks JSONB）+ scanRunInto 统一三处 scan。canary abort 窗口修复：DeployCanary 成功即写 OutCanaryWorkloadID + flushStageLog 连带 Output 落库（就绪等待窗口内 Abort 级联可读，此前泄漏到 LaneGC TTL）；已知缺口：latestReady 应用级取最新镜像，多服务应用（paas-shop）镜像归属与 canary port 可能错配（Image 无 Service 字段，正解=加字段+构建回填+按服务过滤，留后续）。
 - 通知聚合 `GET /api/notifications`（实时拼装无持久化）+ 值班台/详情页路由 `/devops/*`。
 
 ### 数据服务 + 备份
@@ -267,7 +274,7 @@ route registry（`internal/apiroute/`）驱动 mux 注册与 spec 生成；`GET 
 - **持久化/规模**：observability 迁 PG、RLS 生产角色非超级用户生效（dev postgres chart 超级用户 BYPASSRLS，策略已全表覆盖 migration 0043/0044）、ClickHouse 时序计量、审计分页、流水线运行历史分页、configcenter 长连接 watch/灰度下发。~~配额计数回收失衡~~（**已修复 2026-09-04**：dataservice Delete 补回收 + 启动自愈 `recalcUsageIfDrift` 对齐行数计数型资源，reconcile C1 清零）。
 - **发布/部署**：batches 切流实现（D1）、蓝绿模板变体、金丝雀告警联动、promote 跨级跳迁、PVC 数据服务重启保数据（现 STS 删 pod 不删 PVC 可恢复）、异步创建流转 PG 反向同步、真实备份任务。
 - **MaaS**：通道健康检查真实探活、凭证测试 ping、Vendor 改配置后存量通道/绑定自动同步、按用户 scope 列 API Key。
-- **流水线**：cron 触发器、Gitea webhook 自动注册、process/mock 模式实时构建日志、租户自定义模板编辑器、行级评论、CI 状态挂 PR。
+- **流水线**：cron 触发器、Gitea webhook 自动注册、process/mock 模式实时构建日志、租户自定义模板编辑器、行级评论、CI 状态挂 PR、pipeline PG store 集成测试缺位（runCols 加列漏 Scan 对齐时编译期/单测均查不出，2026-10-17 曾致集群全部 run 读路径 500「19 vs 20」——加列必须三处同步 runCols/scanRunInto/INSERT，或补 test-pg 用例）。
 - **前端**：应用级权限按钮级显隐、命令面板（Cmd+K）、console-admin 手写 interface 不迁（现行策略）。
 - **智能体**：admin AI 总览写操作（L2）、工具/KB 删除前引用强校验、skill 版本化、Marketplace 评论/评分/版本链。
 - **开源就绪**：dev 脚本内网默认值（hub.wang.dd/paas.k8s.dd）保留 + 头注释说明覆盖方式；`values-paas-k8s.yaml` 含 dev 密码（已加 dev-overlay 声明）。

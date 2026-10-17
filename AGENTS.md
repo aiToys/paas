@@ -887,7 +887,11 @@ internal/dataservice/  领域(DataService + 6 Kind 常量 + KindMeta 表单元�
 
 新增或调整页面优先复用 PageHeader / StatePanel / TablePager 和 theme.css 语义 token；列表接口使用 fetchList，严格区分 null 空列表、请求失败和格式错误；原生表格放入 table-scroll。顶栏是浏览环境，写操作以资源实际环境或流水线配置为准，不得把运行 CD 流水线标成“部署到当前环境”。经典版仍独立维护，后续“前端架构”段的三层导航描述适用于经典版。
 
+2026-10-17 补齐：可观测采用总览/指标/日志/链路/告警分区，指标使用 `MetricChart` 的时间趋势与实体比较，不复用旧小柱图；`domain/observability.ts` 解析环境/泳道为精确实体。写操作可用 `fetchCommand` 检查 HTTP 结果。新版恢复仓库/PR、流水线参数编辑、发布/回滚、变更批次详情与数据服务运维。TraceID 直查展示全部已返回 span，Jaeger process 资源属性合并进 span tags。完整范围与环境验收边界见 `docs/reviews/2026-10-17-console-next/implementation.md`。
+
 ## 前端架构
+
+新版服务运行骨架（2026-10-17）：`/next/workloads` 名称为“工作负载”，`/next/workloads/:id` 提供运行概览/实例/日志/操作记录。后续接入沿用 `WorkloadRuntime`、`RuntimeInstanceTable`、`RuntimeInstanceDrawer`、`RuntimeLogs`，不重建页面框架。终端/事件/重建/滚动重启当前尚未接通，不得仅凭前端按钮宣称能力完成。设计及交接见 `docs/superpowers/specs/2026-10-17-service-runtime-operations-design.md` 与对应 plans 文档。
 
 三套独立 SPA，共享设计系统（Element Plus + 暗黑模式）：
 
