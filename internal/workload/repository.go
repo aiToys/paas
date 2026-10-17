@@ -32,5 +32,9 @@ type Repository interface {
 	// 供存量工作负载在 opt-in 语义下补声明（创建时未声明的负载否则抓取注解会消失）。
 	// 跨租户访问返回 not found（不泄漏）。
 	SetMetricsPath(ctx context.Context, id, path string) error
+	// SetRestartToken 写滚动重启令牌（OperationsRepo.CreateRestart 同事务调用；
+	// 单独暴露供事务外场景补写。空串拒绝——令牌不可清零，只能被新值覆盖）。
+	// 跨租户访问返回 not found（不泄漏）。
+	SetRestartToken(ctx context.Context, id, token string) error
 	Delete(ctx context.Context, id string) error
 }

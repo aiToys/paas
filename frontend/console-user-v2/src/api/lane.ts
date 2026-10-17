@@ -21,6 +21,7 @@ export interface RunSummary {
   appId: string
   pipelineId: string
   branch: string
+  lane?: string // 触发时固化的显式部署泳道（真实目标关联）
   status: string
   createdAt: string
   finishedAt?: string
@@ -49,5 +50,33 @@ export const createLane = (body: Pick<Lane, 'envId' | 'name' | 'mode'> & Partial
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
   }).then(r => unwrap<Lane>(r))
 
+/** 关闭泳道结构化结果：生命周期与清理分离——部分回收失败不上报假成功，failedIds 可重试。 */
+export interface CloseResult {
+  lane: Lane
+  reclaimed: number
+  failedIds?: string[]
+  error?: string
+}
+
 export const closeLane = (id: string) =>
-  fetchAuth(`/api/lanes/${id}`, { method: 'DELETE' }).then(r => unwrap<Lane>(r))
+  fetchAuth(`/api/lanes/${id}`, { method: 'DELETE' }).then(r => unwrap<CloseResult>(r))
+
+/** 访问地址分类（business 业务入口 / preview 泳道联调入口 / internal 集群内 FQDN）。 */
+export interface AccessEndpoint {
+  kind: 'business' | 'preview' | 'internal'
+  url: string
+  target: string
+  name?: string
+  lane: string
+  port?: number
+  source: 'domain' | 'fqdn'
+  note?: string
+}
+
+export interface LaneAccess {
+  lane: Lane
+  endpoints: AccessEndpoint[]
+}
+
+export const getLaneAccess = (id: string) =>
+  fetchAuth(`/api/lanes/${id}/access`).then(r => unwrap<LaneAccess>(r))

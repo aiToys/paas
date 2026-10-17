@@ -26,7 +26,7 @@ type Store struct {
 func NewStore(db *pg.DB) *Store { return &Store{db: db} }
 
 // wlCols 与 model.Workload 字段顺序对齐（scan 列顺序必须一致）。
-const wlCols = `id, tenant_id, app_id, env_id, lane_id, service, service_id, type, name, image, image_ref, replicas, ready, status, schedule, command, port, container_port, domain, metrics_path, resources, created_at`
+const wlCols = `id, tenant_id, app_id, env_id, lane_id, service, service_id, type, name, image, image_ref, replicas, ready, status, schedule, command, port, container_port, domain, metrics_path, resources, restart_token, created_at`
 
 // marshalResources 把 ResourceSpec 序列化为 JSONB 字节；零值 -> '{}'（与列 DEFAULT 一致）。
 func marshalResources(r workload.ResourceSpec) []byte {
@@ -56,7 +56,7 @@ func scanWL(r pg.RowScanner, w *workload.Workload) error {
 	if err := r.Scan(
 		&w.ID, &w.TenantID, &w.AppID, &w.EnvID, &w.LaneID, &w.Service, &w.ServiceID, &w.Type,
 		&w.Name, &w.Image, &w.ImageRef, &w.Replicas, &w.Ready,
-		&w.Status, &w.Schedule, &w.Command, &w.Port, &w.ContainerPort, &w.Domain, &w.MetricsPath, &resRaw, &w.CreatedAt,
+		&w.Status, &w.Schedule, &w.Command, &w.Port, &w.ContainerPort, &w.Domain, &w.MetricsPath, &resRaw, &w.RestartToken, &w.CreatedAt,
 	); err != nil {
 		return err
 	}
@@ -168,10 +168,10 @@ func (s *Store) Create(ctx context.Context, w workload.Workload) error {
 		w.LaneID = workload.LaneDefault
 	}
 	_, err = s.db.Pool().Exec(ctx,
-		`INSERT INTO workloads (`+wlCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)`,
+		`INSERT INTO workloads (`+wlCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
 		w.ID, w.TenantID, w.AppID, w.EnvID, w.LaneID, w.Service, w.ServiceID, w.Type,
 		w.Name, w.Image, w.ImageRef, w.Replicas, w.Ready,
-		w.Status, w.Schedule, w.Command, w.Port, w.ContainerPort, w.Domain, w.MetricsPath, marshalResources(w.Resources), w.CreatedAt)
+		w.Status, w.Schedule, w.Command, w.Port, w.ContainerPort, w.Domain, w.MetricsPath, marshalResources(w.Resources), w.RestartToken, w.CreatedAt)
 	if pg.IsUniqueViolation(err) {
 		// 同租户 Name 唯一约束：Name 即 K8s Service 名，同名会让 reconciler 抢建同一
 		// K8s Service（AlreadyOwned）无限 requeue（审计第 6 轮 I2）。主键冲突同理。
@@ -307,6 +307,26 @@ func (s *Store) SetMetricsPath(ctx context.Context, id, path string) error {
 	}
 	tag, err := s.db.Pool().Exec(ctx,
 		`UPDATE workloads SET metrics_path=$3 WHERE id=$1 AND tenant_id=$2`, id, tid, path)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("工作负载不存在: %s", id)
+	}
+	return nil
+}
+
+// SetRestartToken 写滚动重启令牌（空串拒绝——令牌只能被新值覆盖）。
+func (s *Store) SetRestartToken(ctx context.Context, id, token string) error {
+	tid, err := pg.TenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	if token == "" {
+		return fmt.Errorf("restartToken 不可为空")
+	}
+	tag, err := s.db.Pool().Exec(ctx,
+		`UPDATE workloads SET restart_token=$3 WHERE id=$1 AND tenant_id=$2`, id, tid, token)
 	if err != nil {
 		return err
 	}

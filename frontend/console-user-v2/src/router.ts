@@ -1,6 +1,3 @@
-// console-user-v2 路由（新 IA 第一期）：登录无壳 / 首页=产品列表 / 产品=三面。
-// 真源设计：docs/superpowers/specs/2026-09-07-console-user-ia-destination.md §9
-// 2026-10-16 全量化完成：全部能力 v2 原生路由，零跳老版。
 import { createRouter, createWebHistory } from 'vue-router'
 import { useSessionStore } from '@/stores/session'
 
@@ -24,6 +21,11 @@ const router = createRouter({
     { path: '/environments/:id', name: 'environment-detail', component: () => import('./views/EnvironmentDetail.vue'), meta: { title: '环境详情' } },
     { path: '/lanes/:id', name: 'lane-detail', component: () => import('./views/LaneDetail.vue'), meta: { title: '泳道详情' } },
     { path: '/ai/runs/:name', name: 'agent-run-detail', component: () => import('./views/AgentRunDetail.vue'), meta: { title: 'AI 执行详情' } },
+    { path: '/products/:appId/repositories/:repoId/pulls', component: () => import('./views/Pulls.vue'), meta: { title: '代码评审' } },
+    { path: '/pulls/:repoId/:number', component: () => import('./views/PullDetail.vue'), meta: { title: 'PR 详情' } },
+    { path: '/releases/:id', component: () => import('./views/ReleaseDetail.vue'), meta: { title: '发布详情' } },
+    { path: '/changes/:id', component: () => import('./views/ChangeDetail.vue'), meta: { title: '变更详情' } },
+    { path: '/batches/:id', component: () => import('./views/BatchDetail.vue'), meta: { title: '批次详情' } },
     { path: '/products', name: 'products', component: () => import('./views/Products.vue'), meta: { title: '产品' } },
     { path: '/delivery', name: 'delivery', component: () => import('./views/Delivery.vue'), meta: { title: '交付中心' } },
     {
@@ -66,8 +68,9 @@ const router = createRouter({
       path: '/workloads',
       name: 'workloads',
       component: () => import('./views/Workloads.vue'),
-      meta: { title: '运行实例' },
+      meta: { title: '工作负载' },
     },
+    { path: '/workloads/:id', name: 'workload-runtime', component: () => import('./views/WorkloadRuntime.vue'), meta: { title: '服务运行' } },
     {
       path: '/environments',
       name: 'environments',

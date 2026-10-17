@@ -48,7 +48,9 @@ func (s *stubRepo) Update(_ context.Context, id string, r int, st string) (Workl
 	}
 	return Workload{}, errNotFound
 }
-func (s *stubRepo) Delete(_ context.Context, id string) error { s.deleted = id; return nil }
+func (s *stubRepo) Delete(_ context.Context, id string) error                 { s.deleted = id; return nil }
+func (s *stubRepo) SetRestartToken(_ context.Context, id, token string) error { return nil }
+
 func (s *stubRepo) SetServiceID(_ context.Context, id, serviceID string) error {
 	for i, w := range s.list {
 		if w.ID == id {

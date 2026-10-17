@@ -55,6 +55,14 @@ type Handler struct {
 	Audit adminutil.AuditRecorder
 	// ActorFn 从请求取操作者（审计用）；nil 则空。
 	ActorFn func(r *http.Request) string
+
+	// —— 运行态/运维操作（spec 2026-10-17）。未注入（nil）时对应端点 503 降级，不影响既有路由。 ——
+	runtimeReader RuntimeReader    // runtime/events/logs(容器级) 读取
+	runtimeActor  RuntimeActor     // recreate 驱逐执行
+	ops           OperationsRepo   // 操作记录（restart/recreate/operations）
+	terminals     *TerminalManager // 终端会话（feature flag 装配）
+	// UserFn 从请求取用户标识（终端归因/并发限制的键）；nil 时终端并发按租户聚合。
+	UserFn func(r *http.Request) string
 }
 
 // recordAudit best-effort 记审计（错误不影响主流程；租户从 ctx 取，空归 platform 由 adapter 兜底）。
@@ -106,6 +114,26 @@ func WithAppGuard(g *application.AppGuard) HandlerOpt {
 // WithAudit 注入写操作审计 recorder + actor 解析（Create/Delete 记审计）。
 func WithAudit(a adminutil.AuditRecorder, actor func(r *http.Request) string) HandlerOpt {
 	return func(h *Handler) { h.Audit = a; h.ActorFn = actor }
+}
+
+// WithRuntime 注入运行态读取器与运维执行器（cmd/core 桥接 controller.K8sRuntimeReader）。
+func WithRuntime(reader RuntimeReader, actor RuntimeActor) HandlerOpt {
+	return func(h *Handler) { h.runtimeReader = reader; h.runtimeActor = actor }
+}
+
+// WithOperations 注入运维操作记录仓储（restart/recreate 受理与推进）。
+func WithOperations(ops OperationsRepo) HandlerOpt {
+	return func(h *Handler) { h.ops = ops }
+}
+
+// WithTerminals 注入终端会话管理器（nil/未启用时 terminal-sessions 端点 503）。
+func WithTerminals(m *TerminalManager) HandlerOpt {
+	return func(h *Handler) { h.terminals = m }
+}
+
+// WithUserFn 注入用户标识解析（终端归因；cmd/core 桥接 gateway.UserIDFrom）。
+func WithUserFn(f func(r *http.Request) string) HandlerOpt {
+	return func(h *Handler) { h.UserFn = f }
 }
 
 func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) bool {
@@ -306,6 +334,12 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 运行态/运维操作子路由（runtime/events/restart/recreate/operations/terminal-sessions）。
+	// 命中即已写响应；见 runtime_handler.go（spec 2026-10-17 §7 增量契约）。
+	if h.serveRuntime(w, r, rest) {
+		return
+	}
+
 	// GET /api/workloads/lanes 租户泳道枚举（distinct laneId + 工作负载数）。
 	// 回答「存在哪些泳道」：前端日志 lane 过滤候选 / 泳道总览的权威来源。
 	// 默认排除 default 基线；?includeDefault=1 包含。
@@ -358,7 +392,9 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 	id := strings.Split(rest, "/")[0]
 	parts := strings.Split(rest, "/")
 
-	// GET /api/workloads/{id}/logs?pod=&tail=&previous= 实例（Pod）日志。
+	// GET /api/workloads/{id}/logs?pod=&tail=&previous=&container=&podUID= 实例（Pod）日志。
+	// container/podUID 是运行态扩展（spec 2026-10-17）：多容器 Pod 按容器过滤、UID 防名复用；
+	// 未注入 runtimeReader 时忽略扩展参数走旧接口（向后兼容）。
 	if r.Method == http.MethodGet && len(parts) == 2 && parts[1] == "logs" && id != "" {
 		if !h.allow(w, r, PermWorkloadRead) {
 			return
@@ -376,7 +412,19 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 			tail = 1000 // 默认最近 1000 行，避免全量拉爆内存
 		}
 		previous := r.URL.Query().Get("previous") == "true"
-		rc, err := h.podLogs(r.Context(), id, podName, tail, previous)
+		container := r.URL.Query().Get("container")
+		// 参数名双收（podUid 前端 camelCase 约定 / podUID 早期文档拼写），避免大小写拼写分叉静默降级。
+		podUID := r.URL.Query().Get("podUid")
+		if podUID == "" {
+			podUID = r.URL.Query().Get("podUID")
+		}
+		var rc io.ReadCloser
+		var err error
+		if h.runtimeReader != nil && (container != "" || podUID != "") {
+			rc, err = h.runtimeReader.ContainerLogs(r.Context(), id, podName, podUID, container, tail, previous)
+		} else {
+			rc, err = h.podLogs(r.Context(), id, podName, tail, previous)
+		}
 		if err != nil {
 			httputil.WriteServiceError(w, http.StatusNotFound, err)
 			return

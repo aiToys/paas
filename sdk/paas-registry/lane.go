@@ -38,15 +38,30 @@ func SetLaneSpanHook(h LaneSpanHook) {
 	defaultLaneHook = h
 }
 
+// explicitDefaultLane 是 ctx 内部哨兵值：WithLane("default") 显式选择基线时与
+// 「未指定」区分——否则 resolveLane 会把字面 "default" 归一后回落 SelfLane，
+// 容器部署在 feature 泳道时「显式请求基线」被吞掉（spec 2026-10-17 §5.1：
+// 请求明确选择 default 必须覆盖容器自身泳道）。
+const explicitDefaultLane = "\x00default"
+
 // WithLane 将 lane 注入 ctx。lane 空 / "default" 视为基线，仍存入 ctx（下游统一判空）。
+// 显式 "default"（如入口收到 x-paas-lane: default）以哨兵存储：LaneFromCtx 对外仍读出
+// "default"，但 resolveLane 据哨兵返回基线（不回落 SelfLane）。
 // 应用 HTTP server 在 LaneMiddleware 中调用；业务代码也可显式注入（如测试触发器）。
 func WithLane(ctx context.Context, lane string) context.Context {
+	if lane == "default" {
+		lane = explicitDefaultLane
+	}
 	return context.WithValue(ctx, laneKey{}, lane)
 }
 
-// LaneFromCtx 从 ctx 取 lane；不存在或空返 ""。
+// LaneFromCtx 从 ctx 取 lane；不存在或空返 ""。显式 default 读出仍为 "default"
+// （对外值语义不变；是否覆盖 SelfLane 由 resolveLane 内部用哨兵判定）。
 func LaneFromCtx(ctx context.Context) string {
 	v, _ := ctx.Value(laneKey{}).(string)
+	if v == explicitDefaultLane {
+		return "default"
+	}
 	return v
 }
 
@@ -102,8 +117,13 @@ func SelfLane() string {
 
 // resolveLane lane 解析优先级：显式 ctx lane > SelfLane env > ""。
 // ctx lane 是入口/上游指定的染色（如网关注入 header）；env 是自身部署泳道。
-// 字面 "default" 归一为 ""（基线不上线：不注入 header、URL 不带 lane query，减噪）。
+// 字面 "default" 归一为 ""（基线不上线：不注入 header、URL 不带 lane query，减噪）——
+// 但仅当它是显式指定（哨兵）时才覆盖 SelfLane；未指定（ctx 无值）仍回落自身泳道。
 func resolveLane(ctx context.Context) string {
+	raw, _ := ctx.Value(laneKey{}).(string)
+	if raw == explicitDefaultLane {
+		return "" // 显式选择基线：覆盖容器 SelfLane，不回落
+	}
 	if lane := LaneFromCtx(ctx); lane != "" && lane != "default" {
 		return lane
 	}

@@ -27,6 +27,11 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments", "statefulsets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # ReplicaSet 只读：运行态运维的实例归属校验（Pod→RS→Deployment owner 链，spec 2026-10-17）
+  # 与滚动重启进度观察（最新 RS revision 的 token 比对）。
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list"]
   - apiGroups: ["batch"]
     resources: ["jobs", "cronjobs"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -57,7 +62,7 @@ rules:
     verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: [""]
     resources: ["events"]
-    verbs: ["create", "patch"]
+    verbs: ["get", "list", "watch", "create", "patch"]
   # Namespace：applier 写 CRD 前 EnsureNamespace 创建租户数据面 ns（paas-<tenant>，按租户隔离）。
   - apiGroups: [""]
     resources: ["namespaces"]
@@ -66,6 +71,14 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
+  # 运行态运维（spec 2026-10-17）：实例重建走 Eviction API（尊重 PDB，429 不强删——
+  # 不授 pods delete；驱逐后由 Deployment 控制器补齐）。终端 exec 只建流不落盘。
+  - apiGroups: [""]
+    resources: ["pods/eviction"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create", "get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

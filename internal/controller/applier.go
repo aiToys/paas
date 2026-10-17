@@ -73,8 +73,9 @@ func (a *K8sApplier) Apply(ctx context.Context, w workload.Workload) error {
 				CPURequest: w.Resources.CPURequest, CPULimit: w.Resources.CPULimit,
 				MemRequest: w.Resources.MemRequest, MemLimit: w.Resources.MemLimit,
 			},
-			Schedule: w.Schedule,
-			Command:  w.Command,
+			Schedule:     w.Schedule,
+			Command:      w.Command,
+			RestartToken: w.RestartToken, // 滚动重启令牌投影（template annotation；空=从未重启）
 		}
 		return nil
 	})

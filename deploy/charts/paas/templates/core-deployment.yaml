@@ -70,6 +70,10 @@ spec:
               value: {{ .Values.ingress.className | default "nginx" | quote }}
             - name: PAAS_METRICS_ADDR
               value: "0"
+            # 容器终端（spec 2026-10-17）：默认关。开启后 workload:exec 权限用户可
+            # 经 /api/terminal-sessions 对运行实例建立 exec 流（60s 握手/5min 空闲/30min 上限）。
+            - name: PAAS_TERMINAL_ENABLED
+              value: {{ .Values.workload.terminalEnabled | default "false" | quote }}
             # DevOps 构建流水线（PAAS_DEVOPS_BUILDER：k8s=Job Pod 构建；process=in-process docker；空=Mock）。
             # k8s 模式：core 创建 batch/Job（docker:git + 挂节点 docker.sock）→ 轮询完成取日志解析 digest。
             - name: PAAS_DEVOPS_BUILDER

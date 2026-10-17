@@ -3,13 +3,16 @@ import { apiError } from '@/api'
 import StatePanel from './StatePanel.vue'
 // 交付·构建与镜像（v2 原生）：BuildRun 列表（状态/分支/触发）+ 镜像 digest（不可变真源）。
 // 待办 build_failed 直达此处排查。
-import { onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { onMounted, ref, nextTick, watch } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
 import { listBuildRuns, listImages, type BuildRun, type Image } from '@/api/pipeline'
 import { statusOf, tagTypeToCls, BUILD_STATUS } from '@/composables/useStatus'
 
 const props = defineProps<{ appId: string }>()
 const router = useRouter()
+const route = useRoute()
+async function focusImage() { await nextTick(); const id = route.query.image; if (typeof id === 'string') { const row = document.getElementById('image-'+id); row?.scrollIntoView({block:'center'}); row?.focus() } }
+watch(() => route.query.image, focusImage)
 
 const builds = ref<BuildRun[]>([])
 const images = ref<Image[]>([])
@@ -30,6 +33,7 @@ async function load() {
     error.value = apiError(e, '无法加载交付配置')
   } finally {
     loading.value = false
+    await focusImage()
   }
 }
 onMounted(load)
@@ -86,7 +90,7 @@ const shortDigest = (d: string) => (d ? d.replace('sha256:', '').slice(0, 12) : 
 <table class="mini-table">
           <thead><tr><th>Tag</th><th>Digest</th><th>来源分支</th></tr></thead>
           <tbody>
-            <tr v-for="i in images" :key="i.id">
+            <tr v-for="i in images" :key="i.id" :id="'image-'+i.id" tabindex="-1" :class="{'focus-row':route.query.image===i.id}">
               <td><span class="mono">{{ i.tag }}</span></td>
               <td><span class="mono dim" :title="i.digest">{{ shortDigest(i.digest) }}</span></td>
               <td><span class="mono dim">{{ i.branch || '-' }}</span></td>

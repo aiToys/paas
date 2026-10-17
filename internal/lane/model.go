@@ -47,6 +47,8 @@ var (
 	ErrLaneNotFound    = errors.New("lane not found")
 	ErrLaneExists      = errors.New("lane already exists")
 	ErrLaneNameInvalid = errors.New("lane name invalid")
+	// ErrLaneProtected 基线 default 受保护（spec L1：创建/关闭/回收多层拒绝，不只靠 UI 隐藏）。
+	ErrLaneProtected = errors.New("baseline lane is protected")
 )
 
 // Lane 是租户×环境内的一条泳道。
@@ -65,7 +67,12 @@ type Lane struct {
 }
 
 // ValidateName 校验泳道名（DNS-1035：作 K8s Service 名后缀的前提）。
+// default 是基线的系统保留名：不允许实体化为普通泳道（否则可被关闭/回收，
+// 等于给基线开了删除入口——spec 2026-10-17 L1 创建层保护）。
 func ValidateName(name string) error {
+	if name == "default" {
+		return ErrLaneProtected
+	}
 	if !names.ValidDNS1035(name) {
 		return ErrLaneNameInvalid
 	}

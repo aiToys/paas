@@ -615,10 +615,24 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	// stores.Workload 与 DevOps 共享：Release 编排要更新 Workload.ImageRef。
 	// statusReader 注入 K8s 实际状态读取器：List 时回填真实 Ready/Status（覆盖 store 静态值），
 	// clientset 为 nil（非集群部署）时 NewK8sStatusReader 内部 no-op，透传 store 原值（降级）。
+	// 运行态三件套（spec 2026-10-17）：runtimeReader（观察+驱逐+exec 流）+ 操作记录 + 终端会话。
+	// 终端 feature flag：PAAS_TERMINAL_ENABLED=true 且 K8s 可用时注入 Streamer，否则
+	// TerminalManager.Enabled()=false（capability 报 disabled，受理返 503）。
+	runtimeReader := controller.NewK8sRuntimeReader(appliers.clientset, appliers.restConfig)
+	var termStreamer workload.ExecStreamer // nil=终端禁用
+	if strings.EqualFold(os.Getenv("PAAS_TERMINAL_ENABLED"), "true") && appliers.restConfig != nil {
+		termStreamer = runtimeReader
+		log.Println("容器终端: 已启用（PAAS_TERMINAL_ENABLED=true，权限 workload:exec）")
+	}
+	terminals := workload.NewTerminalManager(termStreamer)
 	wlHandler := workload.NewHandler(stores.Workload,
 		workload.WithEnvResolver(stores.Environment),
 		workload.WithStatusReader(statusReader),
 		workload.WithAppGuard(appGuard),
+		workload.WithRuntime(runtimeReader, runtimeReader),
+		workload.WithOperations(stores.WorkloadOps),
+		workload.WithTerminals(terminals),
+		workload.WithUserFn(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
 		// Create/Delete 记审计（创建消耗集群资源、删除即下线服务；admin 侧同款已有）。
 		workload.WithAudit(&identityAuditAdapter{store: stores.Security},
 			func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
@@ -707,9 +721,33 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 		pipeline.WithPlatformAdmin(func(r *http.Request) bool { return gateway.IsPlatformAdmin(r) }),
 		// 应用级权限 enforcement（受限应用流水线触发/审批需成员角色）。
 		pipeline.WithAppGuard(appGuard),
+		// 产物锁定元数据（spec 2026-10-17 §6）：Image（digest/buildRunId）+ BuildRun（commit）
+		// 填充 run.Artifact 五元组；查询失败仅降级为 imageId 锁定。
+		pipeline.WithImageMeta(func(ctx context.Context, appID, imageID string) (pipeline.ImageMeta, bool) {
+			img, err := stores.DevOpsImages.GetImage(ctx, imageID)
+			if err != nil {
+				return pipeline.ImageMeta{}, false
+			}
+			meta := pipeline.ImageMeta{Digest: img.Digest, BuildRunID: img.BuildRunID}
+			if img.BuildRunID != "" {
+				if br, berr := stores.DevOpsBuilds.GetBuildRun(ctx, img.BuildRunID); berr == nil {
+					meta.Commit = br.Commit
+				}
+			}
+			return meta, true
+		}),
 	)
 	// 应用创建后置 hook：自动建默认流水线绑定（tpl-ci/tpl-cd），best-effort。
 	appHandler.OnAppCreate = defaultPipelineBinder(stores.Pipeline, stores.Pipeline)
+
+	// 服务×环境版本矩阵（spec 2026-10-17 §5）：跨域只读聚合，装配层组装数据源。
+	matrixHandler := &deliveryMatrixHandler{
+		envs:      stores.Environment,
+		workloads: stores.Workload,
+		images:    stores.DevOpsImages,
+		releases:  stores.DevOpsReleases,
+		authorize: func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) },
+	}
 
 	// 变更管理（单变更 + 集成批次，trunk-based 编排）：service 桥接 gitea client（分支/merge）+
 	// pipeline 包（批次触发 CI/CD run）；handler 注入审计 + prod:write（approve 门禁）。
@@ -832,7 +870,7 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 		lane.WithWorkloadLister(laneWorkloadLister{repos: stores.Workload}),
 		lane.WithRunLister(laneRunLister{runs: stores.Pipeline}),
 		lane.WithAudit(&identityAuditAdapter{store: stores.Security}),
-		lane.WithReclaimer(laneReclaimer), // 关闭泳道同步回收工作负载（与 LaneGC 同源删除逻辑）
+		lane.WithReclaimer(laneReclaimAdapter{gc: laneReclaimer}), // 关闭即回收：与 LaneGC 同源删除，结构化结果（部分失败上报）
 	)
 	laneHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 	laneHandler.CallerUserID = gateway.UserIDFrom
@@ -1023,6 +1061,10 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 				case "pipelines", "agent-ship":
 					pipelineHandler.ServeHTTP(w, r)
 					return
+				case "delivery-matrix":
+					// 服务×环境版本矩阵（spec §5）：只读聚合基线 Workload×环境×发布。
+					matrixHandler.ServeHTTP(w, r)
+					return
 				case "changes", "batches":
 					changeHandler.ServeHTTP(w, r)
 					return
@@ -1047,6 +1089,27 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	mux.Handle("/api/applications/", auth(composite))
 	mux.Handle("/api/workloads", auth(wlHandler))
 	mux.Handle("/api/workloads/", auth(wlHandler))
+	// 容器终端 WS 桥（spec 2026-10-17 §6）：auth 保证登录态（cookie），升级前复核
+	// workload:exec + 同源 Origin + 会话所有者。URL 不带 token；挂独立前缀不走 wlHandler。
+	termWS := &workload.TerminalWSHandler{
+		Terminals: terminals,
+		Authorize: func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) },
+		UserFn:    func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) },
+		Audit: func(r *http.Request, action, resourceID, detail string) {
+			tid, _ := tenant.TenantFrom(r.Context())
+			rec := &identityAuditAdapter{store: stores.Security}
+			_ = rec.Record(r.Context(), tid, gateway.UserIDFrom(r.Context()), action, "workload", resourceID, detail)
+		},
+	}
+	mux.Handle("/api/terminal-sessions/", auth(termWS))
+	// OperationPacer：周期观察非终态运维操作（restart token 达标/recreate 新 Pod 就绪），
+	// core 重启后 ListActive 扫库自动恢复观察。K8s 不可用时 runtimeReader 全量报错，
+	// 操作停在 accepted 由超时转 unknown（不丢记录）。
+	if stores.WorkloadOps != nil && runtimeReader != nil {
+		pacer := &workload.OperationPacer{Ops: stores.WorkloadOps, Repo: stores.Workload, Reader: runtimeReader}
+		go pacer.Run(ctx)
+		log.Println("运维操作 Pacer: 已启动（10s 扫描周期，10min 观察超时）")
+	}
 	// DevOps 详情/动作路由（非应用作用域）：构建详情 / 镜像详情 / 回滚
 	mux.Handle("/api/buildruns", auth(devopsHandler))
 	mux.Handle("/api/buildruns/", auth(devopsHandler))
@@ -1465,6 +1528,24 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 		Schedule string `json:"schedule"`
 	}{}), apiroute.WithResp(workload.Workload{}))
 	reg.Operation("DELETE", "/api/workloads/{id}", apiroute.Tags("工作负载"), apiroute.Summary("删除工作负载"), apiroute.Perm("workload:write"))
+	// 运行态运维（spec 2026-10-17）：观察/操作/终端。写操作均带 reason（审计）。
+	reg.Operation("GET", "/api/workloads/{id}/runtime", apiroute.Tags("工作负载"), apiroute.Summary("运行态快照（实例/容器三态/能力/活跃操作）"), apiroute.Perm("workload:read"), apiroute.WithResp(workload.Runtime{}))
+	reg.Operation("GET", "/api/workloads/{id}/operations", apiroute.Tags("工作负载"), apiroute.Summary("运维操作记录（restart/recreate，时间倒序）"), apiroute.Perm("workload:read"), apiroute.WithResp([]workload.Operation{}))
+	reg.Operation("GET", "/api/workloads/{id}/operations/{opId}", apiroute.Tags("工作负载"), apiroute.Summary("运维操作详情（状态/证据链）"), apiroute.Perm("workload:read"), apiroute.WithResp(workload.Operation{}))
+	reg.Operation("POST", "/api/workloads/{id}/restart", apiroute.Tags("工作负载"), apiroute.Summary("滚动重启（202 受理，token 驱动异步完成）"), apiroute.Perm("workload:write"), apiroute.WithReqBody(struct {
+		Reason string `json:"reason"`
+	}{}), apiroute.WithResp(workload.Operation{}))
+	reg.Operation("GET", "/api/workloads/{id}/instances/{pod}/events", apiroute.Tags("工作负载"), apiroute.Summary("实例（Pod）K8s 事件"), apiroute.Perm("workload:read"), apiroute.WithResp([]workload.PodEvent{}))
+	reg.Operation("POST", "/api/workloads/{id}/instances/{pod}/recreate", apiroute.Tags("工作负载"), apiroute.Summary("实例重建（驱逐旧 Pod 由控制器补齐，尊重 PDB）"), apiroute.Perm("workload:write"), apiroute.WithReqBody(struct {
+		PodUID string `json:"podUid"`
+		Reason string `json:"reason"`
+	}{}), apiroute.WithResp(workload.Operation{}))
+	reg.Operation("POST", "/api/workloads/{id}/instances/{pod}/terminal-sessions", apiroute.Tags("工作负载"), apiroute.Summary("受理容器终端会话（60s 握手窗口，workload:exec）"), apiroute.Perm("workload:exec"), apiroute.WithReqBody(struct {
+		PodUID    string `json:"podUid"`
+		Container string `json:"container,omitempty"`
+		Shell     string `json:"shell,omitempty"`
+		Reason    string `json:"reason"`
+	}{}), apiroute.WithResp(nil))
 	// DevOps
 	reg.Operation("GET", "/api/applications/{id}/repositories", apiroute.Tags("DevOps"), apiroute.Summary("应用代码仓库"), apiroute.Perm("repository:read"), apiroute.WithResp([]devops.CodeRepo{}))
 	reg.Operation("GET", "/api/applications/{id}/buildruns", apiroute.Tags("DevOps"), apiroute.Summary("应用构建记录"), apiroute.Perm("build:read"), apiroute.WithResp([]devops.BuildRun{}))
@@ -1517,6 +1598,11 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 		Commit  string `json:"commit"`
 		Version string `json:"version"`
 	}{}), apiroute.WithResp(pipeline.PipelineRun{}))
+	reg.Operation("POST", "/api/applications/{id}/pipelines/{pid}/preview", apiroute.Tags("流水线"), apiroute.Summary("执行计划预演（最终解析/锁定产物/缺配置项/planHash）"), apiroute.Perm("pipeline:read"), apiroute.WithReqBody(struct {
+		Branch      string                    `json:"branch"`
+		StageParams map[string]map[string]any `json:"stageParams"`
+	}{}), apiroute.WithResp(pipeline.RunPreview{}))
+	reg.Operation("GET", "/api/applications/{id}/delivery-matrix", apiroute.Tags("流水线"), apiroute.Summary("服务×环境版本矩阵（基线 digest/发布/状态聚合）"), apiroute.Perm("pipeline:read"), apiroute.WithResp([]MatrixCell{}))
 	reg.Operation("POST", "/api/applications/{id}/agent-ship/run", apiroute.Tags("流水线"), apiroute.Summary("智能研发一条龙触发（需求文本+勾选段，自动绑定 tpl-agent-ship）"), apiroute.Perm("pipeline:write"), apiroute.WithReqBody(struct {
 		Request string `json:"request"`
 		Review  bool   `json:"review"`
@@ -1528,6 +1614,10 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	reg.Operation("GET", "/api/admin/pipelineruns/{id}", apiroute.Tags("流水线"), apiroute.Summary("运行详情（管理员跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp(pipeline.PipelineRun{}))
 	reg.Operation("GET", "/api/pipelineruns/{id}", apiroute.Tags("流水线"), apiroute.Summary("运行详情（含各 stage 状态/输入输出）"), apiroute.Perm("pipeline:read"), apiroute.WithResp(pipeline.PipelineRun{}))
 	reg.Operation("POST", "/api/pipelineruns/{id}/stages/{idx}/approve", apiroute.Tags("流水线"), apiroute.Summary("审批/人工确认通过（恢复 paused run）"), apiroute.Perm("pipeline:write"))
+	reg.Operation("POST", "/api/pipelineruns/{id}/stages/{idx}/decisions", apiroute.Tags("流水线"), apiroute.Summary("结构化决策（manual-test/approve 的 confirm/reject，含理由）"), apiroute.Perm("pipeline:write"), apiroute.WithReqBody(struct {
+		Action string `json:"action"`
+		Reason string `json:"reason"`
+	}{}))
 	reg.Operation("POST", "/api/pipelineruns/{id}/stages/{idx}/canary", apiroute.Tags("流水线"), apiroute.Summary("金丝雀验证决策（promote 确认放量/terminate 终止）"), apiroute.Perm("pipeline:write"), apiroute.WithReqBody(struct {
 		Action string `json:"action"`
 	}{}))
@@ -1577,7 +1667,8 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	reg.Operation("POST", "/api/lanes", apiroute.Tags("泳道"), apiroute.Summary("创建泳道（生产拒建）"), apiroute.Perm("governance:write"), apiroute.WithReqBody(lane.Lane{}), apiroute.WithResp(lane.Lane{}))
 	reg.Operation("GET", "/api/lanes/{id}", apiroute.Tags("泳道"), apiroute.Summary("泳道详情（聚合工作负载+最近 run）"), apiroute.Perm("governance:read"), apiroute.WithResp(lane.LaneDetail{}))
 	reg.Operation("PUT", "/api/lanes/{id}", apiroute.Tags("泳道"), apiroute.Summary("更新泳道"), apiroute.Perm("governance:write"), apiroute.WithReqBody(lane.Lane{}), apiroute.WithResp(lane.Lane{}))
-	reg.Operation("DELETE", "/api/lanes/{id}", apiroute.Tags("泳道"), apiroute.Summary("关闭泳道（仅标记 closed，幂等）"), apiroute.Perm("governance:write"), apiroute.WithResp(lane.Lane{}))
+	reg.Operation("DELETE", "/api/lanes/{id}", apiroute.Tags("泳道"), apiroute.Summary("关闭泳道（关闭+回收结构化结果，幂等可重试）"), apiroute.Perm("governance:write"), apiroute.WithResp(lane.CloseResult{}))
+	reg.Operation("GET", "/api/lanes/{id}/access", apiroute.Tags("泳道"), apiroute.Summary("泳道访问地址分类（业务/联调/集群内，带 target 与来源）"), apiroute.Perm("governance:read"), apiroute.WithResp(lane.LaneAccess{}))
 	reg.Operation("GET", "/api/breakers", apiroute.Tags("服务治理"), apiroute.Summary("熔断器列表"), apiroute.Perm("governance:read"), apiroute.WithResp([]governance.CircuitBreaker{}))
 	reg.Operation("POST", "/api/breakers", apiroute.Tags("服务治理"), apiroute.Summary("创建熔断器"), apiroute.Perm("governance:write"), apiroute.WithReqBody(governance.CircuitBreaker{}), apiroute.WithResp(governance.CircuitBreaker{}))
 	reg.Operation("PUT", "/api/breakers/{id}", apiroute.Tags("服务治理"), apiroute.Summary("更新熔断器"), apiroute.Perm("governance:write"), apiroute.WithReqBody(governance.CircuitBreaker{}), apiroute.WithResp(governance.CircuitBreaker{}))

@@ -353,7 +353,15 @@ func parseJaegerTrace(jt jaegerTrace) (observability.Trace, bool) {
 	for _, sp := range jt.Spans {
 		svc := jt.Processes[sp.ProcessID].ServiceName
 		parent := firstParentRef(sp.References)
-		tags := jaegerTagsToMap(sp.Tags)
+		// OTel resource 属性由 Jaeger 放在 process.tags；环境/Pod/泳道下钻不能只看 span.tags。
+		// span 同名属性优先，保持请求级覆盖资源默认值的语义。
+		tags := jaegerTagsToMap(jt.Processes[sp.ProcessID].Tags)
+		for key, value := range jaegerTagsToMap(sp.Tags) {
+			if tags == nil {
+				tags = make(map[string]string)
+			}
+			tags[key] = value
+		}
 		isErr := jaegerSpanIsError(sp.Tags)
 		if isErr {
 			hasError = true

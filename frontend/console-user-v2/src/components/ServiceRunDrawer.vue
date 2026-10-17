@@ -199,6 +199,7 @@ async function togglePrevious() {
   >
     <div v-loading="detailLoading">
       <template v-if="detail">
+        <div class="runtime-entry"><RouterLink :to="'/workloads/' + encodeURIComponent(detail.workload.id)" class="act primary" @click="emit('update:modelValue', false)">打开完整运行视图 →</RouterLink><RouterLink :to="{ path: '/observability', query: { workload: detail.workload.id, env: detail.workload.envId, tab: 'metrics' } }" class="text-button" @click="emit('update:modelValue', false)">指标与告警</RouterLink></div>
         <div class="detail-info">
           <div class="info-row"><span class="k">名称</span><span class="v">{{ detail.workload.name }}</span></div>
           <div class="info-row"><span class="k">环境</span><span class="v">{{ envStore.envs.find((e) => e.id === detail?.workload.envId)?.name ?? detail.workload.envId }} · {{ detail.workload.laneId === 'default' ? '基线' : detail.workload.laneId }}</span></div>
@@ -261,7 +262,7 @@ async function togglePrevious() {
 
         <div class="section-title">运行实例（{{ detail.instances.length }}）</div>
         <div v-if="detail.instances.length === 0" class="empty-hint">
-          暂无运行实例（Pod 未就绪或副本为 0）
+          本次未返回实例。当前接口无法区分没有 Pod 与运行态读取不可用，请在完整运行视图中检查数据来源。
         </div>
         <div class="table-scroll" data-table-scroll tabindex="0" v-else>
 <table class="instances-table">
@@ -310,6 +311,7 @@ async function togglePrevious() {
 </template>
 
 <style scoped>
+.runtime-entry { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; margin-bottom: 18px; }
 .detail-info {
   margin-bottom: 14px;
 }

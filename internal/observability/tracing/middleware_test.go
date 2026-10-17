@@ -1,7 +1,10 @@
 package tracing
 
 import (
+	"bufio"
 	"context"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -128,4 +131,36 @@ func TestErrorTraceMiddlewareTruncatesLongBody(t *testing.T) {
 	if len(attrs["exception.message"]) != maxExceptionMsgLen {
 		t.Fatalf("应截断到 %d，得 %d", maxExceptionMsgLen, len(attrs["exception.message"]))
 	}
+}
+
+// TestErrorBodyWriterPreservesHijacker：WebSocket 升级依赖 Hijacker 委托
+// （gorilla/websocket Upgrade 接管原始连接），经 errorBodyWriter 包装后必须仍可达。
+func TestErrorBodyWriterPreservesHijacker(t *testing.T) {
+	hijacked := 0
+	inner := &hijackerRW{ResponseWriter: httptest.NewRecorder(), onHijack: func() { hijacked++ }}
+	ew := &errorBodyWriter{ResponseWriter: inner}
+
+	hj, ok := interface{}(ew).(http.Hijacker)
+	if !ok {
+		t.Fatalf("errorBodyWriter 应实现 http.Hijacker（容器终端 WS 升级不能回退 500）")
+	}
+	if _, _, err := hj.Hijack(); err == nil {
+		t.Fatal("fake 底层应返回错误")
+	}
+	if hijacked != 1 {
+		t.Fatalf("底层 Hijack 调用次数 = %d, want 1", hijacked)
+	}
+}
+
+// hijackerRW 是实现 http.Hijacker 的 fake ResponseWriter，记录 Hijack 调用。
+type hijackerRW struct {
+	http.ResponseWriter
+	onHijack func()
+}
+
+func (h *hijackerRW) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h.onHijack != nil {
+		h.onHijack()
+	}
+	return nil, nil, errors.New("fake: no conn")
 }

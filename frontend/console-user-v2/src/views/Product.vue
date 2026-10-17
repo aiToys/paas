@@ -95,12 +95,13 @@ function updated(a: { id: string; bindings?: Product['bindings'] }) { if (produc
     <StatePanel v-else-if="error" title="无法打开产品" :description="error" error><button class="act" @click="load">重试</button><RouterLink to="/products" class="act">返回产品列表</RouterLink></StatePanel>
     <template v-else-if="product">
       <PageHeader :title="product.name" :description="product.desc || '在这里管理服务运行、交付过程和共享资源。'">
+        <RouterLink :to="{ path: '/observability', query: { app: product.id, env: envStore.currentEnvId || undefined } }" class="act">指标与告警</RouterLink>
         <button v-if="facet === 'services'" class="act primary" @click="showCreate = true">＋ 新建服务</button>
         <RouterLink v-else-if="facet === 'delivery'" to="/delivery" class="act">跨产品交付</RouterLink>
       </PageHeader>
       <nav class="section-nav" aria-label="产品工作区"><button v-for="t in tabs" :key="t.id" :class="{ active: facet === t.id }" :aria-current="facet === t.id ? 'page' : undefined" @click="pickTab(t.id)">{{ t.label }}</button></nav>
       <section v-if="facet === 'services'">
-        <div class="filter-bar"><label class="search-field"><Icon name="search" :size="17" /><input v-model="q" aria-label="搜索产品内服务" placeholder="搜索服务名称" /></label><span class="scope-description">{{ envStore.currentEnv?.name || '全部环境' }} · 基线运行</span><button class="act" :disabled="loading" @click="load">刷新</button><RouterLink :to="{ path: '/workloads', query: { app: product.id } }" class="text-button">全部实例与泳道 →</RouterLink></div>
+        <div class="filter-bar"><label class="search-field"><Icon name="search" :size="17" /><input v-model="q" aria-label="搜索产品内服务" placeholder="搜索服务名称" /></label><span class="scope-description">{{ envStore.currentEnv?.name || '全部环境' }} · 基线运行</span><button class="act" :disabled="loading" @click="load">刷新</button><RouterLink :to="{ path: '/workloads', query: { app: product.id } }" class="text-button">全部工作负载与泳道 →</RouterLink></div>
         <StatePanel v-if="servicesError" title="服务列表加载失败" :description="servicesError" error><button class="act" @click="load">重新加载</button></StatePanel>
         <template v-else>
           <div v-if="workloadsError" class="inline-warning" role="alert">运行状态暂时无法加载，不代表服务未部署。<button class="text-button" @click="load">重试</button></div>

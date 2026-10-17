@@ -7,7 +7,7 @@ export type StageType = 'build' | 'deploy' | 'test' | 'approve' | 'release' | 'p
 export type ImageSource = 'priorBuild' | 'selected' | 'latestReady'
 export type TestMode = 'smoke' | 'manual'
 export type RunStatus = 'running' | 'paused' | 'succeeded' | 'failed' | 'aborted'
-export type StageStatus = 'pending' | 'running' | 'success' | 'failed' | 'waiting' | 'skipped'
+export type StageStatus = 'pending' | 'running' | 'success' | 'succeeded' | 'failed' | 'waiting' | 'skipped' | 'aborted'
 export type MergeMode = 'squash' | 'ff' | 'rebase'
 
 // stage Params（与后端 model.go 对齐；用宽松 record，设计器按 type 动态渲染字段）
@@ -67,9 +67,41 @@ export interface StageRun {
   finishedAt?: string
   input?: Record<string, unknown>
   output?: Record<string, unknown>
+  checks?: CheckResult[]
   error?: string
   // 执行过程关键事件（append-only），展开日志区展示。
   log?: string
+}
+
+// 结构化检查结果（spec §7）：smoke 探活目标/预期/实际/降级说明，manual 人工确认。
+export interface CheckResult {
+  type: string
+  target?: string
+  expected?: string
+  actual?: string
+  status: 'pass' | 'fail' | 'unknown'
+  note?: string
+  at: string
+}
+
+// 结构化决策记录（manual-test/approve/canary 的 confirm/reject/promote/terminate）。
+export interface DecisionRecord {
+  stageIndex: number
+  type: 'manual-test' | 'approve' | 'canary'
+  action: string
+  reason?: string
+  actor?: string
+  at: string
+}
+
+// 触发时锁定的候选产物五元组（spec §6 产物锁定）。
+export interface ArtifactBinding {
+  serviceId?: string
+  repoId?: string
+  commit?: string
+  imageId?: string
+  digest?: string
+  buildRunId?: string
 }
 
 // 从 stage.input 取 lane 字符串（deploy stage 透传，default=基线，其他=联调/灰度泳道）。
@@ -96,8 +128,49 @@ export interface PipelineRun {
   status: RunStatus
   currentStage: number
   stageRuns: StageRun[]
+  templateId?: string
+  templateVersion?: number
+  planHash?: string
+  artifact?: ArtifactBinding
+  decisions?: DecisionRecord[]
   createdAt: string
   finishedAt?: string
+}
+
+// 执行计划预演（spec §6）：最终解析 stages/锁定产物/缺配置项/planHash。
+export interface StagePreview {
+  index: number
+  type: string
+  name: string
+  params?: Record<string, unknown>
+  resolved: string
+}
+
+export interface RunPreview {
+  pipelineId: string
+  templateId: string
+  templateVersion: number
+  branch: string
+  stages: StagePreview[]
+  artifact?: ArtifactBinding
+  missing?: string[]
+  planHash: string
+}
+
+// 矩阵单元格（服务×环境版本矩阵）
+export interface MatrixCell {
+  envId: string
+  envName: string
+  envType: string
+  serviceName: string
+  workloadId: string
+  imageTag?: string
+  imageDigest?: string
+  releaseId?: string
+  ready: number
+  replicas: number
+  status: string
+  updatedAt?: string
 }
 
 // ---------- API ----------
@@ -141,6 +214,8 @@ async function triggerRun(appId: string, pid: string, body: {
   branch: string; commit?: string; version?: string
   /** run 级一次性 stage 参数（需求文本载体）：key "<stageIdx>.<paramKey>"，如 {"0.request":"实现XX"} */
   stageParams?: Record<string, string>
+  /** preview 返回的执行计划指纹：非空时服务端比对，漂移（新构建改变候选）409 */
+  planHash?: string
 }): Promise<PipelineRun> {
   const resp = await fetchAuth(`/api/applications/${appId}/pipelines/${pid}/run`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -151,6 +226,34 @@ async function triggerRun(appId: string, pid: string, body: {
 }
 
 const getRun = (id: string) => fetchJSON<PipelineRun>(`/api/pipelineruns/${id}`)
+
+/** 执行计划预演（spec §6）：只读计算最终解析结果 + 触发时将锁定的候选产物 + planHash。 */
+async function previewRun(appId: string, pid: string, body: {
+  branch: string; commit?: string; stageParams?: Record<string, string>
+}): Promise<RunPreview> {
+  const resp = await fetchAuth(`/api/applications/${appId}/pipelines/${pid}/preview`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  })
+  const json = await resp.json()
+  if (!resp.ok) throw new Error(json.error || '预览失败')
+  return json.data as RunPreview
+}
+
+/** 结构化决策（spec §7）：manual-test/approve 的 confirm（通过/批准）与
+ *  reject（确认不通过→run failed / 拒绝上线→run aborted），reason 落 run.Decisions。 */
+async function decideStage(runId: string, stageIdx: number, action: 'confirm' | 'reject', reason?: string): Promise<void> {
+  const resp = await fetchAuth(`/api/pipelineruns/${runId}/stages/${stageIdx}/decisions`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, reason }),
+  })
+  if (!resp.ok) {
+    const json = await resp.json().catch(() => ({}))
+    throw new Error(json.error || '决策失败')
+  }
+}
+
+/** 服务×环境版本矩阵（spec §5）：基线 digest/发布/状态聚合。 */
+const getDeliveryMatrix = (appId: string) => fetchList<MatrixCell>(`/api/applications/${appId}/delivery-matrix`)
 
 /** 智能研发一条龙触发（2026-10-13）：需求文本 + 勾选段直触 tpl-agent-ship，免预建绑定。
  * 变更由 agent stage registerChange 自动注册（产出分支 open 态入变更 tab）。 */
@@ -251,4 +354,5 @@ export {
   listPipelines, getPipeline, createPipeline, updatePipeline, deletePipeline,
   listTemplates, triggerRun, getRun, listRuns, approveStage, abortRun, retryRun, getBuildRun,
   canaryDecision, listBuildRuns, listImages, listReleases, listRepositories,
+  previewRun, decideStage, getDeliveryMatrix,
 }

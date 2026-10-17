@@ -80,3 +80,17 @@ func TestValidate(t *testing.T) {
 		t.Errorf("Status=closed 应合法: %v", err)
 	}
 }
+
+// TestValidateNameProtectsDefault 基线 default 是系统保留名：实体创建层拒绝（spec 2026-10-17 L1）。
+func TestValidateNameProtectsDefault(t *testing.T) {
+	if err := ValidateName("default"); !errors.Is(err, ErrLaneProtected) {
+		t.Fatalf("default 应被保留拒绝，got %v", err)
+	}
+	l := Lane{EnvID: "env-1", Name: "default", Mode: ModeStandard}
+	if err := l.Validate(); !errors.Is(err, ErrLaneProtected) {
+		t.Fatalf("实体 Validate 应拒绝 default，got %v", err)
+	}
+	if err := ValidateName("feature-pay"); err != nil {
+		t.Fatalf("普通泳道名应合法: %v", err)
+	}
+}

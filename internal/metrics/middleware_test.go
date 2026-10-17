@@ -1,6 +1,9 @@
 package metrics
 
 import (
+	"bufio"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -133,4 +136,45 @@ func (f *flusherRW) Flush() {
 	if f.onFlush != nil {
 		f.onFlush()
 	}
+}
+
+// TestStatusRecorderForwardsHijacker：WebSocket 升级依赖 Hijacker 委托
+// （gorilla/websocket Upgrade 接管原始连接），经 statusRecorder 包装后必须仍可达。
+func TestStatusRecorderForwardsHijacker(t *testing.T) {
+	reg := NewRegistry()
+	mw := HTTPMiddleware(reg, []string{"/ws"})
+
+	hijacked := 0
+	inner := &hijackerRW{ResponseWriter: httptest.NewRecorder(), onHijack: func() { hijacked++ }}
+
+	var seenHijacker bool
+	h := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if ok {
+			seenHijacker = true
+			_, _, _ = hj.Hijack()
+		}
+	}))
+
+	h.ServeHTTP(inner, httptest.NewRequest("GET", "/ws", nil))
+
+	if !seenHijacker {
+		t.Fatal("handler 内 w.(http.Hijacker) 断言失败，WebSocket 升级会 500")
+	}
+	if hijacked != 1 {
+		t.Errorf("底层 Hijack 调用次数 = %d, want 1", hijacked)
+	}
+}
+
+// hijackerRW 是实现 http.Hijacker 的 fake ResponseWriter，记录 Hijack 调用。
+type hijackerRW struct {
+	http.ResponseWriter
+	onHijack func()
+}
+
+func (h *hijackerRW) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h.onHijack != nil {
+		h.onHijack()
+	}
+	return nil, nil, errors.New("fake: no conn")
 }

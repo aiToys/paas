@@ -112,3 +112,27 @@ func resetSelfLaneForTest(t *testing.T) {
 	selfLane.Store("")
 	t.Cleanup(func() { selfLane.Store("") })
 }
+
+// TestExplicitDefaultOverridesSelfLane 显式 default 覆盖容器自身泳道（spec 2026-10-17 §5.1）：
+// 容器部署在 feature-x（SelfLane）时，请求显式 x-paas-lane: default 必须解析回基线——
+// 此前字面 "default" 归一后回落 SelfLane，显式基线请求被吞。
+func TestExplicitDefaultOverridesSelfLane(t *testing.T) {
+	t.Setenv("PAAS_LANE_ID", "feature-x")
+	selfLane.Store("") // 重置进程级缓存（强制重读 env）
+	t.Cleanup(func() { selfLane.Store("") }) // t.Setenv 只恢复 env 不清缓存，防污染后续测试
+	ctx := WithLane(context.Background(), "default")
+	if got := LaneFromCtx(ctx); got != "default" {
+		t.Fatalf("LaneFromCtx 对外应读出 default，got %q", got)
+	}
+	if got := resolveLane(ctx); got != "" {
+		t.Fatalf("显式 default 应解析为基线（覆盖 SelfLane），got %q", got)
+	}
+	// 未指定（ctx 无 lane）仍回落自身泳道（零改动染色语义不变）。
+	if got := resolveLane(context.Background()); got != "feature-x" {
+		t.Fatalf("未指定应回落 SelfLane=feature-x，got %q", got)
+	}
+	// 显式 feature 覆盖 SelfLane（既有语义回归锁）。
+	if got := resolveLane(WithLane(context.Background(), "feature-y")); got != "feature-y" {
+		t.Fatalf("显式 feature-y 应覆盖 SelfLane，got %q", got)
+	}
+}

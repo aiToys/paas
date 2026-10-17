@@ -14,7 +14,8 @@ import (
 )
 
 // laneRunChecker 桥接 pipeline.RunRepository -> workload.LaneActivityChecker（依赖倒置，
-// workload 不 import pipeline）。run.Branch == lane 是 L1 锁定的关联约定：
+// workload 不 import pipeline）。真实运行目标关联（spec 2026-10-17 L5）：run.Lane（显式
+// 部署泳道）∪ run.Branch == lane（裸分支隐式泳道存量语义）：
 //   - Active：存在非终态（running/paused）run——联调/部署中，禁止回收；
 //   - Last：最近终态 run 的 FinishedAt（闲置计时基准）。
 //
@@ -29,7 +30,7 @@ func (c laneRunChecker) LastActive(ctx context.Context, tenantID, appID, lane st
 	}
 	var act workload.LaneActivity
 	for _, r := range runs {
-		if r.Branch != lane {
+		if r.Lane != lane && r.Branch != lane {
 			continue
 		}
 		if r.FinishedAt.IsZero() {
@@ -66,17 +67,18 @@ func (l laneWorkloadLister) ListByLane(ctx context.Context, envID, laneID string
 }
 
 // laneRunLister 桥接 pipeline.RunRepository -> lane.RunLister（Detail 聚合 + Close 前置校验）。
-// run.Branch == lane.Name 是 spec 锁定的关联约定；ListRuns("", "", "") 跨应用全量后按 branch 过滤。
+// 真实运行目标关联（spec 2026-10-17 L5）：run.Lane（触发时固化的显式部署泳道）∪
+// run.Branch == lane.Name（裸分支隐式泳道）；ListRuns("", "", "") 跨应用全量后过滤。
 type laneRunLister struct{ runs pipeline.RunRepository }
 
-func (l laneRunLister) ListByBranch(ctx context.Context, branch string) ([]pipeline.RunSummary, error) {
+func (l laneRunLister) ListByLane(ctx context.Context, laneName string) ([]pipeline.RunSummary, error) {
 	runs, err := l.runs.ListRuns(ctx, "", "", "")
 	if err != nil {
 		return nil, err
 	}
 	out := make([]pipeline.RunSummary, 0, len(runs))
 	for _, r := range runs {
-		if r.Branch == branch {
+		if r.Lane == laneName || r.Branch == laneName {
 			out = append(out, r.Summarize())
 		}
 	}
@@ -85,10 +87,11 @@ func (l laneRunLister) ListByBranch(ctx context.Context, branch string) ([]pipel
 
 // laneStatusBridge 桥接 lane.Repository -> workload.LaneStatusStore（依赖倒置，
 // workload 不 import lane）。Mode 取泳道模式（permanent 常驻 GC 跳过）；
+// Closed 查实体是否已 closed（closed 遗留 Sweep 立即清扫，spec 2026-10-17 B）；
 // MarkClosed 回收后同步实体 closed（幂等；无实体=纯遗留泳道，忽略）。
 type laneStatusBridge struct{ lanes laneRepository }
 
-// laneRepository 收窄 lane.Repository 到 GC 联动所需的最小面（Mode/MarkClosed 仅需 GetByName/Close）。
+// laneRepository 收窄 lane.Repository 到 GC 联动所需的最小面（Mode/Closed/MarkClosed 仅需 GetByName/Close）。
 type laneRepository interface {
 	GetByName(ctx context.Context, envID, name string) (lane.Lane, error)
 	Close(ctx context.Context, id string) (lane.Lane, error)
@@ -100,6 +103,14 @@ func (b laneStatusBridge) Mode(ctx context.Context, envID, name string) (string,
 		return "", err // 不存在等错误交调用方保守跳过
 	}
 	return ln.Mode, nil
+}
+
+func (b laneStatusBridge) Closed(ctx context.Context, envID, name string) (bool, error) {
+	ln, err := b.lanes.GetByName(ctx, envID, name)
+	if err != nil {
+		return false, err
+	}
+	return ln.Status == lane.StatusClosed, nil
 }
 
 func (b laneStatusBridge) MarkClosed(ctx context.Context, envID, name string) error {
@@ -116,4 +127,12 @@ func (b laneStatusBridge) MarkClosed(ctx context.Context, envID, name string) er
 	}
 	_, err = b.lanes.Close(ctx, ln.ID)
 	return err
+}
+
+// laneReclaimAdapter 适配 workload.LaneGC -> lane.Reclaimer（结构化结果跨包转换）。
+type laneReclaimAdapter struct{ gc *workload.LaneGC }
+
+func (a laneReclaimAdapter) ReclaimLane(ctx context.Context, tenantID, envID, laneName string) (lane.ReclaimResult, error) {
+	res, err := a.gc.ReclaimLane(ctx, tenantID, envID, laneName)
+	return lane.ReclaimResult{Reclaimed: res.Reclaimed, FailedIDs: res.FailedIDs}, err
 }

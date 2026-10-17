@@ -2,6 +2,7 @@ package workload
 
 import (
 	"context"
+	"fmt"
 	"log"
 
 	"github.com/aitoys/paas/pkg/tenant"
@@ -119,6 +120,26 @@ func (r *ApplyRepo) SetMetricsPath(ctx context.Context, id string, path string) 
 		if w, err := r.Repository.Get(ctx, id); err == nil { //nolint:staticcheck // QF1008:装饰器显式转发嵌入实现
 			w = withTenant(ctx, w)
 			r.applyLog("set-metrics-path", w.ID, r.applier.Apply(ctx, w))
+		}
+	}
+	return nil
+}
+
+// SetRestartToken 写滚动重启令牌并投影数据面（CRD spec.restartToken → reconciler 注
+// Pod template annotation → 滚动）。缺投影会只写 PG、CRD 不变——重启永不生效（与
+// SetDomain/SetMetricsPath 同款模式）。空令牌拒绝（令牌只能被新值覆盖）。
+func (r *ApplyRepo) SetRestartToken(ctx context.Context, id string, token string) error {
+	if token == "" {
+		return fmt.Errorf("restartToken 不可为空")
+	}
+	// 显式走内层嵌入字段，避免自递归（同 SetDomain）。
+	if err := r.Repository.SetRestartToken(ctx, id, token); err != nil { //nolint:staticcheck // QF1008：装饰器须显式走内层
+		return err
+	}
+	if r.applier != nil {
+		if w, err := r.Repository.Get(ctx, id); err == nil { //nolint:staticcheck // QF1008：装饰器显式转发嵌入实现
+			w = withTenant(ctx, w)
+			r.applyLog("set-restart-token", w.ID, r.applier.Apply(ctx, w))
 		}
 	}
 	return nil

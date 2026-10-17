@@ -48,6 +48,10 @@ type WorkloadSpec struct {
 	// Resources 是容器资源规格（CPU/内存 requests/limits，K8s Quantity 字符串）。
 	// 空字段跳过映射（BestEffort）；生产环境由控制面 handler 强制非空（禁 BestEffort）。
 	Resources ResourceSpec `json:"resources,omitempty"`
+	// RestartToken 是滚动重启的不可重复令牌（spec 2026-10-17 §6）：reconciler 把它注入
+	// Pod template annotation paas.aitoys/restart-token——token 变化即 template hash 变化，
+	// Deployment 按其更新策略滚动重启。普通字段更新原样带出此值（不清除、不重复触发）。
+	RestartToken string `json:"restartToken,omitempty"`
 }
 
 // ResourceSpec 是容器资源规格（K8s Quantity 字符串，如 "500m"/"2"/"512Mi"/"1Gi"）。

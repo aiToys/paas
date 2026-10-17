@@ -44,12 +44,12 @@ func NewPGStore(db *pgxpool.Pool) *pgStore { return &pgStore{db: db} }
 // runCols 含 repo_id（build stage 解析 app 绑定的 internal CodeRepo 用，与内存版字段对齐）。
 const (
 	pipeCols = `id, tenant_id, app_id, name, kind, template_id, param_overrides, trigger, disabled, created_at`
-	runCols  = `id, tenant_id, app_id, pipeline_id, branch, commit, repo_id, trigger, trigger_ref, status, current_stage, version, created_at, finished_at`
+	runCols  = `id, tenant_id, app_id, pipeline_id, branch, lane, commit, repo_id, trigger, trigger_ref, status, current_stage, version, created_at, finished_at, plan_hash, template_id, template_version, artifact, decisions`
 	tplCols  = `id, tenant_id, name, kind, description, stages, builtin, version`
 )
 
 // stageRunCols 不含 BIGSERIAL 的 id（重写时按 (pipeline_run_id, stage_index) 排序读回）。
-const stageRunCols = `stage_index, type, name, status, input, output, started_at, finished_at, error, log`
+const stageRunCols = `stage_index, type, name, status, input, output, started_at, finished_at, error, log, checks`
 
 // 约束名常量（用于错误分类）。与 migration 0018 定义对齐。
 const (
@@ -283,13 +283,8 @@ func (s *pgStore) ListRuns(ctx context.Context, appID, pipelineID, status string
 	out := make([]PipelineRun, 0)
 	for rows.Next() {
 		var r PipelineRun
-		var fp *time.Time // finished_at 可空（run 未完成）
-		if err = rows.Scan(&r.ID, &r.TenantID, &r.AppID, &r.PipelineID, &r.Branch, &r.Commit, &r.RepoID,
-			&r.Trigger, &r.TriggerRef, &r.Status, &r.CurrentStage, &r.Version, &r.CreatedAt, &fp); err != nil {
+		if err = scanRunInto(rows, &r); err != nil {
 			return nil, err
-		}
-		if fp != nil {
-			r.FinishedAt = *fp
 		}
 		if err = loadStageRuns(ctx, s.db, &r); err != nil {
 			return nil, err
@@ -317,13 +312,8 @@ func (s *pgStore) ListAllRuns(ctx context.Context, status string) ([]PipelineRun
 	out := make([]PipelineRun, 0)
 	for rows.Next() {
 		var r PipelineRun
-		var fp *time.Time
-		if err = rows.Scan(&r.ID, &r.TenantID, &r.AppID, &r.PipelineID, &r.Branch, &r.Commit, &r.RepoID,
-			&r.Trigger, &r.TriggerRef, &r.Status, &r.CurrentStage, &r.Version, &r.CreatedAt, &fp); err != nil {
+		if err = scanRunInto(rows, &r); err != nil {
 			return nil, err
-		}
-		if fp != nil {
-			r.FinishedAt = *fp
 		}
 		if err = loadStageRuns(ctx, s.db, &r); err != nil {
 			return nil, err
@@ -334,25 +324,87 @@ func (s *pgStore) ListAllRuns(ctx context.Context, status string) ([]PipelineRun
 }
 
 // GetRun 取单个（含 stageRuns）；跨租户 NotFound 不泄漏。
+// rowScanner pgx Row/Rows 的公共 Scan 接口（run 行读取三处共用）。
+type rowScanner interface{ Scan(dest ...any) error }
+
+// scanRunInto 把 runCols 顺序的行扫进 r（artifact/decisions 为 JSONB 可空列）。
+func scanRunInto(sc rowScanner, r *PipelineRun) error {
+	var fp *time.Time // finished_at 可空（run 未完成）
+	var artB, decB []byte
+	if err := sc.Scan(&r.ID, &r.TenantID, &r.AppID, &r.PipelineID, &r.Branch, &r.Lane, &r.Commit, &r.RepoID,
+		&r.Trigger, &r.TriggerRef, &r.Status, &r.CurrentStage, &r.Version, &r.CreatedAt, &fp,
+		&r.PlanHash, &r.TemplateID, &r.TemplateVersion, &artB, &decB); err != nil {
+		return err
+	}
+	if fp != nil {
+		r.FinishedAt = *fp
+	}
+	r.Artifact = unmarshalArtifact(artB)
+	r.Decisions = unmarshalDecisions(decB)
+	return nil
+}
+
+// jsonbOrNull 序列化为 JSONB 参数（nil/空切片 → NULL）。
+func jsonbOrNull(v any) []byte {
+	switch t := v.(type) {
+	case nil:
+		return nil
+	case *ArtifactBinding:
+		if t == nil {
+			return nil
+		}
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// unmarshalArtifact 反序列化产物绑定（空列 → nil）。
+func unmarshalArtifact(b []byte) *ArtifactBinding {
+	if len(b) == 0 {
+		return nil
+	}
+	var a ArtifactBinding
+	if err := json.Unmarshal(b, &a); err != nil || a.ImageID == "" {
+		return nil
+	}
+	return &a
+}
+
+// unmarshalDecisions 反序列化决策记录（空列 → nil）。
+func unmarshalDecisions(b []byte) []DecisionRecord {
+	if len(b) == 0 {
+		return nil
+	}
+	var ds []DecisionRecord
+	_ = json.Unmarshal(b, &ds)
+	return ds
+}
+
+// unmarshalChecks 反序列化检查结果（空列 → nil）。
+func unmarshalChecks(b []byte) []CheckResult {
+	if len(b) == 0 {
+		return nil
+	}
+	var cs []CheckResult
+	_ = json.Unmarshal(b, &cs)
+	return cs
+}
+
 func (s *pgStore) GetRun(ctx context.Context, id string) (PipelineRun, error) {
 	tid, err := tenantOrErr(ctx)
 	if err != nil {
 		return PipelineRun{}, err
 	}
 	var r PipelineRun
-	var fp *time.Time // finished_at 可空（run 未完成）
-	err = s.db.QueryRow(ctx,
-		`SELECT `+runCols+` FROM pipeline_runs WHERE id=$1 AND tenant_id=$2`, id, tid).
-		Scan(&r.ID, &r.TenantID, &r.AppID, &r.PipelineID, &r.Branch, &r.Commit, &r.RepoID,
-			&r.Trigger, &r.TriggerRef, &r.Status, &r.CurrentStage, &r.Version, &r.CreatedAt, &fp)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+	row := s.db.QueryRow(ctx, `SELECT `+runCols+` FROM pipeline_runs WHERE id=$1 AND tenant_id=$2`, id, tid)
+	if serr := scanRunInto(row, &r); serr != nil {
+		if errors.Is(serr, pgx.ErrNoRows) {
 			return PipelineRun{}, ErrRunNotFound
 		}
-		return PipelineRun{}, err
-	}
-	if fp != nil {
-		r.FinishedAt = *fp
+		return PipelineRun{}, serr
 	}
 	if err = loadStageRuns(ctx, s.db, &r); err != nil {
 		return PipelineRun{}, err
@@ -391,10 +443,11 @@ func (s *pgStore) CreateRun(ctx context.Context, in PipelineRun) (PipelineRun, e
 		return PipelineRun{}, ErrPipelineNotFound
 	}
 	_, err = tx.Exec(ctx,
-		`INSERT INTO pipeline_runs (id, tenant_id, app_id, pipeline_id, branch, commit, repo_id, trigger, trigger_ref, status, current_stage, version, created_at, finished_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-		in.ID, in.TenantID, in.AppID, in.PipelineID, in.Branch, in.Commit, in.RepoID,
-		in.Trigger, in.TriggerRef, in.Status, in.CurrentStage, in.Version, in.CreatedAt, nullTime(in.FinishedAt))
+		`INSERT INTO pipeline_runs (id, tenant_id, app_id, pipeline_id, branch, lane, commit, repo_id, trigger, trigger_ref, status, current_stage, version, created_at, finished_at, plan_hash, template_id, template_version, artifact, decisions)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+		in.ID, in.TenantID, in.AppID, in.PipelineID, in.Branch, in.Lane, in.Commit, in.RepoID,
+		in.Trigger, in.TriggerRef, in.Status, in.CurrentStage, in.Version, in.CreatedAt, nullTime(in.FinishedAt),
+		in.PlanHash, in.TemplateID, in.TemplateVersion, jsonbOrNull(in.Artifact), jsonbOrNull(in.Decisions))
 	if err != nil {
 		switch classifyRunErr(err) {
 		case ErrActiveRunExists:
@@ -415,8 +468,8 @@ func (s *pgStore) CreateRun(ctx context.Context, in PipelineRun) (PipelineRun, e
 			return PipelineRun{}, fmt.Errorf("序列化 stage output 失败: %w", mErr)
 		}
 		if _, err = tx.Exec(ctx,
-			`INSERT INTO stage_runs (pipeline_run_id, `+stageRunCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-			in.ID, sr.Index, sr.Type, sr.Name, sr.Status, inB, outB, nullTime(sr.StartedAt), nullTime(sr.FinishedAt), sr.Error, sr.Log); err != nil {
+			`INSERT INTO stage_runs (pipeline_run_id, `+stageRunCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+			in.ID, sr.Index, sr.Type, sr.Name, sr.Status, inB, outB, nullTime(sr.StartedAt), nullTime(sr.FinishedAt), sr.Error, sr.Log, jsonbOrNull(sr.Checks)); err != nil {
 			return PipelineRun{}, err
 		}
 	}
@@ -440,9 +493,10 @@ func (s *pgStore) UpdateRun(ctx context.Context, in PipelineRun) (PipelineRun, e
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 	tag, err := tx.Exec(ctx,
-		`UPDATE pipeline_runs SET branch=$1, commit=$2, trigger=$3, trigger_ref=$4, status=$5, current_stage=$6, version=$7, finished_at=$8
-		 WHERE id=$9 AND tenant_id=$10`,
-		in.Branch, in.Commit, in.Trigger, in.TriggerRef, in.Status, in.CurrentStage, in.Version, nullTime(in.FinishedAt),
+		`UPDATE pipeline_runs SET branch=$1, lane=$2, commit=$3, trigger=$4, trigger_ref=$5, status=$6, current_stage=$7, version=$8, finished_at=$9, artifact=$10, decisions=$11
+		 WHERE id=$12 AND tenant_id=$13`,
+		in.Branch, in.Lane, in.Commit, in.Trigger, in.TriggerRef, in.Status, in.CurrentStage, in.Version, nullTime(in.FinishedAt),
+		jsonbOrNull(in.Artifact), jsonbOrNull(in.Decisions),
 		in.ID, tid)
 	if err != nil {
 		return PipelineRun{}, err
@@ -464,8 +518,8 @@ func (s *pgStore) UpdateRun(ctx context.Context, in PipelineRun) (PipelineRun, e
 			return PipelineRun{}, fmt.Errorf("序列化 stage output 失败: %w", mErr)
 		}
 		if _, err = tx.Exec(ctx,
-			`INSERT INTO stage_runs (pipeline_run_id, `+stageRunCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-			in.ID, sr.Index, sr.Type, sr.Name, sr.Status, inB, outB, nullTime(sr.StartedAt), nullTime(sr.FinishedAt), sr.Error, sr.Log); err != nil {
+			`INSERT INTO stage_runs (pipeline_run_id, `+stageRunCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+			in.ID, sr.Index, sr.Type, sr.Name, sr.Status, inB, outB, nullTime(sr.StartedAt), nullTime(sr.FinishedAt), sr.Error, sr.Log, jsonbOrNull(sr.Checks)); err != nil {
 			return PipelineRun{}, err
 		}
 	}
@@ -650,10 +704,10 @@ func loadStageRuns(ctx context.Context, db *pgxpool.Pool, r *PipelineRun) error 
 	defer rows.Close()
 	for rows.Next() {
 		var sr StageRun
-		var inB, outB []byte
+		var inB, outB, chkB []byte
 		// started_at/finished_at 可空（stage 未开始/未结束），用 *time.Time 接 NULL
 		var sp, fp *time.Time
-		if err = rows.Scan(&sr.Index, &sr.Type, &sr.Name, &sr.Status, &inB, &outB, &sp, &fp, &sr.Error, &sr.Log); err != nil {
+		if err = rows.Scan(&sr.Index, &sr.Type, &sr.Name, &sr.Status, &inB, &outB, &sp, &fp, &sr.Error, &sr.Log, &chkB); err != nil {
 			return err
 		}
 		if sp != nil {
@@ -668,6 +722,7 @@ func loadStageRuns(ctx context.Context, db *pgxpool.Pool, r *PipelineRun) error 
 		if len(outB) > 0 {
 			_ = json.Unmarshal(outB, &sr.Output)
 		}
+		sr.Checks = unmarshalChecks(chkB)
 		r.StageRuns = append(r.StageRuns, sr)
 	}
 	return rows.Err()

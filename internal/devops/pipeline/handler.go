@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/aitoys/paas/internal/core/application"
 	"github.com/aitoys/paas/internal/environment"
@@ -82,6 +83,8 @@ type Handler struct {
 	isPlatformAdmin func(*http.Request) bool
 	// appGuard 应用级权限 enforcement（受限应用触发/审批需成员角色）；nil 跳过。
 	appGuard *application.AppGuard
+	// imageMeta 镜像元数据（产物锁定时补 digest/commit/buildRunId）；nil 仅锁 imageId。
+	imageMeta ImageMetaResolver
 }
 
 // HandlerOpt 配置 Handler。
@@ -128,6 +131,11 @@ func WithPlatformAdmin(f func(*http.Request) bool) HandlerOpt {
 }
 
 // WithAppGuard 注入应用级权限 enforcement（受限应用流水线触发需 write、审批需 release）。
+// WithImageMeta 注入镜像元数据解析（产物锁定 digest/commit/buildRunId）。
+func WithImageMeta(f ImageMetaResolver) HandlerOpt {
+	return func(h *Handler) { h.imageMeta = f }
+}
+
 func WithAppGuard(g *application.AppGuard) HandlerOpt {
 	return func(h *Handler) { h.appGuard = g }
 }
@@ -313,6 +321,16 @@ func (h *Handler) serveAppPipelines(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.triggerRun(w, r, appID, parts[2])
+		return
+	}
+
+	// /api/applications/{id}/pipelines/{pid}/preview —— 执行计划预演（只读，spec §6）。
+	if len(parts) == 4 && parts[3] == "preview" {
+		if r.Method != http.MethodPost {
+			httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		h.previewRun(w, r, appID, parts[2])
 		return
 	}
 	httputil.WriteError(w, http.StatusNotFound, "not found")
@@ -625,12 +643,28 @@ func (h *Handler) serveRuns(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		stageIdx := atoiSafe(parts[2])
+		// 结构化决策记录（run 时间线用；旧端点与 decisions 端点同款记录，双入口行为一致）。
+		if dtype := decisionType(run.StageRuns[min(stageIdx, len(run.StageRuns)-1)]); dtype != "" {
+			if derr := h.recordDecision(r.Context(), id, stageIdx, dtype, "confirm", "", h.actorOf(r)); derr != nil {
+				writePipeErr(w, derr)
+				return
+			}
+		}
 		if err := h.engine.Resume(r.Context(), id, stageIdx); err != nil {
 			writePipeErr(w, err)
 			return
 		}
 		h.recordAudit(r, "approve", "pipeline_run", id, fmt.Sprintf("stage=%d", stageIdx))
 		httputil.WriteData(w, map[string]string{"resumed": id})
+		return
+	}
+
+	// POST /{id}/stages/{idx}/decisions 结构化决策（spec §7，v2 前端主入口）：
+	// manual-test → confirm（确认通过）/ reject（确认不通过，run failed 质量否决）
+	// approve → confirm（批准）/ reject（拒绝，run aborted）
+	// canary 决策走专属 canary 端点（promote/terminate 有独立副作用与两段锁）。
+	if r.Method == http.MethodPost && len(parts) == 4 && parts[1] == "stages" && parts[3] == "decisions" {
+		h.decideStage(w, r, id, atoiSafe(parts[2]))
 		return
 	}
 
@@ -676,6 +710,9 @@ func (h *Handler) serveRuns(w http.ResponseWriter, r *http.Request) {
 		if err := h.engine.CanaryResume(r.Context(), id, stageIdx, in.Action == "promote"); err != nil {
 			writePipeErr(w, err)
 			return
+		}
+		if derr := h.recordDecision(r.Context(), id, stageIdx, "canary", in.Action, "", h.actorOf(r)); derr != nil {
+			log.Printf("[pipeline] canary 决策记录写入失败: %v", derr)
 		}
 		h.recordAudit(r, "canary_"+in.Action, "pipeline_run", id, fmt.Sprintf("stage=%d", stageIdx))
 		httputil.WriteData(w, map[string]string{"resumed": id})
@@ -757,6 +794,123 @@ func (h *Handler) serveRuns(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteError(w, http.StatusNotFound, "not found")
 }
 
+// decisionType 按当前 stage 判定决策类型（""=不支持决策，如 canary/smoke）。
+func decisionType(sr StageRun) string {
+	if sr.Type == StageTest && strFromInput(sr.Input, "mode") == TestManual {
+		return "manual-test"
+	}
+	if sr.Type == StageApprove {
+		return "approve"
+	}
+	return ""
+}
+
+// actorOf 取决策/审计 actor（actorFn nil 返回空串）。
+func (h *Handler) actorOf(r *http.Request) string {
+	if h.actorFn != nil {
+		return h.actorFn(r)
+	}
+	return ""
+}
+
+// recordDecision 结构化决策落 run.Decisions（只追加）。在 engine 动作前写：
+// engine 的 Resume/Abort/RejectManual 内部重新 GetRun，读到含本记录的最新状态，不丢失。
+// 仅 paused run 可决策（engine 不在推进），无写竞态。
+func (h *Handler) recordDecision(ctx context.Context, id string, stageIdx int, dtype, action, reason, actor string) error {
+	run, err := h.runs.GetRun(ctx, id)
+	if err != nil {
+		return err
+	}
+	run.Decisions = append(run.Decisions, DecisionRecord{
+		StageIndex: stageIdx, Type: dtype, Action: action,
+		Reason: reason, Actor: actor, At: time.Now(),
+	})
+	_, err = h.runs.UpdateRun(ctx, run)
+	return err
+}
+
+// decideStage POST /api/pipelineruns/{id}/stages/{idx}/decisions。
+// action=confirm：manual-test 确认通过 / approve 批准（等价旧 approve 端点的 Resume）。
+// action=reject：manual-test 质量否决（run failed）；approve 拒绝上线（run aborted）。
+func (h *Handler) decideStage(w http.ResponseWriter, r *http.Request, id string, stageIdx int) {
+	if !h.allow(w, r, PermPipelineWrite) {
+		return
+	}
+	if h.engine == nil {
+		httputil.WriteError(w, http.StatusServiceUnavailable, "engine not configured")
+		return
+	}
+	var in struct {
+		Action string `json:"action"`
+		Reason string `json:"reason"`
+	}
+	if derr := json.NewDecoder(r.Body).Decode(&in); derr != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "请求体非法（JSON 解析失败）")
+		return
+	}
+	if in.Action != "confirm" && in.Action != "reject" {
+		httputil.WriteError(w, http.StatusBadRequest, "action 必须是 confirm 或 reject")
+		return
+	}
+	// GetRun 提为主路径：查询失败直接返回（fail-closed，防 appGuard 在瞬时故障下跳过）。
+	run, err := h.runs.GetRun(r.Context(), id)
+	if err != nil {
+		writePipeErr(w, err)
+		return
+	}
+	if stageIdx < 0 || stageIdx >= len(run.StageRuns) {
+		httputil.WriteError(w, http.StatusBadRequest, "stage 索引越界")
+		return
+	}
+	if run.Status != RunPaused || run.CurrentStage != stageIdx {
+		httputil.WriteError(w, http.StatusConflict, "该阶段当前不在等待决策")
+		return
+	}
+	dtype := decisionType(run.StageRuns[stageIdx])
+	if dtype == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "该阶段不支持 confirm/reject 决策（金丝雀请走 canary 决策端点）")
+		return
+	}
+	// 应用级权限：按决策性质分流——approve（发布门禁）需 release；manual-test 验证需 write。
+	action := application.AppActionWrite
+	if dtype == "approve" {
+		action = application.AppActionRelease
+	}
+	if !h.allowApp(w, r, run.AppID, action) {
+		return
+	}
+	// prod:write 复查（与旧 approve 端点同款）：confirm 后剩余 stages 将继续执行，
+	// 触达 prod 必须持 prod:write（防 webhook 触发 + 自行 confirm 绕过生产写权限）。
+	if in.Action == "confirm" && !h.allowProdFlow(w, r, stagesAfter(run, stageIdx)) {
+		return
+	}
+	// 决策记录先落（engine 动作内部重新 GetRun 读到含记录的最新状态）。
+	if derr := h.recordDecision(r.Context(), id, stageIdx, dtype, in.Action, in.Reason, h.actorOf(r)); derr != nil {
+		writePipeErr(w, derr)
+		return
+	}
+	switch {
+	case in.Action == "confirm":
+		if err := h.engine.Resume(r.Context(), id, stageIdx); err != nil {
+			writePipeErr(w, err)
+			return
+		}
+	case dtype == "manual-test":
+		if err := h.engine.RejectManual(r.Context(), id, stageIdx, in.Reason); err != nil {
+			writePipeErr(w, err)
+			return
+		}
+	default: // approve reject = 拒绝上线，中止执行
+		if err := h.engine.Abort(r.Context(), id); err != nil {
+			writePipeErr(w, err)
+			return
+		}
+	}
+	h.recordAudit(r, "decision_"+dtype+"_"+in.Action, "pipeline_run", id,
+		fmt.Sprintf("stage=%d reason=%.80s", stageIdx, in.Reason))
+	httputil.WriteData(w, map[string]string{"decided": id})
+}
+
 // allowApp 校验受限应用的应用级权限；未注入/非受限放行，不通过回 403。
 func (h *Handler) allowApp(w http.ResponseWriter, r *http.Request, appID, action string) bool {
 	if h.appGuard == nil || h.appGuard.Allow(r, appID, action) {
@@ -784,18 +938,100 @@ func stagesAfter(run PipelineRun, fromIdx int) []StageDef {
 // body {branch, commit?, version?} -> 建 PipelineRun + engine.Start。
 // prod:write 横切：deploy stage 目标环境为 prod 要求调用者持 prod:write。
 // 单实例串行：已有 running/paused run 拒绝（ErrActiveRunExists）。
-func (h *Handler) triggerRun(w http.ResponseWriter, r *http.Request, appID, pid string) {
-	if !h.allow(w, r, PermPipelineWrite) {
+// runTriggerInput trigger/preview 共用请求体。
+type runTriggerInput struct {
+	Branch  string `json:"branch"`
+	Commit  string `json:"commit"`
+	Version string `json:"version"`
+	// StageParams run 级一次性 stage 参数（需求文本载体）：key 格式同 ParamOverrides（"<stageIdx>.<paramKey>"），
+	// 后于 ParamOverrides 应用（run 级优先）。webhook 路径不接（机器触发无动态需求）。
+	StageParams map[string]any `json:"stageParams"`
+	// PlanHash 来自 preview 的执行计划指纹：非空时服务端锁定产物后重算比对，
+	// 不一致 409（防预览到执行之间目标漂移，spec §6）。
+	PlanHash string `json:"planHash"`
+}
+
+// resolveForRun trigger/preview 共用解析链：pipeline 归属 → 模板 → ResolveStages →
+// run 级 stageParams 应用。写侧权限预演（appGuard/prod:write）由 triggerRun 做，
+// preview 只读不预演（不构成越权面：解析输入均为调用方自有资源）。
+func (h *Handler) resolveForRun(w http.ResponseWriter, r *http.Request, appID, pid string, body runTriggerInput) (Pipeline, PipelineTemplate, []StageDef, bool) {
+	p, err := h.pipes.GetPipeline(r.Context(), pid)
+	if err != nil {
+		writePipeErr(w, err)
+		return Pipeline{}, PipelineTemplate{}, nil, false
+	}
+	// 归属校验（同 get 分支注释）：不符 404，防跨应用触发他人流水线。
+	if p.AppID != appID {
+		httputil.WriteError(w, http.StatusNotFound, "pipeline 不存在")
+		return Pipeline{}, PipelineTemplate{}, nil, false
+	}
+	tpl, terr := h.templates.GetTemplate(r.Context(), p.TemplateID)
+	if terr != nil {
+		httputil.WriteError(w, http.StatusNotFound, "pipeline template not found")
+		return Pipeline{}, PipelineTemplate{}, nil, false
+	}
+	resolved, rerr := ResolveStages(r.Context(), tpl.Stages, p.ParamOverrides, h.paramResolver, appID, body.Branch)
+	if rerr != nil {
+		// WriteServiceError 分流（错误契约审计 C1）：rerr 可能内嵌 pgx 原始错误，裸 400 直通泄漏内部细节。
+		httputil.WriteServiceError(w, http.StatusBadRequest, rerr)
+		return Pipeline{}, PipelineTemplate{}, nil, false
+	}
+	// run 级 stageParams 应用：必须在 validateDeployEnvs/appGuard/allowProdFlow 预演**之前**——
+	// 防经 stageParams 把 deploy envId 改指 prod 绕过 prod:write 静态预演（越权防线，review focus ②）。
+	for i := range resolved {
+		applyOverrides(resolved[i].Params, body.StageParams, i)
+	}
+	return p, tpl, resolved, true
+}
+
+// lockArtifacts 产物锁定（spec §6）：imageSource=latestReady 的镜像消费 stage
+// （deploy/canary/promote/release）预解析一次，写入 Params["lockedImageId"]。
+// 触发时固化 → 后续执行/审批后推进/Retry 均用锁定值，审批等待期间新完成的构建
+// 不再漂移实际发布产物。run.Artifact 记候选五元组（digest/commit/buildRunId 来自
+// 镜像元数据真源）。幂等：已锁定的 stage 跳过（triggerRun 与 triggerRunInternal 双调用安全）。
+func (h *Handler) lockArtifacts(ctx context.Context, appID string, resolved []StageDef) (*ArtifactBinding, error) {
+	var binding *ArtifactBinding
+	for i := range resolved {
+		s := &resolved[i]
+		switch s.Type {
+		case StageDeploy, StageCanary, StagePromote, StageRelease:
+		default:
+			continue
+		}
+		if strOr(s.Params, "imageSource", ImagePriorBuild) != ImageLatestReady {
+			continue
+		}
+		if strOr(s.Params, "lockedImageId", "") != "" {
+			continue
+		}
+		if h.engine == nil {
+			continue // 引擎未配置（测试场景）：不锁定，preview 展示「触发时锁定」语义
+		}
+		imageID, err := h.engine.Releases.LatestReadyImage(ctx, appID)
+		if err != nil {
+			return nil, fmt.Errorf("解析候选镜像失败: %w", err)
+		}
+		s.Params["lockedImageId"] = imageID
+		if binding == nil {
+			binding = &ArtifactBinding{ImageID: imageID}
+			if h.imageMeta != nil {
+				if m, ok := h.imageMeta(ctx, appID, imageID); ok {
+					binding.Digest, binding.Commit, binding.BuildRunID = m.Digest, m.Commit, m.BuildRunID
+				}
+			}
+		}
+	}
+	return binding, nil
+}
+
+// previewRun POST /api/applications/{id}/pipelines/{pid}/preview —— 执行计划预演（只读）。
+// 返回最终解析的 stages（含中文目标说明）、触发时将锁定的候选产物、缺配置项、planHash。
+// 前端把 planHash 原样带回 trigger 即得「预览=执行」一致性保证。
+func (h *Handler) previewRun(w http.ResponseWriter, r *http.Request, appID, pid string) {
+	if !h.allow(w, r, PermPipelineRead) {
 		return
 	}
-	var body struct {
-		Branch  string `json:"branch"`
-		Commit  string `json:"commit"`
-		Version string `json:"version"`
-		// StageParams run 级一次性 stage 参数（需求文本载体）：key 格式同 ParamOverrides（"<stageIdx>.<paramKey>"），
-		// 后于 ParamOverrides 应用（run 级优先）。webhook 路径不接（机器触发无动态需求）。
-		StageParams map[string]any `json:"stageParams"`
-	}
+	var body runTriggerInput
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 		return
@@ -804,32 +1040,38 @@ func (h *Handler) triggerRun(w http.ResponseWriter, r *http.Request, appID, pid 
 		httputil.WriteError(w, http.StatusBadRequest, "branch required")
 		return
 	}
-	p, err := h.pipes.GetPipeline(r.Context(), pid)
-	if err != nil {
-		writePipeErr(w, err)
+	p, tpl, resolved, ok := h.resolveForRun(w, r, appID, pid, body)
+	if !ok {
 		return
 	}
-	// 归属校验（同 get 分支注释）：不符 404，防跨应用触发他人流水线。
-	if p.AppID != appID {
-		httputil.WriteError(w, http.StatusNotFound, "pipeline 不存在")
+	if msg := validateDeployEnvs(resolved); msg != "" {
+		httputil.WriteError(w, http.StatusBadRequest, msg)
 		return
 	}
-	// 从模板解析 stages（占位符 {{app.env.*}}/{{app.repo}} + ParamOverrides 实例化）。
-	tpl, terr := h.templates.GetTemplate(r.Context(), p.TemplateID)
-	if terr != nil {
-		httputil.WriteError(w, http.StatusNotFound, "pipeline template not found")
+	artifact, aerr := h.lockArtifacts(r.Context(), appID, resolved)
+	if aerr != nil {
+		httputil.WriteServiceError(w, http.StatusBadRequest, aerr)
 		return
 	}
-	resolved, rerr := ResolveStages(r.Context(), tpl.Stages, p.ParamOverrides, h.paramResolver, appID, body.Branch)
-	if rerr != nil {
-		// WriteServiceError 分流（错误契约审计 C1）：rerr 可能内嵌 pgx 原始错误，裸 400 直通泄漏内部细节。
-		httputil.WriteServiceError(w, http.StatusBadRequest, rerr)
+	httputil.WriteData(w, BuildPreview(p, tpl, resolved, body.Branch, artifact, missingConfigItems(resolved)))
+}
+
+func (h *Handler) triggerRun(w http.ResponseWriter, r *http.Request, appID, pid string) {
+	if !h.allow(w, r, PermPipelineWrite) {
 		return
 	}
-	// run 级 stageParams 应用：必须在 validateDeployEnvs/appGuard/allowProdFlow 预演**之前**——
-	// 防经 stageParams 把 deploy envId 改指 prod 绕过 prod:write 静态预演（越权防线，review focus ②）。
-	for i := range resolved {
-		applyOverrides(resolved[i].Params, body.StageParams, i)
+	var body runTriggerInput
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if body.Branch == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "branch required")
+		return
+	}
+	p, tpl, resolved, ok := h.resolveForRun(w, r, appID, pid, body)
+	if !ok {
+		return
 	}
 	// deploy stage envId 必填校验（fail-fast，避免注定失败的 run 占住单实例串行槽位）。
 	// 占位符解析后 envId 仍空（app 无对应环境）则拒。
@@ -848,7 +1090,9 @@ func (h *Handler) triggerRun(w http.ResponseWriter, r *http.Request, appID, pid 
 	if !h.allowProdFlow(w, r, resolved) {
 		return
 	}
-	created, err := h.triggerRunInternal(r.Context(), appID, pid, resolved, body.Branch, body.Commit, body.Version, TriggerManual)
+	// 产物锁定 + 执行计划一致性（spec §6）在 triggerRunInternal 内单次完成：
+	// 锁定值计入 hash，带 planHash（来自 preview）时比对，漂移 → 409 重新预览。
+	created, err := h.triggerRunInternal(r.Context(), appID, p.ID, tpl, resolved, body.Branch, body.Commit, body.Version, TriggerManual, body.PlanHash)
 	if err != nil {
 		writePipeErr(w, err)
 		return
@@ -972,7 +1216,7 @@ func (h *Handler) triggerAgentShipRun(w http.ResponseWriter, r *http.Request, ap
 	if !h.allowProdFlow(w, r, resolved) {
 		return
 	}
-	created, err := h.triggerRunInternal(r.Context(), appID, p.ID, resolved, "main", "", "", TriggerManual)
+	created, err := h.triggerRunInternal(r.Context(), appID, p.ID, tpl, resolved, "main", "", "", TriggerManual, "")
 	if err != nil {
 		writePipeErr(w, err)
 		return
@@ -982,10 +1226,12 @@ func (h *Handler) triggerAgentShipRun(w http.ResponseWriter, r *http.Request, ap
 	httputil.WriteDataCreated(w, created)
 }
 
-// triggerRunInternal 触发 run 核心：resolved stages -> 单实例校验 -> 创建 run + 启动 engine。
+// triggerRunInternal 触发 run 核心：resolved stages -> 产物锁定 -> 单实例校验 -> 创建 run + 启动 engine。
 // perm + prod:write 校验由调用方做（manual triggerRun 做；webhook 跳过，approve 门禁兜底 CD）。
-// 错误经 toHTTPStatus 映射：validateDeployEnvs 失败 -> 400，ErrActiveRunExists -> 409，NotFound -> 404。
-func (h *Handler) triggerRunInternal(ctx context.Context, appID, pid string, resolved []StageDef, branch, commit, version, trigger string) (PipelineRun, error) {
+// expectPlanHash 非空时（来自 preview）锁定产物后重算比对，漂移返 ErrPlanChanged（409）。
+// 错误经 toHTTPStatus 映射：validateDeployEnvs 失败 -> 400，ErrActiveRunExists/ErrPlanChanged -> 409，NotFound -> 404。
+// tpl 用于模板身份快照（TemplateID/Version 固化进 run，模板升级不影响归因）与 planHash。
+func (h *Handler) triggerRunInternal(ctx context.Context, appID, pid string, tpl PipelineTemplate, resolved []StageDef, branch, commit, version, trigger, expectPlanHash string) (PipelineRun, error) {
 	if msg := validateDeployEnvs(resolved); msg != "" {
 		return PipelineRun{}, errors.New(msg)
 	}
@@ -1002,6 +1248,21 @@ func (h *Handler) triggerRunInternal(ctx context.Context, appID, pid string, res
 			repoID = rid
 		}
 	}
+	// 产物锁定（spec §6）：latestReady 预解析固化进 stage Input，run.Artifact 记候选五元组。
+	artifact, aerr := h.lockArtifacts(ctx, appID, resolved)
+	if aerr != nil {
+		return PipelineRun{}, aerr
+	}
+	if artifact != nil {
+		artifact.RepoID = repoID
+		if artifact.Commit == "" {
+			artifact.Commit = commit // 无镜像元数据时退 run 触发 commit
+		}
+	}
+	planHash := PlanHash(tpl.ID, tpl.Version, branch, resolved)
+	if expectPlanHash != "" && planHash != expectPlanHash {
+		return PipelineRun{}, ErrPlanChanged
+	}
 	stageRuns := make([]StageRun, len(resolved))
 	for i, s := range resolved {
 		stageRuns[i] = StageRun{Index: i, Type: s.Type, Name: s.Name, Status: StagePending, Input: s.Params}
@@ -1010,6 +1271,9 @@ func (h *Handler) triggerRunInternal(ctx context.Context, appID, pid string, res
 		PipelineID: pid, AppID: appID, Branch: branch, Commit: commit,
 		RepoID: repoID, Version: version, Trigger: trigger,
 		Status: RunRunning, CurrentStage: 0, StageRuns: stageRuns,
+		TemplateID: tpl.ID, TemplateVersion: tpl.Version,
+		PlanHash: planHash, Artifact: artifact,
+		Lane: deployLaneOf(resolved),
 	}
 	created, err := h.runs.CreateRun(ctx, run)
 	if err != nil {
@@ -1095,7 +1359,7 @@ func (h *Handler) webhookTrigger(w http.ResponseWriter, r *http.Request, pid str
 		httputil.WriteError(w, http.StatusForbidden, "webhook 触发的生产部署流水线必须包含 approve 审批门禁")
 		return
 	}
-	created, err := h.triggerRunInternal(wctx, p.AppID, pid, resolved, branch, push.After, "", TriggerWebhook)
+	created, err := h.triggerRunInternal(wctx, p.AppID, pid, tpl, resolved, branch, push.After, "", TriggerWebhook, "")
 	if err != nil {
 		// 已有 active run（Gitea 重发/人工 replay 窗口内重复投递）：静默 200——返 409 会
 		// 触发 webhook 源重试风暴，且「已有 run 在跑」本身就是期望状态（并发审计 M6）。
@@ -1266,7 +1530,7 @@ func toHTTPStatus(err error) int {
 	case errors.Is(err, ErrPipelineExists), errors.Is(err, ErrActiveRunExists),
 		errors.Is(err, ErrRunExists), errors.Is(err, ErrTemplateExists),
 		errors.Is(err, ErrNotPaused), errors.Is(err, ErrStageNotCurrent), errors.Is(err, ErrNotRunning),
-		errors.Is(err, ErrNotFailed), errors.Is(err, ErrTemplateBuiltin):
+		errors.Is(err, ErrNotFailed), errors.Is(err, ErrTemplateBuiltin), errors.Is(err, ErrPlanChanged):
 		return http.StatusConflict
 	case errors.Is(err, ErrNoTenant):
 		return http.StatusBadRequest
@@ -1286,6 +1550,7 @@ var sentinelText = map[error]string{
 	ErrNotRunning:       "运行不在进行中，无法操作",
 	ErrTemplateExists:   "模板已存在",
 	ErrNoTenant:         "缺少租户上下文",
+	ErrPlanChanged:      "执行计划已变化（可能有新构建完成改变了候选产物），请重新预览后执行",
 	ErrInvalidKind:      "流水线类型非法（仅 ci/cd）",
 	ErrNoStages:         "模板缺少阶段定义",
 	ErrInvalidStageType: "阶段类型非法",

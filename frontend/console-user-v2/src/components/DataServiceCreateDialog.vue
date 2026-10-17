@@ -120,7 +120,7 @@ async function submit() {
           <el-option v-for="e in kindEngines" :key="e.id" :value="e.id" :label="e.label" />
         </el-select>
         <span v-if="selectedEngine" class="mode-hint">
-          {{ selectedEngine.mode === 'managed' ? '平台托管：自动拉起与备份' : selectedEngine.mode === 'external-shared' ? '共享集群：平台侧连接池' : '独占外部：连接你自管的实例' }}
+          {{ selectedEngine.mode === 'managed' ? '平台托管：自动拉起实例（备份记录不等于真实快照）' : selectedEngine.mode === 'external-shared' ? '共享集群：平台侧连接池' : '独占外部：连接你自管的实例' }}
         </span>
       </el-form-item>
       <el-form-item label="实例名" required>

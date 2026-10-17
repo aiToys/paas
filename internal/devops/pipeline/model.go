@@ -161,8 +161,54 @@ type PipelineRun struct {
 	CurrentStage int        `json:"currentStage"`
 	StageRuns    []StageRun `json:"stageRuns"`
 	Version      string     `json:"version,omitempty"` // baseline 写入
-	CreatedAt    time.Time  `json:"createdAt"`
-	FinishedAt   time.Time  `json:"finishedAt,omitempty"`
+	// 模板身份快照（DefinitionSnapshot）：触发时固化，模板后续升级不影响在跑/可查 run 的归因。
+	TemplateID      string `json:"templateId,omitempty"`
+	TemplateVersion int    `json:"templateVersion,omitempty"`
+	// PlanHash 执行计划指纹（preview 与 trigger 共用算法）：trigger 请求携带时服务端
+	// 锁定产物后重算比对，不一致 409——防「预览到执行之间新构建完成」改变候选产物。
+	PlanHash string `json:"planHash,omitempty"`
+	// Artifact 触发时锁定的候选产物（imageSource=latestReady 预解析一次固化）。
+	// 后续执行/审批后推进/Retry 均引用该快照，不再动态选 latest（产物锁定，spec §6）。
+	Artifact *ArtifactBinding `json:"artifact,omitempty"`
+	// Decisions 结构化决策记录（manual-test 确认/拒绝、审批通过/拒绝，append-only）。
+	Decisions []DecisionRecord `json:"decisions,omitempty"`
+	// Lane 触发时从最终解析 stages 提取的部署泳道（首个 deploy 段 lane；canary 段运行时
+	// 派生 canary-<runID> 不计入）。泳道关闭保护按此真实目标关联，不再按 Branch==lane 名
+	// 字符串匹配（spec 2026-10-17 L5：遗漏显式命名泳道，混同跨环境同名分支）。
+	Lane       string    `json:"lane,omitempty"`
+	CreatedAt  time.Time `json:"createdAt"`
+	FinishedAt time.Time `json:"finishedAt,omitempty"`
+}
+
+// ArtifactBinding 交付产物绑定（触发时冻结的候选五元组，spec §6 产物锁定）。
+type ArtifactBinding struct {
+	ServiceID  string `json:"serviceId,omitempty"` // 多服务应用的目标服务（可空=单服务）
+	RepoID     string `json:"repoId,omitempty"`
+	Commit     string `json:"commit,omitempty"` // 镜像构建 commit（元数据真源；无 meta 时退 run 触发 commit）
+	ImageID    string `json:"imageId,omitempty"`
+	Digest     string `json:"digest,omitempty"` // 跨环境晋升同一候选的锚点
+	BuildRunID string `json:"buildRunId,omitempty"`
+}
+
+// DecisionRecord 结构化决策（区别于审计日志：挂在 run 上供详情页时间线展示）。
+type DecisionRecord struct {
+	StageIndex int       `json:"stageIndex"`
+	Type       string    `json:"type"`   // manual-test|approve|canary
+	Action     string    `json:"action"` // confirm|reject|promote|terminate
+	Reason     string    `json:"reason,omitempty"`
+	Actor      string    `json:"actor,omitempty"`
+	At         time.Time `json:"at"`
+}
+
+// CheckResult 结构化检查结果（smoke 探活等；区别于泛化「测试通过」，spec §7）。
+type CheckResult struct {
+	Type     string    `json:"type"` // smoke|manual
+	Target   string    `json:"target,omitempty"`
+	Expected string    `json:"expected,omitempty"`
+	Actual   string    `json:"actual,omitempty"`
+	Status   string    `json:"status"`         // pass|fail|unknown
+	Note     string    `json:"note,omitempty"` // 如探活降级路径说明
+	At       time.Time `json:"at"`
 }
 
 // StageRun 单阶段执行记录（输出链载体）。
@@ -173,6 +219,7 @@ type StageRun struct {
 	Status     string         `json:"status"`
 	Input      map[string]any `json:"input,omitempty"`
 	Output     map[string]any `json:"output,omitempty"`
+	Checks     []CheckResult  `json:"checks,omitempty"` // 结构化质量结果（探活目标/预期/实际）
 	StartedAt  time.Time      `json:"startedAt,omitempty"`
 	FinishedAt time.Time      `json:"finishedAt,omitempty"`
 	Error      string         `json:"error,omitempty"`
@@ -235,6 +282,7 @@ type RunSummary struct {
 	AppID      string    `json:"appId"`
 	PipelineID string    `json:"pipelineId"`
 	Branch     string    `json:"branch"`
+	Lane       string    `json:"lane,omitempty"` // 触发时提取的部署泳道（关闭保护真实目标关联）
 	Status     string    `json:"status"`
 	CreatedAt  time.Time `json:"createdAt"`
 	FinishedAt time.Time `json:"finishedAt,omitempty"`
@@ -244,7 +292,7 @@ type RunSummary struct {
 func (r PipelineRun) Summarize() RunSummary {
 	return RunSummary{
 		ID: r.ID, AppID: r.AppID, PipelineID: r.PipelineID,
-		Branch: r.Branch, Status: r.Status,
+		Branch: r.Branch, Lane: r.Lane, Status: r.Status,
 		CreatedAt: r.CreatedAt, FinishedAt: r.FinishedAt,
 	}
 }

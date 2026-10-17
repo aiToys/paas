@@ -16,6 +16,7 @@ import (
 	envmemory "github.com/aitoys/paas/internal/environment/memory"
 	"github.com/aitoys/paas/internal/lane"
 	lanememory "github.com/aitoys/paas/internal/lane/memory"
+	"github.com/aitoys/paas/internal/workload"
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
@@ -72,13 +73,13 @@ type fakeRuns struct {
 	err       error
 }
 
-func (f *fakeRuns) ListByBranch(_ context.Context, branch string) ([]pipeline.RunSummary, error) {
+func (f *fakeRuns) ListByLane(_ context.Context, laneName string) ([]pipeline.RunSummary, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
 	var out []pipeline.RunSummary
 	for _, s := range f.summaries {
-		if s.Branch == branch {
+		if s.Lane == laneName || s.Branch == laneName {
 			out = append(out, s)
 		}
 	}
@@ -234,17 +235,78 @@ func TestHandlerClose(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("关闭应 200，got %d: %s", w.Code, w.Body.String())
 	}
-	var closed lane.Lane
+	var closed lane.CloseResult
 	decodeData(t, w.Body.Bytes(), &closed)
-	if closed.Status != lane.StatusClosed {
-		t.Fatalf("关闭后状态不符: %+v", closed)
+	if closed.Lane.Status != lane.StatusClosed {
+		t.Fatalf("关闭后状态不符: %+v", closed.Lane)
 	}
 
-	// 已 closed 再 DELETE 幂等 200
+	// 已 closed 再 DELETE 幂等 200（重试回收遗留，spec 2026-10-17 B）
 	w = httptest.NewRecorder()
 	h.ServeHTTP(w, req(acmeCtx(), "DELETE", "/api/lanes/"+created.ID, nil))
 	if w.Code != http.StatusOK {
-		t.Fatalf("重复关闭应幂等 200，got %d", w.Code)
+		t.Fatalf("重复关闭应幂等 200，got %d: %s", w.Code, w.Body.String())
+	}
+	var retried lane.CloseResult
+	decodeData(t, w.Body.Bytes(), &retried)
+	if retried.Lane.Status != lane.StatusClosed || retried.Reclaimed != 0 || len(retried.FailedIDs) != 0 {
+		t.Fatalf("重试应返回 closed + 零回收结果, got %+v", retried)
+	}
+}
+
+// fakeReclaimer 桩 Reclaimer（结构化回收结果注入）。
+type fakeReclaimer struct {
+	results []lane.ReclaimResult
+	err     error
+	calls   int
+}
+
+func (f *fakeReclaimer) ReclaimLane(context.Context, string, string, string) (lane.ReclaimResult, error) {
+	f.calls++
+	if f.err != nil {
+		return lane.ReclaimResult{}, f.err
+	}
+	if f.calls-1 < len(f.results) {
+		return f.results[f.calls-1], nil
+	}
+	return lane.ReclaimResult{}, nil
+}
+
+// TestHandlerCloseReportsPartialFailure 部分回收失败结构化呈现（spec 2026-10-17 B：
+// 部分删除失败不得假报「全部回收」）——HTTP 200 但 body 带 failedIds。
+func TestHandlerCloseReportsPartialFailure(t *testing.T) {
+	rc := &fakeReclaimer{results: []lane.ReclaimResult{{Reclaimed: 1, FailedIDs: []string{"wl-x"}}}}
+	h := newHandler(true, lane.WithReclaimer(rc))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req(acmeCtx(), "POST", "/api/lanes", validLane()))
+	var created lane.Lane
+	decodeData(t, w.Body.Bytes(), &created)
+
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req(acmeCtx(), "DELETE", "/api/lanes/"+created.ID, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("部分失败仍应 200（关闭成功）, got %d: %s", w.Code, w.Body.String())
+	}
+	var res lane.CloseResult
+	decodeData(t, w.Body.Bytes(), &res)
+	if res.Lane.Status != lane.StatusClosed || res.Reclaimed != 1 || len(res.FailedIDs) != 1 || res.FailedIDs[0] != "wl-x" {
+		t.Fatalf("应结构化报 1 成功 + 1 失败, got %+v", res)
+	}
+
+	// 重试 DELETE：只重扫遗留（第二次回收结果如实上报），不 409 不假成功。
+	rc.results = append(rc.results, lane.ReclaimResult{Reclaimed: 1})
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req(acmeCtx(), "DELETE", "/api/lanes/"+created.ID, nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("重试应 200, got %d", w.Code)
+	}
+	var res2 lane.CloseResult // 新变量：json decode 不清缺省字段，复用会残留 failedIds
+	decodeData(t, w.Body.Bytes(), &res2)
+	if res2.Reclaimed != 1 || len(res2.FailedIDs) != 0 {
+		t.Fatalf("重试应报补收 1 个无遗留, got %+v", res2)
+	}
+	if rc.calls != 2 {
+		t.Fatalf("已 closed 重试 DELETE 应重执行回收, got calls=%d", rc.calls)
 	}
 }
 
@@ -343,5 +405,108 @@ func TestHandlerProdLaneDeletePutDenied(t *testing.T) {
 	dev.ServeHTTP(w, req(acmeCtx(), "PUT", "/api/lanes/"+created.ID, map[string]any{"mode": "permanent"}))
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("developer 改生产泳道 mode 应 403, got %d", w.Code)
+	}
+}
+
+// TestHandlerBaselineProtected 基线 default 三层保护（spec 2026-10-17 L1）：
+// 创建拒绝 403 + 遗留 default 实体关闭拒绝（UI 隐藏不是保护，handler 是真闸门）。
+func TestHandlerBaselineProtected(t *testing.T) {
+	h := newHandler(true)
+	// 创建层：POST name=default 拒绝。
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req(acmeCtx(), "POST", "/api/lanes", map[string]any{
+		"envId": "env-acme-test", "name": "default", "mode": "standard",
+	}))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("创建 default 应 403，got %d: %s", w.Code, w.Body.String())
+	}
+	// 关闭层：保护生效前建成的遗留 default 实体也拒绝 DELETE。
+	// 仓储直建不经 Validate（模拟历史遗留数据；Validate 已拒，走 API 建不出来）。
+	store := lanememory.NewStore()
+	created, err := store.UpsertForRepair(acmeCtx(), lane.Lane{
+		EnvID: "env-acme-test", Name: "default", Mode: lane.ModeStandard, Status: lane.StatusActive,
+	})
+	if err != nil {
+		t.Fatalf("seed 遗留实体失败: %v", err)
+	}
+	h = lane.NewHandler(store)
+	h.Authorize = func(r *http.Request, perm string) bool { return true }
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req(acmeCtx(), "DELETE", "/api/lanes/"+created.ID, nil))
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("关闭遗留 default 应 403，got %d: %s", w.Code, w.Body.String())
+	}
+	got, _ := store.Get(acmeCtx(), created.ID)
+	if got.Status != lane.StatusActive {
+		t.Fatalf("default 实体不应被关闭，got %s", got.Status)
+	}
+}
+
+// fakeWorkloads 桩 WorkloadLister（access 读模型验证）。
+type fakeWorkloads struct{ items []workload.Workload }
+
+func (f *fakeWorkloads) ListByLane(context.Context, string, string) ([]workload.Workload, error) {
+	return f.items, nil
+}
+
+// TestHandlerAccessClassification access 读模型分类（spec 2026-10-17 §7.1）：
+// 声明域名按泳道归属分 business/preview；无域名 FQDN 兜底标 internal（仅集群内）。
+func TestHandlerAccessClassification(t *testing.T) {
+	h := newHandler(true, lane.WithWorkloadLister(&fakeWorkloads{items: []workload.Workload{
+		{ID: "wl-b", Name: "shop-web", LaneID: "default", Domain: "shop.example.com"},
+		{ID: "wl-l", Name: "shop-web-feature-x", LaneID: "feature-x", Domain: "shop-web-feature-x.preview.example.com"},
+		{ID: "wl-i", Name: "orders", LaneID: "feature-x", Port: 8080},
+	}}))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req(acmeCtx(), "POST", "/api/lanes", validLane()))
+	var created lane.Lane
+	decodeData(t, w.Body.Bytes(), &created)
+
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req(acmeCtx(), "GET", "/api/lanes/"+created.ID+"/access", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("access 应 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var acc lane.LaneAccess
+	decodeData(t, w.Body.Bytes(), &acc)
+	if len(acc.Endpoints) != 3 {
+		t.Fatalf("应 3 条地址, got %+v", acc.Endpoints)
+	}
+	byTarget := map[string]lane.AccessEndpoint{}
+	for _, ep := range acc.Endpoints {
+		byTarget[ep.Target] = ep
+	}
+	// 基线声明域名 → 业务入口
+	if ep := byTarget["wl-b"]; ep.Kind != lane.AccessBusiness || ep.URL != "http://shop.example.com" || ep.Source != lane.AccessSourceDomain {
+		t.Fatalf("基线域名应分类 business, got %+v", ep)
+	}
+	// 泳道声明域名 → 联调入口（带诚实边界 note）
+	if ep := byTarget["wl-l"]; ep.Kind != lane.AccessPreview || ep.Lane != "feature-x" || ep.Note == "" {
+		t.Fatalf("泳道域名应分类 preview 带说明, got %+v", ep)
+	}
+	// 无域名 → FQDN 兜底 internal（带端口）
+	if ep := byTarget["wl-i"]; ep.Kind != lane.AccessInternal || ep.Source != lane.AccessSourceFQDN ||
+		ep.URL != "orders.paas-t-acme.svc.cluster.local:8080" || ep.Port != 8080 {
+		t.Fatalf("无域名应 FQDN internal 带端口, got %+v", ep)
+	}
+}
+
+// TestHandlerAccessEmptyLister 未注入 lister 返空列表不 panic（与 Detail 同款降级）。
+func TestHandlerAccessEmptyLister(t *testing.T) {
+	h := newHandler(true)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req(acmeCtx(), "POST", "/api/lanes", validLane()))
+	var created lane.Lane
+	decodeData(t, w.Body.Bytes(), &created)
+
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req(acmeCtx(), "GET", "/api/lanes/"+created.ID+"/access", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("access 无 lister 应 200 空列表, got %d", w.Code)
+	}
+	var acc lane.LaneAccess
+	decodeData(t, w.Body.Bytes(), &acc)
+	if acc.Endpoints == nil || len(acc.Endpoints) != 0 {
+		t.Fatalf("Endpoints 应空切片非 nil, got %+v", acc.Endpoints)
 	}
 }

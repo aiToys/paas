@@ -4,7 +4,7 @@ export const navigation: { label: string; items: NavItem[] }[] = [
   { label: '应用交付', items: [
     { label: '产品', to: '/products', icon: 'deploy', keywords: '应用 application' },
     { label: '交付中心', to: '/delivery', icon: 'pipeline', keywords: 'DevOps CI CD 构建 发布 审批 变更' },
-    { label: '运行实例', to: '/workloads', icon: 'server', keywords: '工作负载 日志 服务 任务 定时' },
+    { label: '工作负载', to: '/workloads', icon: 'server', keywords: '运行实例 Pod 容器 日志 服务 任务 定时 终端' },
   ] },
   { label: 'AI 平台', items: [
     { label: '模型目录', to: '/models', icon: 'market', keywords: '推理 MaaS 价格 通道' },
@@ -13,7 +13,7 @@ export const navigation: { label: string; items: NavItem[] }[] = [
   ] },
   { label: '基础设施', items: [
     { label: '数据服务', to: '/dataservices', icon: 'database', keywords: '数据库 缓存 消息 队列 存储 向量 搜索' },
-    { label: '可观测', to: '/observability', icon: 'activity', keywords: '告警 日志 链路 trace' },
+    { label: '可观测', to: '/observability', icon: 'activity', keywords: '指标 监控 Metrics 告警 日志 链路 trace' },
     { label: '流量治理', to: '/governance', icon: 'service', keywords: '路由 域名 服务发现 熔断' },
     { label: '配置中心', to: '/config-center', icon: 'sliders', keywords: '动态配置 共享命名空间 发布 回滚' },
     { label: '环境', to: '/environments', icon: 'env', keywords: '生产 测试 集群' },

@@ -469,6 +469,14 @@ func clonePipeline(p Pipeline) Pipeline {
 func cloneRun(r PipelineRun) PipelineRun {
 	cp := r
 	cp.StageRuns = cloneStageRuns(r.StageRuns)
+	// Artifact 指针与 Decisions 切片深拷贝（decision append / 读侧遍历防共享引用写穿）。
+	if r.Artifact != nil {
+		a := *r.Artifact
+		cp.Artifact = &a
+	}
+	if r.Decisions != nil {
+		cp.Decisions = append([]DecisionRecord(nil), r.Decisions...)
+	}
 	return cp
 }
 
@@ -509,6 +517,9 @@ func cloneStageRuns(in []StageRun) []StageRun {
 		out[i] = r
 		out[i].Input = cloneStringAnyMap(r.Input)
 		out[i].Output = cloneStringAnyMap(r.Output)
+		if r.Checks != nil {
+			out[i].Checks = append([]CheckResult(nil), r.Checks...)
+		}
 	}
 	return out
 }

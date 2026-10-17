@@ -6,7 +6,8 @@ import { formatDateTime } from '@/utils/format'
 // 值后端明文存储、API 掩码返回；写操作（创建/删除）自动记审计，删除走二次确认。
 import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { fetchAuth } from '@/api'
+import { fetchAuth, fetchList, apiError } from '@/api'
+import StatePanel from '@/components/StatePanel.vue'
 import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import TablePager from '@/components/TablePager.vue'
@@ -31,6 +32,8 @@ const SCOPE_PLATFORM = 'platform'
 const secrets = ref<Secret[]>([])
 const audits = ref<AuditLog[]>([])
 const loading = ref(false)
+const readErrors = ref<Record<string, string>>({})
+let auditSeq = 0
 const auditFilter = ref('') // action 过滤
 // 前端分页：dev 集群实测 1000+ 条密钥全量渲染卡顿（后端 API 无分页参数，slice 同其他列表页模式）。
 const page = ref(1)
@@ -50,14 +53,18 @@ const actionOpts = [
 ]
 
 async function loadSecrets() {
-  const resp = await fetchAuth('/api/security/secrets')
-  if (resp.ok) secrets.value = (await resp.json()).data ?? []
+  readErrors.value.secrets = ''
+  try { secrets.value = await fetchList<Secret>('/api/security/secrets') }
+  catch (e) { readErrors.value.secrets = apiError(e); secrets.value = [] }
 }
 
 async function loadAudits() {
   const q = auditFilter.value ? `?action=${auditFilter.value}` : ''
-  const resp = await fetchAuth(`/api/security/audit-logs${q}`)
-  if (resp.ok) audits.value = (await resp.json()).data ?? []
+  const rev = ++auditSeq
+  readErrors.value.audits = ''
+  auditPage.value = 1
+  try { const list = await fetchList<AuditLog>(`/api/security/audit-logs${q}`); if (rev === auditSeq) audits.value = list }
+  catch (e) { if (rev === auditSeq) { readErrors.value.audits = apiError(e); audits.value = [] } }
 }
 
 async function load() {
@@ -86,7 +93,7 @@ async function create() {
       body: JSON.stringify(form.value),
     })
     if (resp.ok) {
-      ElMessage.success('已创建（值掩码存储，展示与传输均不可见明文）')
+      ElMessage.success('保存成功，后续页面仅展示掩码')
       showCreate.value = false
       load()
     } else {
@@ -133,7 +140,8 @@ watch(() => envStore.currentEnvId, () => load())
     <!-- 密钥/证书 -->
     <section class="block" v-loading="loading">
       <div class="block-title">密钥与证书</div>
-      <el-table :data="pagedSecrets" size="small" empty-text="暂无密钥资产">
+      <StatePanel v-if="readErrors.secrets" title="密钥加载失败" :description="readErrors.secrets" error><button class="act" @click="loadSecrets">重试</button></StatePanel>
+      <el-table v-else :data="pagedSecrets" size="small" empty-text="暂无密钥资产">
         <el-table-column label="名称" min-width="180">
           <template #default="{ row }"><span class="mono">{{ row.name }}</span></template>
         </el-table-column>
@@ -174,7 +182,8 @@ watch(() => envStore.currentEnvId, () => load())
           <el-option v-for="o in actionOpts" :key="o.value" :label="o.label" :value="o.value" />
         </el-select>
       </div>
-      <el-table :data="pagedAudits" size="small" empty-text="暂无审计记录">
+      <StatePanel v-if="readErrors.audits" title="审计日志加载失败" :description="readErrors.audits" error><button class="act" @click="loadAudits">重试</button></StatePanel>
+      <el-table v-else :data="pagedAudits" size="small" empty-text="暂无审计记录">
         <el-table-column label="时间" width="170">
           <template #default="{ row }">{{ formatDateTime(row.at) }}</template>
         </el-table-column>

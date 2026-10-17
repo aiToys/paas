@@ -7,3 +7,10 @@ export function asList<T>(value: unknown): T[] {
   if (!Array.isArray(value)) throw new Error('列表响应格式错误，请重试或联系管理员')
   return value as T[]
 }
+
+// 写操作即使没有响应体，也必须先确认 HTTP 成功；fetch 自身不会因 403/405/500 拒绝。
+export async function requireOK(response: Response): Promise<void> {
+  if (response.ok) return
+  const body = await response.json().catch(() => null)
+  throw new Error(typeof body?.error === 'string' ? body.error : `HTTP ${response.status}`)
+}

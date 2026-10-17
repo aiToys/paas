@@ -1,7 +1,9 @@
 package metrics
 
 import (
+	"bufio"
 	"fmt"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -95,4 +97,13 @@ func (s *statusRecorder) Flush() {
 	if f, ok := s.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// Hijack 转发底层 http.Hijacker（与 Flush 同因）：容器终端等 WebSocket 升级
+// （gorilla/websocket Upgrade）需要接管原始连接，断言失败 -> 升级 500。
+func (s *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := s.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, fmt.Errorf("底层 response writer 不支持 hijack")
 }

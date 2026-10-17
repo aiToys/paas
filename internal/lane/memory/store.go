@@ -192,3 +192,30 @@ func (s *Store) EnsureByName(ctx context.Context, envID, name string) (lane.Lane
 	s.lanes[in.ID] = in
 	return in, nil
 }
+
+// UpsertForRepair 数据修复/遗留迁移通道：跳过领域 Validate 直插（仅用于平台数据修复
+// 与等价测试场景——如保护规则生效前的历史遗留 default 实体补录）。正常业务一律走 Create。
+func (s *Store) UpsertForRepair(ctx context.Context, in lane.Lane) (lane.Lane, error) {
+	tid, err := tenant.IDOrErr(ctx)
+	if err != nil {
+		return lane.Lane{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, l := range s.lanes {
+		if l.TenantID == tid && l.EnvID == in.EnvID && l.Name == in.Name {
+			return l, nil // 已存在幂等返回
+		}
+	}
+	s.seq++
+	now := time.Now()
+	in.ID = fmt.Sprintf("lane-%d", s.seq)
+	in.TenantID = tid
+	if in.Status == "" {
+		in.Status = lane.StatusActive
+	}
+	in.CreatedAt = now
+	in.UpdatedAt = now
+	s.lanes[in.ID] = in
+	return in, nil
+}

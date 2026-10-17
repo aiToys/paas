@@ -1,0 +1,348 @@
+<template>
+  <div class="page detail-page">
+    <DetailShell
+      :crumbs="[{ label: '变更', to: '/delivery' }, { label: change?.id ?? (route.params.id as string) }]"
+      :tags="change ? [{ label: statusLabel(change.status), type: statusType(change.status) as ShellTag['type'] }] : []"
+    >
+      <template #actions>
+        <el-button v-if="change?.status === 'open'" size="small" type="primary" @click="openAgentDlg">智能研发</el-button>
+        <el-button v-if="change?.status === 'open' && !change.batchId" size="small" type="danger" plain @click="abandon">放弃变更</el-button>
+      </template>
+    </DetailShell>
+
+    <div v-if="change" class="inbox">
+      <!-- ① 我的代码 -->
+      <section class="card">
+        <h3>① 我的代码</h3>
+        <div class="kv"><span>标题</span><b>{{ change.title }}</b></div>
+        <div class="kv"><span>类型</span><el-tag size="small" :type="change.type === 'hotfix' ? 'danger' : 'primary'">{{ change.type }}</el-tag></div>
+        <div class="kv"><span>分支</span><code class="mono">{{ change.branch }}</code><span class="dim">（基于 {{ change.baseBranch }}{{ change.branchCreated ? '，平台代建' : '' }}）</span></div>
+        <div class="kv">
+<span>克隆</span><code class="mono clone">{{ cloneCmd }}</code>
+          <el-button size="small" text @click="copyClone">复制</el-button>
+          <el-button size="small" text type="primary" @click="router.push(repoLink(change.appId, change.repoId))">浏览仓库 →</el-button>
+</div>
+        <!-- 内网 Gitea 集群外不可达（旅程审计 R5-I11）：本地 clone 前先 port-forward，
+             给出可复制的辅助命令而非让用户自己猜为何 clone 超时。 -->
+        <div v-if="isClusterInternal" class="kv clone-hint">
+          <span></span>
+          <span class="dim">
+            内网仓库需先建立隧道：<code class="mono">{{ portForwardCmd }}</code>
+            <el-button size="small" text @click="copyText(portForwardCmd)">复制</el-button>
+          </span>
+        </div>
+        <div v-if="commits.length" class="commits">
+          <div class="sub">最近提交</div>
+          <div v-for="c in commits" :key="c.sha" class="commit">
+            <code class="mono sha">{{ c.sha.slice(0, 8) }}</code>
+            <span class="msg">{{ c.message }}</span>
+          </div>
+        </div>
+        <!-- 委派智能研发运行块（契约 v2 §5.2/§5.3）：存 pipeline 名（两阶段），stages 内嵌展开，
+             不外跳 AgentRunDetail（那是 run 名视图，pipeline 名查 /api/runs 会 404）。 -->
+        <div v-if="change?.agentRunName" class="agent-run-block">
+          <div class="kv">
+            <span>智能研发</span>
+            <el-tag v-if="agentRun" size="small" :type="phaseTagType(agentRun.phase)">{{ agentRun.phase }}</el-tag>
+            <span v-else class="dim">查询中…</span>
+            <code class="mono">{{ change.agentRunName }}</code>
+            <el-button
+v-if="agentRun?.phase === 'Running' || agentRun?.phase === 'Pending'" size="small" text
+              @click="pollAgentRun"
+>
+刷新
+</el-button>
+          </div>
+          <div v-if="agentRun?.stages?.length" class="agent-stages">
+            <div v-for="st in agentRun.stages" :key="st.name" class="kv">
+              <span></span>
+              <el-tag size="small" :type="phaseTagType(st.phase)">{{ st.name }}</el-tag>
+              <span class="dim">{{ st.phase }}</span>
+              <el-button
+v-if="st.agentRun" size="small" text type="primary"
+                @click="router.push(`/ai/runs/${encodeURIComponent(st.agentRun)}`)"
+>
+run 详情 →
+</el-button>
+              <span v-if="st.summary" class="dim agent-summary">{{ st.summary.slice(0, 80) }}</span>
+            </div>
+          </div>
+          <div v-if="agentRun?.phase === 'Running'" class="dim agent-hint">AI 正在此变更分支上工作，产出将 push 回 {{ change.branch }}，完成后经下方批次集成发车</div>
+        </div>
+      </section>
+
+      <!-- ② 集成批次 -->
+      <section class="card">
+        <h3>② 集成批次</h3>
+        <template v-if="batch">
+          <div class="kv">
+<span>批次</span>
+            <a class="link" @click="router.push(`/batches/${batch.id}`)">{{ batch.title }}</a>
+            <el-tag size="small" :type="batchStatusType(batch.status)">{{ batchStatusLabel(batch.status) }}</el-tag>
+          </div>
+          <div class="kv"><span>集成分支</span><code class="mono">{{ batch.branch }}</code></div>
+          <div v-if="batch.runId" class="kv">
+<span>关联运行</span>
+            <a class="link" @click="router.push(`/runs/${batch.runId}`)">查看运行 →</a>
+          </div>
+          <div v-if="change.conflictWith" class="conflict">⚠️ 与变更 <code class="mono">{{ change.conflictWith }}</code> 冲突，解决冲突后重新集成</div>
+        </template>
+        <div v-else class="dim batch-empty">
+          未入批
+          <el-button v-if="change.status === 'open'" size="small" type="primary" plain :loading="batching" @click="batchThis">并入新批次</el-button>
+          <span class="dim">（或到产品「交付 · 变更」tab 与其他变更组批）</span>
+        </div>
+      </section>
+
+      <!-- ③ 测试验证 / ④ 发布状态 -->
+      <section class="card">
+        <h3>③ 测试验证 → ④ 发布状态</h3>
+        <el-steps v-if="batch" :active="stepActive" align-center finish-status="success" class="steps">
+          <el-step title="集成" :description="batchStatusLabel(batch.status)" />
+          <el-step title="测试" :description="batch.status === 'tested' || batch.status === 'releasing' || batch.status === 'released' ? '通过' : '—'" />
+          <el-step title="审批" :description="batch.status === 'releasing' || batch.status === 'released' ? '已批准' : '待审批'" />
+          <el-step title="发布" :description="batch.status === 'released' ? '已上线' : '—'" />
+        </el-steps>
+        <div v-if="batch?.releaseIds?.length" class="kv">
+<span>发布记录</span>
+          <a v-for="rid in batch.releaseIds" :key="rid" class="link mono" @click="router.push(`/releases/${rid}`)">{{ rid }}</a>
+        </div>
+        <div v-if="!batch" class="dim">入批集成后在此展示测试与发布进度</div>
+      </section>
+
+      <!-- ⑤ 时间线（只显示真实事件；批次推进无逐事件历史，按当前状态推导并标注，不伪造） -->
+      <section class="card">
+        <h3>⑤ 时间线</h3>
+        <el-timeline>
+          <el-timeline-item :timestamp="change.createdAt" type="primary">创建变更（{{ change.type }}，{{ change.branchCreated ? '平台代建分支' : '关联已有分支' }}）</el-timeline-item>
+          <el-timeline-item v-if="change.agentRunName" :timestamp="change.updatedAt" type="warning">委派智能研发（{{ change.agentRunName }}）</el-timeline-item>
+          <el-timeline-item v-if="batch" :timestamp="batch.createdAt" type="success">入批「{{ batch.title }}」——批次当前：{{ batchStatusLabel(batch.status) }}（按批次状态推导）</el-timeline-item>
+          <el-timeline-item v-if="change.status === 'abandoned'" :timestamp="change.updatedAt" type="info">变更被放弃</el-timeline-item>
+        </el-timeline>
+      </section>
+    </div>
+
+    <el-skeleton v-else :rows="6" animated />
+  </div>
+    <el-dialog v-model="agentDlg" title="委派智能研发" width="480px">
+      <p class="dim" style="margin-top: 0">
+        AI 将在变更分支 <code class="mono">{{ change?.branch }}</code> 上工作：独立验收 → AI 审查 → 研发审批门，
+        产出 push 回该分支（author=agent:&lt;run名&gt;），随后进入批次集成。
+      </p>
+      <el-input v-model="agentRequest" type="textarea" :rows="3" placeholder="需求文本（已预填变更标题，可修改）" />
+      <template #footer>
+        <el-button @click="agentDlg = false">取消</el-button>
+        <el-button type="primary" :loading="delegating" @click="confirmDelegate">发起</el-button>
+      </template>
+    </el-dialog>
+</template>
+
+<script setup lang="ts">
+import { copyText } from '@/utils/clipboard'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { getChange, abandonChange, delegateAgentRun, getBatch, listAllBatches, listAllChanges, createBatch, addChangeToBatch, type Change, type IntegrationBatch } from '@/api/change'
+import { getPipeline, phaseTagType, type AgentPipelineDetail } from '@/api/agentrun'
+import { fetchAuth, apiError } from '@/api'
+import { repoLink } from '@/composables/useDevopsLinks'
+import { CHANGE_STATUS, BATCH_STATUS, statusOf } from '@/composables/useStatus'
+import { confirmAbandon } from '@/composables/useAbandonConfirm'
+import DetailShell from '@/components/DetailShell.vue'
+import type { ShellTag } from '@/components/DetailShell.vue'
+
+const route = useRoute()
+const router = useRouter()
+const change = ref<Change>()
+const batch = ref<IntegrationBatch>()
+const commits = ref<{ sha: string; message: string }[]>([])
+const repoGitUrl = ref('')
+
+// 克隆命令：仓库地址来自仓库详情（GitURL，internal=内网 Gitea / external=用户填的公网地址）
+const cloneCmd = computed(() =>
+  repoGitUrl.value ? `git clone -b ${change.value?.branch ?? ''} ${repoGitUrl.value}` : '（仓库地址加载中…）')
+
+// 内网 Gitea 判定：地址含 .svc.（集群 Service FQDN）时本地不可达，需 port-forward。
+// 端口取仓库地址里的（默认 3000，与 deploy/devops/gitea.yaml Service 一致）。
+const isClusterInternal = computed(() => repoGitUrl.value.includes('.svc.'))
+const portForwardCmd = computed(() => {
+  try {
+    const port = new URL(repoGitUrl.value).port || '3000'
+    return `kubectl port-forward -n paas svc/gitea ${port}:${port}`
+  } catch {
+    return 'kubectl port-forward -n paas svc/gitea 3000:3000'
+  }
+})
+
+const statusType = (s: string) => statusOf(CHANGE_STATUS, s).type
+const statusLabel = (s: string) => statusOf(CHANGE_STATUS, s).label
+
+const batchStatusType = (s: string) => statusOf(BATCH_STATUS, s).type
+const batchStatusLabel = (s: string) => statusOf(BATCH_STATUS, s).label
+
+// steps 活跃序：collecting/conflict=0，testing=1，tested=2，releasing/released=4
+const stepActive = computed(() => {
+  const s = batch.value?.status
+  if (!s) return 0
+  if (s === 'testing') return 1
+  if (s === 'tested') return 2
+  if (s === 'releasing') return 3
+  if (s === 'released') return 4
+  return 0
+})
+
+const copyClone = () => copyText(cloneCmd.value)
+
+async function abandon() {
+  if (!change.value) return
+  try {
+    if (!(await confirmAbandon('change', change.value.title))) return
+    await abandonChange(change.value.appId, change.value.id)
+    ElMessage.success('已放弃')
+    router.push(`/products/${change.value.appId}`)
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error(apiError(e))
+  }
+}
+
+async function load() {
+  try {
+    await doLoad()
+  } catch (e) {
+    ElMessage.error(apiError(e, '加载失败'))
+  }
+}
+
+async function doLoad() {
+  const id = route.params.id as string
+  // 变更详情需要 appId 前缀；先跨应用列表定位归属应用
+  const all = await listAllChanges()
+  const c = all.find((x) => x.id === id)
+  if (!c) {
+    ElMessage.error('变更不存在')
+    return
+  }
+  change.value = await getChange(c.appId, id)
+  // 仓库地址（真实 clone 命令用；拉不到降级提示）
+  try {
+    const resp = await fetchAuth(`/api/applications/${c.appId}/repositories`)
+    if (resp.ok) {
+      const repos = (await resp.json()).data ?? []
+      const r = repos.find((x: { id: string }) => x.id === change.value!.repoId)
+      if (r?.gitUrl) repoGitUrl.value = r.gitUrl
+    }
+  } catch { /* 非关键 */ }
+  // 批次：经跨应用批次列表定位（change.batchId 已知）
+  if (change.value.batchId) {
+    const bs = await listAllBatches(change.value.appId)
+    const b = bs.find((x) => x.id === change.value!.batchId)
+    if (b) batch.value = await getBatch(b.appId, b.id)
+  }
+  // 最近 commits：应用内置仓库浏览端点（repoId 非内置时静默跳过）
+  try {
+    const resp = await fetchAuth(
+      `/api/applications/${change.value.appId}/repositories/${change.value.repoId}/commits?limit=5&branch=${encodeURIComponent(change.value.branch)}`,
+    )
+    if (resp.ok) {
+      const j = await resp.json()
+      commits.value = j?.data ?? []
+    }
+  } catch { /* 非关键 */ }
+}
+
+// ---------- 并入新批次（组织入口补齐，评审 F2：单变更快捷组批） ----------
+const batching = ref(false)
+async function batchThis() {
+  if (!change.value || change.value.status !== 'open') return
+  const c = change.value
+  try {
+    await ElMessageBox.confirm(
+      `为变更「${c.title}」创建独立批次并入批？集成分支 = ${c.branch}-integration。多变更组批请到产品「交付 · 变更」。`,
+      '并入新批次', { type: 'info' },
+    )
+  } catch { return }
+  batching.value = true
+  try {
+    const b = await createBatch(c.appId, { title: `${c.title}（单变更批次）`, branch: `${c.branch}-integration`.slice(0, 60) })
+    await addChangeToBatch(c.appId, b.id, c.id)
+    ElMessage.success('已入批')
+    await doLoad()
+  } catch (e) {
+    ElMessage.error(apiError(e, '入批失败'))
+  } finally { batching.value = false }
+}
+
+// ---------- 委派智能研发（契约 v2 §3.3/§5.1：变更页「智能研发」按钮） ----------
+const agentDlg = ref(false)
+const agentRequest = ref('')
+const delegating = ref(false)
+const agentRun = ref<AgentPipelineDetail | null>(null)
+let agentPollTimer: number | undefined
+
+function openAgentDlg() {
+  agentRequest.value = change.value?.title ?? '' // 预填变更 Title（可改，即需求文本）
+  agentDlg.value = true
+}
+async function confirmDelegate() {
+  if (!change.value) return
+  delegating.value = true
+  try {
+    const r = await delegateAgentRun(change.value.appId, change.value.id, agentRequest.value.trim() || undefined)
+    agentDlg.value = false
+    ElMessage.success(`已委派智能研发（${r.agentRunName}）`)
+    change.value = await getChange(change.value.appId, change.value.id) // 回读 agentRunName
+    startAgentPoll()
+  } catch (e) {
+    ElMessage.error(apiError(e, '委派失败'))
+  } finally {
+    delegating.value = false
+  }
+}
+async function pollAgentRun() {
+  const name = change.value?.agentRunName // 委派存 pipeline 名（两阶段 analyze→implement）
+  if (!name) return
+  try {
+    agentRun.value = await getPipeline(name)
+    if (agentRun.value.phase === 'Succeeded' || agentRun.value.phase === 'Failed') stopAgentPoll()
+  } catch { /* 观测失败静默（未配置/不可达由详情页引导）；下轮再试 */ }
+}
+function startAgentPoll() {
+  stopAgentPoll()
+  void pollAgentRun()
+  agentPollTimer = window.setInterval(pollAgentRun, 5000)
+}
+function stopAgentPoll() {
+  if (agentPollTimer !== undefined) { clearInterval(agentPollTimer); agentPollTimer = undefined }
+}
+onUnmounted(stopAgentPoll)
+watch(() => change.value?.agentRunName, (n) => { if (n) startAgentPoll() })
+
+onMounted(load)
+// 同路由不同 id 复用组件（详情互链点另一单据）时重载
+watch(() => route.params.id, () => load())
+</script>
+
+<style scoped>
+.detail-page { padding: 20px; max-width: 960px; margin: 0 auto; }
+.grow { flex: 1; }
+.inbox { display: grid; gap: 14px; }
+.card { background: var(--el-bg-color); border: 1px solid var(--el-border-color-lighter); border-radius: 8px; padding: 16px 20px; }
+.card h3 { margin: 0 0 12px; font-size: 14px; color: var(--el-text-color-secondary); }
+.kv { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; }
+.kv > span:first-child { color: var(--el-text-color-secondary); min-width: 64px; }
+.clone { background: var(--el-fill-color-light); padding: 2px 8px; border-radius: 4px; }
+.clone-hint { margin-top: -4px; }
+.mono { font-family: ui-monospace, monospace; font-size: 12px; }
+.dim { color: var(--el-text-color-placeholder); font-size: 13px; }
+.link { color: var(--el-color-primary); cursor: pointer; }
+.commits { margin-top: 10px; border-top: 1px dashed var(--el-border-color-lighter); padding-top: 10px; }
+.sub { font-size: 12px; color: var(--el-text-color-secondary); margin-bottom: 6px; }
+.commit { display: flex; gap: 10px; font-size: 13px; padding: 2px 0; }
+.sha { color: var(--el-color-primary); }
+.conflict { margin-top: 8px; padding: 8px 12px; background: var(--el-color-danger-light-9); border-radius: 6px; font-size: 13px; color: var(--el-color-danger); }
+.steps { margin: 8px 0; }
+.agent-run-block { margin-top: 10px; border-top: 1px dashed var(--el-border-color-lighter); padding-top: 10px; }
+.agent-stages { margin: 4px 0; }
+.agent-summary { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-hint { margin-top: 4px; }
+</style>

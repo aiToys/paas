@@ -34,9 +34,10 @@ func (f fakeBuilder) PollBuildRun(ctx context.Context, buildID string) (devops.B
 type fakeReleaser struct {
 	imageID   string // LatestReadyImage 返回
 	latestErr error
-	deployErr error  // Deploy 错误（可选）
-	pollErr   error  // PollWorkloadReady 错误（可选，模拟 deploy 后探活失败）
-	domain    string // Deploy/WorkloadDomain 返回（空则默认 wl-{id}.svc.cluster.local)
+	deployErr error         // Deploy 错误（可选）
+	pollErr   error         // PollWorkloadReady 错误（可选，模拟 deploy 后探活失败）
+	pollBlock chan struct{} // 非 nil 时 PollWorkloadReady 阻塞到关闭（就绪等待窗口模拟）
+	domain    string        // Deploy/WorkloadDomain 返回（空则默认 wl-{id}.svc.cluster.local)
 
 	deployLane      string          // Deploy 收到的 lane（断言用）
 	deployImageID   string          // Deploy 收到的 imageID（canary 放量断言用）
@@ -80,6 +81,14 @@ func (f *fakeReleaser) CreateRelease(ctx context.Context, input devops.ReleaseIn
 	return devops.Release{ID: "rel-1", AppID: input.AppID, EnvID: input.EnvID, ImageID: input.ImageID, WorkloadID: "wl-1"}, nil
 }
 func (f *fakeReleaser) PollWorkloadReady(ctx context.Context, workloadID string) error {
+	// pollBlock 非 nil 时阻塞到关闭（模拟就绪等待窗口，窗口内 Abort 级联测试用）。
+	if f.pollBlock != nil {
+		select {
+		case <-f.pollBlock:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return f.pollErr
 }
 func (f *fakeReleaser) WorkloadDomain(ctx context.Context, workloadID string) string {

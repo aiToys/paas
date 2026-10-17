@@ -107,14 +107,17 @@ func (envNamespaceResolver) Namespace(tid string) string { return tenant.Namespa
 // 字段类型为各模块 Repository 接口；handler 注入点对后端透明。
 // devops 是四子接口合集，无单一 Repository 接口，故拆 4 字段（同一 store 实例同时实现全部）。
 type Stores struct {
-	Identity       identity.Repository
-	Application    application.Repository
-	AppMembers     application.MemberRepository
-	Environment    environment.Repository
-	AppConfig      appconfig.Repository
-	DataService    dataservice.Repository
-	Engine         dataservice.EngineRepository
-	Workload       workload.Repository
+	Identity    identity.Repository
+	Application application.Repository
+	AppMembers  application.MemberRepository
+	Environment environment.Repository
+	AppConfig   appconfig.Repository
+	DataService dataservice.Repository
+	Engine      dataservice.EngineRepository
+	Workload    workload.Repository
+	// WorkloadOps 是运维操作记录存储（restart/recreate，migration 0048）。
+	// handler 受理 + Pacer 周期推进共用；两路径均非 nil。
+	WorkloadOps    workload.OperationsRepo
 	DevOpsRepos    devops.CodeRepoRepository
 	DevOpsBuilds   devops.BuildRunRepository
 	DevOpsImages   devops.ImageRepository
@@ -182,6 +185,12 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto
 		var wlRepo workload.Repository = rawWl
 		if appliers.workload != nil {
 			wlRepo = workload.NewApplyRepo(wlRepo, appliers.workload) // K8s 启用：workload 写操作投影 CRD 期望状态
+		}
+		// 运维操作：受理（token 同事务落 workloads.restart_token）后投影 CRD（spec 2026-10-17）。
+		// 装饰持 applier 而非 wlRepo——Apply 全量重赋 Spec 会原样带出持久化 token。
+		wlOps := workload.OperationsRepo(wlpg.NewOpsStore(db))
+		if appliers.workload != nil {
+			wlOps = workload.NewApplyOperations(wlOps, appliers.workload)
 		}
 		svcRepo := svcpg.NewStore(db)
 		billingRepo := billingpg.NewStore(db)
@@ -264,6 +273,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto
 			DataService:    dsRepo,
 			Engine:         rawDs, // PG ds store 同实现 EngineRepository（平台级，无 ApplyRepo 装饰）
 			Workload:       wlRepo,
+			WorkloadOps:    wlOps,
 			DevOpsRepos:    devopsRepo,
 			DevOpsBuilds:   devopsRepo,
 			DevOpsImages:   devopsRepo,
@@ -306,9 +316,16 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto
 		dsRepo = dataservice.NewApplyRepo(dsRepo, appliers.dataservice) // K8s 启用：dataservice 写投影 CRD
 	}
 	// 内存路径 NewStore 传 imageRegistry opt，seed 镜像拼内网地址（集群可拉）。
-	var wlRepo workload.Repository = wlmemory.NewStore(wlmemory.WithImageRegistry(os.Getenv("PAAS_IMAGE_REGISTRY"))) // 与 devops 共享：Release 编排更新 Workload.ImageRef
+	wlMemStore := wlmemory.NewStore(wlmemory.WithImageRegistry(os.Getenv("PAAS_IMAGE_REGISTRY")))
+	var wlRepo workload.Repository = wlMemStore // 与 devops 共享：Release 编排更新 Workload.ImageRef
 	if appliers.workload != nil {
 		wlRepo = workload.NewApplyRepo(wlRepo, appliers.workload) // K8s 启用：workload 写操作投影 CRD 期望状态
+	}
+	// 运维操作（内存路径同款；PG 路径注释见上）。OpsStore 必须持同一 *Store 实例——
+	// restart token 写进主 store 的 map，另建实例会读写分裂。
+	wlOps := workload.OperationsRepo(wlmemory.NewOpsStore(wlMemStore))
+	if appliers.workload != nil {
+		wlOps = workload.NewApplyOperations(wlOps, appliers.workload)
 	}
 	svcRepo0 := svcmemory.NewStore()
 	billingRepo := billingmemory.NewStore()
@@ -369,6 +386,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto
 		DataService:    dsRepo,
 		Engine:         dsRaw, // 内存 ds store 同实现 EngineRepository（NewStore 已 seed DefaultEngines）
 		Workload:       wlRepo,
+		WorkloadOps:    wlOps,
 		DevOpsRepos:    devopsRepo,
 		DevOpsBuilds:   devopsRepo,
 		DevOpsImages:   devopsRepo,

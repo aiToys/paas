@@ -146,6 +146,23 @@ func sanitizeLane(lane string) string {
 	return out
 }
 
+// restartTokenAnnotationKey 是 Pod template 上的滚动重启令牌注解键（spec 2026-10-17 §6）。
+// token 值变化 → template hash 变化 → Deployment 按其更新策略滚动；观察侧按「最新 RS 的
+// 该注解 == 目标 token」判定重启完成（status.ready 达标不足以区分新旧版本）。
+const restartTokenAnnotationKey = "paas.aitoys/restart-token" //nolint:gosec // 注解 key（Pod template 滚动触发器），非凭证
+
+// podAnnotations 合成 Pod template 注解：Prometheus 抓取注解（opt-in）+ 滚动重启令牌。
+func podAnnotations(w *v1alpha1.Workload) map[string]string {
+	ann := prometheusAnnotations(w)
+	if w.Spec.RestartToken != "" {
+		if ann == nil {
+			ann = map[string]string{}
+		}
+		ann[restartTokenAnnotationKey] = w.Spec.RestartToken
+	}
+	return ann
+}
+
 // prometheusAnnotations 返回 service 类型工作负载 Pod 的 Prometheus 自动发现注解。
 // 条件：type=service、端口>0、且 spec.metricsPath 非空（**显式声明**）。
 // Prometheus kubernetes-pods job 按 prometheus.io/scrape=true 发现 Pod，抓 <port><metricsPath>
@@ -311,7 +328,7 @@ func (r *WorkloadReconciler) applyDeployment(ctx context.Context, w *v1alpha1.Wo
 			return perr // 资源规格非法：CreateOrUpdate mutate 返 err -> 外层回写 failed
 		}
 		dep.Spec.Template = corev1.PodTemplateSpec{
-			ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: prometheusAnnotations(w)},
+			ObjectMeta: metav1.ObjectMeta{Labels: labels, Annotations: podAnnotations(w)},
 			Spec:       pspec,
 		}
 		c := &dep.Spec.Template.Spec.Containers[0]

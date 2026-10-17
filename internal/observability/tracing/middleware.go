@@ -8,7 +8,9 @@
 package tracing
 
 import (
+	"bufio"
 	"fmt"
+	"net"
 	"net/http"
 	"runtime/debug"
 
@@ -101,6 +103,15 @@ func (w *errorBodyWriter) Flush() {
 	if f, ok := w.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
+}
+
+// Hijack 委托底层（与 Flush 同因）：容器终端等 WebSocket 升级（gorilla/websocket
+// Upgrade）需要接管原始连接，断言失败 -> 升级 500。
+func (w *errorBodyWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if h, ok := w.ResponseWriter.(http.Hijacker); ok {
+		return h.Hijack()
+	}
+	return nil, nil, fmt.Errorf("底层 response writer 不支持 hijack")
 }
 
 func truncateMsg(s string) string {

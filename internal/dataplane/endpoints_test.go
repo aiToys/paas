@@ -2,11 +2,14 @@ package dataplane
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	testing2 "k8s.io/client-go/testing"
 
 	"github.com/aitoys/paas/pkg/tenant"
 )
@@ -19,8 +22,8 @@ func TestK8sReaderTenantIsolation(t *testing.T) {
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "user-svc", Namespace: "paas", Labels: map[string]string{
 			"app.kubernetes.io/managed-by": "paas", "paas.aitoys/tenant": "t-acme",
 		}}, Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 80}}}},
-		&corev1.Endpoints{ObjectMeta: metav1.ObjectMeta{Name: "user-svc", Namespace: "paas"},
-			Subsets: []corev1.EndpointSubset{{
+		&corev1.Endpoints{ObjectMeta: metav1.ObjectMeta{Name: "user-svc", Namespace: "paas"}, //nolint:staticcheck // 与主代码同款：Endpoints v0.36 仍主流，EndpointSlice 迁移留后续
+			Subsets: []corev1.EndpointSubset{{ //nolint:staticcheck // 同上
 				Addresses: []corev1.EndpointAddress{{IP: "10.0.0.1"}},
 				Ports:     []corev1.EndpointPort{{Port: 8080}},
 			}}},
@@ -69,8 +72,8 @@ func TestK8sReaderLaneFallback(t *testing.T) {
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "user-svc", Namespace: "paas", Labels: map[string]string{
 			"app.kubernetes.io/managed-by": "paas", "paas.aitoys/tenant": "t-acme",
 		}}, Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 80}}}},
-		&corev1.Endpoints{ObjectMeta: metav1.ObjectMeta{Name: "user-svc", Namespace: "paas"},
-			Subsets: []corev1.EndpointSubset{{
+		&corev1.Endpoints{ObjectMeta: metav1.ObjectMeta{Name: "user-svc", Namespace: "paas"}, //nolint:staticcheck // 与主代码同款：Endpoints v0.36 仍主流，EndpointSlice 迁移留后续
+			Subsets: []corev1.EndpointSubset{{ //nolint:staticcheck // 同上
 				Addresses: []corev1.EndpointAddress{{IP: defaultIP}},
 				Ports:     []corev1.EndpointPort{{Port: 8080}},
 			}}},
@@ -78,17 +81,17 @@ func TestK8sReaderLaneFallback(t *testing.T) {
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "user-svc-feature-x", Namespace: "paas", Labels: map[string]string{
 			"app.kubernetes.io/managed-by": "paas", "paas.aitoys/tenant": "t-acme",
 		}}, Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 80}}}},
-		&corev1.Endpoints{ObjectMeta: metav1.ObjectMeta{Name: "user-svc-feature-x", Namespace: "paas"},
-			Subsets: []corev1.EndpointSubset{{
+		&corev1.Endpoints{ObjectMeta: metav1.ObjectMeta{Name: "user-svc-feature-x", Namespace: "paas"}, //nolint:staticcheck // 同上
+			Subsets: []corev1.EndpointSubset{{ //nolint:staticcheck // 同上
 				Addresses: []corev1.EndpointAddress{{IP: featureIP}},
 				Ports:     []corev1.EndpointPort{{Port: 8080}},
 			}}},
-		// feature-y 泳道：Service 存在但 Endpoints 无 ready addresses（未变更服务，应降级 default）
+		// feature-y 泳道：Service 存在但 Endpoints 无 ready addresses（已覆盖不健康：显式空，不降级）
 		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "user-svc-feature-y", Namespace: "paas", Labels: map[string]string{
 			"app.kubernetes.io/managed-by": "paas", "paas.aitoys/tenant": "t-acme",
 		}}, Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 80}}}},
-		&corev1.Endpoints{ObjectMeta: metav1.ObjectMeta{Name: "user-svc-feature-y", Namespace: "paas"},
-			Subsets: []corev1.EndpointSubset{{
+		&corev1.Endpoints{ObjectMeta: metav1.ObjectMeta{Name: "user-svc-feature-y", Namespace: "paas"}, //nolint:staticcheck // 同上
+			Subsets: []corev1.EndpointSubset{{ //nolint:staticcheck // 同上
 				NotReadyAddresses: []corev1.EndpointAddress{{IP: "10.1.0.2"}},
 				Ports:             []corev1.EndpointPort{{Port: 8080}},
 			}}},
@@ -108,13 +111,14 @@ func TestK8sReaderLaneFallback(t *testing.T) {
 		t.Fatalf("feature 实例 LaneID 应为 feature-x，实际 %q", insts[0].LaneID)
 	}
 
-	// lane=feature-y：Endpoints 存在但无 ready addresses → 降级 default
-	insts2, _ := r.Instances(ctx, "paas", "user-svc", "feature-y")
-	if len(insts2) != 1 || insts2[0].IP != defaultIP {
-		t.Fatalf("lane=feature-y 应降级返 default 实例 IP=%s，实际 %+v", defaultIP, insts2)
+	// lane=feature-y：Service 存在但无 ready addresses（Pending/不健康/缩 0）→ 显式空，
+	// 不再降级 default（spec 2026-10-17 L2：不把「已覆盖但故障」藏进基线成功）。
+	insts2, err2 := r.Instances(ctx, "paas", "user-svc", "feature-y")
+	if err2 != nil {
+		t.Fatalf("lane=feature-y 不应报错: %v", err2)
 	}
-	if insts2[0].LaneID != LaneDefault {
-		t.Fatalf("降级 default 实例 LaneID 应为 default，实际 %q", insts2[0].LaneID)
+	if len(insts2) != 0 {
+		t.Fatalf("lane=feature-y 已覆盖不健康应显式返空（不回退基线），实际 %+v", insts2)
 	}
 
 	// lane 未创建（feature-z）：Service/Endpoints 都不存在 → 降级 default
@@ -140,5 +144,29 @@ func TestK8sReaderLaneFallback(t *testing.T) {
 	insts6, _ := r.Instances(ctxGlobex, "paas", "user-svc", "feature-x")
 	if len(insts6) != 0 {
 		t.Fatalf("跨租户访问应返空（不泄漏/不降级到他人 default），实际 %d", len(insts6))
+	}
+}
+
+// TestK8sReaderSourceErrorNoFallback 源读取失败（apiserver 故障）不静默回退基线
+// （spec 2026-10-17 L2：无法确认选路时不能假装已回退）。
+func TestK8sReaderSourceErrorNoFallback(t *testing.T) {
+	cs := fake.NewSimpleClientset(
+		&corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "user-svc", Namespace: "paas", Labels: map[string]string{
+			"app.kubernetes.io/managed-by": "paas", "paas.aitoys/tenant": "t-acme",
+		}}, Spec: corev1.ServiceSpec{Ports: []corev1.ServicePort{{Port: 80}}}},
+		&corev1.Endpoints{ObjectMeta: metav1.ObjectMeta{Name: "user-svc", Namespace: "paas"}, //nolint:staticcheck // 与主代码同款：Endpoints v0.36 仍主流，EndpointSlice 迁移留后续
+			Subsets: []corev1.EndpointSubset{{ //nolint:staticcheck // 同上
+				Addresses: []corev1.EndpointAddress{{IP: "10.0.0.1"}},
+				Ports:     []corev1.EndpointPort{{Port: 8080}},
+			}}},
+	)
+	// 注入 apiserver 故障：所有请求 500。
+	cs.PrependReactor("*", "*", func(_ testing2.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("apiserver down")
+	})
+	r := NewEndpointsReader(cs)
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+	if _, err := r.Instances(ctx, "paas", "user-svc", "feature-x"); err == nil {
+		t.Fatal("源读取失败应透传错误，不静默回退基线")
 	}
 }

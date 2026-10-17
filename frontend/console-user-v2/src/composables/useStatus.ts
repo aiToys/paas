@@ -102,14 +102,24 @@ export const POD_STATUS: Record<string, StatusMeta> = {
   Unknown: def('未知', 'info'),
 }
 
-// 流水线阶段（StageRun）
+// 流水线阶段（StageRun；后端枚举 succeeded/aborted——与 success 并存兼容历史数据）
 export const STAGE_STATUS: Record<string, StatusMeta> = {
   pending: def('待执行', 'info'),
   running: def('执行中', 'warning'),
-  waiting: def('等待审批', 'warning'),
+  waiting: def('等待决策', 'warning'),
   success: def('成功', 'success'),
+  succeeded: def('成功', 'success'),
   failed: def('失败', 'danger'),
+  aborted: def('已中止', 'info'),
   skipped: def('跳过', 'info'),
+}
+
+// waiting 阶段按类型派生文案（canary=放量决策 / approve=审批 / manual=人工确认）。
+export function waitingLabel(sr: { type?: string; input?: Record<string, unknown> }): string {
+  if (sr?.type === 'canary') return '等待放量决策'
+  if (sr?.type === 'approve') return '等待审批'
+  if (sr?.input?.mode === 'manual') return '等待人工确认'
+  return '等待决策'
 }
 
 // tagTypeToCls 把 el-tag type 映射到 dot 色 class（Workloads/AppServices 页内视觉体系）。

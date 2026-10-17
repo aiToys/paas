@@ -63,9 +63,9 @@ func TestCachePolicy(t *testing.T) {
 		want string
 	}{
 		{"/console/", "no-cache"},
-		{"/console", "no-cache"},                         // FileServer 会 308 补尾斜杠，头同样要设
-		{"/console/applications/app-1", "no-cache"},      // SPA 路由 fallback index.html
-		{"/console/favicon.ico", "no-cache"},             // 无 hash 公共资源
+		{"/console", "no-cache"},                    // FileServer 会 308 补尾斜杠，头同样要设
+		{"/console/applications/app-1", "no-cache"}, // SPA 路由 fallback index.html
+		{"/console/favicon.ico", "no-cache"},        // 无 hash 公共资源
 		{"/console/assets/index-C4dKF8Xe.js", "public, max-age=31536000, immutable"},
 		{"/console/assets/style-abc123.css", "public, max-age=31536000, immutable"},
 		{"/assets/index-C4dKF8Xe.js", "public, max-age=31536000, immutable"}, // landing（prefix "/"）

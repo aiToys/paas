@@ -121,6 +121,11 @@ core:
 # 空 = 一键暴露降级为手工建路由提示。
 domainSuffix: ""
 
+# 工作负载运行态运维（spec 2026-10-17）。terminalEnabled：容器终端 feature flag
+# （env PAAS_TERMINAL_ENABLED，默认关——开启需同时授予 workload:exec 权限，RBAC 已含 pods/exec）。
+workload:
+  terminalEnabled: false
+
 # core 容器资源
 resources:
   requests: { cpu: 100m, memory: 128Mi }

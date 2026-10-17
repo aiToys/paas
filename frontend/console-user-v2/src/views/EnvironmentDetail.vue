@@ -79,20 +79,17 @@ function openLaneManager() {
   loadLanes()
 }
 
-// 列头点入泳道详情：优先实体（name 精确匹配）；裸分支（无实体）懒建实体再进详情
-// （与 deploy EnsureByName 同语义）。无写权限（viewer）时创建会 403，降级提示。
+// 列头点入泳道：优先实体（name 精确匹配）跳详情；裸分支（无实体）不隐式 POST 创建
+// （读路径零副作用，viewer 可用）——降级跳工作负载列表按泳道过滤查看部署。
 async function goLane(name: string) {
   await loadLanes()
   const hit = lanes.value.find((l) => l.name === name && l.status === 'active')
   if (hit) {
     router.push(`/lanes/${hit.id}`)
-  } else {
-    try {
-      const created = await createLane({ envId: route.params.id as string, name, mode: 'standard' })
-      router.push(`/lanes/${created.id}`)
-    } catch (e) {
-      ElMessage.error(`该泳道尚未实体化，实体化失败（可能无写权限）：${apiError(e)}`)
-    }
+    return
+  }
+  if (!env.value || (await envStore.switchEnv(env.value))) {
+    router.push({ path: '/workloads', query: { lane: name } })
   }
 }
 
@@ -112,8 +109,13 @@ async function onCloseLane(l: LaneEntity) {
   const ok = await confirmDangerous({ action: '关闭泳道', target: l.name, requireNameConfirm: true, isProd: env.value?.type === 'prod' })
   if (!ok) return
   try {
-    await closeLane(l.id)
-    ElMessage.success('泳道已关闭')
+    const res = await closeLane(l.id)
+    // 结构化结果（spec 2026-10-17 B）：部分回收失败不假报全部成功。
+    if (res.failedIds?.length) {
+      ElMessage.warning(`泳道已关闭，但 ${res.failedIds.length} 个工作负载回收失败（遗留将由 GC 自动清扫，也可重试关闭）`)
+    } else {
+      ElMessage.success(`泳道已关闭，回收 ${res.reclaimed} 个工作负载`)
+    }
     await loadLanes()
   } catch (e) {
     ElMessage.error(apiError(e))
@@ -313,7 +315,7 @@ watch(() => route.params.id, load)
                   <span class="lane-svc-count">{{ laneMatrix[row.appId][lane].count }} 服务</span>
                 </div>
               </template>
-              <span v-else-if="lane !== 'default'" class="lane-fallback">↩ 基线</span>
+              <span v-else-if="lane !== 'default'" class="lane-fallback" title="该泳道未部署此应用，运行时按服务发现回退本环境基线（未实测验证）">↩ 基线（预计）</span>
             </template>
           </el-table-column>
         </el-table>

@@ -70,6 +70,8 @@ func (f *fakeRepo) SetMetricsPath(ctx context.Context, id string, path string) e
 	}
 	return nil
 }
+func (f *fakeRepo) SetRestartToken(ctx context.Context, id, token string) error { return nil }
+
 func (f *fakeRepo) Delete(ctx context.Context, id string) error {
 	f.deleted = append(f.deleted, id)
 	return nil

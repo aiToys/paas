@@ -10,6 +10,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -33,6 +34,7 @@ type k8sAppliers struct {
 	wlReconciler *controller.WorkloadReconciler
 	dsReconciler *controller.DataServiceReconciler // 供 stores 构造后延迟注入 PlatformExists（孤儿回收）
 	client       client.Client                     // controller-runtime typed client（供 route applier 聚合 Ingress）
+	restConfig   *rest.Config                      // 供 K8sRuntimeReader（exec SPDY 流构造需要 *rest.Config）
 }
 
 // startManager 启 controller-runtime manager（K8s 数据面），自动检测配置来源：
@@ -131,6 +133,7 @@ func startManager() (k8sAppliers, context.CancelFunc) {
 		wlReconciler: wlReconciler,
 		dsReconciler: dsReconciler,
 		client:       mgr.GetClient(),
+		restConfig:   cfg,
 	}, cancel
 }
 

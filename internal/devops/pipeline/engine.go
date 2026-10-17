@@ -351,12 +351,17 @@ func (e *Engine) flushStageLog(ctx context.Context, run *PipelineRun, sr *StageR
 	if err != nil || run.CurrentStage >= len(latest.StageRuns) {
 		return
 	}
-	// Input 与 Log 一起落库：execAgent 在 CreateRun 成功后把 prevRunName/agentAttempt 写进
+	// Input/Output 与 Log 一起落库：execAgent 在 CreateRun 成功后把 prevRunName/agentAttempt 写进
 	// sr.Input（Retry 续接凭据），若此后进程滚动/崩溃，只同步 Log 会丢 Input → 下次 Retry
 	// 生成同名 agent run 撞对方 K8s CR（2026-10-13 实测 run-4c69ae55d9fa 三连 already exists）。
+	// Output 同理：execCanary 部署成功即写 OutCanaryWorkloadID，就绪等待窗口内 Abort 的级联
+	// 清理从库内读该键（只同步 Log 时窗口内 abort 仍泄漏 canary workload 到 LaneGC TTL）。
 	latest.StageRuns[run.CurrentStage].Log = sr.Log
 	if sr.Input != nil {
 		latest.StageRuns[run.CurrentStage].Input = sr.Input
+	}
+	if sr.Output != nil {
+		latest.StageRuns[run.CurrentStage].Output = sr.Output
 	}
 	if _, err := e.Runs.UpdateRun(ctx, latest); err != nil {
 		log.Printf("pipeline: stage 日志落库失败 run=%s stage=%d: %v", run.ID, run.CurrentStage, err) //nolint:gosec // runID 平台生成
@@ -654,6 +659,10 @@ func (e *Engine) execTest(ctx context.Context, run *PipelineRun, stage StageDef,
 	url := fmt.Sprintf("http://%s%s", host, path)
 	logf(sr, "探活 %s", url)
 	e.flushStageLog(ctx, run, sr)
+	// 结构化检查记录（spec §7 CheckResult）：目标/预期/实际路径显式可见，
+	// 探活降级不再被压缩成泛化「测试通过」。
+	check := CheckResult{Type: "smoke", Target: url, Expected: "HTTP 2xx", Status: "unknown", At: time.Now()}
+	defer func() { sr.Checks = append(sr.Checks, check) }()
 	// 两段探活：主路径先短探（15s，快速失败给降级让路），未过且非显式 / 时降级试根路径
 	//（静态页应用无 /healthz，白等 2 分钟才降级的体验优化），降级也未过再回到主路径长探
 	//（覆盖「应用启动慢」场景——短探失败可能是还没起完，不是路径不存在）。
@@ -665,6 +674,8 @@ func (e *Engine) execTest(ctx context.Context, run *PipelineRun, stage StageDef,
 		if err2 := pollHTTP(ctx, fallback, 30*time.Second); err2 == nil {
 			err = nil
 			url = fallback
+			check.Note = fmt.Sprintf("指定路径 %s 未通过，实际按根路径 / 验证", path)
+			check.Target = url
 		}
 	}
 	if err != nil {
@@ -674,10 +685,14 @@ func (e *Engine) execTest(ctx context.Context, run *PipelineRun, stage StageDef,
 	}
 	if err != nil {
 		// F6：失败信息带行动指引（检查服务端口/健康路径），不只是裸报错。
+		check.Status = "fail"
+		check.Actual = err.Error()
 		sr.Error = fmt.Sprintf("探活失败 %s: %v（排查：确认服务监听端口与流水线一致、健康路径存在；可在「服务」tab 修改端口后在「流水线」paramOverrides 覆盖探活 path）", url, err)
 		return true, err
 	}
 	logf(sr, "探活通过")
+	check.Status = "pass"
+	check.Actual = "2xx"
 	sr.Output = map[string]any{"result": "ok", "url": url}
 	sr.Status = StageSuccess
 	sr.FinishedAt = time.Now()
@@ -731,6 +746,13 @@ func (e *Engine) execCanary(ctx context.Context, run *PipelineRun, stage StageDe
 		sr.Error = err.Error()
 		return true, err
 	}
+	// 部署成功即写 workloadID（不等就绪）：就绪等待窗口内用户 Abort 时，
+	// 级联清理依赖 Output 里的 OutCanaryWorkloadID（此前就绪后才写，窗口内 abort 泄漏到 LaneGC TTL）。
+	if sr.Output == nil {
+		sr.Output = map[string]any{}
+	}
+	sr.Output[OutCanaryWorkloadID] = deployment.WorkloadID
+	e.flushStageLog(ctx, run, sr) // 就绪等待分钟级：workloadID 先落库，窗口内 Abort 级联可读
 	logf(sr, "等待金丝雀 Workload %s 就绪", deployment.WorkloadID)
 	if err := e.Releases.PollWorkloadReady(ctx, deployment.WorkloadID); err != nil {
 		// 就绪超时清理 canary workload：Abort/terminate 路径有清理，唯独此处泄漏到
@@ -974,6 +996,42 @@ func (e *Engine) Resume(ctx context.Context, runID string, stageIdx int) error {
 	return nil
 }
 
+// RejectManual 拒绝人工测试确认（decisions action=reject）：当前 manual-test stage
+// 标 failed（Error=拒绝理由）+ run 终态 failed。区别于 Abort（aborted=人为中止执行）：
+// 拒绝是质量否决——「确认这个版本不行」，后续 Retry 语义与失败一致。
+func (e *Engine) RejectManual(ctx context.Context, runID string, stageIdx int, reason string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	run, err := e.Runs.GetRun(ctx, runID)
+	if err != nil {
+		return err
+	}
+	if run.Status != RunPaused {
+		return ErrNotPaused
+	}
+	if stageIdx != run.CurrentStage || stageIdx < 0 || stageIdx >= len(run.StageRuns) {
+		return ErrStageNotCurrent
+	}
+	sr := &run.StageRuns[stageIdx]
+	if sr.Type != StageTest || strFromInput(sr.Input, "mode") != TestManual {
+		return fmt.Errorf("该阶段不是人工测试确认")
+	}
+	sr.Status = StageFailed
+	sr.Error = "人工确认未通过"
+	if reason != "" {
+		sr.Error += "：" + reason
+	}
+	sr.Checks = append(sr.Checks, CheckResult{
+		Type: TestManual, Status: "fail", Actual: "人工确认未通过",
+		Note: reason, At: time.Now(),
+	})
+	sr.FinishedAt = time.Now()
+	run.Status = RunFailed
+	run.FinishedAt = time.Now()
+	_, err = e.Runs.UpdateRun(ctx, run)
+	return err
+}
+
 // CanaryResume 金丝雀验证决策（canary stage StageWaiting 期人工调用）：
 //   - promote=true 确认放量：新镜像全量滚动到基线泳道（lane=default，空 DeployResources 不覆盖基线
 //     既有资源规格），成功后删 canary 并行负载，stage Success + run 续推后续 stage；
@@ -1141,7 +1199,8 @@ func pollHTTP(ctx context.Context, url string, timeout time.Duration) error {
 }
 
 // resolveImage deploy stage 镜像来源解析（CI/CD 解耦核心）。
-// selected=指定 imageId；latestReady=app 最新 ready Image；priorBuild=前序 build stage 产出。
+// selected=指定 imageId；latestReady=触发时锁定值优先（产物锁定，spec §6），无锁定值
+// （存量 run）动态查 app 最新 ready Image；priorBuild=前序 build stage 产出。
 func (e *Engine) resolveImage(ctx context.Context, stage StageDef, run PipelineRun) (string, error) {
 	switch strOr(stage.Params, "imageSource", ImagePriorBuild) {
 	case ImageSelected:
@@ -1151,6 +1210,11 @@ func (e *Engine) resolveImage(ctx context.Context, stage StageDef, run PipelineR
 		}
 		return id, nil
 	case ImageLatestReady:
+		// 触发时锁定优先：审批等待期间新完成的构建不再漂移实际发布产物；
+		// Retry 复用 StageRun.Input（含锁定值）天然同源。
+		if id := strOr(stage.Params, "lockedImageId", ""); id != "" {
+			return id, nil
+		}
 		return e.Releases.LatestReadyImage(ctx, run.AppID)
 	case ImagePriorBuild:
 		return resolvePriorOutput(run, OutImageID)

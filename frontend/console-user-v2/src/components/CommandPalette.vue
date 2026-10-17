@@ -18,6 +18,7 @@ const results = computed(() => {
   const entries = [
     ...products.value.map((p) => ({ label: p.name, to: '/products/' + p.id, icon: 'deploy', group: '产品', keywords: p.id })),
     ...navigation.flatMap((g) => g.items.map((i) => ({ ...i, group: g.label }))),
+    ...[{ id: 'overview', label: '观测总览' }, { id: 'metrics', label: '指标' }, { id: 'logs', label: '日志' }, { id: 'traces', label: '链路' }, { id: 'alerts', label: '告警' }].map(s => ({ label: s.label, to: '/observability?tab='+s.id, icon: 'activity', group: '可观测', keywords: s.id })),
     ...aiSections.map((s) => ({ label: s.label, to: '/ai/' + s.id, icon: s.icon, group: 'AI 开发', keywords: s.id })),
   ]
   return searchEntries(entries, q.value)

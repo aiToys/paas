@@ -319,3 +319,25 @@ func TestTracesStoreGetTraceTenantGuard(t *testing.T) {
 		t.Fatalf("非法 traceID 应拒: %v", err)
 	}
 }
+
+// 资源属性实际由 Jaeger processes 承载；不能在转换后丢失环境/Pod 上下文。
+func TestParseJaegerTracePreservesResourceAttributes(t *testing.T) {
+	tr, _ := parseJaegerTrace(jaegerTrace{
+		TraceID: "3fb7533a3292802d71d84ee00995cc3f",
+		Processes: map[string]jaegerProc{"p1": {ServiceName: "api", Tags: []jaegerTag{
+			{Key: "k8s.pod.name", Type: "string", Value: json.RawMessage(`"wl-test-abcd"`)},
+			{Key: "paas.env", Type: "string", Value: json.RawMessage(`"env-test"`)},
+			{Key: "paas.lane", Type: "string", Value: json.RawMessage(`"default"`)},
+		}}},
+		Spans: []jaegerSpan{{SpanID: "root", ProcessID: "p1", StartTime: 1719500000000000, Duration: 20000, Tags: []jaegerTag{
+			{Key: "paas.lane", Type: "string", Value: json.RawMessage(`"preview"`)},
+		}}},
+	})
+	if len(tr.Spans) != 1 {
+		t.Fatalf("spans=%d", len(tr.Spans))
+	}
+	tags := tr.Spans[0].Tags
+	if tags["k8s.pod.name"] != "wl-test-abcd" || tags["paas.env"] != "env-test" || tags["paas.lane"] != "preview" {
+		t.Fatalf("资源属性丢失或请求级覆盖不正确: %#v", tags)
+	}
+}

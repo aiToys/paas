@@ -16,6 +16,7 @@ var (
 	ErrNotRunning       = errors.New("pipeline run not running or paused") // Abort 守卫：仅 running/paused 可 abort
 	ErrTemplateExists   = errors.New("pipeline template already exists")
 	ErrNoTenant         = errors.New("missing tenant context")
+	ErrPlanChanged      = errors.New("pipeline plan hash mismatch") // preview→trigger 一致性：候选产物已漂移，需重新预览
 )
 
 // Repository Pipeline CRUD（应用 1:N 主线实体，租户隔离）。

@@ -1,5 +1,9 @@
 /* PaaS 控制台：任务优先的密度、颜色与交互基线，亮暗主题共用语义 token。 */
 :root {
+  --chart-teal: #5cd5ba;
+  --chart-violet: #c1a2ff;
+  --chart-amber: #eac16c;
+  --chart-rose: #f898b1;
   --bg: #0f1520;
   --surface: #151e2c;
   --surface-2: #1b2738;
@@ -38,6 +42,10 @@
   color-scheme: dark;
 }
 html:not(.dark) {
+  --chart-teal: #087e68;
+  --chart-violet: #7853c5;
+  --chart-amber: #976409;
+  --chart-rose: #b82f59;
   --bg: #f5f7fa;
   --surface: #ffffff;
   --surface-2: #edf1f6;

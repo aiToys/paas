@@ -9,6 +9,7 @@ import { useListFilters } from '@/composables/useListFilters'
 import { statusOf, tagTypeToCls, RUN_STATUS } from '@/composables/useStatus'
 import DeliveryChanges from '@/components/DeliveryChanges.vue'
 import DeliveryBuilds from '@/components/DeliveryBuilds.vue'
+import DeliveryMatrix from '@/components/DeliveryMatrix.vue'
 import DeliveryReleases from '@/components/DeliveryReleases.vue'
 import DeliveryPipelines from '@/components/DeliveryPipelines.vue'
 import DeliveryRepos from '@/components/DeliveryRepos.vue'
@@ -74,9 +75,12 @@ onMounted(() => { document.title = '产品交付 · PaaS' })
     </section>
     <DeliveryChanges v-else-if="section === 'changes'" :app-id="appId" />
     <DeliveryBuilds v-else-if="section === 'builds'" :app-id="appId" />
-    <DeliveryReleases v-else-if="section === 'releases'" :app-id="appId" />
+    <template v-else-if="section === 'releases'">
+      <DeliveryMatrix :app-id="appId" />
+      <DeliveryReleases :app-id="appId" />
+    </template>
     <DeliveryPipelines v-else-if="section === 'pipelines'" :app-id="appId" />
-    <DeliveryRepos v-else :app-id="appId" />
+    <DeliveryRepos v-else :app-id="appId" :focus-repo-id="typeof route.query.repo === 'string' ? route.query.repo : undefined" />
   </div>
 </template>
 <style scoped>

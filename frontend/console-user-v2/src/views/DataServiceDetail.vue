@@ -1,11 +1,14 @@
 <script setup lang="ts">
-import { confirmAction } from '@/composables/useConfirmAction'
+import { confirmDangerous } from '@/composables/useDangerConfirm'
+import { dataServiceCommand } from '@/domain/dataservice'
+import DataServiceOperations from '@/components/DataServiceOperations.vue'
+import StatePanel from '@/components/StatePanel.vue'
 // 数据服务详情（v2 原生，功能对等迁移）：连接信息（掩码+复制）/ 生命周期（启停/重启）/
 // 规格+伸缩 / 绑定应用（谁在用）。指标卡与告警关联在 /observability（维度过滤）。
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { fetchJSON, fetchAuth, apiError, fetchList } from '@/api'
+import { fetchJSON, fetchCommand, apiError, fetchList } from '@/api'
 import { statusOf, tagTypeToCls, DATASERVICE_STATUS } from '@/composables/useStatus'
 import { useEnvStore } from '@/stores/env'
 
@@ -29,23 +32,32 @@ const ds = ref<DataService | null>(null)
 const boundApps = ref<{ id: string; name: string }[]>([])
 const loading = ref(true)
 const loadFailed = ref(false)
+const error = ref('')
+const isManaged = computed(() => !ds.value?.source || ds.value.source === 'managed')
+const actualProd = computed(() => envStore.envs.find(e => e.id === ds.value?.envId)?.type === 'prod')
+async function command(action: Parameters<typeof dataServiceCommand>[1], body?: unknown) {
+  const request = dataServiceCommand(id.value, action, body)
+  await fetchCommand(request.path, request.options)
+}
 
 async function load() {
   loading.value = true
   loadFailed.value = false
+  error.value = ''
   try {
     ds.value = await fetchJSON<DataService>(`/api/dataservices/${id.value}`)
     // 绑定应用：拉应用列表过滤 bindings 引用（前端聚合，避免跨模块后端耦合）。
     const apps = await fetchList<AppLite>('/api/applications').catch(() => [])
-    boundApps.value = apps.filter((a) => a.bindings?.some((b) => b.name === ds.value?.name || b.name === ds.value?.id))
+    boundApps.value = apps.filter((a) => a.bindings?.some((b) => b.type === ds.value?.kind && (b.name === ds.value?.name || b.name === ds.value?.id)))
   } catch (e) {
     loadFailed.value = true
-    ElMessage.error(apiError(e, '加载数据服务失败'))
+    error.value = apiError(e, '加载数据服务失败')
   } finally {
     loading.value = false
   }
 }
-onMounted(load)
+onMounted(async () => { await envStore.loadEnvs(); await load() })
+watch(id, () => { ds.value = null; void load() })
 
 const KIND_LABEL: Record<string, string> = {
   db: '数据库', cache: '缓存', mq: '消息', storage: '对象存储', vector: '向量', search: '搜索',
@@ -84,10 +96,10 @@ async function copyText(t: string) {
 const acting = ref('')
 async function lifecycle(action: 'start' | 'stop' | 'restart') {
   const verbs = { start: '启动', stop: '停止', restart: '重启' } as const
-  if (action !== 'start' && !await confirmAction(`确认${verbs[action]}「${ds.value?.name}」？${action === 'stop' ? '使用该实例的服务将不可用。' : ''}`)) return
+  if (!await confirmDangerous({ action: verbs[action], target: `${ds.value?.name}（${envName.value}）`, isProd: actualProd.value, requireNameConfirm: actualProd.value, message: action === 'stop' ? '使用该实例的服务将不可用。' : '' })) return
   acting.value = action
   try {
-    await fetchAuth(`/api/dataservices/${id.value}/${action}`, { method: 'POST' })
+    await command(action)
     ElMessage.success(`${verbs[action]}指令已下发`)
     await load()
   } catch (e) {
@@ -100,19 +112,20 @@ async function lifecycle(action: 'start' | 'stop' | 'restart') {
 // —— 伸缩（replicas） ——
 const scaling = ref(false)
 const replicas = ref(1)
+const cpu = ref(''), memory = ref(''), storageGb = ref(0)
 function openScale() {
   replicas.value = ds.value?.replicas ?? 1
+  cpu.value = ds.value?.cpu || ''
+  memory.value = ds.value?.memory || ''
+  storageGb.value = ds.value?.storageGb || 0
   scaling.value = true
 }
 const scalingBusy = ref(false)
 async function submitScale() {
+  if (!await confirmDangerous({ action: '调整规格', target: `${ds.value?.name}（${envName.value}）`, isProd: actualProd.value, requireNameConfirm: actualProd.value })) return
   scalingBusy.value = true
   try {
-    await fetchAuth(`/api/dataservices/${id.value}/scale`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ replicas: replicas.value }),
-    })
+    await command('scale', { replicas: replicas.value, cpu: cpu.value || undefined, memory: memory.value || undefined, storageGb: storageGb.value || undefined })
     ElMessage.success('伸缩指令已下发')
     scaling.value = false
     await load()
@@ -125,9 +138,9 @@ async function submitScale() {
 
 async function removeDs() {
   if (!ds.value) return
-  if (!await confirmAction(`删除数据服务「${ds.value.name}」？数据与实例将一并回收，不可恢复。`)) return
+  if (!await confirmDangerous({ action: '删除数据服务', target: ds.value.name, isProd: actualProd.value, requireNameConfirm: actualProd.value, message: `目标环境：${envName.value}。数据与实例将一并回收，不可恢复。` })) return
   try {
-    await fetchAuth(`/api/dataservices/${id.value}`, { method: 'DELETE' })
+    await command('delete')
     ElMessage.success('已删除')
     router.push('/dataservices')
   } catch (e) {
@@ -145,7 +158,7 @@ const fmtTime = (iso: string) => (iso ?? '').replace('T', ' ').slice(0, 16)
     </div>
 
     <div v-if="loading" class="loading-block" v-loading="true" element-loading-text="加载实例…"></div>
-    <div v-else-if="loadFailed || !ds" class="empty">实例不存在或已被删除</div>
+    <StatePanel v-else-if="loadFailed || !ds" title="数据服务加载失败" :description="error" error><button class="act" @click="load">重试</button></StatePanel>
 
     <template v-else>
       <!-- 头部：标识 + 状态 + 操作 -->
@@ -165,6 +178,7 @@ const fmtTime = (iso: string) => (iso ?? '').replace('T', ' ').slice(0, 16)
           </div>
         </div>
         <div class="head-acts">
+<template v-if="isManaged">
           <button
             v-if="ds.status === 'running'" class="act danger"
             :disabled="!!acting" @click="lifecycle('stop')"
@@ -181,7 +195,7 @@ const fmtTime = (iso: string) => (iso ?? '').replace('T', ' ').slice(0, 16)
             {{ acting === 'restart' ? '重启中…' : '重启' }}
           </button>
           <button class="act" @click="openScale">伸缩</button>
-          <button class="act danger" @click="removeDs">删除</button>
+          </template><button class="act danger" @click="removeDs">删除</button>
         </div>
       </div>
 
@@ -234,22 +248,26 @@ const fmtTime = (iso: string) => (iso ?? '').replace('T', ' ').slice(0, 16)
           <span class="card-title">绑定应用</span>
           <span class="card-sub">{{ boundApps.length ? `${boundApps.length} 个产品在使用` : '连接信息未注入任何产品' }}</span>
         </div>
-        <div v-if="!boundApps.length" class="empty-hint">暂无产品绑定——在产品「设置 → 绑定资源」接入</div>
+        <div v-if="!boundApps.length" class="empty-hint">暂无产品绑定——在产品「共享资源」接入</div>
         <div v-else class="app-list">
-          <a v-for="a in boundApps" :key="a.id" class="app-row" @click="router.push(`/products/${a.id}?tab=settings`)">
+          <a v-for="a in boundApps" :key="a.id" class="app-row" @click="router.push(`/products/${a.id}?tab=resources`)">
             <span class="a-name">{{ a.name }}</span>
-            <span class="a-open">设置 →</span>
+            <span class="a-open">共享资源 →</span>
           </a>
         </div>
       </div>
+      <DataServiceOperations :key="ds.id" :service="ds" @changed="load" />
     </template>
 
     <!-- 伸缩弹窗 -->
-    <el-dialog v-model="scaling" title="伸缩" width="400px" append-to-body>
+    <el-dialog v-model="scaling" title="调整数据服务规格" width="min(480px, 94vw)" append-to-body>
       <el-form label-position="top" @submit.prevent="submitScale">
-        <el-form-item label="副本数（0-3）">
-          <el-input-number v-model="replicas" :min="0" :max="3" />
+        <el-form-item label="副本数">
+          <el-input-number v-model="replicas" :min="0" :max="100" />
         </el-form-item>
+        <el-form-item label="CPU（Kubernetes Quantity）"><el-input v-model="cpu" placeholder="例如 500m 或 1" /></el-form-item>
+        <el-form-item label="内存"><el-input v-model="memory" placeholder="例如 512Mi 或 1Gi" /></el-form-item>
+        <el-form-item label="存储 GB（仅扩容）"><el-input-number v-model="storageGb" :min="ds?.storageGb || 0" /></el-form-item>
       </el-form>
       <template #footer>
         <button class="act" @click="scaling = false">取消</button>
@@ -276,7 +294,8 @@ const fmtTime = (iso: string) => (iso ?? '').replace('T', ' ').slice(0, 16)
 }
 .meta-row { display: flex; gap: 14px; margin-top: 8px; }
 .meta { font-size: 12px; color: var(--text-faint); }
-.head-acts { display: flex; gap: 8px; flex-shrink: 0; }
+.head-acts { display: flex; gap: 8px; flex-wrap: wrap; }
+@media(max-width:900px){.head-card{flex-direction:column}.head-title-row,.meta-row{flex-wrap:wrap}}
 .loading-block { height: 200px; }
 .empty { padding: 60px 0; text-align: center; font-size: 13px; color: var(--text-faint); }
 .kv-table { width: 100%; border-collapse: collapse; font-size: 13px; }

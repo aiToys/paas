@@ -270,6 +270,26 @@ func (s *Store) SetMetricsPath(ctx context.Context, id, path string) error {
 	return nil
 }
 
+// SetRestartToken 写滚动重启令牌（空串拒绝——令牌只能被新值覆盖）。
+func (s *Store) SetRestartToken(ctx context.Context, id, token string) error {
+	tid, err := tenant.IDOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	if token == "" {
+		return fmt.Errorf("restartToken 不可为空")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	w, hit := s.workloads[id]
+	if !hit || w.TenantID != tid {
+		return fmt.Errorf("工作负载不存在: %s", id)
+	}
+	w.RestartToken = token
+	s.workloads[id] = w
+	return nil
+}
+
 // SetDomain 设置对外域名（canary 独立验证域名；与 SetResources 同模式）。
 func (s *Store) SetDomain(ctx context.Context, id, domain string) error {
 	tid, err := tenant.IDOrErr(ctx)

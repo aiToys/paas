@@ -81,43 +81,55 @@ func (r *k8sEndpointsReader) Instances(ctx context.Context, namespace, serviceNa
 		return nil, nil
 	}
 	// lane 空/default → 直接查基线（现状，向后兼容）。
-	// lane 非 default → 先查 <service>-<lane> 泳道，无/空降级 <service> 基线。
+	// lane 非 default → 按 feature 三态规则（见下）。
 	if lane == "" || lane == LaneDefault {
-		return r.fetchInstances(ctx, namespace, serviceName, tid, LaneDefault)
+		insts, _, err := r.fetchInstances(ctx, namespace, serviceName, tid, LaneDefault)
+		return insts, err
 	}
-	// feature 泳道：优先查 <service>-<lane>（L1 Service 命名约定；清洗与 BaselineWorkloadName
-	// 同款——集成分支 lane 含 / 时 K8s Service 名已清洗为 -，两侧必须一致才能命中）。
+	// feature 泳道三态回退规则（spec 2026-10-17 L2，此前空实例/查询错误一律静默回退）：
+	// ① Service 存在且有 ready 实例 → 本泳道版本；
+	// ② Service 存在但无 ready 实例（缩 0/Pending/不健康）→ 显式返回空，不回退——
+	//    把「已部署但故障」藏进基线成功会掩盖验证问题；
+	// ③ Service 不存在（未覆盖）→ 回退本环境基线（未变更服务复用基线，核心语义）；
+	// 查询错误（apiserver 故障）→ 透传错误，不静默回退（无法确认选路时不能假装已回退）。
 	featureName := dns1035Name(serviceName + "-" + lane)
-	insts, err := r.fetchInstances(ctx, namespace, featureName, tid, lane)
-	if err == nil && len(insts) > 0 {
-		return insts, nil
+	insts, exists, err := r.fetchInstances(ctx, namespace, featureName, tid, lane)
+	if err != nil {
+		return nil, err
 	}
-	// 降级基线（feature 泳道无 ready 实例 = 未变更服务走基线，L2 核心语义）。
-	return r.fetchInstances(ctx, namespace, serviceName, tid, LaneDefault)
+	if exists {
+		return insts, nil // ①②：覆盖即以覆盖为准（无 ready 实例返回空列表，调用方显式感知）
+	}
+	// ③：未覆盖 → 回退本环境基线。
+	insts, _, err = r.fetchInstances(ctx, namespace, serviceName, tid, LaneDefault)
+	return insts, err
 }
 
 // fetchInstances 校验同名 Service 归属本租户后读 Endpoints 转 Instance。
 // resolvedLane 为最终命中的泳道（feature-x 或 default），写入 Instance.LaneID。
+// svcExists 标记「同名 Service 是否存在于本租户」——泳道回退判定区分「未覆盖」
+// （Service 不存在，允许回退基线）与「已覆盖但无 ready 实例」（缩 0/Pending/不健康，
+// 显式返回空不回退，spec 2026-10-17 L2：不把失败藏进基线成功）。
 //
 // 多租户隔离：Endpoints 不带 tenant label，先经同名 Service 的 tenant label 校验归属。
 // 跨租户或不存在统一返空（不泄漏存在性），与平台 Repository 隔离语义一致。
-func (r *k8sEndpointsReader) fetchInstances(ctx context.Context, namespace, serviceName, tid, resolvedLane string) ([]Instance, error) {
+func (r *k8sEndpointsReader) fetchInstances(ctx context.Context, namespace, serviceName, tid, resolvedLane string) (insts []Instance, svcExists bool, err error) {
 	svc, err := r.cs.CoreV1().Services(namespace).Get(ctx, serviceName, metav1.GetOptions{})
 	if err != nil {
 		// 服务不存在（含泳道降级候选）返空；其它错误（apiserver 故障）透传，不与 not found 混淆（审计第 6 轮 M3）。
 		if errors.Is(err, apierrors.NewNotFound(schema.GroupResource{}, "")) || strings.Contains(err.Error(), "not found") {
-			return nil, nil
+			return nil, false, nil
 		}
-		return nil, fmt.Errorf("get service: %w", err)
+		return nil, false, fmt.Errorf("get service: %w", err)
 	}
 	if svc.Labels[labels.KeyTenant] != tid {
-		return nil, nil
+		return nil, false, nil // 跨租户同名单独标记存在（不泄漏细节，且不触发回退歧义）
 	}
 	ep, err := r.cs.CoreV1().Endpoints(namespace).Get(ctx, serviceName, metav1.GetOptions{}) //nolint:staticcheck // Endpoints 在 K8s v0.36 仍主流；EndpointSlice 迁移留后续
 	if err != nil {
-		return nil, fmt.Errorf("get endpoints: %w", err)
+		return nil, true, fmt.Errorf("get endpoints: %w", err)
 	}
-	return endpointsToInstances(ep, resolvedLane), nil
+	return endpointsToInstances(ep, resolvedLane), true, nil
 }
 
 func (r *k8sEndpointsReader) Services(ctx context.Context, namespace string) ([]ServiceInfo, error) {

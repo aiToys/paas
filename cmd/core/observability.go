@@ -174,6 +174,9 @@ func seedDefaultAlertRules(ctx context.Context, idRepo identity.Repository, rule
 	if os.Getenv("PAAS_DISABLE_DEMO_SEED") == "true" {
 		return
 	}
+	if ruleRepo == nil {
+		return // 内存路径无持久规则存储（Stores.AlertRules nil）：跳过 seed，observability 内部回退内存规则集
+	}
 	tenants, err := idRepo.ListTenants(ctx)
 	if err != nil {
 		log.Printf("[seed] 列租户（默认告警规则）失败: %v", err)

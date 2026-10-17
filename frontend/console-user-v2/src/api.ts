@@ -1,5 +1,5 @@
 import { ElMessage } from 'element-plus'
-import { asList, unwrapData } from './api/response'
+import { asList, unwrapData, requireOK } from './api/response'
 
 // 会话走 httpOnly cookie（后端 Set-Cookie），前端不存不读 token。
 // 401 -> 自动 refresh（cookie 自带 refresh token）-> 重试原请求一次 -> 仍 401 触发会话过期事件。
@@ -87,4 +87,8 @@ export async function respError(resp: Response, prefix = ''): Promise<string> {
 // List API 显式接住 Go nil slice，同时拒绝非数组响应，避免假空态。
 export async function fetchList<T>(path: string, opts?: RequestInit): Promise<T[]> {
   return asList<T>(await fetchJSON<unknown>(path, opts))
+}
+
+export async function fetchCommand(path: string, opts: RequestInit): Promise<void> {
+  await requireOK(await fetchAuth(path, opts))
 }

@@ -68,7 +68,12 @@ type Workload struct {
 	// Resources 是容器资源规格（CPU/内存 requests/limits，K8s Quantity 字符串如 "500m"/"1"/"512Mi"）。
 	// 空 = BestEffort（不设 requests/limits）；生产环境创建时 handler 强制要求非空（禁 BestEffort）。
 	Resources ResourceSpec `json:"resources,omitempty"`
-	CreatedAt time.Time    `json:"createdAt"`
+	// RestartToken 是滚动重启的不可重复令牌（spec 2026-10-17 §6）：每次受理重启生成新值，
+	// 经 CRD 投影到 Pod template annotation → template hash 变化触发 Deployment 滚动。
+	// 完成观察按「当前 Deployment 最新 RS 的 token == 本值」判定，防旧 Ready 误报成功。
+	// 空 = 从未重启。普通字段更新不改此值（applier 全量投影也原样带出，不会清除）。
+	RestartToken string    `json:"restartToken,omitempty"`
+	CreatedAt    time.Time `json:"createdAt"`
 }
 
 // ResourceSpec 是工作负载容器资源规格（K8s Quantity 字符串）。

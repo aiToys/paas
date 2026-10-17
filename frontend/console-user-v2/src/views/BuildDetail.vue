@@ -17,6 +17,9 @@ const route = useRoute()
 const router = useRouter()
 const build = ref<BuildRunFull | null>(null)
 const loadFailed = ref(false)
+// 加载失败分类（评审 F7）：403 越权 / 404 不存在 / 其他（网络/服务异常）——
+// 不再把一切失败解释成「已删除」误导排障。
+const loadErrKind = ref<'forbidden' | 'notfound' | 'error'>('error')
 const logBox = ref<HTMLPreElement | null>(null)
 
 // 实时日志片段（SSE 追加）；终态回落 build.log 全量。
@@ -57,7 +60,9 @@ function startStream(id: string) {
 async function load() {
   try {
     const resp = await fetchAuth(`/api/buildruns/${route.params.id}`)
-    if (!resp.ok) throw new Error('not found')
+    if (resp.status === 403) { loadErrKind.value = 'forbidden'; throw new Error('forbidden') }
+    if (resp.status === 404) { loadErrKind.value = 'notfound'; throw new Error('not found') }
+    if (!resp.ok) { loadErrKind.value = 'error'; throw new Error(`HTTP ${resp.status}`) }
     const j = await resp.json()
     const fresh: BuildRunFull = j?.data ?? j
     const prev = build.value
@@ -69,7 +74,8 @@ async function load() {
       closeStream()
     }
     loadFailed.value = false
-  } catch {
+  } catch (e) {
+    if (String(e).includes('Failed to fetch') || String(e).includes('NetworkError')) loadErrKind.value = 'error'
     loadFailed.value = true
   }
 }
@@ -110,7 +116,11 @@ const fmtTime = (iso?: string) => (iso ?? '').replace('T', ' ').slice(0, 19) || 
       <a class="back" @click="router.back()">← 返回</a>
     </div>
 
-    <div v-if="loadFailed" class="empty">构建不存在或已被删除</div>
+    <div v-if="loadFailed" class="empty">
+      <p v-if="loadErrKind === 'forbidden'">无权查看该构建（跨租户或权限不足）</p>
+      <p v-else-if="loadErrKind === 'notfound'">构建不存在或已被删除</p>
+      <p v-else>加载失败（服务异常或网络中断）——<a class="retry-link" @click="load">重试</a></p>
+    </div>
     <template v-else-if="build">
       <div class="card head-card">
         <div class="head-main">
@@ -158,6 +168,7 @@ const fmtTime = (iso?: string) => (iso ?? '').replace('T', ' ').slice(0, 19) || 
 .meta { font-size: 12px; color: var(--text-dim); }
 .msg { margin: 8px 0 0; font-size: 12.5px; color: var(--text-faint); }
 .empty { padding: 60px 0; text-align: center; font-size: 13px; color: var(--text-faint); }
+.retry-link { color: var(--brand); cursor: pointer; }
 .loading-block { height: 200px; }
 .log-card { padding-bottom: 8px; }
 .log {

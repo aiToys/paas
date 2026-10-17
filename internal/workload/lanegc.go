@@ -41,9 +41,13 @@ type LaneOverrideCleaner interface {
 
 // LaneStatusStore 泳道实体的模式/状态查询（依赖倒置：workload 不 import lane）。
 // Mode 返回 lane.Mode；无实体（纯遗留泳道）返 "" 照旧回收。
+// Closed 标记实体是否已 closed——closed 泳道的遗留工作负载（首关回收部分失败的）
+// Sweep 立即清扫，不等 TTL 也不受 permanent 跳过约束（spec 2026-10-17 B：可恢复回收，
+// 常驻泳道关闭后的失败重试不依赖普通 TTL 路径）。
 // MarkClosed 回收后同步实体 closed（无实体忽略；best-effort，失败不阻断回收）。
 type LaneStatusStore interface {
 	Mode(ctx context.Context, envID, name string) (string, error)
+	Closed(ctx context.Context, envID, name string) (bool, error)
 	MarkClosed(ctx context.Context, envID, name string) error
 }
 
@@ -116,9 +120,19 @@ func (g *LaneGC) Sweep(ctx context.Context) int {
 			continue
 		}
 		// 泳道实体联动：Mode=permanent（常驻联调）跳过；查询失败也跳过（保守，下轮再试）。
+		// 例外：实体已 closed（首关回收部分失败遗留）——立即清扫不等 TTL，也不受
+		// permanent 跳过约束（关闭语义优先于常驻属性，spec 2026-10-17 B 可恢复回收）。
+		closed := false
 		if g.Lanes != nil {
 			mode, err := g.Lanes.Mode(wctx, w.EnvID, w.LaneID)
-			if err != nil || mode == laneModePermanent {
+			if err != nil {
+				continue
+			}
+			closed, err = g.Lanes.Closed(wctx, w.EnvID, w.LaneID)
+			if err != nil {
+				continue
+			}
+			if mode == laneModePermanent && !closed {
 				continue
 			}
 		}
@@ -139,8 +153,8 @@ func (g *LaneGC) Sweep(ctx context.Context) int {
 		if act.Last.After(idleSince) {
 			idleSince = act.Last
 		}
-		if now.Sub(idleSince) <= ttl {
-			continue // 仍在 TTL 内
+		if !closed && now.Sub(idleSince) <= ttl {
+			continue // 仍在 TTL 内（closed 遗留不受 TTL 约束，见上）
 		}
 		if err := g.Repos.Delete(wctx, w.ID); err != nil {
 			g.logf("laneGC: delete %s: %v", w.ID, err)
@@ -202,39 +216,52 @@ func (g *LaneGC) cleanLaneOverrides(wctx context.Context, tenantID, envID, laneN
 	}
 }
 
-// ReclaimLane 同步回收某条泳道的全部工作负载（lane handler 关闭泳道时调用）。
+// ReclaimResult 同步回收的结构化结果（spec 2026-10-17 B：部分删除失败不得假报全部回收）。
+type ReclaimResult struct {
+	Reclaimed int      // 成功删除数
+	FailedIDs []string // 删除失败的工作负载 ID（遗留：可重试 DELETE 或 Sweep closed 清扫兜底）
+}
+
+// ReclaimLane 同步回收某条泳道的全部工作负载（lane handler 关闭泳道/重试时调用；幂等——
+// 已删的不在 List 结果中，重复调用只处理遗留）。
 // 逐 workload：派生租户 ctx -> Delete -> Quota(-1) -> 审计 lane_close（detail 含回收数由调用方拼装）。
 // 仅管删：TTL 判定/prod 跳过/活跃 run 阻止在 Sweep 层或 handler Close 前置完成。
-// 单个删除失败继续删其余（best-effort，剩余遗留由 GC 兜底清扫），返回成功删除数。
-func (g *LaneGC) ReclaimLane(ctx context.Context, tenantID, envID, laneName string) (int, error) {
+// 单个删除失败继续删其余（best-effort，失败 ID 上报调用方呈现，遗留由 GC closed 清扫兜底）。
+// 基线保护（spec 2026-10-17 L1 回收层）：default 拒绝——回收器是删除基线全部工作负载的
+// 最后一环，不能只依赖上游 handler 拦截。
+func (g *LaneGC) ReclaimLane(ctx context.Context, tenantID, envID, laneName string) (ReclaimResult, error) {
+	var res ReclaimResult
+	if laneName == "" || laneName == LaneDefault {
+		return res, fmt.Errorf("基线 default 不允许回收（系统保留）")
+	}
 	if ctx.Err() != nil {
-		return 0, ctx.Err()
+		return res, ctx.Err()
 	}
 	wctx := tenant.WithTenant(ctx, tenantID) // store 层强制租户过滤
 	// List 空参数 = 跨应用全类型，按 (env, lane) 过滤。
 	wls, err := g.Repos.List(wctx, envID, "", laneName, "", "")
 	if err != nil {
-		return 0, err
+		return res, err
 	}
-	deleted := 0
 	for _, w := range wls {
 		if ctx.Err() != nil {
 			break // 进程退出：剩余遗留由 GC 兜底
 		}
 		if err := g.Repos.Delete(wctx, w.ID); err != nil {
 			g.logf("laneGC: reclaim delete %s: %v", w.ID, err)
+			res.FailedIDs = append(res.FailedIDs, w.ID)
 			continue
 		}
 		g.afterReclaim(wctx, w, 0)
-		deleted++
+		res.Reclaimed++
 	}
 	// 关闭即回收：覆盖清理不与删除数耦合——permanent 泳道/已无 workload 的泳道关闭时
-	// deleted=0，但配置覆盖必须清（e2e 实测：否则发现端点仍返回已死泳道的覆盖值）。
+	// reclaimed=0，但配置覆盖必须清（e2e 实测：否则发现端点仍返回已死泳道的覆盖值）。
 	g.cleanLaneOverrides(wctx, tenantID, envID, laneName)
-	if deleted > 0 {
+	if res.Reclaimed > 0 {
 		g.markLaneClosed(wctx, envID, laneName)
 	}
-	return deleted, nil
+	return res, nil
 }
 
 func (g *LaneGC) logf(format string, args ...any) {
