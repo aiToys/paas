@@ -18,7 +18,9 @@ const filtered = computed(() => models.value.filter((m) =>
   (!filters.q || (m.id + (m.name ?? '') + (m.description ?? '')).toLowerCase().includes(filters.q.trim().toLowerCase())) &&
   (!filters.vendor || m.vendor === filters.vendor) && (!filters.capability || m.capabilities?.includes(filters.capability)),
 ))
-const rows = computed(() => filtered.value.slice((page.value - 1) * 20, page.value * 20))
+const rows = computed(() =>
+  filtered.value.slice((page.value - 1) * 20, page.value * 20).map((m) => ({ m, action: actionFor(m) }))
+)
 watch(filters, () => { page.value = 1 })
 async function load() {
   loading.value = true
@@ -35,6 +37,15 @@ function channelBadge(m: ModelInfo) {
   if (ch.some((c) => c.status === 'healthy')) return { label: '可用', cls: 'ok' }
   if (ch.some((c) => c.status === 'degraded')) return { label: '降级', cls: 'warn' }
   return { label: '异常', cls: 'err' }
+}
+// 操作列按能力分派（D1）：能力标签 ≠ 试玩已实现——chat 走对话试玩、embedding 走向量测试，
+// 其余能力不提供「用 chat 请求代替」的假入口（设计 §2 动作表）。
+type RowAction = { kind: 'chat' } | { kind: 'embedding' } | { kind: 'none', reason: string }
+function actionFor(m: ModelInfo): RowAction {
+  const caps = m.capabilities ?? []
+  if (caps.includes('chat')) return { kind: 'chat' }
+  if (caps.includes('embedding')) return { kind: 'embedding' }
+  return { kind: 'none', reason: `该模型能力为 ${caps.join(' / ') || '未标注'}，控制台暂不支持此能力试玩，请通过 API 接入。` }
 }
 </script>
 <template>
@@ -54,7 +65,15 @@ function channelBadge(m: ModelInfo) {
       <div class="table-scroll" data-table-scroll tabindex="0">
 <table class="list-table model-table">
 <thead><tr><th scope="col">模型</th><th scope="col">供应商</th><th scope="col">上下文</th><th scope="col">能力</th><th scope="col">价格（¥ / 百万 Token）</th><th scope="col">通道状态</th><th scope="col">操作</th></tr></thead>
-        <tbody><tr v-for="m in rows" :key="m.id"><td><div class="name-cell"><strong>{{ m.name || m.id }}</strong><code class="s-desc" :title="m.id">{{ m.id }}</code><span v-if="m.description" class="s-desc" :title="m.description">{{ m.description }}</span></div></td><td>{{ m.vendor }}</td><td class="mono">{{ fmtContext(m.contextWindow) }}</td><td><span v-for="c in m.capabilities ?? []" :key="c" class="cap-tag">{{ c }}</span></td><td><div class="price-pair"><span>输入 <b>{{ m.inputPrice ?? '—' }}</b></span><span>输出 <b>{{ m.outputPrice ?? '—' }}</b></span></div></td><td><span class="status" :class="channelBadge(m).cls">{{ channelBadge(m).label }}</span></td><td><RouterLink :to="{ path: '/playground', query: { model: m.id } }" class="act small">试玩 →</RouterLink></td></tr></tbody>
+        <tbody>
+<tr v-for="{ m, action } in rows" :key="m.id">
+<td><div class="name-cell"><strong>{{ m.name || m.id }}</strong><code class="s-desc" :title="m.id">{{ m.id }}</code><span v-if="m.description" class="s-desc" :title="m.description">{{ m.description }}</span></div></td><td>{{ m.vendor }}</td><td class="mono">{{ fmtContext(m.contextWindow) }}</td><td><span v-for="c in m.capabilities ?? []" :key="c" class="cap-tag">{{ c }}</span></td><td><div class="price-pair"><span>输入 <b>{{ m.inputPrice ?? '—' }}</b></span><span>输出 <b>{{ m.outputPrice ?? '—' }}</b></span></div></td><td><span class="status" :class="channelBadge(m).cls">{{ channelBadge(m).label }}</span></td><td>
+            <RouterLink v-if="action.kind === 'chat'" :to="{ path: '/playground', query: { model: m.id } }" class="act small">对话试玩 →</RouterLink>
+            <RouterLink v-else-if="action.kind === 'embedding'" :to="{ path: '/playground', query: { model: m.id } }" class="act small">向量测试 →</RouterLink>
+            <el-tooltip v-else :content="action.reason" placement="top"><span class="no-action">暂不支持试玩</span></el-tooltip>
+          </td>
+</tr>
+</tbody>
       </table>
 </div><TablePager v-model="page" :total="filtered.length" />
     </template>
@@ -66,4 +85,5 @@ function channelBadge(m: ModelInfo) {
 .model-table td:first-child { max-width: 280px; }
 .price-pair { display: flex; flex-direction: column; gap: 4px; white-space: nowrap; font-size: 12px; color: var(--text-faint); }
 .price-pair b { color: var(--text-dim); font-weight: 500; font-family: var(--font-mono); }
+.no-action { color: var(--text-faint); font-size: 12px; cursor: help; border-bottom: 1px dashed var(--border, #d0d5dd); }
 </style>

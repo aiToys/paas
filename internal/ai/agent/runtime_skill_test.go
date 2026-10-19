@@ -52,7 +52,7 @@ func TestBuildSystemInjectsSkills(t *testing.T) {
 	a := Agent{
 		ID: "a", Enabled: true, Model: "m", MaxSteps: 1,
 		SystemPrompt: "你是助手",
-		Skills:       []string{"sk-on", "sk-off", "sk-missing"},
+		Skills:       []string{"sk-on"},
 	}
 	err := rt.runLoop(context.Background(), fp, a, []provider.Message{{Role: "user", Content: "hi"}}, func(provider.Chunk) {})
 	if err != nil {
@@ -63,5 +63,19 @@ func TestBuildSystemInjectsSkills(t *testing.T) {
 	}
 	if strings.Contains(fp.system, "不应出现") {
 		t.Errorf("禁用的 skill 被注入: %q", fp.system)
+	}
+}
+
+func TestUnavailableDependenciesStopBeforeProvider(t *testing.T) {
+	for _, a := range []Agent{
+		{Skills: []string{"missing"}}, {Tools: []string{"missing"}},
+		{KnowledgeBases: []string{"missing"}}, {PromptRef: "missing"},
+	} {
+		a.MaxSteps = 1
+		r := &Runtime{}
+		p := &echoFakeProvider{}
+		if err := r.runLoop(context.Background(), p, a, []provider.Message{{Role: "user", Content: "hi"}}, func(provider.Chunk) { t.Error("失败依赖不应产生回答") }); err == nil {
+			t.Fatalf("依赖失败不应静默降级: %+v", a)
+		}
 	}
 }

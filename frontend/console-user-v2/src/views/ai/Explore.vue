@@ -132,6 +132,20 @@ const installHint: Record<string, string> = {
   workflow: '内嵌的 Agent/工具会作为副本一并安装（凭证剔除）；工作流默认停用，补齐配置后再启用。',
 }
 
+// 安装后待办（C5：安装≠可用，按类型列明需要补什么才算就绪）
+const INSTALL_TODO: Record<string, string[]> = {
+  tool: ['补填凭证（serverURL / apiKey 不随安装带入，未补填前调用会失败）'],
+  knowledgebase: ['绑定本租户向量库/对象存储实例（需已创建）', '上传文档并等待索引完成（无文档的 KB 检索为空）'],
+  workflow: ['检查节点引用的 Agent/工具副本配置（凭证已剔除）', '验证后手动启用（安装后默认停用）'],
+  agent: ['到 Agent 列表查看「依赖就绪」：模型/工具/知识库引用需在本租户补齐'],
+  prompt: [],
+  skill: [],
+}
+
+interface InstallDone { entityType: string; name: string }
+const showInstallDone = ref(false)
+const installDone = ref<InstallDone | null>(null)
+
 async function install(it: MarketItem) {
   await ElMessageBox.confirm(
     `安装「${it.name}」到本租户？${installHint[it.entityType] ?? ''}安装后与源头独立演进。`,
@@ -140,14 +154,22 @@ async function install(it: MarketItem) {
   installing.value = true
   try {
     const res = await installFromMarket(it.id)
-    ElMessage.success(`已安装为「${res.name}」`)
+    // 安装≠可用：结果 dialog 列待办，而不是 toast 后直接跳走（C5）
+    installDone.value = { entityType: res.entityType, name: res.name }
+    showInstallDone.value = true
     detail.value = null
-    router.push(entityTypeRoute[res.entityType] ?? '/ai/explore')
+    load()
   } catch (e) {
     ElMessage.error(apiError(e, '安装失败'))
   } finally {
     installing.value = false
   }
+}
+
+function gotoInstalled() {
+  if (!installDone.value) return
+  router.push(entityTypeRoute[installDone.value.entityType] ?? '/ai/explore')
+  showInstallDone.value = false
 }
 
 function fmtDate(s: string) {
@@ -252,6 +274,26 @@ onMounted(load)
         </div>
       </template>
     </el-drawer>
+
+    <!-- 安装结果与待办（安装≠可用） -->
+    <el-dialog v-model="showInstallDone" title="安装完成" width="480px">
+      <template v-if="installDone">
+        <p class="install-done-name">
+          已安装为「{{ installDone.name }}」（{{ typeLabel(installDone.entityType) }}），与源头独立演进。
+        </p>
+        <template v-if="(INSTALL_TODO[installDone.entityType] ?? []).length">
+          <p class="todo-title">接下来需要补齐（安装 ≠ 可用）：</p>
+          <ul class="todo-list">
+            <li v-for="(td, i) in INSTALL_TODO[installDone.entityType]" :key="i">{{ td }}</li>
+          </ul>
+        </template>
+        <p v-else class="todo-title">此类型安装后即可使用，无需额外配置。</p>
+      </template>
+      <template #footer>
+        <el-button @click="showInstallDone = false">稍后处理</el-button>
+        <el-button type="primary" @click="gotoInstalled">去处理</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -307,4 +349,7 @@ onMounted(load)
 }
 .hint { margin-top: 12px; }
 .drawer-actions { margin-top: 16px; display: flex; justify-content: flex-end; }
+.install-done-name { margin: 0 0 12px; font-size: 14px; line-height: 1.6; }
+.todo-title { margin: 0 0 6px; font-size: 13px; color: var(--el-text-color-secondary); }
+.todo-list { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.8; color: var(--el-text-color-regular); }
 </style>

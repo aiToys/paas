@@ -21,6 +21,9 @@ type Repo struct {
 	// engine 评估引擎（R4-C2 后台评估 + 状态机 + webhook 出站）。
 	// 注入后 ListAlerts 读引擎快照；nil 降级即时评估（现状行为）。
 	engine AlertLister
+	// prober 采集质量探测（spec 2026-10-17 专项04 §5）。nil = 未接真实采集源，
+	// ProbeMetricsQuality 返回「未接入」报告（前端展示接入引导，不伪造探测结果）。
+	prober observability.QualityProber
 }
 
 // AlertLister 评估引擎的最小消费接口（避免 compose→alert 循环 import）。
@@ -35,6 +38,21 @@ func New(rules observability.RuleStore, metrics observability.MetricsReader, log
 
 // WithEngine 注入告警评估引擎（后台周期评估 + pending/firing/resolved 状态机 + webhook 出站）。
 func (r *Repo) WithEngine(e AlertLister) *Repo { r.engine = e; return r }
+
+// WithQualityProber 注入采集质量探测器（real MetricsStore；未接 Prometheus 时不注入）。
+func (r *Repo) WithQualityProber(p observability.QualityProber) *Repo { r.prober = p; return r }
+
+// ProbeMetricsQuality 采集质量诊断（spec 2026-10-17 专项04 §5）。未注入 prober =
+// 未接真实采集源，返回「未接入」报告——不伪造探测结果，前端据此展示接入引导。
+func (r *Repo) ProbeMetricsQuality(ctx context.Context, targetType, targetID string) (observability.QualityReport, error) {
+	if r.prober == nil {
+		return observability.QualityReport{
+			Source: observability.QualitySourceMock,
+			Note:   "未接入真实采集源（PAAS_PROM_URL 未配置），当前指标为演示数据；配置后此处置为采集覆盖探测",
+		}, nil
+	}
+	return r.prober.ProbeQuality(ctx, targetType, targetID)
+}
 
 func (r *Repo) ListMetrics(ctx context.Context, targetType, targetID, name string) ([]observability.MetricSeries, error) {
 	return r.metrics.ListMetrics(ctx, targetType, targetID, name)

@@ -113,8 +113,12 @@ type WorkflowRun struct {
 	Status     string            `json:"status"`
 	Inputs     map[string]string `json:"inputs"`
 	NodeRuns   []NodeRun         `json:"nodeRuns"`
-	CreatedAt  time.Time         `json:"createdAt"`
-	FinishedAt time.Time         `json:"finishedAt,omitempty"`
+	// DefSnapshot Start 时固化的定义快照（WF-02）：进程重启后 paused 恢复、UI 解释
+	// 旧运行都以它为准——定义后续修改/删除不影响在跑与历史 run 的语义。
+	// nil=存量 run（快照能力上线前创建），消费方 fallback 当前定义并如实标注边界。
+	DefSnapshot *WorkflowDef `json:"defSnapshot,omitempty"`
+	CreatedAt   time.Time    `json:"createdAt"`
+	FinishedAt  time.Time    `json:"finishedAt,omitempty"`
 }
 
 // —— 定义校验（结构完整性；Agent/Tool 存在性由引擎执行期校验）——

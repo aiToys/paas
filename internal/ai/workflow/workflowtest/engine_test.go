@@ -375,6 +375,44 @@ func TestApproveWithoutWaiterResumes(t *testing.T) {
 	}
 }
 
+// TestRunDefSnapshotSurvivesDefChange（WF-02）：run 启动后定义被改成完全不同的拓扑，
+// paused 恢复必须用 Start 时固化的快照续跑（原拓扑走完），而不是当前定义。
+func TestRunDefSnapshotSurvivesDefChange(t *testing.T) {
+	repo := memory.NewStore()
+	d, err := repo.Create(ctxTenant(), ticketDef())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e1 := workflow.NewEngine(repo, &fakeAgents{}, nil)
+	run, err := e1.Start(ctxTenant(), d, map[string]string{"ticket": "要求退款"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, repo, run.ID, workflow.StatusPaused)
+	fresh, _ := repo.GetRun(ctxTenant(), run.ID)
+	if fresh.DefSnapshot == nil {
+		t.Fatal("Start 创建的 run 应固化定义快照")
+	}
+	// 破坏性改定义：换成 start→end 直连（当前定义下 af/cls/route 均不存在）
+	d.Nodes = []workflow.NodeDef{
+		{ID: "s", Type: workflow.NodeStart, NextID: "e"},
+		{ID: "e", Type: workflow.NodeEnd},
+	}
+	if _, err := repo.Update(ctxTenant(), d); err != nil {
+		t.Fatal(err)
+	}
+	// 全新引擎（模拟进程重启后无等待者）approve：走快照续跑
+	e2 := workflow.NewEngine(repo, &fakeAgents{}, nil)
+	if err := e2.Approve(ctxTenant(), run.ID, "af"); err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	waitStatus(t, repo, run.ID, workflow.StatusSucceeded)
+	final := mustGetRun(t, repo, run.ID)
+	if got := strings.Join(nodeIDs(final), ","); got != "s,cls,route,af,e" {
+		t.Fatalf("快照续跑应走启动时拓扑 s,cls,route,af,e，got %s（疑似用了当前定义）", got)
+	}
+}
+
 // Sweep：running 孤儿标 failed「进程重启中断」，paused 保留（等 Approve 拉起）。
 func TestSweepInterrupted(t *testing.T) {
 	repo := memory.NewStore()

@@ -431,6 +431,27 @@ func (s *Store) DeleteRoute(ctx context.Context, id string) error {
 	return nil
 }
 
+// SetRouteApplyStatus 回写数据面下发状态（ApplyRepo 装饰器专用；跨租户 not found）。
+func (s *Store) SetRouteApplyStatus(ctx context.Context, id, status, applyErr string) error {
+	tid, err := tenant.IDOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ex, ok := s.routes[id]
+	if !ok || ex.TenantID != tid {
+		return fmt.Errorf("路由不存在: %s", id)
+	}
+	ex.ApplyStatus = status
+	ex.ApplyError = applyErr
+	if status == "applied" {
+		ex.AppliedAt = time.Now()
+	}
+	s.routes[id] = ex
+	return nil
+}
+
 func seedRoutes() []governance.Route {
 	t := time.Now()
 	return []governance.Route{

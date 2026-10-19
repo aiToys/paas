@@ -160,6 +160,14 @@ type Route struct {
 	StripPath bool      `json:"stripPath"`          // 转发时剥离前缀
 	Enabled   bool      `json:"enabled"`
 	UpdatedAt time.Time `json:"updatedAt"`
+
+	// 数据面下发状态（spec 2026-10-17 专项04 §4「配置 → K8s 对象」证据链）：
+	// ApplyRepo 装饰器在每次写投影后回写。""=未下发（Host 空/数据面未启用）；
+	// applied=Ingress 已聚合下发；failed=下发失败（ApplyError 记脱敏原因）。
+	// 注意这是「配置已下发」而非「公网可达」——DNS/TLS/HTTP 探测平台未做，前端不混淆。
+	ApplyStatus string    `json:"applyStatus,omitempty"`
+	ApplyError  string    `json:"applyError,omitempty"`
+	AppliedAt   time.Time `json:"appliedAt,omitempty"`
 }
 
 // Validate 校验路由：Name/Path/ServiceID 非空、Path 以 / 开头且不含 ..（防异常 path 下发 Ingress）、

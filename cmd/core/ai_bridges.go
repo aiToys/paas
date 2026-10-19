@@ -280,7 +280,11 @@ func (a agentDispatcherAdapter) ServeSSE(w http.ResponseWriter, r *http.Request,
 		}
 		return err
 	}
-	return a.rt.ServeSSE(w, r.Context(), agentID, msgs)
+	err := a.rt.ServeSSE(w, r.Context(), agentID, msgs)
+	if err != nil && strings.HasPrefix(w.Header().Get("Content-Type"), "text/event-stream") {
+		return fmt.Errorf("%w: %v", gateway.ErrAgentStreamReported, err)
+	}
+	return err
 }
 
 // ServeSSEConv 带会话 ID（多轮记忆）的执行。
@@ -295,7 +299,11 @@ func (a agentDispatcherAdapter) ServeSSEConv(w http.ResponseWriter, r *http.Requ
 		}
 		return err
 	}
-	return a.rt.ServeSSEConv(w, r.Context(), agentID, conversationID, msgs)
+	err := a.rt.ServeSSEConv(w, r.Context(), agentID, conversationID, msgs)
+	if err != nil && strings.HasPrefix(w.Header().Get("Content-Type"), "text/event-stream") {
+		return fmt.Errorf("%w: %v", gateway.ErrAgentStreamReported, err)
+	}
+	return err
 }
 
 // —— 工作流引擎桥接（workflow 依赖倒置接口 -> agent.Runtime / mcp client）——

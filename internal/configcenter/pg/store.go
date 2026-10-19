@@ -672,12 +672,20 @@ func (s *Store) UpsertLaneOverride(ctx context.Context, o configcenter.LaneOverr
 	if err := o.Validate(); err != nil {
 		return configcenter.LaneOverride{}, err
 	}
+	tx, err := s.db.Pool().Begin(ctx)
+	if err != nil {
+		return configcenter.LaneOverride{}, err
+	}
+	defer tx.Rollback(ctx)
+	if err = lockLane(ctx, tx, tid, o.AppID, o.EnvID, o.LaneID); err != nil {
+		return configcenter.LaneOverride{}, err
+	}
 	if o.ID == "" {
 		o.ID = newCCID("ovr")
 	}
 	o.TenantID = tid
 	o.UpdatedAt = time.Now()
-	row := s.db.Pool().QueryRow(ctx, `
+	row := tx.QueryRow(ctx, `
 INSERT INTO cc_lane_overrides (`+ovCols+`)
 VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
 ON CONFLICT (tenant_id, app_id, env_id, lane_id, key) DO UPDATE
@@ -689,6 +697,9 @@ RETURNING `+ovCols,
 	if err := scanOverride(row, &saved); err != nil {
 		return configcenter.LaneOverride{}, err
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return configcenter.LaneOverride{}, err
+	}
 	return saved, nil
 }
 
@@ -698,7 +709,15 @@ func (s *Store) DeleteLaneOverride(ctx context.Context, appID, envID, laneID, ke
 	if err != nil {
 		return err
 	}
-	tag, err := s.db.Pool().Exec(ctx,
+	tx, err := s.db.Pool().Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err = lockLane(ctx, tx, tid, appID, envID, laneID); err != nil {
+		return err
+	}
+	tag, err := tx.Exec(ctx,
 		`DELETE FROM cc_lane_overrides WHERE tenant_id=$1 AND app_id=$2 AND env_id=$3 AND lane_id=$4 AND key=$5`,
 		tid, appID, envID, laneID, key)
 	if err != nil {
@@ -707,7 +726,7 @@ func (s *Store) DeleteLaneOverride(ctx context.Context, appID, envID, laneID, ke
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("%w: %s", configcenter.ErrLaneOverrideNotFound, key)
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 // ListLaneOverrides 按 (app, env, lane) 过滤（lane 空=该 env 全部泳道），按 Key 升序。
@@ -761,6 +780,124 @@ func (s *Store) ListLaneOverridesForClean(ctx context.Context, envID, laneID str
 		out = append(out, o)
 	}
 	return out, rows.Err()
+}
+
+// ApplyLaneOverrides 批次原子应用泳道覆盖变更集（接口注释见 repository.go；spec 2026-10-17 专项04 §3）。
+// 单事务：事务级泳道锁（含空集及单 key 写）→ 预览版本比较 →
+// 逐 op upsert（ON CONFLICT）/ remove（幂等删）→ upsert 无基线 draft 时写占位 → Commit。
+// 任一步失败整体回滚（部分写入不留库）。
+func (s *Store) ApplyLaneOverrides(ctx context.Context, appID, envID, laneID string, ops []configcenter.LaneOverrideOp, expectedCount int, revision ...string) ([]configcenter.LaneOverride, error) {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// 先校验全部 op（开事务前拦截非法输入）。
+	for _, op := range ops {
+		switch op.Action {
+		case configcenter.OpUpsert, configcenter.OpRemove:
+			if op.Key == "" {
+				return nil, fmt.Errorf("%s 缺 key", op.Action)
+			}
+		default:
+			return nil, fmt.Errorf("未知 action %q", op.Action)
+		}
+	}
+	tx, err := s.db.Pool().Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // 已提交或失败均无害
+	if err = lockLane(ctx, tx, tid, appID, envID, laneID); err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, `SELECT `+ovCols+` FROM cc_lane_overrides WHERE tenant_id=$1 AND app_id=$2 AND env_id=$3 AND lane_id=$4 ORDER BY key`, tid, appID, envID, laneID)
+	if err != nil {
+		return nil, err
+	}
+	current := []configcenter.LaneOverride{}
+	for rows.Next() {
+		var o configcenter.LaneOverride
+		if err = scanOverride(rows, &o); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		current = append(current, o)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	if len(revision) > 0 && revision[0] != configcenter.LaneRevision(current) {
+		return nil, configcenter.ErrLaneOverrideConflict
+	}
+	if expectedCount >= 0 && expectedCount != len(current) {
+		return nil, configcenter.ErrLaneOverrideConflict
+	}
+	now := time.Now()
+	for _, op := range ops {
+		switch op.Action {
+		case configcenter.OpUpsert:
+			if _, err = tx.Exec(ctx, `
+INSERT INTO cc_lane_overrides (`+ovCols+`)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+ON CONFLICT (tenant_id, app_id, env_id, lane_id, key) DO UPDATE
+    SET value      = EXCLUDED.value,
+        updated_at = EXCLUDED.updated_at`,
+				newCCID("ovr"), tid, appID, envID, laneID, op.Key, op.Value, now); err != nil {
+				return nil, err
+			}
+			if err = s.ensureDraftPlaceholderTx(ctx, tx, tid, appID, envID, op, now); err != nil {
+				return nil, err
+			}
+		case configcenter.OpRemove:
+			// 幂等：0 行删除视为成功（批次语义=「确保无覆盖」）。
+			if _, err = tx.Exec(ctx,
+				`DELETE FROM cc_lane_overrides WHERE tenant_id=$1 AND app_id=$2 AND env_id=$3 AND lane_id=$4 AND key=$5`,
+				tid, appID, envID, laneID, op.Key); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return s.ListLaneOverrides(ctx, appID, envID, laneID)
+}
+
+// ensureDraftPlaceholderTx 事务内保证 (app, env) 派生 ns 存在且 key 有 draft 占位
+// （已有同 key draft 不覆盖——用户已编辑的基线草稿保持原值）。tx 内执行。
+func (s *Store) ensureDraftPlaceholderTx(ctx context.Context, tx pgx.Tx, tid, appID, envID string, op configcenter.LaneOverrideOp, now time.Time) error {
+	var nsID string
+	err := tx.QueryRow(ctx,
+		`SELECT id FROM cc_namespaces WHERE tenant_id=$1 AND scope='app' AND app_id=$2 AND env_id=$3`,
+		tid, appID, envID).Scan(&nsID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// 懒建派生 ns（UNIQUE (tenant_id, name) 冲突=手工共享 ns 抢占派生名，映射 NameTaken）。
+		nsID = newCCID("ns")
+		_, err = tx.Exec(ctx,
+			`INSERT INTO cc_namespaces (`+nsCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+			nsID, tid, configcenter.AppNSName(appID, envID), configcenter.ScopeApp, appID, envID, "", "", now)
+		if err != nil {
+			if storagepg.IsUniqueViolation(err) {
+				return fmt.Errorf("%w: %s", configcenter.ErrNamespaceNameTaken, configcenter.AppNSName(appID, envID))
+			}
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+	typ := op.Type
+	if typ == "" {
+		typ = configcenter.TypeText
+	}
+	// 已有 draft 则跳过（不覆盖用户编辑）。
+	_, err = tx.Exec(ctx, `
+INSERT INTO cc_items (`+itemCols+`)
+VALUES ($1,$2,$3,$4,$5,$6,$7)
+ON CONFLICT (namespace_id, key) DO NOTHING`,
+		newCCID("item"), tid, nsID, op.Key, op.Value, typ, now)
+	return err
 }
 
 // ---- 共享配置引用（shared ns → 应用派生 ns）----
@@ -938,4 +1075,11 @@ VALUES ($1,$2,$3,$4,$5,'text',now()) ON CONFLICT DO NOTHING`,
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+// lockLane 串行化同一租户/应用/环境/泳道的所有覆盖写，空集也有锁。
+func lockLane(ctx context.Context, tx pgx.Tx, tid, app, env, lane string) error {
+	key, _ := json.Marshal([]string{tid, app, env, lane})
+	_, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, string(key))
+	return err
 }

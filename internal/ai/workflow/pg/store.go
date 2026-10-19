@@ -25,7 +25,7 @@ func NewStore(db *storagepg.DB) *Store { return &Store{db: db} }
 
 // 列顺序与 scan 对齐（列错位 panic 警示）。
 const defCols = `id, tenant_id, name, "desc", nodes, enabled, created_at, updated_at`
-const runCols = `id, tenant_id, workflow_id, status, inputs, node_runs, created_at, finished_at`
+const runCols = `id, tenant_id, workflow_id, status, inputs, node_runs, def_snapshot, created_at, finished_at`
 
 func (s *Store) newID(prefix string) string {
 	s.seq.Add(1)
@@ -180,14 +180,18 @@ func (s *Store) CreateRun(ctx context.Context, in workflow.WorkflowRun) (workflo
 	}
 	inputs, _ := json.Marshal(mapOrDefault(in.Inputs))
 	nrs, _ := json.Marshal(in.NodeRuns)
+	var snap []byte
+	if in.DefSnapshot != nil {
+		snap, _ = json.Marshal(in.DefSnapshot)
+	}
 	in.ID = s.newID("wfr")
 	in.TenantID = tid
 	if in.CreatedAt.IsZero() {
 		in.CreatedAt = time.Now()
 	}
 	err = s.db.Pool().QueryRow(ctx,
-		`INSERT INTO ai_workflow_runs (`+runCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-		in.ID, in.TenantID, in.WorkflowID, in.Status, inputs, nrs, in.CreatedAt, nilFinishAt(in.FinishedAt)).
+		`INSERT INTO ai_workflow_runs (`+runCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+		in.ID, in.TenantID, in.WorkflowID, in.Status, inputs, nrs, snap, in.CreatedAt, nilFinishAt(in.FinishedAt)).
 		Scan()
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return workflow.WorkflowRun{}, err
@@ -224,9 +228,9 @@ func (s *Store) GetRun(ctx context.Context, id string) (workflow.WorkflowRun, er
 
 func scanRun(row rowScanner) (workflow.WorkflowRun, error) {
 	var r workflow.WorkflowRun
-	var inputs, nrs []byte
+	var inputs, nrs, snap []byte
 	var finished *time.Time
-	if err := row.Scan(&r.ID, &r.TenantID, &r.WorkflowID, &r.Status, &inputs, &nrs, &r.CreatedAt, &finished); err != nil {
+	if err := row.Scan(&r.ID, &r.TenantID, &r.WorkflowID, &r.Status, &inputs, &nrs, &snap, &r.CreatedAt, &finished); err != nil {
 		return workflow.WorkflowRun{}, err
 	}
 	if len(inputs) > 0 {
@@ -238,6 +242,13 @@ func scanRun(row rowScanner) (workflow.WorkflowRun, error) {
 		if err := json.Unmarshal(nrs, &r.NodeRuns); err != nil {
 			return workflow.WorkflowRun{}, fmt.Errorf("node_runs 反序列化: %w", err)
 		}
+	}
+	if len(snap) > 0 {
+		var d workflow.WorkflowDef
+		if err := json.Unmarshal(snap, &d); err != nil {
+			return workflow.WorkflowRun{}, fmt.Errorf("def_snapshot 反序列化: %w", err)
+		}
+		r.DefSnapshot = &d
 	}
 	if finished != nil {
 		r.FinishedAt = *finished
@@ -252,6 +263,7 @@ func (s *Store) UpdateRun(ctx context.Context, in workflow.WorkflowRun) (workflo
 	}
 	inputs, _ := json.Marshal(mapOrDefault(in.Inputs))
 	nrs, _ := json.Marshal(in.NodeRuns)
+	// def_snapshot 有意不在 UPDATE 列：定义快照创建时固化后不可变（WF-02）
 	tag, err := s.db.Pool().Exec(ctx,
 		`UPDATE ai_workflow_runs SET status=$3, inputs=$4, node_runs=$5, finished_at=$6
 		 WHERE tenant_id=$1 AND id=$2`,

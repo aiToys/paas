@@ -62,6 +62,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case path == "/api/observability/metrics":
 		h.serveMetrics(w, r)
+	case path == "/api/observability/metrics/quality":
+		h.serveMetricsQuality(w, r)
 	case path == "/api/observability/alert-rules":
 		h.serveRuleCollection(w, r)
 	case strings.HasPrefix(path, "/api/observability/alert-rules/"):
@@ -167,6 +169,26 @@ func (h *Handler) serveMetrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputil.WriteData(w, list)
+}
+
+// serveMetricsQuality GET /api/observability/metrics/quality?targetType=&targetId=
+// 采集质量诊断（spec 2026-10-17 专项04 §5）：逐约定 metric 即时探测 ok/empty/failed，
+// 回答「为什么没有数据」。未接采集源返回 Source=memory 报告（前端展示接入引导）。
+func (h *Handler) serveMetricsQuality(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.allow(w, r, PermObservabilityRead) {
+		return
+	}
+	q := r.URL.Query()
+	report, err := h.repo.ProbeMetricsQuality(r.Context(), q.Get("targetType"), q.Get("targetId"))
+	if err != nil {
+		httputil.WriteServiceError(w, http.StatusBadRequest, err)
+		return
+	}
+	httputil.WriteData(w, report)
 }
 
 func (h *Handler) serveRuleCollection(w http.ResponseWriter, r *http.Request) {

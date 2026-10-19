@@ -22,6 +22,10 @@ var (
 // ErrLaneOverrideNotFound 泳道配置覆盖不存在（删除不存在的 key 时返回）。
 var ErrLaneOverrideNotFound = errors.New("泳道配置覆盖不存在")
 
+// ErrLaneOverrideConflict 批次变更集与当前覆盖数不符（并发漂移，handler 映射 409，
+// 前端应重新预览后重试——spec 2026-10-17 专项04 §3）。
+var ErrLaneOverrideConflict = errors.New("泳道覆盖已被并发修改，请重新预览")
+
 // 共享配置引用（shared ns → 应用派生 ns）。
 var (
 	// ErrRefNotFound 引用不存在（解除不存在的引用时返回）。

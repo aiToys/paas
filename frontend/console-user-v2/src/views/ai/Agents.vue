@@ -7,8 +7,10 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 const router = useRouter()
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchJSON, fetchAuth, respError, apiError } from '@/api'
+import { fetchJSON, fetchAuth, fetchSettled, respError, apiError } from '@/api'
 import Icon from '@/components/Icon.vue'
+import { chatEvent } from '@/domain/playground'
+import StatePanel from '@/components/StatePanel.vue'
 import { usePublish } from '@/composables/usePublish'
 
 interface Agent {
@@ -44,6 +46,10 @@ const kbs = ref<KB[]>([])
 const skills = ref<Skill[]>([])
 const prompts = ref<Prompt[]>([])
 const loading = ref(false)
+// 主数据失败文案（null=正常）：与「真的没有 Agent」区分开，避免失败变假空态
+const loadError = ref('')
+// 引用数据是否加载成功（就绪摘要用）：失败时对应维度判「未知」，不假装就绪
+const refsLoaded = ref({ models: false, tools: false, kbs: false, skills: false, prompts: false })
 
 // id -> 实体 索引（列表展示具名 tag 用）
 const toolById = computed(() => Object.fromEntries(tools.value.map((t) => [t.id, t])))
@@ -52,32 +58,97 @@ const skillById = computed(() => Object.fromEntries(skills.value.map((s) => [s.i
 
 async function load() {
   loading.value = true
+  loadError.value = ''
+  refsLoaded.value = { models: false, tools: false, kbs: false, skills: false, prompts: false }
   try {
+    // 主数据与引用数据独立结算（AI-01）：引用失败只影响对应下拉/tag，主列表照常展示
     const [a, m, t, k, s, p] = await Promise.all([
-      fetchJSON<Agent[]>('/api/agents'),
-      fetchJSON<Model[]>('/api/models'),
-      fetchJSON<Tool[]>('/api/tools'),
-      fetchJSON<KB[]>('/api/knowledgebases'),
-      fetchJSON<Skill[]>('/api/skills'),
-      fetchJSON<Prompt[]>('/api/prompts'),
+      fetchSettled<Agent[]>('/api/agents', '智能体'),
+      fetchSettled<Model[]>('/api/models', '模型'),
+      fetchSettled<Tool[]>('/api/tools', '工具'),
+      fetchSettled<KB[]>('/api/knowledgebases', '知识库'),
+      fetchSettled<Skill[]>('/api/skills', '技能'),
+      fetchSettled<Prompt[]>('/api/prompts', '提示词'),
     ])
-    agents.value = a
-    models.value = m
-    tools.value = t
-    kbs.value = k
-    skills.value = s
-    // PromptRef 下拉只展示各 name 的激活版本（去重）
-    const seen = new Set<string>()
-    prompts.value = p.filter((pr) => pr.active && !seen.has(pr.name) && seen.add(pr.name))
-  } catch (e) {
-    ElMessage.error(apiError(e, '加载 Agent 失败'))
+    if (a) agents.value = a
+    else loadError.value = '智能体列表加载失败，请重试'
+    if (m) { models.value = m; refsLoaded.value.models = true }
+    if (t) { tools.value = t; refsLoaded.value.tools = true }
+    if (k) { kbs.value = k; refsLoaded.value.kbs = true }
+    if (s) { skills.value = s; refsLoaded.value.skills = true }
+    if (p) {
+      // PromptRef 下拉只展示各 name 的激活版本（去重）
+      const seen = new Set<string>()
+      prompts.value = p.filter((pr) => pr.active && !seen.has(pr.name) && seen.add(pr.name))
+      refsLoaded.value.prompts = true
+    }
   } finally {
     loading.value = false
   }
 }
 
+// 依赖就绪摘要（C4 首期=本地元数据判断，不发起远程探活）：
+// 模型在目录 / 引用的工具存在且启用 / KB 存在 / Skill 存在且启用 / promptRef 有激活版本。
+// 引用数据加载失败 → 该维度「未知」（enabled=true 不等于就绪，不画健康徽标假装可用）。
+interface Readiness { state: 'ready' | 'blocked' | 'unknown'; issues: string[] }
+
+const readinessById = computed(() => {
+  const m: Record<string, Readiness> = {}
+  for (const a of agents.value) {
+    const issues: string[] = []
+    let unknown = false
+    if (refsLoaded.value.models) {
+      if (!models.value.some((x) => x.id === a.model)) issues.push(`模型 ${a.model} 不在模型目录`)
+    } else {
+      unknown = true
+    }
+    if (refsLoaded.value.tools) {
+      for (const tid of a.tools || []) {
+        const t = tools.value.find((x) => x.id === tid)
+        if (!t) issues.push(`工具 ${tid.slice(0, 12)} 不存在`)
+        else if (t.type !== 'mcp') issues.push(`工具「${t.name}」不支持智能体调用（仅 MCP）`)
+        else if (!t.enabled) issues.push(`工具「${t.name}」已禁用（运行会阻断）`)
+      }
+    } else if ((a.tools || []).length) {
+      unknown = true
+    }
+    if (refsLoaded.value.kbs) {
+      for (const kid of a.knowledgeBases || []) {
+        if (!kbs.value.some((x) => x.id === kid)) issues.push(`知识库 ${kid.slice(0, 12)} 不存在（检索失败会阻断）`)
+      }
+    } else if ((a.knowledgeBases || []).length) {
+      unknown = true
+    }
+    if (refsLoaded.value.skills) {
+      for (const sid of a.skills || []) {
+        const s = skills.value.find((x) => x.id === sid)
+        if (!s) issues.push(`技能 ${sid.slice(0, 12)} 不存在（运行会阻断）`)
+        else if (!s.enabled) issues.push(`技能「${s.name}」已禁用（运行会阻断）`)
+      }
+    } else if ((a.skills || []).length) {
+      unknown = true
+    }
+    if (!a.systemPrompt && a.promptRef) {
+      if (refsLoaded.value.prompts) {
+        if (!prompts.value.some((p) => p.name === a.promptRef)) issues.push(`提示词「${a.promptRef}」无激活版本`)
+      } else {
+        unknown = true
+      }
+    }
+    m[a.id] = unknown
+      ? { state: 'unknown', issues }
+      : issues.length ? { state: 'blocked', issues } : { state: 'ready', issues }
+  }
+  return m
+})
+
+const READINESS_LABEL: Record<Readiness['state'], string> = { ready: '引用完整', blocked: '未就绪', unknown: '未知' }
+const READINESS_TAG: Record<Readiness['state'], 'success' | 'danger' | 'info'> = { ready: 'success', blocked: 'danger', unknown: 'info' }
+
 // 创建/编辑弹窗
 const showForm = ref(false)
+// 请求中禁重复提交（§3：连点不重复建）
+const submitting = ref(false)
 const editing = ref<Agent | null>(null)
 const form = ref<Agent>(emptyForm())
 
@@ -118,6 +189,9 @@ function openEdit(a: Agent) {
 }
 
 async function submit() {
+  if (submitting.value) return
+  submitting.value = true
+  try {
   const f = form.value
   if (!f.name || !f.model) {
     ElMessage.warning('名称与模型必填')
@@ -125,11 +199,15 @@ async function submit() {
   }
   const method = editing.value ? 'PUT' : 'POST'
   const url = editing.value ? `/api/agents/${editing.value.id}` : '/api/agents'
+  // 创建时空 createdAt="" 会让后端 time.Time 解析失败（invalid body）——创建请求不带该字段
+  const body: Record<string, unknown> = { ...f }
+  if (!body.createdAt) delete body.createdAt
+  if (!body.id) delete body.id
   try {
     const resp = await fetchAuth(url, {
       method,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(f),
+      body: JSON.stringify(body),
     })
     if (!resp.ok) {
       ElMessage.error(await respError(resp, '保存失败：'))
@@ -140,6 +218,9 @@ async function submit() {
     load()
   } catch (e) {
     ElMessage.error(apiError(e, '保存失败'))
+  }
+  } finally {
+    submitting.value = false
   }
 }
 
@@ -166,6 +247,7 @@ const runAgent = ref<Agent | null>(null)
 const runInput = ref('')
 const runOutput = ref('')
 const runReasoning = ref('')
+const runError = ref('')
 const runLoading = ref(false)
 
 // 跳 Playground 选用该 Agent（虚拟模型 agent:{id}，Playground 模型列表已并入 agents）。
@@ -189,6 +271,7 @@ function openRun(a: Agent) {
   runInput.value = ''
   runOutput.value = ''
   runReasoning.value = ''
+  runError.value = ''
   runConvId.value = 'run-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8)
   runDialog.value = true
 }
@@ -198,6 +281,7 @@ async function doRun() {
   runLoading.value = true
   runOutput.value = ''
   runReasoning.value = ''
+  runError.value = ''
   try {
     runAbort = new AbortController()
     const resp = await fetchAuth('/v1/chat/completions', {
@@ -215,7 +299,8 @@ async function doRun() {
       }),
     })
     if (!resp.ok || !resp.body) {
-      ElMessage.error(await respError(resp, '运行失败：'))
+      runError.value = !resp.ok ? await respError(resp, '运行失败：') : '运行服务未返回可读取响应'
+      ElMessage.error(runError.value)
       return
     }
     // 解析 SSE 流
@@ -226,25 +311,19 @@ async function doRun() {
       const { done, value } = await reader.read()
       if (done) break
       buf += dec.decode(value, { stream: true })
-      const lines = buf.split('\n')
+      const lines = buf.split(/\r?\n\r?\n/)
       buf = lines.pop() || ''
       for (const line of lines) {
-        const t = line.trim()
-        if (!t.startsWith('data:')) continue
-        const payload = t.slice(5).trim()
-        if (payload === '[DONE]') continue
-        try {
-          const obj = JSON.parse(payload)
-          const delta = obj.choices?.[0]?.delta
-          if (delta?.content) runOutput.value += delta.content
-          if (delta?.reasoning_content) runReasoning.value += delta.reasoning_content
-        } catch {
-          // 跳过无法解析的行
-        }
+        const event = chatEvent(line.replace(/\r/g, ''))
+        if (event.done) return
+        if (event.delta?.content) runOutput.value += event.delta.content
+        if (event.delta?.reasoning_content) runReasoning.value += event.delta.reasoning_content
       }
     }
+    throw new Error('运行流中断，结果未完成')
   } catch (e) {
-    ElMessage.error(apiError(e, '运行异常'))
+    runError.value = runAbort?.signal.aborted ? '已停止运行，结果可能不完整' : apiError(e, '运行异常')
+    if (!runAbort?.signal.aborted) ElMessage.error(runError.value)
   } finally {
     runLoading.value = false
   }
@@ -348,7 +427,8 @@ onUnmounted(() => runAbort?.abort())
       </div>
       <el-button type="primary" @click="openCreate">新建 Agent</el-button>
     </div>
-    <el-table v-loading="loading" :data="agents">
+    <StatePanel v-if="loadError" :title="loadError" description="列表加载失败与「暂无智能体」是两种状态，重试或检查服务后再来。" error><button class="act" @click="load">重新加载</button></StatePanel>
+    <el-table v-else v-loading="loading" :data="agents">
       <template #empty>
         <el-empty description="暂无 Agent，创建一个开始编排模型与工具" :image-size="64">
           <el-button type="primary" @click="openCreate">新建 Agent</el-button>
@@ -394,6 +474,20 @@ onUnmounted(() => runAbort?.abort())
       <el-table-column label="状态" width="80">
         <template #default="{ row }">
           <el-tag :type="row.enabled ? 'success' : 'info'">{{ row.enabled ? '启用' : '禁用' }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="依赖就绪" width="100">
+        <template #default="{ row }">
+          <el-tooltip
+            :content="readinessById[row.id]?.issues.length
+              ? readinessById[row.id].issues.join('；')
+              : (readinessById[row.id]?.state === 'ready' ? '引用存在且启用；远程连接与实际调用在运行时验证' : '引用数据未加载完成，无法判断')"
+            placement="top"
+          >
+            <el-tag :type="READINESS_TAG[readinessById[row.id]?.state ?? 'unknown']">
+              {{ READINESS_LABEL[readinessById[row.id]?.state ?? 'unknown'] }}
+            </el-tag>
+          </el-tooltip>
         </template>
       </el-table-column>
       <el-table-column label="操作" width="170" fixed="right">
@@ -446,7 +540,7 @@ onUnmounted(() => runAbort?.abort())
         </el-form-item>
         <el-form-item label="工具">
           <el-select v-model="form.tools" multiple filterable placeholder="选择可调用的外部工具">
-            <el-option v-for="t in tools" :key="t.id" :label="t.name" :value="t.id" :disabled="!t.enabled">
+            <el-option v-for="t in tools" :key="t.id" :label="t.name" :value="t.id" :disabled="!t.enabled || t.type !== 'mcp'">
               <div class="opt">
                 <span>{{ t.name }}<el-tag size="small" class="opt-type">{{ TOOL_TYPE_LABEL[t.type] || t.type }}</el-tag></span>
                 <span class="opt-desc">{{ t.description }}</span>
@@ -471,7 +565,7 @@ onUnmounted(() => runAbort?.abort())
       </el-form>
       <template #footer>
         <el-button @click="showForm = false">取消</el-button>
-        <el-button type="primary" @click="submit">保存</el-button>
+        <el-button type="primary" :disabled="submitting" @click="submit">{{ submitting ? '保存中…' : '保存' }}</el-button>
       </template>
     </el-dialog>
 
@@ -481,6 +575,7 @@ onUnmounted(() => runAbort?.abort())
       <div style="margin-top: 8px">
         <el-button type="primary" :loading="runLoading" @click="doRun">运行</el-button>
       </div>
+      <el-alert v-if="runError" :title="runError" type="error" :closable="false" show-icon />
       <el-collapse v-if="runReasoning" style="margin-top: 12px">
         <el-collapse-item title="思考过程">
           <pre class="stream">{{ runReasoning }}</pre>

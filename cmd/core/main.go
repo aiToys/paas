@@ -440,7 +440,7 @@ var (
 	obsAlertEngine *alertengine.Engine
 )
 
-func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, appliers k8sAppliers, metricsReg *metrics.Registry, laneReclaimer *workload.LaneGC) *http.Server {
+func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, appliers k8sAppliers, metricsReg *metrics.Registry, laneReclaimer *workload.LaneGC) *http.Server {
 	apiKey := resolveAPIKey()
 	// P3-2 计量采集：推理 token 用量回写 billing（meter.OnTokens 钩子）。
 	// appID 来自应用级 Key（强制归因到应用）；user 是 agent 软标签（仅日志，不入 billing 聚合）。
@@ -454,8 +454,9 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	jwtSecret := resolveJWTSecret()
 	// 可观测 Repository + 告警评估引擎先行构造（单实例）：changeHandler 通知桥接（下方）与
 	// obsHandler（下方可观测段）共用；必须在第一个消费者之前，否则 bridge 捕获 nil。
-	// 引擎启动在 run 层（有进程生命周期 ctx）。
-	obsRepo, obsAlertEngine = buildObservabilityStore(workloadLister{repo: stores.Workload}, tenantEntityLister{apps: stores.Application, ds: stores.DataService, wls: stores.Workload}, stores.AlertRules, stores.AlertEvents, stores.AlertEvents)
+	// 引擎启动在 run 层（有进程生命周期 ctx）。内存路径 AlertEvents 为 typed nil，
+	// buildObservabilityStore 内做装箱前 nil 判断（typed-nil 装箱陷阱，见其注释）。
+	obsRepo, obsAlertEngine = buildObservabilityStore(workloadLister{repo: stores.Workload}, tenantEntityLister{apps: stores.Application, ds: stores.DataService, wls: stores.Workload}, stores.AlertRules, stores.AlertEvents)
 	// 开箱默认告警规则：给「零规则」租户灌入默认基线（demo 门控，生产自配）。
 	seedDefaultAlertRules(ctx, stores.Identity, stores.AlertRules)
 	mux := http.NewServeMux()
@@ -511,11 +512,21 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	}) // 写操作记审计（元审计 2026-09-04 补）
 	msgHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 	// backup（数据服务备份）：方法级权限 dataservice:read/write + 生产数据服务备份需 prod:write。
+	// K8s 数据面可用时装配真实快照执行面（spec 专项05 阶段B：pg_dump Job + Pacer 推进）。
+	var bkExecutor backup.Executor
+	if appliers.clientset != nil {
+		bkExecutor = backup.K8sExecutor{Clientset: appliers.clientset}
+		bkPacer := backup.NewPacer(stores.Backup, bkExecutor, backupTargetResolver{repo: stores.DataService}).WithRestorer(backupRestorer{repo: stores.DataService, quota: quotaCheckFn(stores.Billing)})
+		go bkPacer.Run(ctx)
+		log.Printf("Backup: 真实快照执行面已启用（postgres 快照/恢复 Job + Pacer 观察推进）")
+	}
 	bkHandler := backup.NewHandler(stores.Backup,
 		backup.WithEnvResolver(stores.Environment, dsEnvLookup{repo: stores.DataService}),
 		backup.WithAudit(&identityAuditAdapter{store: stores.Security}, func(r *http.Request) string {
 			return gateway.UserIDFrom(r.Context())
-		})) // 写操作记审计（元审计 2026-09-04 补）
+		}),
+		backup.WithExecutor(bkExecutor, backupTargetResolver{repo: stores.DataService}, backupRestorer{repo: stores.DataService, quota: quotaCheckFn(stores.Billing)}),
+	) // 写操作记审计（元审计 2026-09-04 补）
 	bkHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 	// apiroute Registry：路由 + OpenAPI 元数据单一真源，own 同一个 mux。
 	// Register 同时驱动 mux（Go 1.22 method-scoped）与 spec；Operation 仅记 spec（composite 子操作）。
@@ -605,7 +616,7 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	// Audit 记 Create/Delete（写操作全记审计）。
 	envHandler := environment.NewHandler(stores.Environment)
 	envHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
-	envHandler.Usage = envUsageChecker{wl: stores.Workload}
+	envHandler.Usage = envUsageChecker{wl: stores.Workload, ds: stores.DataService, lne: stores.Lane}
 	envHandler.Audit = &identityAuditAdapter{store: stores.Security}
 	envHandler.ActorFn = func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }
 	mux.Handle("/api/environments", auth(envHandler))
@@ -1180,6 +1191,7 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	mux.Handle("/api/configcenter/apps/", auth(ccHandler))
 	// 可观测（指标 + 告警）
 	mux.Handle("/api/observability/metrics", auth(obsHandler))
+	mux.Handle("/api/observability/metrics/quality", auth(obsHandler))
 	mux.Handle("/api/observability/alert-rules", auth(obsHandler))
 	mux.Handle("/api/observability/alert-rules/", auth(obsHandler))
 	mux.Handle("/api/observability/alerts", auth(obsHandler))
@@ -1287,7 +1299,7 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	mux.Handle("/api/prompts", auth(promptHandler))
 	mux.Handle("/api/prompts/", auth(promptHandler))
 	reg.Operation("GET", "/api/prompts", apiroute.Tags("Prompt"), apiroute.Summary("Prompt 列表（全部版本）"), apiroute.Perm("prompt:read"), apiroute.WithResp([]prompt.Prompt{}))
-	reg.Operation("POST", "/api/prompts", apiroute.Tags("Prompt"), apiroute.Summary("创建 Prompt（同 name 自动 version+1 且激活）"), apiroute.Perm("prompt:write"), apiroute.WithReqBody(prompt.Prompt{}), apiroute.WithResp(prompt.Prompt{}))
+	reg.Operation("POST", "/api/prompts", apiroute.Tags("Prompt"), apiroute.Summary("创建 Prompt（同 name 自动 version+1；activate=false 保存草稿不动现有激活版本）"), apiroute.Perm("prompt:write"), apiroute.WithReqBody(prompt.CreateRequest{}), apiroute.WithResp(prompt.Prompt{}))
 	reg.Operation("GET", "/api/prompts/active", apiroute.Tags("Prompt"), apiroute.Summary("取激活版本（?name=）"), apiroute.Perm("prompt:read"), apiroute.WithResp(prompt.Prompt{}))
 	reg.Operation("GET", "/api/prompts/{id}", apiroute.Tags("Prompt"), apiroute.Summary("取单版本"), apiroute.Perm("prompt:read"), apiroute.WithResp(prompt.Prompt{}))
 	reg.Operation("DELETE", "/api/prompts/{id}", apiroute.Tags("Prompt"), apiroute.Summary("删单版本"), apiroute.Perm("prompt:write"))
@@ -1473,6 +1485,9 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	reg.Operation("GET", "/api/environments/{id}",
 		apiroute.Tags("环境"), apiroute.Summary("环境详情"), apiroute.Perm("environment:read"),
 		apiroute.WithResp(environment.Environment{}))
+	reg.Operation("GET", "/api/environments/{id}/usage",
+		apiroute.Tags("环境"), apiroute.Summary("环境依赖预检（工作负载/数据服务/泳道清单，删除前展示实际依赖）"), apiroute.Perm("environment:read"),
+		apiroute.WithResp(environment.EnvUsageReport{}))
 	reg.Operation("DELETE", "/api/environments/{id}",
 		apiroute.Tags("环境"), apiroute.Summary("删除环境"), apiroute.Perm("environment:write"))
 
@@ -1697,6 +1712,13 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	reg.Operation("GET", "/api/applications/{id}/dynamic-configs/lane-overrides", apiroute.Tags("配置中心"), apiroute.Summary("泳道配置覆盖列表（?envId=&lane=，lane 必填）"), apiroute.Perm("application:read"), apiroute.WithResp([]configcenter.LaneOverride{}))
 	reg.Operation("POST", "/api/applications/{id}/dynamic-configs/lane-overrides", apiroute.Tags("配置中心"), apiroute.Summary("泳道配置覆盖 upsert（即时生效，?envId=&lane=，prod 需 prod:write）"), apiroute.Perm("application:write"), apiroute.WithReqBody(configcenter.LaneOverride{}), apiroute.WithResp(configcenter.LaneOverride{}))
 	reg.Operation("DELETE", "/api/applications/{id}/dynamic-configs/lane-overrides/{key}", apiroute.Tags("配置中心"), apiroute.Summary("删除泳道配置覆盖（?envId=&lane=，prod 需 prod:write）"), apiroute.Perm("application:write"))
+	reg.Operation("POST", "/api/applications/{id}/dynamic-configs/lane-overrides/batch", apiroute.Tags("配置中心"), apiroute.Summary("批次原子应用泳道覆盖变更集（整批全成功或全回滚；expectedRevision 漂移 409，?envId=&lane=，prod 需 prod:write）"), apiroute.Perm("application:write"), apiroute.WithReqBody(struct {
+		Ops              []configcenter.LaneOverrideOp `json:"ops"`
+		ExpectedRevision string                        `json:"expectedRevision"`
+	}{}), apiroute.WithResp(struct {
+		Applied   int                         `json:"applied"`
+		Overrides []configcenter.LaneOverride `json:"overrides"`
+	}{}))
 	reg.Operation("GET", "/api/applications/{id}/dynamic-configs/shared-refs", apiroute.Tags("配置中心"), apiroute.Summary("共享配置引用列表（?envId=，含 shared ns 名/版本/key 数）"), apiroute.Perm("application:read"), apiroute.WithResp([]configcenter.NSRef{}))
 	reg.Operation("POST", "/api/applications/{id}/dynamic-configs/shared-refs", apiroute.Tags("配置中心"), apiroute.Summary("引用共享配置（body {sharedNsId}，?envId=，prod 需 prod:write；发现时 shared 作为三层 merge 基础层）"), apiroute.Perm("application:write"), apiroute.WithReqBody(struct {
 		SharedNSID string `json:"sharedNsId"`
@@ -1705,6 +1727,7 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	reg.Operation("GET", "/api/configcenter/namespaces/{id}/ref-users", apiroute.Tags("配置中心"), apiroute.Summary("共享配置影响面反查（被哪些应用派生 ns 引用）"), apiroute.Perm("governance:read"), apiroute.WithResp([]configcenter.NSRef{}))
 	// 可观测
 	reg.Operation("GET", "/api/observability/metrics", apiroute.Tags("可观测"), apiroute.Summary("指标时序（惰性补点）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.MetricSeries{}))
+	reg.Operation("GET", "/api/observability/metrics/quality", apiroute.Tags("可观测"), apiroute.Summary("采集质量诊断（逐约定 metric 即时探测 ok/empty/failed，回答「为什么没有数据」；?targetType=app|workload|dataservice&targetId=）"), apiroute.Perm("observability:read"), apiroute.WithResp(observability.QualityReport{}))
 	reg.Operation("GET", "/api/observability/alert-rules", apiroute.Tags("可观测"), apiroute.Summary("告警规则列表"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.AlertRule{}))
 	reg.Operation("POST", "/api/observability/alert-rules", apiroute.Tags("可观测"), apiroute.Summary("创建告警规则"), apiroute.Perm("observability:write"), apiroute.WithReqBody(observability.AlertRule{}), apiroute.WithResp(observability.AlertRule{}))
 	reg.Operation("PUT", "/api/observability/alert-rules/{id}", apiroute.Tags("可观测"), apiroute.Summary("更新告警规则"), apiroute.Perm("observability:write"), apiroute.WithReqBody(observability.AlertRule{}), apiroute.WithResp(observability.AlertRule{}))
@@ -1958,8 +1981,12 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	mux.Handle("/api/backups", auth(bkHandler))
 	mux.Handle("/api/backups/", auth(bkHandler))
 	reg.Operation("GET", "/api/backups", apiroute.Tags("数据服务"), apiroute.Summary("备份列表（?resourceId=）"), apiroute.Perm("dataservice:read"), apiroute.WithResp([]backup.Backup{}))
-	reg.Operation("POST", "/api/backups", apiroute.Tags("数据服务"), apiroute.Summary("创建备份"), apiroute.Perm("dataservice:write"), apiroute.WithReqBody(backup.Backup{}), apiroute.WithResp(backup.Backup{}))
+	reg.Operation("POST", "/api/backups", apiroute.Tags("数据服务"), apiroute.Summary("创建备份（mode=record 记录模式 | snapshot 真实快照，spec 专项05）"), apiroute.Perm("dataservice:write"), apiroute.WithReqBody(backup.CreateBackupRequest{}), apiroute.WithResp(backup.Backup{}))
+	reg.Operation("POST", "/api/backups/{id}/restore", apiroute.Tags("数据服务"), apiroute.Summary("从真实快照恢复到新建实例（仅 completed 快照可恢复）"), apiroute.WithHeader("Idempotency-Key", "8..128 字符，同一操作重试必须复用；参数变化返回 409", true), apiroute.Perm("dataservice:write"), apiroute.WithReqBody(struct {
+		Name string `json:"name"`
+	}{}), apiroute.WithResp(backup.Backup{}))
 	reg.Operation("DELETE", "/api/backups/{id}", apiroute.Tags("数据服务"), apiroute.Summary("删除备份"), apiroute.Perm("dataservice:write"))
+	reg.Operation("GET", "/api/dataservices/{id}/capabilities", apiroute.Tags("数据服务"), apiroute.Summary("数据服务运维能力面（备份/恢复按引擎与接入模式判定）"), apiroute.Perm("dataservice:read"))
 
 	// 数据面 SDK 接入（/dp/，zeus paas-registry 插件消费；mux 见 mux.Handle("/dp/")，BearerAuth 鉴权）。
 	reg.Operation("GET", "/dp/services", apiroute.Tags("数据面"), apiroute.Summary("列服务（Discovery）"), apiroute.Perm("dp:read"))
@@ -2040,7 +2067,11 @@ func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, s
 	} else {
 		log.Printf("HTTP 监听 :8080（无默认 API Key）")
 	}
-	// 后台监听；run() 在收到 SIGTERM 后调 srv.Shutdown 优雅关闭（in-flight 请求/SSE 流式有 grace 期）。
+	return srv
+}
+
+func serveHTTP(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, appliers k8sAppliers, metricsReg *metrics.Registry, laneReclaimer *workload.LaneGC) *http.Server {
+	srv := buildHTTPServer(ctx, gw, meter, stores, appliers, metricsReg, laneReclaimer)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("HTTP 服务异常退出: %v", err)

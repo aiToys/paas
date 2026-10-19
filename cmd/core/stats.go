@@ -4,6 +4,9 @@ import (
 	"context"
 
 	"github.com/aitoys/paas/internal/core/application"
+	"github.com/aitoys/paas/internal/dataservice"
+	"github.com/aitoys/paas/internal/environment"
+	"github.com/aitoys/paas/internal/lane"
 	"github.com/aitoys/paas/internal/workload"
 )
 
@@ -42,18 +45,48 @@ func (s *appWorkloadStats) StatsByTenant(ctx context.Context) (map[string]applic
 	return stats, nil
 }
 
-// envUsageChecker 实现 environment.EnvUsageChecker：环境删除前查该环境下工作负载数
-// （非 0 拒删 409，防悬挂 envId 引用——allowProd fail-closed + 发布阶序断裂）。
-// 桥接 workload store（environment 不 import workload：后者已 import environment 会循环）。
-type envUsageChecker struct{ wl workload.Repository }
+// envUsageChecker 实现 environment.EnvUsageChecker：环境删除前查依赖清单
+// （spec 2026-10-17 专项04 §6：工作负载/数据服务/泳道三类；非 0 拒删 409）。
+// 桥接 workload/dataservice/lane store（environment 不 import 它们：workload 已 import
+// environment 会循环）。dataservice/lane 无 env 过滤参数，全量拉后客户端过滤（租户级量小）。
+type envUsageChecker struct {
+	wl  workload.Repository
+	ds  dataservice.Repository
+	lne laneLister
+}
 
-func (c envUsageChecker) CountByEnv(ctx context.Context, envID string) (int, error) {
+// laneLister 泳道仓储最小面（本文件只需 List；lanegc_adapters.go 另有收窄的 laneRepository）。
+type laneLister interface {
+	List(ctx context.Context, envID string) ([]lane.Lane, error)
+}
+
+func (c envUsageChecker) EnvUsage(ctx context.Context, envID string) (environment.EnvUsageReport, error) {
+	var rep environment.EnvUsageReport
 	// List 按 ctx 租户过滤（Repository 强制）；appID/lane/type/service 空串=不过滤。
 	wls, err := c.wl.List(ctx, envID, "", "", "", "")
 	if err != nil {
-		return 0, err
+		return rep, err
 	}
-	return len(wls), nil
+	rep.Workloads = len(wls)
+	if c.ds != nil {
+		dss, err := c.ds.List(ctx, "")
+		if err != nil {
+			return rep, err
+		}
+		for _, d := range dss {
+			if d.EnvID == envID {
+				rep.Dataservices++
+			}
+		}
+	}
+	if c.lne != nil {
+		ls, err := c.lne.List(ctx, envID)
+		if err != nil {
+			return rep, err
+		}
+		rep.Lanes = len(ls)
+	}
+	return rep, nil
 }
 
 // wlServiceLister 查 app×env 已部署的服务集合（devops.WorkloadServiceLister 桥接，

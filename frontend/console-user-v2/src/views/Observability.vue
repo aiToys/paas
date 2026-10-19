@@ -13,11 +13,13 @@ import {
   listAlertEvents,
   createAlertRule,
   updateAlertRule,
+  probeMetricsQuality,
   type MetricSeries,
   type LogEntry,
   type Alert,
   type AlertRule,
   type AlertEvent,
+  type QualityReport,
 } from '@/api/observability'
 import {
   buildSpanTree,
@@ -304,6 +306,52 @@ function traceMatches(t: Trace) {
   }
   return !s.lane || !!t.spans?.some((sp) => sp.tags?.['paas.lane'] === s.lane)
 }
+// ---- 采集覆盖（spec 专项04 §5：回答「为什么没有数据」）----
+// 独立诊断端点（不在主查询路径）：展开时对当前实体逐 metric 即时探测。
+// empty=查询成功无数据（检查时间范围/目标/埋点，非平台故障）；failed=采集源问题。
+const showQuality = ref(false)
+const quality = ref<QualityReport | null>(null)
+const qualityBusy = ref(false)
+const qualityError = ref('')
+const qualityTargetType = computed(() =>
+  scope.value.ds ? 'dataservice' : scope.value.workload ? 'workload' : scope.value.app ? 'app' : '',
+)
+const qualityTargetId = computed(
+  () => scope.value.ds || scope.value.workload || scope.value.app || '',
+)
+async function toggleQuality() {
+  showQuality.value = !showQuality.value
+  if (!showQuality.value || qualityBusy.value) return
+  // 切实体后重探测（缓存上次 targetType+id 防重复拉取）
+  if (quality.value && qualityTargetType.value + qualityTargetId.value === qualityCacheKey) return
+  qualityBusy.value = true
+  qualityError.value = ''
+  try {
+    quality.value = await probeMetricsQuality(qualityTargetType.value, qualityTargetId.value)
+    qualityCacheKey = qualityTargetType.value + qualityTargetId.value
+  } catch (e) {
+    qualityError.value = apiError(e, '采集质量探测失败')
+  } finally {
+    qualityBusy.value = false
+  }
+}
+let qualityCacheKey = ''
+watch([qualityTargetType, qualityTargetId], () => {
+  quality.value = null
+  qualityCacheKey = ''
+  if (showQuality.value) toggleQuality()
+})
+const qualityStatusLabel: Record<string, string> = {
+  ok: '有数据',
+  empty: '查询成功，无数据',
+  failed: '查询失败',
+}
+const qualityStatusClass: Record<string, string> = {
+  ok: 'q-ok',
+  empty: 'q-empty',
+  failed: 'q-failed',
+}
+
 async function refresh(silent = false) {
   silentRefresh = silent
   if (!ready.value) return
@@ -762,6 +810,56 @@ const time = (iso: string) => new Date(iso).toLocaleString('zh-CN')
         </div>
       </template>
       <template v-if="tab === 'metrics'">
+        <div class="quality-panel">
+          <button class="quality-toggle" :aria-expanded="showQuality" @click="toggleQuality">
+            采集覆盖{{ showQuality ? '▾' : '▸' }}
+          </button>
+          <span v-if="!qualityTargetType" class="quality-hint"
+            >选择应用/工作负载/数据服务后可探测各指标采集状态</span
+          >
+          <div v-if="showQuality && qualityTargetType" class="quality-body">
+            <p v-if="qualityBusy" class="quality-note">探测中…</p>
+            <StatePanel
+              v-else-if="qualityError"
+              title="采集质量探测失败"
+              :description="qualityError"
+              error
+            />
+            <template v-else-if="quality">
+              <p v-if="quality.source === 'memory'" class="quality-note quality-warn">
+                {{ quality.note }}
+              </p>
+              <p v-else-if="quality.note" class="quality-note">{{ quality.note }}</p>
+              <table v-if="quality.metrics.length" class="quality-table">
+                <thead>
+                  <tr>
+                    <th>指标</th>
+                    <th>采集状态</th>
+                    <th>说明</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="m in quality.metrics" :key="m.metric">
+                    <td>{{ metricLabel(m.metric) }}</td>
+                    <td>
+                      <span :class="['quality-badge', qualityStatusClass[m.status]]">{{
+                        qualityStatusLabel[m.status]
+                      }}</span>
+                    </td>
+                    <td>
+                      <template v-if="m.status === 'ok'">{{ m.sampleSeries }} 组序列</template>
+                      <template v-else-if="m.status === 'empty'"
+                        >查询成功无数据——检查时间范围/目标/埋点（RED 类依赖应用暴露
+                        /metrics），非平台故障</template
+                      >
+                      <template v-else>{{ m.error }}</template>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </template>
+          </div>
+        </div>
         <div class="metric-toolbar">
           <div class="metric-categories" role="group" aria-label="指标分类">
             <button
@@ -1392,6 +1490,75 @@ input[type='checkbox'] {
 }
 .metric-toolbar {
   justify-content: space-between;
+}
+/* 采集覆盖折叠区（spec 专项04 §5）*/
+.quality-panel {
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+  background: var(--bg-soft, var(--bg));
+}
+.quality-toggle {
+  background: transparent;
+  border: none;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 2px 0;
+}
+.quality-toggle:hover {
+  color: var(--accent);
+}
+.quality-hint {
+  margin-left: 10px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.quality-body {
+  margin-top: 8px;
+}
+.quality-note {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin: 0 0 8px;
+}
+.quality-note.quality-warn {
+  color: var(--warn, #b8860b);
+}
+.quality-table {
+  width: 100%;
+  font-size: 12.5px;
+}
+.quality-table th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 500;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.quality-table td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+.quality-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+.quality-badge.q-ok {
+  color: #1a7f37;
+  background: rgba(26, 127, 55, 0.12);
+}
+.quality-badge.q-empty {
+  color: var(--text-dim);
+  background: rgba(127, 127, 127, 0.12);
+}
+.quality-badge.q-failed {
+  color: #c0392b;
+  background: rgba(192, 57, 43, 0.12);
 }
 .metric-categories {
   display: flex;

@@ -36,6 +36,10 @@ defineProps<{ name: string; size?: number }>()
       <polyline points="6 9 9 12 6 15" />
       <line x1="12" y1="15" x2="16" y2="15" />
     </template>
+    <!-- 停止生成：实心方块 -->
+    <template v-else-if="name === 'stop'">
+      <rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor" stroke="none" />
+    </template>
     <!-- API Key：钥匙 -->
     <template v-else-if="name === 'key'">
       <circle cx="8" cy="15" r="4" />

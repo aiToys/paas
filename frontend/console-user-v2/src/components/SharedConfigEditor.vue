@@ -21,7 +21,7 @@ import { apiError } from '@/api'
 import {
   fetchAppDynamicConfigs, upsertAppDynamicConfig, deleteAppDynamicConfig,
   publishAppDynamicConfigs, fetchAppPublishes, fetchAppPublished, rollbackAppPublish,
-  fetchLaneOverrides, upsertLaneOverride, deleteLaneOverride, promoteLaneOverrides,
+  fetchLaneOverrides, upsertLaneOverride, deleteLaneOverride, promoteLaneOverrides, applyLaneOverridesBatch, fetchLaneOverrideRevision,
   fetchSharedRefs, addSharedRef, deleteSharedRef, fetchNamespaces,
   type DynamicConfigItem, type ConfigPublish, type ConfigPublished, type LaneOverride, type SharedRef,
 } from '@/api/configcenter'
@@ -72,6 +72,7 @@ interface DiffRow {
   effective?: string   // 生效值（active snapshot），undefined = 新增
   draft: string
   state: 'modified' | 'added' | 'clean'
+  removed?: boolean
 }
 const diffRows = computed<DiffRow[]>(() => {
   const snap = published.value?.snapshot ?? {}
@@ -93,7 +94,7 @@ const diffRows = computed<DiffRow[]>(() => {
   }
   // 生效有但 draft 已删的 key：提示「发布后将移除」（shared 来源除外）
   for (const k of Object.keys(snap)) {
-    if (!seen.has(k) && !sharedKeys.has(k)) rows.push({ key: k, type: 'text', effective: snap[k], draft: '', state: 'modified' })
+    if (!seen.has(k) && !sharedKeys.has(k)) rows.push({ key: k, type: 'text', effective: snap[k], draft: '', state: 'modified', removed: true })
   }
   return rows
 })
@@ -298,6 +299,22 @@ async function remove(row: DiffRow) {
 const showPub = ref(false)
 const pubTarget = ref<'baseline' | 'lane'>('baseline')
 const pubLane = ref('')
+const pubSnapshot = ref<LaneOverride[]>([])
+const pubRevision = ref(''), previewError = ref(''), previewBusy = ref(false)
+let previewSeq = 0
+async function previewLane() {
+  const seq = ++previewSeq
+  pubRevision.value = ''; previewError.value = ''
+  if (!showPub.value || pubTarget.value !== 'lane' || !pubLane.value) { previewBusy.value = false; return }
+  previewBusy.value = true
+  try {
+    const snapshot = await fetchLaneOverrideRevision(props.appId, selEnv.value, pubLane.value)
+    if (seq === previewSeq) { pubRevision.value = snapshot.revision; pubSnapshot.value = snapshot.overrides }
+  } catch (e) { if (seq === previewSeq) previewError.value = apiError(e, '无法读取配置版本') }
+  finally { if (seq === previewSeq) previewBusy.value = false }
+}
+watch([showPub, pubTarget, pubLane, selEnv, () => props.appId], previewLane)
+
 
 function openPublish() {
   if (!hasPending.value) {
@@ -310,11 +327,16 @@ function openPublish() {
 }
 
 async function confirmPublish() {
+  if (pubTarget.value === 'lane' && (!pubRevision.value || previewBusy.value)) { ElMessage.warning('请先成功预览目标泳道版本'); return }
+  const target = { app: props.appId, env: selEnv.value, lane: pubLane.value, revision: pubRevision.value }
   showPub.value = false
-  // 泳道目标：逐项写 key 级覆盖（即时生效，无版本记录）
+  // 泳道目标：批次原子写 key 级覆盖（即时生效，无版本记录；整批全成功或全回滚）
   if (pubTarget.value === 'lane') {
     if (!pubLane.value) { ElMessage.warning('请选择泳道'); showPub.value = true; return }
-    const changed = diffRows.value.filter(r => r.state !== 'clean')
+    // 只发布有 draft 值的变更行：「draft 已删」的行（基线上即将移除）无灰度语义——
+    // 泳道本无该 key 覆盖，写空值覆盖会让泳道实例拿到空串（旧实现误写，这里修正）。
+    const changed = diffRows.value.filter(r => r.state !== 'clean' && !r.removed).map(r => ({ ...r }))
+    if (!changed.length) { ElMessage.info('可发布的草稿变更为空'); return }
     const ok = await confirmDangerous({
       action: `发布 ${changed.length} 项覆盖到泳道`,
       target: pubLane.value,
@@ -323,19 +345,15 @@ async function confirmPublish() {
     if (!ok) { showPub.value = true; return }
     publishing.value = true
     try {
-      for (const r of changed) {
-        if (r.state === 'added') {
-          // 新增 key 基线无值：先写基线 draft（占位当前值），再写泳道覆盖——
-          // 保证提升到基线时该 key 有 draft 可合并。
-          await upsertAppDynamicConfig(props.appId, { key: r.key, value: r.draft, type: r.type }, selEnv.value)
-        }
-        await upsertLaneOverride(props.appId, selEnv.value, pubLane.value, { key: r.key, value: r.draft })
-      }
-      ElMessage.success(`已发布 ${changed.length} 项覆盖到泳道 ${pubLane.value}（即时生效，基线不变）`)
+      await applyLaneOverridesBatch(target.app, target.env, target.lane,
+        changed.map(r => ({ action: 'upsert' as const, key: r.key, value: r.draft, type: r.type })), target.revision)
+      ElMessage.success(`已发布 ${changed.length} 项覆盖到泳道 ${target.lane}（整批生效，基线不变；客户端采用情况未知——实例下次拉取时生效）`)
       await load()
-      laneSel.value = pubLane.value
+      if (props.appId === target.app && selEnv.value === target.env) laneSel.value = target.lane
     } catch (e) {
+      // 409（并发漂移）与其它失败统一提示后刷新 diff——重预览由用户重新发起
       ElMessage.error(apiError(e, '泳道发布失败'))
+      load()
     } finally {
       publishing.value = false
     }
@@ -350,8 +368,8 @@ async function confirmPublish() {
   if (!ok) { showPub.value = true; return }
   publishing.value = true
   try {
-    const pub = await publishAppDynamicConfigs(props.appId, selEnv.value)
-    ElMessage.success(`已发布 v${pub.version}`)
+    const pub = await publishAppDynamicConfigs(target.app, target.env)
+    ElMessage.success(`已发布 v${pub.version}（已发布，客户端采用情况未知——实例下次拉取时生效）`)
     load()
   } catch (e) {
     ElMessage.error(apiError(e, '发布失败'))
@@ -725,6 +743,11 @@ v-loading="laneLoading" :data="overrides" size="small"
           <el-option v-for="l in lanes" :key="l.name" :value="l.name" :label="l.name + (l.mode === 'permanent' ? '（常驻）' : '')" />
         </el-select>
       </div>
+      <div v-if="pubTarget === 'lane' && pubRevision" class="pub-diff-title">
+        目标泳道当前覆盖：<span v-if="!pubSnapshot.length">无</span>
+        <div v-for="item in pubSnapshot" :key="item.key"><code>{{ item.key }}</code> · 已有覆盖（值不回显）</div>
+        <p>基线删除不写为空字符串覆盖；如需恢复继承，请使用取消泳道覆盖。</p>
+      </div>
       <div class="pub-diff-title">
         即将发布 {{ pendingCount.modified + pendingCount.added }} 项变更
         <template v-if="curActiveVer">（v{{ curActiveVer }} → v{{ curActiveVer + 1 }}）</template>：
@@ -743,7 +766,8 @@ v-loading="laneLoading" :data="overrides" size="small"
       </div>
       <template #footer>
         <el-button @click="showPub = false">取消</el-button>
-        <el-button type="primary" :disabled="publishing" @click="confirmPublish">
+        <p v-if="pubTarget === 'lane'" role="status">{{ previewBusy ? '正在读取配置版本…' : previewError || (pubRevision ? '已固定预览版本；并发修改将阻止发布。' : '请预览目标泳道') }}<button v-if="previewError" class="text-button" @click="previewLane">重新预览</button></p>
+        <el-button type="primary" :disabled="publishing || (pubTarget === 'lane' && (!pubRevision || previewBusy))" @click="confirmPublish">
           {{ publishing ? '发布中…' : (pubTarget === 'lane' ? `发布到泳道` : '确认发布') }}
         </el-button>
       </template>

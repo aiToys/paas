@@ -38,6 +38,19 @@ const unwrap = async <T>(resp: Response): Promise<T> => {
 export const listMetrics = (params: Record<string, string>) =>
   fetchAuth(`/api/observability/metrics?${new URLSearchParams(params).toString()}`).then(r => unwrap<unknown>(r)).then(v => asList<MetricSeries>(v))
 
+// 采集质量诊断（spec 专项04 §5）：逐 metric 即时探测 ok/empty/failed。
+// status=empty 表示查询成功无数据（检查时间范围/目标/埋点——非平台故障）；
+// failed 才是采集源问题。source=memory 表示未接真实采集源（演示数据）。
+export interface MetricQuality {
+  metric: string; status: 'ok' | 'empty' | 'failed'; sampleSeries?: number
+  error?: string; checkedAt: string
+}
+export interface QualityReport {
+  source: 'prometheus' | 'memory'; note?: string; metrics: MetricQuality[]
+}
+export const probeMetricsQuality = (targetType: string, targetId: string) =>
+  fetchAuth(`/api/observability/metrics/quality?targetType=${encodeURIComponent(targetType)}&targetId=${encodeURIComponent(targetId)}`).then(r => unwrap<QualityReport>(r))
+
 export const listAlertRules = () =>
   fetchAuth('/api/observability/alert-rules').then(r => unwrap<unknown>(r)).then(v => asList<AlertRule>(v))
 

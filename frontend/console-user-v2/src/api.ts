@@ -89,6 +89,17 @@ export async function fetchList<T>(path: string, opts?: RequestInit): Promise<T[
   return asList<T>(await fetchJSON<unknown>(path, opts))
 }
 
+// fetchSettled: 失败结算为 null + toast，不抛出——供「主数据 + 引用数据」并行取数
+// 独立结算（任一引用失败不拖垮主数据变假空态）；主数据返回 null 时页面展示错误态。
+export async function fetchSettled<T>(path: string, label: string): Promise<T | null> {
+  try {
+    return await fetchJSON<T>(path)
+  } catch (e) {
+    ElMessage.error(`${label}加载失败：${apiError(e)}`)
+    return null
+  }
+}
+
 export async function fetchCommand(path: string, opts: RequestInit): Promise<void> {
   await requireOK(await fetchAuth(path, opts))
 }

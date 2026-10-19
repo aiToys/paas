@@ -59,7 +59,7 @@ func newTestDB(t *testing.T) *storagepg.DB {
 func resetSchema(t *testing.T, db *storagepg.DB) {
 	t.Helper()
 	_, err := db.Pool().Exec(context.Background(),
-		`DROP TABLE IF EXISTS cc_publishes, cc_items, cc_namespaces,
+		`DROP TABLE IF EXISTS cc_lane_overrides, cc_ns_refs, cc_publishes, cc_items, cc_namespaces,
 				gov_breakers, gov_routes, gov_instances, gov_services,
 				releases, images, build_runs, code_repos,
 				workloads, data_services, appconfigs, environments,

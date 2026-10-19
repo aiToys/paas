@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -91,71 +92,93 @@ func lastUserText(msgs []provider.Message) string {
 	return ""
 }
 
+type dependencyFailure struct{ reason string }
+
+func (e *dependencyFailure) Error() string { return e.reason }
+func dependencyErrorf(format string, args ...any) error {
+	return &dependencyFailure{reason: fmt.Sprintf(format, args...)}
+}
+
 // buildSystem 组装 system prompt：agent.SystemPrompt 或 PromptRef 模板 + Skill 能力指令 + KB RAG 上下文。
 // 工具描述不在此注入（启用工具时以结构化 ToolDef 传 LLM，见 buildTools）。
-func (r *Runtime) buildSystem(ctx context.Context, a Agent, msgs []provider.Message) string {
+// 引用的资产均是显式依赖；失败时终止并说明，避免无知识/工具仍返回成功。
+func (r *Runtime) buildSystem(ctx context.Context, a Agent, msgs []provider.Message) (string, error) {
 	sys := a.SystemPrompt
-	if sys == "" && a.PromptRef != "" && r.prompts != nil {
-		if p, err := r.prompts.GetActive(ctx, a.PromptRef); err == nil {
-			sys = p.Template
+	if sys == "" && a.PromptRef != "" {
+		if r.prompts == nil {
+			return "", dependencyErrorf("提示词服务未接入")
 		}
-	}
-	// Skill 能力指令：逐个注入（启用的 skill 才生效，缺失/禁用静默跳过——与 tool 降级语义一致）。
-	if len(a.Skills) > 0 && r.skills != nil {
-		for _, sid := range a.Skills {
-			s, err := r.skills.Get(ctx, sid)
-			if err != nil || !s.Enabled {
-				continue
-			}
-			if sys != "" {
-				sys += "\n\n"
-			}
-			sys += "# 能力：" + s.Name + "\n" + s.Instructions
+		p, err := r.prompts.GetActive(ctx, a.PromptRef)
+		if err != nil {
+			return "", dependencyErrorf("引用的提示词不可用，请检查激活版本")
 		}
+		if len(p.Variables) > 0 || strings.Contains(p.Template, "{{") {
+			return "", dependencyErrorf("提示词含未绑定变量，当前智能体仅支持静态系统提示；请将变量填写为静态值后再运行")
+		}
+		sys = p.Template
 	}
-	// KB RAG：用最后一条 user 消息检索，注入相关切片。
-	if len(a.KnowledgeBases) > 0 && r.kb != nil {
+	if len(a.Skills) > 0 && r.skills == nil {
+		return "", dependencyErrorf("技能服务未接入")
+	}
+	for _, sid := range a.Skills {
+		sk, err := r.skills.Get(ctx, sid)
+		if err != nil || !sk.Enabled {
+			return "", dependencyErrorf("引用的技能不可用或已禁用，请修复依赖后重试")
+		}
+		if sys != "" {
+			sys += "\n\n"
+		}
+		sys += "# 能力：" + sk.Name + "\n" + sk.Instructions
+	}
+	if len(a.KnowledgeBases) > 0 {
+		if r.kb == nil {
+			return "", dependencyErrorf("知识库检索服务未接入")
+		}
 		query := lastUserText(msgs)
-		if query != "" {
-			var parts []string
-			for _, kbID := range a.KnowledgeBases {
-				hits, err := r.kb.Retrieve(ctx, kbID, query)
-				if err != nil {
-					continue
-				}
-				for _, h := range hits {
-					parts = append(parts, h.Chunk.Content)
-				}
+		if query == "" {
+			return "", dependencyErrorf("知识库检索需要用户输入")
+		}
+		var parts []string
+		for _, id := range a.KnowledgeBases {
+			hits, err := r.kb.Retrieve(ctx, id, query)
+			if err != nil {
+				return "", dependencyErrorf("知识库检索失败，请检查索引与数据服务后重试")
 			}
-			if len(parts) > 0 {
-				if sys != "" {
-					sys += "\n\n"
-				}
-				sys += "参考资料（来自知识库，请据此回答）:\n" + strings.Join(parts, "\n---\n")
+			for _, h := range hits {
+				parts = append(parts, h.Chunk.Content)
 			}
 		}
+		if len(parts) > 0 {
+			sys += "\n\n参考资料（来自知识库，请据此回答）:\n" + strings.Join(parts, "\n---\n")
+		}
 	}
-	return sys
+	return sys, nil
 }
 
 // buildTools 从 agent 引用的工具实体构建 LLM 工具定义 + 调用器。
 // 仅 MCP 类型可调用：经 ListTools 取真实 JSON Schema 参数；按工具实体 Name 精确匹配 MCP 工具名
 // （匹配失败保持实体名直调，MCP 端报 unknown tool），invoker 调 tools/call。http/builtin 暂不可调用（invoke 仅 mcp，留后续）。
-func (r *Runtime) buildTools(ctx context.Context, a Agent) ([]provider.ToolDef, map[string]toolInvoker) {
-	if r.tools == nil || len(a.Tools) == 0 {
-		return nil, nil
+func (r *Runtime) buildTools(ctx context.Context, a Agent) ([]provider.ToolDef, map[string]toolInvoker, error) {
+	if len(a.Tools) == 0 {
+		return nil, nil, nil
+	}
+	if r.tools == nil {
+		return nil, nil, dependencyErrorf("工具服务未接入")
 	}
 	var defs []provider.ToolDef
 	invokers := map[string]toolInvoker{}
 	for _, tid := range a.Tools {
 		t, err := r.tools.Get(ctx, tid)
-		if err != nil || !t.Enabled || t.Type != tool.TypeMCP {
-			continue
+		if err != nil || !t.Enabled {
+			return nil, nil, dependencyErrorf("引用的工具不可用或已禁用")
+		}
+		if t.Type != tool.TypeMCP {
+			return nil, nil, dependencyErrorf("工具 %s 暂不支持智能体调用，仅支持 MCP", t.Name)
 		}
 		serverURL := t.Config[tool.CfgMCPServerURL]
 		apiKey := t.Config[tool.CfgMCPAPIKey]
 		if serverURL == "" {
-			continue
+			return nil, nil, dependencyErrorf("工具 %s 未配置服务地址", t.Name)
 		}
 		cli := mcp.GetClient(serverURL, apiKey)
 		// Initialize + ListTools 取真实 schema（失败则降级 permissive schema，仍可调）。
@@ -165,17 +188,25 @@ func (r *Runtime) buildTools(ctx context.Context, a Agent) ([]provider.ToolDef, 
 		// 多工具 server 下全部串调 tools[0]，schema 也错位。）
 		mcpName := t.Name
 		schema := map[string]any{"type": "object", "properties": map[string]any{}}
-		if err := cli.Initialize(ctx); err == nil {
-			if tools, err := cli.ListTools(ctx); err == nil {
-				for _, mt := range tools {
-					if mt.Name == t.Name {
-						if mt.InputSchema != nil {
-							schema = mt.InputSchema
-						}
-						break
-					}
+		if err := cli.Initialize(ctx); err != nil {
+			return nil, nil, dependencyErrorf("工具 %s 连接失败，请检查地址与凭证", t.Name)
+		}
+		methods, err := cli.ListTools(ctx)
+		if err != nil {
+			return nil, nil, dependencyErrorf("工具 %s 方法发现失败", t.Name)
+		}
+		matched := false
+		for _, method := range methods {
+			if method.Name == t.Name {
+				matched = true
+				if method.InputSchema != nil {
+					schema = method.InputSchema
 				}
+				break
 			}
+		}
+		if !matched {
+			return nil, nil, dependencyErrorf("工具 %s 未在 MCP 服务暴露，请选择实际方法", t.Name)
 		}
 		fnName := t.Name // LLM 侧函数名 = 工具实体名（租户内唯一，避免冲突）
 		defs = append(defs, provider.ToolDef{
@@ -190,7 +221,9 @@ func (r *Runtime) buildTools(ctx context.Context, a Agent) ([]provider.ToolDef, 
 		invokers[fnName] = func(c context.Context, argsJSON string) (string, error) {
 			args := map[string]any{}
 			if argsJSON != "" {
-				_ = json.Unmarshal([]byte(argsJSON), &args) // 解析失败按空参调（permissive schema 容错）
+				if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+					return "", dependencyErrorf("工具参数不是合法 JSON")
+				} // 解析失败按空参调（permissive schema 容错）
 			}
 			res, err := cliRef.Invoke(c, invokeMcpName, args)
 			if err != nil {
@@ -206,7 +239,7 @@ func (r *Runtime) buildTools(ctx context.Context, a Agent) ([]provider.ToolDef, 
 			return sb.String(), nil
 		}
 	}
-	return defs, invokers
+	return defs, invokers, nil
 }
 
 // Run 执行 Agent，流式回调 onChunk（content/reasoning + 工具进度）。
@@ -324,7 +357,10 @@ func totalChars(msgs []provider.Message) int {
 // p 为底层 LLM Provider；a.MaxSteps 为轮数上限。
 func (r *Runtime) runLoop(ctx context.Context, p provider.Provider, a Agent, msgs []provider.Message, onChunk func(provider.Chunk)) error {
 	// 组装对话上下文：system + 用户消息。
-	sys := r.buildSystem(ctx, a, msgs)
+	sys, err := r.buildSystem(ctx, a, msgs)
+	if err != nil {
+		return err
+	}
 	conv := make([]provider.Message, 0, len(msgs)+1)
 	if sys != "" {
 		conv = append(conv, provider.Message{Role: "system", Content: sys})
@@ -332,7 +368,10 @@ func (r *Runtime) runLoop(ctx context.Context, p provider.Provider, a Agent, msg
 	conv = append(conv, msgs...)
 
 	// 工具定义 + 调用器（无工具时单轮直出）。
-	defs, invokers := r.buildTools(ctx, a)
+	defs, invokers, err := r.buildTools(ctx, a)
+	if err != nil {
+		return err
+	}
 
 	for step := 1; step <= a.MaxSteps; step++ {
 		req := provider.ChatRequest{Model: a.Model, Messages: conv, Stream: true}
@@ -442,6 +481,15 @@ func (r *Runtime) ServeSSEConv(w http.ResponseWriter, ctx context.Context, agent
 		}
 		writeSSE(map[string]any{"choices": []map[string]any{{"delta": delta}}})
 	})
-	writeSSE("[DONE]")
+	if err != nil {
+		message := "智能体运行失败，请检查模型通道与执行日志"
+		var dependency *dependencyFailure
+		if errors.As(err, &dependency) {
+			message = dependency.Error()
+		}
+		writeSSE(map[string]any{"error": message})
+	}
+	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	flusher.Flush()
 	return err
 }

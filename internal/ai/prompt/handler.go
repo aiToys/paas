@@ -19,7 +19,8 @@ const (
 // 路由：
 //
 //	GET    /api/prompts            列表（全部版本）
-//	POST   /api/prompts            创建（同 name 自动 version+1 且激活）
+//	POST   /api/prompts            创建（同 name 自动 version+1；body.activate 缺省 true=激活，
+//	                               false=保存草稿版本不动现有 active——显式激活语义，C3）
 //	GET    /api/prompts/{id}       取单版本
 //	DELETE /api/prompts/{id}       删单版本（删 active 自动激活最新剩余版本）
 //	POST   /api/prompts/{id}/activate 激活该版本
@@ -30,6 +31,13 @@ type Handler struct {
 }
 
 func NewHandler(repo Repository) *Handler { return &Handler{repo: repo} }
+
+// CreateRequest 创建请求体（Prompt 字段 + activate 可选项）。
+// Activate 缺省 nil 按 true 处理（兼容既有「创建即激活」客户端）；false=草稿版本。
+type CreateRequest struct {
+	Prompt
+	Activate *bool `json:"activate,omitempty"`
+}
 
 func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) bool {
 	if h.Authorize == nil || h.Authorize(r, perm) {
@@ -71,12 +79,19 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request) {
 		if !h.allow(w, r, PermPromptWrite) {
 			return
 		}
-		var p Prompt
-		if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		// activate 缺省 true：兼容既有「创建即激活」客户端；false=草稿版本（现有 active 不动）
+		var req CreateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
-		saved, err := h.repo.Create(r.Context(), p)
+		var saved Prompt
+		var err error
+		if req.Activate != nil && !*req.Activate {
+			saved, err = h.repo.CreateDraft(r.Context(), req.Prompt)
+		} else {
+			saved, err = h.repo.Create(r.Context(), req.Prompt)
+		}
 		if err != nil {
 			h.writeErr(w, err)
 			return

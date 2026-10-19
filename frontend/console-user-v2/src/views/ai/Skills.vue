@@ -5,7 +5,8 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchJSON, fetchAuth, respError, apiError } from '@/api'
+import { fetchAuth, fetchSettled, respError, apiError } from '@/api'
+import StatePanel from '@/components/StatePanel.vue'
 import { CATEGORIES, catLabel } from '@/api/marketplace'
 import { usePublish } from '@/composables/usePublish'
 
@@ -20,6 +21,8 @@ const router = useRouter()
 const skills = ref<Skill[]>([])
 const agents = ref<Agent[]>([])
 const loading = ref(false)
+// 主数据失败文案（''=正常）：与「真的没有技能」区分开
+const loadError = ref('')
 
 // 被 Agent 引用计数（skill id -> N 个 Agent 使用）
 const usage = computed(() => {
@@ -34,15 +37,16 @@ const usage = computed(() => {
 
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
+    // 主数据与引用数据独立结算（AI-01）：Agent 引用失败不拖垮技能列表
     const [s, a] = await Promise.all([
-      fetchJSON<Skill[]>('/api/skills'),
-      fetchJSON<Agent[]>('/api/agents'),
+      fetchSettled<Skill[]>('/api/skills', '技能'),
+      fetchSettled<Agent[]>('/api/agents', '智能体'),
     ])
-    skills.value = s
-    agents.value = a
-  } catch (e) {
-    ElMessage.error(apiError(e, '加载 Skill 失败'))
+    if (s) skills.value = s
+    else loadError.value = '技能列表加载失败，请重试'
+    if (a) agents.value = a
   } finally {
     loading.value = false
   }
@@ -50,6 +54,8 @@ async function load() {
 
 // 创建/编辑弹窗
 const showForm = ref(false)
+// 请求中禁重复提交（§3：连点不重复建）
+const submitting = ref(false)
 const editing = ref<Skill | null>(null)
 const form = ref<Skill>(emptyForm())
 
@@ -70,6 +76,9 @@ function openEdit(s: Skill) {
 }
 
 async function submit() {
+  if (submitting.value) return
+  submitting.value = true
+  try {
   const f = form.value
   if (!f.name || !f.instructions) {
     ElMessage.warning('名称与指令内容必填')
@@ -77,11 +86,15 @@ async function submit() {
   }
   const method = editing.value ? 'PUT' : 'POST'
   const url = editing.value ? `/api/skills/${editing.value.id}` : '/api/skills'
+  // 创建时空 createdAt="" 会让后端 time.Time 解析失败（invalid body）——创建请求不带该字段
+  const body: Record<string, unknown> = { ...f }
+  if (!body.createdAt) delete body.createdAt
+  if (!body.id) delete body.id
   try {
     const resp = await fetchAuth(url, {
       method,
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(f),
+      body: JSON.stringify(body),
     })
     if (!resp.ok) {
       ElMessage.error(await respError(resp, '保存失败：'))
@@ -92,6 +105,9 @@ async function submit() {
     load()
   } catch (e) {
     ElMessage.error(apiError(e, '保存失败'))
+  }
+  } finally {
+    submitting.value = false
   }
 }
 
@@ -139,7 +155,8 @@ onMounted(load)
       </div>
       <el-button type="primary" @click="openCreate">新建 Skill</el-button>
     </div>
-    <el-table v-loading="loading" :data="skills">
+    <StatePanel v-if="loadError" :title="loadError" description="列表加载失败与「暂无技能」是两种状态，重试或检查服务后再来。" error><button class="act" @click="load">重新加载</button></StatePanel>
+    <el-table v-else v-loading="loading" :data="skills">
       <template #empty>
         <el-empty description="暂无 Skill，去广场逛逛或创建一个把常用能力沉淀为可复用指令" :image-size="64">
           <el-button @click="router.push('/ai/explore')">逛广场</el-button>
@@ -236,7 +253,7 @@ onMounted(load)
       </el-form>
       <template #footer>
         <el-button @click="showForm = false">取消</el-button>
-        <el-button type="primary" @click="submit">保存</el-button>
+        <el-button type="primary" :disabled="submitting" @click="submit">{{ submitting ? '保存中…' : '保存' }}</el-button>
       </template>
     </el-dialog>
   </div>

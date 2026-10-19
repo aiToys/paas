@@ -446,3 +446,83 @@ func TestLaneOverrideUpsertDeleteList(t *testing.T) {
 		t.Fatal("appID 缺失应拒绝")
 	}
 }
+
+// TestApplyLaneOverridesAtomic 批次原子契约（spec 2026-10-17 专项04 §3）：
+// 整批全成功或全回滚；expectedCount 并发漂移 409；remove 幂等；upsert 新 key 产 draft 占位。
+func TestApplyLaneOverridesAtomic(t *testing.T) {
+	s := NewStore()
+	ctx := tenant.WithTenant(context.Background(), "t-acme")
+
+	// 预置 1 条既有覆盖 + 1 条既有 draft。
+	if _, err := s.UpsertLaneOverride(ctx, configcenter.LaneOverride{
+		AppID: "app-1", EnvID: "env-t", LaneID: "feat-x", Key: "k1", Value: "old",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ns, err := s.EnsureByAppEnv(ctx, "app-1", "env-t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpsertItem(ctx, configcenter.ConfigItem{NamespaceID: ns.ID, Key: "k1", Value: "draft-v1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 批次：改 k1 + 删不存在的 k9（幂等）+ 新增 k2（应产 draft 占位）。
+	applied, err := s.ApplyLaneOverrides(ctx, "app-1", "env-t", "feat-x", []configcenter.LaneOverrideOp{
+		{Action: configcenter.OpUpsert, Key: "k1", Value: "new"},
+		{Action: configcenter.OpRemove, Key: "k9"},
+		{Action: configcenter.OpUpsert, Key: "k2", Value: "v2", Type: configcenter.TypeJSON},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(applied) != 2 || applied[0].Key != "k1" || applied[0].Value != "new" || applied[1].Key != "k2" {
+		t.Fatalf("批次后应 2 条（k1=new, k2）: %+v", applied)
+	}
+	// 既有 draft 不被覆盖（k1 保持 draft-v1）；k2 产生占位 draft（值=覆盖值）。
+	items, _ := s.ListItems(ctx, ns.ID)
+	byKey := map[string]string{}
+	for _, it := range items {
+		byKey[it.Key] = it.Value
+	}
+	if byKey["k1"] != "draft-v1" {
+		t.Fatalf("既有 draft 不应被批次覆盖: %q", byKey["k1"])
+	}
+	if byKey["k2"] != "v2" {
+		t.Fatalf("upsert 新 key 应产 draft 占位: %q", byKey["k2"])
+	}
+
+	// 并发漂移：expectedCount 与实际（2）不符 → 409 sentinel + 不改库。
+	if _, err := s.ApplyLaneOverrides(ctx, "app-1", "env-t", "feat-x",
+		[]configcenter.LaneOverrideOp{{Action: configcenter.OpUpsert, Key: "k3", Value: "x"}}, 5); !errors.Is(err, configcenter.ErrLaneOverrideConflict) {
+		t.Fatalf("期望 ErrLaneOverrideConflict, got %v", err)
+	}
+	if l, _ := s.ListLaneOverrides(ctx, "app-1", "env-t", "feat-x"); len(l) != 2 {
+		t.Fatalf("冲突批次不应写入, got %d 条", len(l))
+	}
+
+	// 全删（remove 全部）→ 空集。
+	if _, err := s.ApplyLaneOverrides(ctx, "app-1", "env-t", "feat-x", []configcenter.LaneOverrideOp{
+		{Action: configcenter.OpRemove, Key: "k1"},
+		{Action: configcenter.OpRemove, Key: "k2"},
+	}, 2); err != nil {
+		t.Fatal(err)
+	}
+	if l, _ := s.ListLaneOverrides(ctx, "app-1", "env-t", "feat-x"); len(l) != 0 {
+		t.Fatalf("全删后应 0 条, got %d", len(l))
+	}
+
+	// 非法 action 整批拒绝（写入前拦截）。
+	if _, err := s.ApplyLaneOverrides(ctx, "app-1", "env-t", "feat-x", []configcenter.LaneOverrideOp{
+		{Action: "bogus", Key: "k"},
+	}, -1); err == nil {
+		t.Fatal("未知 action 应拒绝")
+	}
+
+	// expectedCount<0 = 跳过漂移校验（无预览场景直写）。
+	if _, err := s.ApplyLaneOverrides(ctx, "app-1", "env-t", "feat-x", []configcenter.LaneOverrideOp{
+		{Action: configcenter.OpUpsert, Key: "k5", Value: "v"},
+	}, -1); err != nil {
+		t.Fatalf("expectedCount<0 应跳过校验: %v", err)
+	}
+}

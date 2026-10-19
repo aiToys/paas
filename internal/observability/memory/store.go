@@ -342,6 +342,15 @@ func (s *Store) GetTrace(ctx context.Context, traceID string) (observability.Tra
 	return observability.Trace{}, observability.ErrTraceNotFound
 }
 
+// ProbeMetricsQuality memory 路径恒「未接入」——mock 数据无采集过程可诊断，
+// 不伪造探测结果（spec 2026-10-17 专项04 §5；接入引导文案与 compose 未注入分支一致）。
+func (s *Store) ProbeMetricsQuality(ctx context.Context, targetType, targetID string) (observability.QualityReport, error) {
+	return observability.QualityReport{
+		Source: observability.QualitySourceMock,
+		Note:   "未接入真实采集源（PAAS_PROM_URL 未配置），当前指标为演示数据；配置后此处置为采集覆盖探测",
+	}, nil
+}
+
 // seed 灌平台预置告警规则（targetID 空=该维度全部实体，新应用自动纳入监控）；
 // metrics/logs/traces 不 seed（去假数据，接真实后端或返空）。
 func (s *Store) seed() {

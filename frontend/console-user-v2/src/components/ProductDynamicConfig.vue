@@ -79,8 +79,9 @@ const publishing = ref(false)
 async function publish() {
   publishing.value = true
   try {
-    await publishAppDynamicConfigs(props.appId, envStore.currentEnv?.id)
-    ElMessage.success('已发布新版本（运行中服务热更新）')
+    const pub = await publishAppDynamicConfigs(props.appId, envStore.currentEnv?.id)
+    // 诚实标注：平台只能确认「已发布」，实例是否已拉取采用无回报通道（spec 专项04 §3）
+    ElMessage.success(`已发布 v${pub.version}（客户端采用情况未知——实例下次拉取时生效）`)
     await load()
   } catch (e) {
     ElMessage.error(apiError(e, '发布失败'))

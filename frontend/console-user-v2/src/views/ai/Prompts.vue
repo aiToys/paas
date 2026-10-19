@@ -1,9 +1,10 @@
 <script setup lang="ts">
-// AI 服务 -> 提示词（P2）：版本化模板，同 name 多版本，最新版自动激活。
-// 创建同 name 自动 version+1 且激活；可手动激活历史版本。
+// AI 服务 -> 提示词（P2）：版本化模板，同 name 多版本。
+// 创建可选「立即激活」（默认开=兼容旧语义）或「保存草稿」（现有 active 不动）；
+// 激活任意版本前展示引用该名称的 Agent 影响（C3 显式激活）。
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchJSON, fetchAuth, respError, apiError } from '@/api'
+import { fetchJSON, fetchAuth, fetchSettled, respError, apiError } from '@/api'
 import { usePublish } from '@/composables/usePublish'
 
 interface Prompt {
@@ -13,8 +14,10 @@ interface Prompt {
   version: number; active: boolean
   createdAt: string
 }
+interface Agent { id: string; name: string; promptRef: string }
 
 const prompts = ref<Prompt[]>([])
+const agents = ref<Agent[]>([])
 const loading = ref(false)
 
 async function load() {
@@ -26,6 +29,17 @@ async function load() {
   } finally {
     loading.value = false
   }
+}
+
+// 引用 Agent（激活影响确认用）：独立结算，失败时确认框提示「引用情况未知」不阻塞激活
+async function loadAgents() {
+  const a = await fetchSettled<Agent[]>('/api/agents', '智能体引用')
+  if (a) agents.value = a
+}
+
+function agentsUsing(name: string): { names: string[]; known: boolean } {
+  if (!agents.value.length) return { names: [], known: false }
+  return { names: agents.value.filter((x) => x.promptRef === name).map((x) => x.name), known: true }
 }
 
 // 按名称分组（同 name 多版本）
@@ -41,25 +55,33 @@ function grouped(): { name: string; versions: Prompt[] }[] {
   }))
 }
 
-// 创建弹窗
+// 创建弹窗（保存后立即激活=默认开，兼容旧语义；关闭=草稿版本）
 const showForm = ref(false)
+// 请求中禁重复提交（§3：连点不重复建）
+const submitting = ref(false)
 const form = ref({ name: '', template: '', variables: '' })
+const activateNow = ref(true)
 
 function openCreate() {
   form.value = { name: '', template: '', variables: '' }
+  activateNow.value = true
   showForm.value = true
 }
 
 async function submit() {
+  if (submitting.value) return
+  submitting.value = true
+  try {
   const f = form.value
   if (!f.name || !f.template) {
     ElMessage.warning('名称与模板必填')
     return
   }
-  const body: { name: string; template: string; variables?: string[] } = {
+  const body: { name: string; template: string; variables?: string[]; activate?: boolean } = {
     name: f.name,
     template: f.template,
   }
+  if (!activateNow.value) body.activate = false
   if (f.variables.trim()) {
     body.variables = f.variables.split(',').map((s) => s.trim()).filter(Boolean)
   }
@@ -73,17 +95,27 @@ async function submit() {
       ElMessage.error(await respError(resp, '创建失败：'))
       return
     }
-    ElMessage.success('已创建（同 name 自动 version+1 且激活）')
+    ElMessage.success(activateNow.value ? '已创建并激活' : '已保存为草稿版本（现有激活版本未变动）')
     showForm.value = false
     load()
   } catch (e) {
     ElMessage.error(apiError(e, '创建失败'))
   }
+  } finally {
+    submitting.value = false
+  }
 }
 
 async function activate(p: Prompt) {
+  // 激活前展示引用影响：引用该名称的 Agent 立即改用此版本
+  const ref = agentsUsing(p.name)
+  const impact = ref.known
+    ? (ref.names.length
+        ? `引用此名称的 Agent：${ref.names.join('、')}——激活后立即改用 v${p.version}。`
+        : '当前没有 Agent 引用此名称。')
+    : '引用情况未知（Agent 列表加载失败），激活将影响所有引用此名称的 Agent。'
   try {
-    await ElMessageBox.confirm(`激活「${p.name} v${p.version}」？`, '激活确认', { type: 'warning' })
+    await ElMessageBox.confirm(`激活「${p.name} v${p.version}」？\n\n${impact}`, '激活确认', { type: 'warning' })
     const resp = await fetchAuth(`/api/prompts/${p.id}/activate`, { method: 'POST' })
     if (!resp.ok) {
       ElMessage.error(await respError(resp, '激活失败：'))
@@ -117,7 +149,7 @@ async function remove(p: Prompt) {
   }
 }
 
-onMounted(load)
+onMounted(() => { load(); loadAgents() })
 </script>
 
 <template>
@@ -139,7 +171,7 @@ onMounted(load)
           <el-table-column label="状态" width="90">
             <template #default="{ row }">
               <el-tag v-if="row.active" type="success">激活</el-tag>
-              <el-tag v-else type="info">历史</el-tag>
+              <el-tag v-else type="info">未激活</el-tag>
             </template>
           </el-table-column>
           <el-table-column prop="template" label="模板" min-width="300" show-overflow-tooltip />
@@ -158,9 +190,13 @@ onMounted(load)
     </el-empty>
 
     <el-dialog v-model="showForm" title="新建提示词" width="640px">
-      <el-form label-width="90px">
+      <el-form label-width="110px">
         <el-form-item label="名称">
-          <el-input v-model="form.name" placeholder="同 name 自动 version+1 且激活" />
+          <el-input v-model="form.name" placeholder="同 name 自动 version+1" />
+        </el-form-item>
+        <el-form-item label="创建后激活">
+          <el-switch v-model="activateNow" />
+          <span class="switch-note">{{ activateNow ? '立即激活，引用此名称的智能体随即改用新版本' : '保存为草稿，现有激活版本不动；稍后在列表手动激活' }}</span>
         </el-form-item>
         <el-form-item label="模板">
           <el-input v-model="form.template" type="textarea" :rows="8" placeholder="支持 {{.var}} 模板变量" />
@@ -171,7 +207,7 @@ onMounted(load)
       </el-form>
       <template #footer>
         <el-button @click="showForm = false">取消</el-button>
-        <el-button type="primary" @click="submit">创建</el-button>
+        <el-button type="primary" :disabled="submitting" @click="submit">{{ submitting ? '保存中…' : (activateNow ? '创建并激活' : '保存草稿') }}</el-button>
       </template>
     </el-dialog>
   </div>
@@ -183,4 +219,5 @@ onMounted(load)
 .page-header h2 { margin: 0; }
 .group-title { font-weight: 600; }
 .ml { margin-left: 8px; }
+.switch-note { margin-left: 10px; font-size: 12px; color: var(--el-text-color-secondary); }
 </style>

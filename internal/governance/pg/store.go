@@ -42,7 +42,7 @@ func NewStore(db *storagepg.DB) *Store { return &Store{db: db} }
 const (
 	svcCols     = `id, tenant_id, name, app_id, env_id, protocol, port, "desc", updated_at`
 	instCols    = `id, tenant_id, service_id, addr, status, lane_id, meta, updated_at`
-	routeCols   = `id, tenant_id, name, host, path, service_id, methods, strip_path, enabled, updated_at`
+	routeCols   = `id, tenant_id, name, host, path, service_id, methods, strip_path, enabled, updated_at, apply_status, apply_error, applied_at`
 	breakerCols = `id, tenant_id, name, service_id, strategy, threshold, min_requests, window_secs, enabled, updated_at`
 )
 
@@ -113,8 +113,15 @@ func scanInstance(r storagepg.RowScanner, in *governance.Instance) error {
 
 func scanRoute(r storagepg.RowScanner, rt *governance.Route) error {
 	var methodsRaw []byte
-	if err := r.Scan(&rt.ID, &rt.TenantID, &rt.Name, &rt.Host, &rt.Path, &rt.ServiceID, &methodsRaw, &rt.StripPath, &rt.Enabled, &rt.UpdatedAt); err != nil {
+	// appliedAt 用可空指针接收：存量路由该列为 NULL（migration 0052 前），scan 进
+	// time.Time 会报「cannot scan NULL into *time.Time」致整个列表 500（2026-10-19 集群实测）。
+	var appliedAt *time.Time
+	if err := r.Scan(&rt.ID, &rt.TenantID, &rt.Name, &rt.Host, &rt.Path, &rt.ServiceID, &methodsRaw, &rt.StripPath, &rt.Enabled, &rt.UpdatedAt,
+		&rt.ApplyStatus, &rt.ApplyError, &appliedAt); err != nil {
 		return err
+	}
+	if appliedAt != nil {
+		rt.AppliedAt = *appliedAt
 	}
 	rt.Methods = unmarshalMethods(methodsRaw)
 	return nil
@@ -461,8 +468,10 @@ func (s *Store) CreateRoute(ctx context.Context, r governance.Route) (governance
 	if err != nil {
 		return governance.Route{}, err
 	}
+	// 下发状态列不在此 INSERT（默认 空/NULL——创建后由 ApplyRepo 装饰器投影回写）。
 	_, err = s.db.Pool().Exec(ctx,
-		`INSERT INTO gov_routes (`+routeCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		`INSERT INTO gov_routes (id, tenant_id, name, host, path, service_id, methods, strip_path, enabled, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
 		r.ID, r.TenantID, r.Name, r.Host, r.Path, r.ServiceID, methodsBytes, r.StripPath, r.Enabled, r.UpdatedAt)
 	if storagepg.IsUniqueViolation(err) {
 		return governance.Route{}, fmt.Errorf("路由名已存在: %s", r.Name)
@@ -527,6 +536,37 @@ func (s *Store) DeleteRoute(ctx context.Context, id string) error {
 	}
 	tag, err := s.db.Pool().Exec(ctx,
 		`DELETE FROM gov_routes WHERE id=$1 AND tenant_id=$2`, id, tid)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("路由不存在: %s", id)
+	}
+	return nil
+}
+
+// SetRouteApplyStatus 回写数据面下发状态（ApplyRepo 装饰器专用；跨租户 not found）。
+// status=applied 时刷 applied_at；failed 记脱敏原因。
+func (s *Store) SetRouteApplyStatus(ctx context.Context, id, status, applyErr string) error {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return err
+	}
+	if status == "applied" {
+		tag, err := s.db.Pool().Exec(ctx,
+			`UPDATE gov_routes SET apply_status=$1, apply_error='', applied_at=now() WHERE id=$2 AND tenant_id=$3`,
+			status, id, tid)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return fmt.Errorf("路由不存在: %s", id)
+		}
+		return nil
+	}
+	tag, err := s.db.Pool().Exec(ctx,
+		`UPDATE gov_routes SET apply_status=$1, apply_error=$2 WHERE id=$3 AND tenant_id=$4`,
+		status, applyErr, id, tid)
 	if err != nil {
 		return err
 	}

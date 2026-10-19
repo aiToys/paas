@@ -61,6 +61,10 @@ func cloneRun(r workflow.WorkflowRun) workflow.WorkflowRun {
 	out := r
 	out.Inputs = cloneMap(r.Inputs)
 	out.NodeRuns = append([]workflow.NodeRun(nil), r.NodeRuns...)
+	if r.DefSnapshot != nil {
+		snap := cloneDef(*r.DefSnapshot)
+		out.DefSnapshot = &snap
+	}
 	return out
 }
 

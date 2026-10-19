@@ -177,7 +177,7 @@ func (s *Store) Get(ctx context.Context, id string) (dataservice.DataService, er
 	var d dataservice.DataService
 	if err = s.scanDS(row, &d); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return dataservice.DataService{}, fmt.Errorf("数据服务不存在: %s", id)
+			return dataservice.DataService{}, fmt.Errorf("%w: %s", dataservice.ErrNotFound, id)
 		}
 		return dataservice.DataService{}, err
 	}
@@ -192,7 +192,7 @@ func (s *Store) GetAny(ctx context.Context, id string) (dataservice.DataService,
 	var d dataservice.DataService
 	if err := s.scanDS(row, &d); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return dataservice.DataService{}, fmt.Errorf("数据服务不存在: %s", id)
+			return dataservice.DataService{}, fmt.Errorf("%w: %s", dataservice.ErrNotFound, id)
 		}
 		return dataservice.DataService{}, err
 	}
@@ -349,7 +349,7 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("数据服务不存在: %s", id)
+		return fmt.Errorf("%w: %s", dataservice.ErrNotFound, id)
 	}
 	return nil
 }

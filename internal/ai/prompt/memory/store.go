@@ -106,6 +106,32 @@ func (s *Store) Create(ctx context.Context, p prompt.Prompt) (prompt.Prompt, err
 	return clone(p), nil
 }
 
+// CreateDraft 同 name → version = max+1，但不激活、不动现有 active（草稿版本）。
+func (s *Store) CreateDraft(ctx context.Context, p prompt.Prompt) (prompt.Prompt, error) {
+	tid, err := tenantOrErr(ctx)
+	if err != nil {
+		return prompt.Prompt{}, err
+	}
+	if err := p.Validate(); err != nil {
+		return prompt.Prompt{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	maxVer := 0
+	for _, ex := range s.prompts {
+		if ex.TenantID == tid && ex.Name == p.Name && ex.Version > maxVer {
+			maxVer = ex.Version
+		}
+	}
+	p.Version = maxVer + 1
+	p.ID = "prompt-" + randID()
+	p.TenantID = tid
+	p.Active = false // 草稿：现有 active 保持不变
+	p.CreatedAt = time.Now()
+	s.prompts[p.ID] = p
+	return clone(p), nil
+}
+
 // SetActive 激活某版本（同 name 其他 deactive）。
 func (s *Store) SetActive(ctx context.Context, id string) (prompt.Prompt, error) {
 	tid, err := tenantOrErr(ctx)

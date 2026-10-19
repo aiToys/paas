@@ -29,6 +29,9 @@ interface Workload {
 const envs = ref<Env[]>([])
 const workloads = ref<Workload[]>([])
 const loading = ref(true)
+// UX-01：环境主数据失败文案 + 工作负载依赖失败标记——依赖失败时不派生健康值（假「空闲」）
+const loadError = ref('')
+const wlFailed = ref(false)
 const router = useRouter()
 const envStore = useEnvStore()
 
@@ -38,15 +41,21 @@ const submitting = ref(false)
 
 async function load() {
   loading.value = true
+  loadError.value = ''
+  wlFailed.value = false
   try {
     const [eResp, wResp] = await Promise.all([
       fetchAuth('/api/environments'),
       fetchAuth('/api/workloads'),
     ])
     if (eResp.ok) envs.value = (await eResp.json()).data ?? []
+    else loadError.value = `环境列表加载失败：HTTP ${eResp.status}`
+    // 工作负载是健康值的依赖：失败时保留旧数据但标记降级，不拿空数组派生「空闲」
+    wlFailed.value = !wResp.ok
     if (wResp.ok) workloads.value = (await wResp.json()).data ?? []
   } catch (e) {
-    ElMessage.error(apiError(e, '加载环境失败'))
+    loadError.value = apiError(e, '加载环境失败')
+    wlFailed.value = true
   } finally {
     loading.value = false
   }
@@ -67,11 +76,18 @@ function wlCount(envId: string) {
 }
 
 function health(envId: string): { label: string; cls: string } {
+  // 依赖失败＝数据未知，不能伪装成「空闲」（UX-01：不生成虚拟健康值）
+  if (wlFailed.value) return { label: '未知', cls: 'idle' }
   const wls = wlByEnv.value.get(envId) ?? []
   if (!wls.length) return { label: '空闲', cls: 'idle' }
-  if (wls.some((w) => w.status === 'failed' || w.ready < w.replicas)) {
-    return { label: '有异常', cls: 'warn' }
-  }
+  // 健康算法按类型区分（spec 专项04 §6）：Job/CronJob 完成态 ready 低于 replicas
+  // 是正常终态，不按 Deployment ready/replicas 判坏；仅 status=failed 计异常。
+  const bad = wls.some((w) => {
+    if (w.status === 'failed') return true
+    if (w.type === 'job' || w.type === 'cronjob') return false
+    return w.ready < w.replicas
+  })
+  if (bad) return { label: '有异常', cls: 'warn' }
   return { label: '正常', cls: 'ok' }
 }
 
@@ -79,10 +95,33 @@ function open(e: Env) {
   router.push(`/environments/${e.id}`)
 }
 
-// 删除环境：生产环境输入环境 ID 确认。删除前提示该环境下工作负载数。
+// 删除环境：先做依赖预检（spec 专项04 §6——展示实际依赖清单，不用重复确认弹窗
+// 代替依赖检查）。有依赖直接阻断并逐项列出；无依赖走 confirmDangerous（生产输入
+// 环境名）——删除语义如实说明：仅移除环境元数据，不清理/停止任何部署物。
 async function remove(e: Env) {
-  const count = wlCount(e.id)
-  const hint = count > 0 ? `该环境下有 ${count} 个工作负载，删除环境不影响已部署工作负载但将解除环境元数据。` : ''
+  let usage: { workloads: number; dataservices: number; lanes: number } | null = null
+  try {
+    const resp = await fetchAuth(`/api/environments/${e.id}/usage`)
+    usage = resp.ok ? ((await resp.json()).data ?? null) : null
+  } catch {
+    usage = null
+  }
+  const deps =
+    usage && usage.workloads + usage.dataservices + usage.lanes > 0
+      ? [
+          usage.workloads ? `${usage.workloads} 个工作负载` : '',
+          usage.dataservices ? `${usage.dataservices} 个数据服务` : '',
+          usage.lanes ? `${usage.lanes} 个泳道` : '',
+        ].filter(Boolean)
+      : []
+  if (deps.length) {
+    await ElMessageBox.alert(
+      `该环境仍有依赖：${deps.join('、')}。请先删除或迁移这些资源后再删除环境（后端同样会拒绝）。`,
+      '无法删除',
+      { type: 'warning', confirmButtonText: '知道了' },
+    )
+    return
+  }
   const isProd = e.type === 'prod'
   const ok = await confirmDangerous({
     action: '删除环境',
@@ -92,18 +131,9 @@ async function remove(e: Env) {
   })
   if (!ok) return
   try {
-    await ElMessageBox.confirm(
-      `${hint}确认删除环境「${e.name}」？`.trim(),
-      '二次确认',
-      { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' },
-    )
-  } catch {
-    return
-  }
-  try {
     const resp = await fetchAuth(`/api/environments/${e.id}`, { method: 'DELETE' })
     if (resp.ok) {
-      ElMessage.success('环境已删除')
+      ElMessage.success('环境已删除（仅移除环境元数据与发布阶序引用，不影响任何已部署资源）')
       load()
     } else {
       const err = await resp.json().catch(() => ({}))
@@ -156,6 +186,12 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
 
     <div v-if="loading" class="grid">
       <div v-for="i in 3" :key="i" class="skel" />
+    </div>
+    <div v-else-if="loadError && !envs.length" class="empty">
+      <Icon name="shield" :size="32" />
+      <p class="err">⚠ {{ loadError }}</p>
+      <p class="err-sub">加载失败与「暂无环境」是两种状态。</p>
+      <button class="act" @click="load">重新加载</button>
     </div>
     <div v-else-if="!envs.length" class="empty">
       <Icon name="shield" :size="32" />
@@ -396,6 +432,9 @@ onUnmounted(() => window.removeEventListener('paas:key-changed', onKeyChanged))
   color: var(--text-faint);
   margin-top: -4px;
 }
+.empty :deep(p.err),
+.empty p.err { color: var(--danger); }
+.empty p.err-sub { color: var(--text-faint); font-size: 12px; }
 .empty {
   display: flex;
   flex-direction: column;

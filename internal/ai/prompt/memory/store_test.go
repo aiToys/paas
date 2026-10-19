@@ -44,6 +44,42 @@ func TestVersionIncrementAndActive(t *testing.T) {
 	}
 }
 
+func TestCreateDraftKeepsActive(t *testing.T) {
+	s := memory.NewStore()
+	ctx := ctxT("t-a")
+	p1, err := s.Create(ctx, prompt.Prompt{Name: "greet", Template: "v1"})
+	if err != nil {
+		t.Fatalf("Create v1: %v", err)
+	}
+	// 草稿版本：version 递增但不激活，现有 active 不动
+	draft, err := s.CreateDraft(ctx, prompt.Prompt{Name: "greet", Template: "v2-draft"})
+	if err != nil {
+		t.Fatalf("CreateDraft: %v", err)
+	}
+	if draft.Version != 2 {
+		t.Fatalf("草稿应 version=2，got %d", draft.Version)
+	}
+	if draft.Active {
+		t.Fatalf("草稿不应 active")
+	}
+	got1, _ := s.Get(ctx, p1.ID)
+	if !got1.Active {
+		t.Fatalf("现有 active 版本不应被动")
+	}
+	active, err := s.GetActive(ctx, "greet")
+	if err != nil || active.Version != 1 {
+		t.Fatalf("active 仍应是 v1，got v%d err=%v", active.Version, err)
+	}
+	// 显式激活草稿后接管
+	if _, err := s.SetActive(ctx, draft.ID); err != nil {
+		t.Fatalf("SetActive draft: %v", err)
+	}
+	active, _ = s.GetActive(ctx, "greet")
+	if active.Version != 2 {
+		t.Fatalf("激活后应是 v2，got v%d", active.Version)
+	}
+}
+
 func TestSetActiveSwitch(t *testing.T) {
 	s := memory.NewStore()
 	ctx := ctxT("t-a")

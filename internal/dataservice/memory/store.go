@@ -130,7 +130,7 @@ func (s *Store) Get(ctx context.Context, id string) (dataservice.DataService, er
 	defer s.mu.RUnlock()
 	d, ok := s.services[id]
 	if !ok || d.TenantID != tid {
-		return dataservice.DataService{}, fmt.Errorf("数据服务不存在: %s", id)
+		return dataservice.DataService{}, fmt.Errorf("%w: %s", dataservice.ErrNotFound, id)
 	}
 	d.Spec = cloneStrMap(d.Spec)
 	d.Connection = cloneStrMap(d.Connection)
@@ -144,7 +144,7 @@ func (s *Store) GetAny(ctx context.Context, id string) (dataservice.DataService,
 	defer s.mu.RUnlock()
 	d, ok := s.services[id]
 	if !ok {
-		return dataservice.DataService{}, fmt.Errorf("数据服务不存在: %s", id)
+		return dataservice.DataService{}, fmt.Errorf("%w: %s", dataservice.ErrNotFound, id)
 	}
 	d.Spec = cloneStrMap(d.Spec)
 	d.Connection = cloneStrMap(d.Connection)
@@ -264,7 +264,7 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	defer s.mu.Unlock()
 	d, ok := s.services[id]
 	if !ok || d.TenantID != tid {
-		return fmt.Errorf("数据服务不存在: %s", id)
+		return fmt.Errorf("%w: %s", dataservice.ErrNotFound, id)
 	}
 	delete(s.services, id)
 	return nil

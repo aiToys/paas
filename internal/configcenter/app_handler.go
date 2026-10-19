@@ -128,6 +128,9 @@ func (h *AppHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// 精确匹配先于通配 lane-overrides/{key} DELETE（promote 是保留字，key 不会叫 promote——
 		// DELETE /lane-overrides/promote 会被此分支吃掉返 405，可接受：key 命名空间保留字）。
 		h.serveLanePromote(w, r, appID, r.URL.Query().Get("envId"), r.URL.Query().Get("lane"))
+	case len(sub) == 2 && sub[0] == "lane-overrides" && sub[1] == "batch":
+		// batch 同为保留字（与 promote 同理，key 不会叫 batch）。
+		h.serveLaneOverrideBatch(w, r, appID, r.URL.Query().Get("envId"), r.URL.Query().Get("lane"))
 	case sub[0] == "lane-overrides":
 		h.serveLaneOverrides(w, r, appID, r.URL.Query().Get("envId"), r.URL.Query().Get("lane"), parts[3:])
 	case len(sub) == 1 && sub[0] == "shared-refs":
@@ -479,6 +482,16 @@ func (h *AppHandler) serveLaneOverrides(w http.ResponseWriter, r *http.Request, 
 		if !h.allow(w, r, "application:read") {
 			return
 		}
+		exact, err := h.repo.ListLaneOverrides(r.Context(), appID, envID, lane)
+		if err != nil {
+			httputil.WriteInternalError(w, err)
+			return
+		}
+		if r.URL.Query().Get("preview") == "1" {
+			w.Header().Set("X-Config-Revision", LaneRevision(exact))
+			httputil.WriteData(w, exact)
+			return
+		}
 		ovs, err := listOverridesResolvedRepo(r.Context(), h.repo, appID, envID, lane)
 		if err != nil {
 			httputil.WriteInternalError(w, err)
@@ -527,6 +540,57 @@ func (h *AppHandler) serveLaneOverrides(w http.ResponseWriter, r *http.Request, 
 	default:
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
+}
+
+// serveLaneOverrideBatch POST /dynamic-configs/lane-overrides/batch?envId=&lane=
+// 批次原子应用泳道覆盖变更集（spec 2026-10-17 专项04 §3）。body：
+//
+//	{"ops":[{"action":"upsert","key":"k","value":"v","type":"text"},
+//	        {"action":"remove","key":"old"}], "expectedRevision": "<preview header>"}
+//
+// 整批全成功或全回滚；预览版本不一致返回 409，调用方必须重新预览。
+// 写权限与单 key 端点一致（application:write + 生产闸门 + AppGuard write）；一条审计记整批。
+func (h *AppHandler) serveLaneOverrideBatch(w http.ResponseWriter, r *http.Request, appID, envID, lane string) {
+	if lane == "" || lane == "default" {
+		httputil.WriteError(w, http.StatusBadRequest, "lane 参数必填且不可为 default（default 即基线，不接受覆盖）")
+		return
+	}
+	if r.Method != http.MethodPost {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !h.allowWrite(w, r, appID, envID) {
+		return
+	}
+	var body struct {
+		Ops              []LaneOverrideOp `json:"ops"`
+		ExpectedCount    int              `json:"expectedCount"`
+		ExpectedRevision string           `json:"expectedRevision"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if len(body.Ops) == 0 {
+		httputil.WriteError(w, http.StatusBadRequest, "ops 不能为空")
+		return
+	}
+	if body.ExpectedRevision == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "缺少配置预览版本，请重新预览")
+		return
+	}
+	applied, err := h.repo.ApplyLaneOverrides(r.Context(), appID, envID, lane, body.Ops, -1, body.ExpectedRevision)
+	if err != nil {
+		if errors.Is(err, ErrLaneOverrideConflict) {
+			httputil.WriteError(w, http.StatusConflict, err.Error())
+			return
+		}
+		httputil.WriteServiceError(w, http.StatusBadRequest, err)
+		return
+	}
+	h.recordAudit(r.Context(), tenantIDFromCtx(r.Context()), "configcenter_lane_override_batch", appID,
+		fmt.Sprintf("ops=%d,lane=%s,envId=%s", len(body.Ops), lane, envID))
+	httputil.WriteData(w, map[string]any{"applied": len(applied), "overrides": applied})
 }
 
 // serveSharedRefs 共享配置引用两操作（挂 dynamic-configs/shared-refs）：

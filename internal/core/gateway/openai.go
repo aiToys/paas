@@ -69,6 +69,10 @@ func ChatCompletions(gw *Gateway, meter *Meter, agents *AgentDispatcherHolder) h
 				// 预检错误（agent 不存在/禁用/护栏拦截）发生在 SSE 写头前，返干净 4xx。
 				// ServeSSE 内部流式错误已无法改 status，仅日志（与 serveStream 同）。
 				switch {
+				case errors.Is(err, ErrAgentStreamReported):
+					// 流内错误已有结构化帧，不能在 DONE 后追加裸 JSON/HTTP 错误。
+					log.Printf("[gateway] agent 流式执行失败: %v", err)
+					return
 				case errors.Is(err, ErrAgentBlocked):
 					httputil.WriteError(w, http.StatusUnprocessableEntity, err.Error())
 				case errors.Is(err, ErrAgentNotFound):

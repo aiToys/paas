@@ -108,21 +108,35 @@ function nextNodeId(): string {
 }
 
 function addNode() {
-  form.value.nodes.splice(form.value.nodes.length - 1, 0, {
-    id: nextNodeId(), type: 'llm', name: '',
-    nextId: form.value.nodes[form.value.nodes.length - 1]?.id || 'e',
+  const endId = form.value.nodes[form.value.nodes.length - 1]?.id || 'e'
+  const node = {
+    id: nextNodeId(), type: 'llm' as const, name: '',
+    nextId: endId,
     config: { agentId: agents.value[0]?.id ?? '', inputTemplate: '{{inputs.input}}' },
-  })
+  }
+  // 插到 end 前并重连前驱（WF-01）：插入位置前一个节点若直连 end，改指新节点，
+  // 否则新节点无前驱指向＝不可达，后端可达性校验会拒绝保存
+  const prev = form.value.nodes[form.value.nodes.length - 2]
+  form.value.nodes.splice(form.value.nodes.length - 1, 0, node)
+  if (prev && prev.id !== node.id) {
+    if (prev.nextId === endId) prev.nextId = node.id
+    if (prev.elseId === endId) prev.elseId = node.id
+    for (const b of prev.branches || []) if (b.nextId === endId) b.nextId = node.id
+  }
 }
 
 function removeNode(i: number) {
   const id = form.value.nodes[i].id
+  // 继承被删节点的后继（WF-01）：前驱重指后继保持链语义，不写死 'e'
+  // ——end 节点 id 允许改名，写死会留下错误引用
+  const succ = form.value.nodes[i].nextId
+    || form.value.nodes[form.value.nodes.length - 1]?.id
+    || ''
   form.value.nodes.splice(i, 1)
-  // 清悬挂连线：指向被删节点的 nextId 重指到 end
   for (const n of form.value.nodes) {
-    if (n.nextId === id) n.nextId = 'e'
-    if (n.elseId === id) n.elseId = 'e'
-    for (const b of n.branches || []) if (b.nextId === id) b.nextId = 'e'
+    if (n.nextId === id) n.nextId = succ
+    if (n.elseId === id) n.elseId = succ
+    for (const b of n.branches || []) if (b.nextId === id) b.nextId = succ
   }
 }
 

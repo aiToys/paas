@@ -6,7 +6,8 @@ import { statusOf, DOC_STATUS } from '@/composables/useStatus'
 // 租户私有；不绑物理环境（无 prod:write）。文档上传异步解析+索引，状态轮询 parsing->indexed/failed。
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { fetchJSON, fetchAuth, apiError } from '@/api'
+import { fetchJSON, fetchAuth, fetchSettled, apiError } from '@/api'
+import StatePanel from '@/components/StatePanel.vue'
 import { usePublish } from '@/composables/usePublish'
 
 interface KnowledgeBase {
@@ -23,10 +24,13 @@ interface Document {
 interface ChunkHit { chunk: { content: string; seq: number }; score: number }
 interface DSItem { id: string; name: string; kind: string }
 interface Agent { id: string; name: string; knowledgeBases: string[] | null }
+interface ModelItem { id: string; name?: string; capabilities?: string[] | null }
 
 const kbs = ref<KnowledgeBase[]>([])
 const agents = ref<Agent[]>([])
 const loading = ref(false)
+// 主数据失败文案（''=正常）：与「真的没有知识库」区分开
+const loadError = ref('')
 
 // 被 Agent 引用计数（kb id -> 引用它的 Agent 名列表）
 const usage = computed(() => {
@@ -40,36 +44,43 @@ const usage = computed(() => {
 })
 const vectorDS = ref<DSItem[]>([])
 const storageDS = ref<DSItem[]>([])
+// 兼容 embedding 的模型（capabilities 含 "embedding"）；独立结算：模型目录拉不到=下拉空+提示，不拖垮 KB 列表
+const embeddingModels = ref<ModelItem[]>([])
+const modelsFailed = ref(false)
+
+async function loadModels() {
+  const m = await fetchSettled<ModelItem[]>('/api/models', '模型目录')
+  if (m) embeddingModels.value = m.filter((x) => (x.capabilities || []).includes('embedding'))
+  else modelsFailed.value = true
+}
 
 // 状态字典收编 useStatus.DOC_STATUS（R1-C1）
 
 async function load() {
   loading.value = true
+  loadError.value = ''
   try {
+    // 主数据与引用数据独立结算（AI-01）：Agent 引用失败不拖垮知识库列表
     const [k, a] = await Promise.all([
-      fetchJSON<KnowledgeBase[]>('/api/knowledgebases'),
-      fetchJSON<Agent[]>('/api/agents'),
+      fetchSettled<KnowledgeBase[]>('/api/knowledgebases', '知识库'),
+      fetchSettled<Agent[]>('/api/agents', '智能体'),
     ])
-    kbs.value = k
-    agents.value = a
-  } catch (e) {
-    ElMessage.error(apiError(e, '加载知识库失败'))
+    if (k) kbs.value = k
+    else loadError.value = '知识库列表加载失败，请重试'
+    if (a) agents.value = a
   } finally {
     loading.value = false
   }
 }
 
 async function loadDS() {
-  try {
-    const [vs, ss] = await Promise.all([
-      fetchJSON<DSItem[]>('/api/dataservices?kind=vector'),
-      fetchJSON<DSItem[]>('/api/dataservices?kind=storage'),
-    ])
-    vectorDS.value = vs
-    storageDS.value = ss
-  } catch {
-    // 数据服务未就绪不阻塞 KB 列表
-  }
+  // vector/storage 独立结算：任一失败不影响另一个，也不阻塞 KB 列表
+  const [vs, ss] = await Promise.all([
+    fetchSettled<DSItem[]>('/api/dataservices?kind=vector', '向量数据服务'),
+    fetchSettled<DSItem[]>('/api/dataservices?kind=storage', '对象存储'),
+  ])
+  if (vs) vectorDS.value = vs
+  if (ss) storageDS.value = ss
 }
 
 // 创建弹窗
@@ -78,7 +89,7 @@ const form = ref({
   name: '',
   vectorStoreRef: '',
   objectStoreRef: '',
-  embeddingModel: 'text-embedding-v4',
+  embeddingModel: '',
   embeddingDim: 1024,
 })
 const submitting = ref(false)
@@ -88,7 +99,7 @@ function openCreate() {
     name: '',
     vectorStoreRef: vectorDS.value[0]?.id ?? '',
     objectStoreRef: storageDS.value[0]?.id ?? '',
-    embeddingModel: 'text-embedding-v4',
+    embeddingModel: embeddingModels.value[0]?.id ?? '',
     embeddingDim: 1024,
   }
   showCreate.value = true
@@ -98,6 +109,7 @@ async function create() {
   if (!form.value.name.trim()) { ElMessage.warning('请填写名称'); return }
   if (!form.value.vectorStoreRef) { ElMessage.warning('请选择向量库（先建 dataservice vector 实例）'); return }
   if (!form.value.objectStoreRef) { ElMessage.warning('请选择对象存储（先建 dataservice storage 实例）'); return }
+  if (!form.value.embeddingModel) { ElMessage.warning('请选择嵌入模型（仅列兼容 embedding 的模型）'); return }
   submitting.value = true
   try {
     await fetchJSON('/api/knowledgebases', {
@@ -238,7 +250,7 @@ async function retrieve() {
   }
 }
 
-onMounted(() => { load(); loadDS() })
+onMounted(() => { load(); loadDS(); loadModels() })
 onUnmounted(stopPoll)
 </script>
 
@@ -248,7 +260,8 @@ onUnmounted(stopPoll)
       <h2>知识库</h2>
       <el-button type="primary" @click="openCreate">新建知识库</el-button>
     </div>
-    <el-table v-loading="loading" :data="kbs">
+    <StatePanel v-if="loadError" :title="loadError" description="列表加载失败与「暂无知识库」是两种状态，重试或检查服务后再来。" error><button class="act" @click="load">重新加载</button></StatePanel>
+    <el-table v-else v-loading="loading" :data="kbs">
       <template #empty>
         <el-empty description="暂无知识库，上传文档构建 RAG 检索" :image-size="64">
           <el-button type="primary" @click="openCreate">新建知识库</el-button>
@@ -293,8 +306,19 @@ onUnmounted(stopPoll)
             <el-option v-for="d in storageDS" :key="d.id" :label="d.name" :value="d.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="向量模型"><el-input v-model="form.embeddingModel" /></el-form-item>
-        <el-form-item label="维度"><el-input-number v-model="form.embeddingDim" :min="1" /></el-form-item>
+        <el-form-item label="嵌入模型">
+          <el-select v-model="form.embeddingModel" placeholder="仅列兼容 embedding 的模型" :disabled="!embeddingModels.length">
+            <el-option v-for="m in embeddingModels" :key="m.id" :label="m.name || m.id" :value="m.id" />
+          </el-select>
+          <div v-if="modelsFailed" class="field-note err">模型目录加载失败，无法确认兼容模型——请重试后再创建</div>
+          <div v-else-if="!embeddingModels.length" class="field-note err">
+            模型目录中没有 embedding 能力模型：先到「模型」页确认已启用嵌入模型，再回来创建知识库
+          </div>
+        </el-form-item>
+        <el-form-item label="维度">
+          <el-input-number v-model="form.embeddingDim" :min="1" />
+          <div class="field-note">须与所选嵌入模型的输出维度一致（模型目录暂无维度元数据，请查阅模型文档）；创建后维度不可修改，不一致会导致写入/检索失败。变更维度 = 新建知识库重建索引。</div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="showCreate = false">取消</el-button>
@@ -351,6 +375,8 @@ onUnmounted(stopPoll)
 <style scoped>
 .page { padding: 16px 24px; }
 .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
+.field-note { font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.5; margin-top: 4px; }
+.field-note.err { color: var(--el-color-danger); }
 .hit { margin-top: 12px; padding: 10px; background: var(--el-fill-color-light); border-radius: 4px; }
 .hit-score { font-size: 12px; color: var(--el-text-color-secondary); margin-bottom: 4px; }
 .hit-content { white-space: pre-wrap; font-size: 13px; line-height: 1.5; max-height: 160px; overflow: auto; }

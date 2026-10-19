@@ -13,6 +13,10 @@ interface GovRoute {
   path?: string
   serviceId: string
   enabled: boolean
+  // 数据面下发状态（spec 专项04 §4）：''=未下发（数据面未启用）、applied、failed
+  applyStatus?: string
+  applyError?: string
+  appliedAt?: string
 }
 interface Instance { id: string; address?: string; status?: string }
 interface Breaker {
@@ -183,7 +187,8 @@ const BREAKER_STATE: Record<string, { label: string; cls: string }> = {
           <th>域名</th>
           <th>路径</th>
           <th>服务</th>
-          <th>状态</th>
+          <th>配置</th>
+          <th>下发</th>
           <th class="col-act"></th>
         </tr>
       </thead>
@@ -193,7 +198,22 @@ const BREAKER_STATE: Record<string, { label: string; cls: string }> = {
           <td class="mono dim">{{ r.path || '/' }}</td>
           <td><span class="s-name mono">{{ serviceName(r.serviceId) }}</span></td>
           <td>
-            <span class="status" :class="r.enabled ? 'ok' : 'idle'">{{ r.enabled ? '在线' : '已下线' }}</span>
+            <span class="status" :class="r.enabled ? 'ok' : 'idle'">{{ r.enabled ? '启用' : '已停用' }}</span>
+          </td>
+          <td>
+            <el-tooltip v-if="r.applyStatus === 'failed'" :content="r.applyError || '下发失败'" placement="top">
+              <span class="status err">下发失败 ?</span>
+            </el-tooltip>
+            <el-tooltip
+              v-else-if="r.applyStatus === 'applied'"
+              content="Ingress 已聚合下发（配置层证据）；域名实际可达性未探测"
+              placement="top"
+            >
+              <span class="status ok">已下发</span>
+            </el-tooltip>
+            <el-tooltip v-else content="尚未向数据面下发（无 Host 或数据面未启用）" placement="top">
+              <span class="status idle">未下发</span>
+            </el-tooltip>
           </td>
           <td class="col-act"><button class="act" @click="toggle(r)">{{ r.enabled ? '下线' : '上线' }}</button></td>
         </tr>

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { fetchList, fetchCommand, apiError } from '@/api'
+import { fetchList, fetchCommand, fetchAuth, apiError } from '@/api'
 import { listMetrics, type MetricSeries } from '@/api/observability'
 import { usePolling } from '@/composables/usePolling'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
@@ -44,9 +44,19 @@ interface Pod {
 interface Backup {
   id: string
   type: string
-  status: string
+  status: string // accepted|running|verifying|completed|failed
+  mode?: string // record|snapshot|restore（''=存量记录）
   sizeMB: number
+  sizeBytes?: number
+  checksum?: string
+  error?: string
+  sourceBackupId?: string
+  restoredResourceId?: string
   createdAt: string
+}
+interface Caps {
+  backup: { supported: boolean; mode: string; reason: string }
+  restore: { supported: boolean; mode: string; reason: string }
 }
 interface Topic {
   id: string
@@ -63,6 +73,7 @@ interface Group {
 }
 const pods = ref<Pod[]>([]),
   backups = ref<Backup[]>([]),
+  caps = ref<Caps | null>(null),
   topics = ref<Topic[]>([]),
   groups = ref<Record<string, Group[]>>({})
 const names = computed(() => ({
@@ -96,10 +107,21 @@ async function load() {
       if (rev === seq) pods.value = v
     }
     if (tab.value === 'backup') {
-      const v = await fetchList<Backup>(
-        `/api/backups?resourceId=${encodeURIComponent(props.service.id)}`,
-      )
-      if (rev === seq) backups.value = v
+      const [v, c] = await Promise.all([
+        fetchList<Backup>(
+          `/api/backups?resourceId=${encodeURIComponent(props.service.id)}`,
+        ),
+        fetchAuth(
+          `/api/dataservices/${encodeURIComponent(props.service.id)}/capabilities`,
+        )
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status))))
+          .then((j) => j.data as Caps)
+          .catch(() => null), // 能力面失败不阻塞列表（按钮按 unknown 处理）
+      ])
+      if (rev === seq) {
+        backups.value = v
+        caps.value = c
+      }
     }
     if (tab.value === 'topics') {
       const v = await fetchList<Topic>(
@@ -131,10 +153,13 @@ async function mutate(task: () => Promise<unknown>, message: string) {
     acting.value = false
   }
 }
+// isProdEnv 按资源实际环境判定（非顶栏 scope——资源可能在其他环境）。
+const isProdEnv = computed(
+  () => env.envs.find((e) => e.id === props.service.envId)?.type === 'prod',
+)
 async function upgrade() {
   if (!image.value.trim()) return
-  const isProd =
-    env.envs.find((e) => e.id === props.service.envId)?.type === 'prod'
+  const isProd = isProdEnv.value
   if (
     !(await confirmDangerous({
       action: '升级镜像',
@@ -150,18 +175,89 @@ async function upgrade() {
   })
   await mutate(() => fetchCommand(r.path, r.options), '升级请求已提交')
 }
-async function backup() {
+// 备份模式标签/状态中文映射（mode ''=存量记录按 record 解释，与后端 EffectiveMode 一致）。
+function modeLabel(b: Backup): string {
+  const m = b.mode || 'record'
+  return m === 'snapshot' ? '快照' : m === 'restore' ? '恢复' : '记录'
+}
+function statusLabel(s: string): string {
+  return (
+    {
+      accepted: '已受理',
+      running: '执行中',
+      verifying: '校验中',
+      completed: '已完成',
+      failed: '失败',
+    }[s] || s
+  )
+}
+function sizeText(b: Backup): string {
+  if (b.sizeBytes && b.sizeBytes > 0) {
+    return b.sizeBytes >= 1048576
+      ? (b.sizeBytes / 1048576).toFixed(1) + ' MB'
+      : b.sizeBytes + ' B'
+  }
+  return '—' // 记录模式无产物大小（不显示历史模拟值）
+}
+const hasActiveJob = computed(() =>
+  backups.value.some((b) => !['completed', 'failed'].includes(b.status)),
+)
+async function createBackup(mode: 'record' | 'snapshot') {
+  if (mode === 'snapshot') {
+    const ok = await confirmDangerous({
+      action: '执行真实备份',
+      target: props.service.name,
+      isProd: isProdEnv.value,
+      requireNameConfirm: isProdEnv.value,
+      message:
+        '将对该数据服务执行引擎级快照（pg_dump），产物落平台 PVC 并记录校验和。执行期间会产生额外 I/O 负载，请按容量选择时间。',
+    })
+    if (!ok) return
+  }
   await mutate(
     () =>
       fetchCommand('/api/backups', {
         method: 'POST',
-        body: JSON.stringify({ resourceId: props.service.id, type: 'full' }),
+        body: JSON.stringify({ resourceId: props.service.id, type: 'full', mode }),
       }),
-    '备份记录已创建（未执行真实快照）',
+    mode === 'snapshot'
+      ? '备份已受理（快照作业执行中，完成后列表更新）'
+      : '备份记录已创建（记录模式：仅登记意图，无产物无恢复证明）',
+  )
+}
+const restoreKeys = new Map<string, string>()
+async function restoreBackup(b: Backup) {
+  if (backups.value.some(row => row.sourceBackupId === b.id && !['completed', 'failed'].includes(row.status))) { ElMessage.info('该快照已有恢复任务，请先查看操作记录'); return }
+  const ok = await confirmDangerous({
+    action: '从快照恢复',
+    target: props.service.name,
+    isProd: isProdEnv.value,
+    requireNameConfirm: isProdEnv.value,
+    message:
+      '将创建一个新的数据服务实例并从快照恢复数据（原实例不受影响，不支持覆盖恢复）。恢复期间新实例经历拉起与导入，耗时取决于数据量。',
+  })
+  if (!ok) return
+  await mutate(
+    async () => {
+      const storageKey = 'paas.restore.' + b.id
+      let key = restoreKeys.get(b.id)
+      try { key ||= sessionStorage.getItem(storageKey) || undefined } catch { /* 存储受限时保留内存重试键 */ }
+      if (!key) key = Array.from(crypto.getRandomValues(new Uint32Array(4)), n => n.toString(16).padStart(8, '0')).join('')
+      restoreKeys.set(b.id, key)
+      try { sessionStorage.setItem(storageKey, key) } catch { /* 不影响请求 */ }
+      await fetchCommand('/api/backups/' + b.id + '/restore', { method: 'POST', headers: { 'Idempotency-Key': key }, body: '{}' })
+      restoreKeys.delete(b.id)
+      try { sessionStorage.removeItem(storageKey) } catch { /* 不影响受理结果 */ }
+    },
+    '恢复已受理（新实例创建与数据导入执行中，完成后显示新实例 ID；文件完整性与表读取检查不等于业务数据一致性验收）',
   )
 }
 async function removeBackup(b: Backup) {
-  if (await confirmAction(`删除备份记录「${b.id}」？`))
+  const hint =
+    b.mode === 'snapshot'
+      ? '删除的记录对应的 PVC 产物仍保留（产物清理待后续提供）'
+      : ''
+  if (await confirmAction(`删除备份记录「${b.id}」？${hint}`))
     await mutate(
       () => fetchCommand('/api/backups/' + b.id, { method: 'DELETE' }),
       '记录已删除',
@@ -235,7 +331,7 @@ async function removeGroup(t: Topic, g: Group) {
           tab === 'metrics'
             ? '仅展示此实例实际采集到的指标，不把缺失数据补成 0。'
             : tab === 'backup'
-              ? '目前仅管理备份记录，不执行数据库备份或存储快照。'
+              ? '目前仅登记备份记录（状态「已记录」≠ 快照已执行/可恢复），不执行数据库备份或存储快照。'
               : tab === 'pods'
                 ? 'Pod 状态来自集群；未接入集群时无法提供诊断。'
                 : '消息主题与消费组管理'
@@ -330,40 +426,78 @@ async function removeGroup(t: Topic, g: Group) {
       <p v-else>外部实例的启停、规格和升级请在其所属集群操作。</p>
 </template>
     <template v-else-if="tab === 'backup'">
-<button class="act" :disabled="acting" @click="backup">
-        添加备份记录
-      </button>
+      <div class="ops-controls">
+        <button
+          class="act"
+          :disabled="acting || !caps?.backup.supported"
+          :title="caps ? caps.backup.reason : '能力面加载失败，操作仍受服务端鉴权'"
+          @click="createBackup('snapshot')"
+        >
+          执行真实备份
+        </button>
+        <button class="act" :disabled="acting" @click="createBackup('record')">
+          仅添加记录
+        </button>
+        <span v-if="caps && !caps.backup.supported" class="hint">{{
+          caps.backup.reason
+        }}</span>
+        <span v-if="hasActiveJob" class="hint"
+          >有执行中的作业，列表随轮询自动更新</span
+        >
+      </div>
       <div class="table-scroll" tabindex="0">
         <table class="list-table">
           <thead>
             <tr>
-              <th>记录</th>
-              <th>类型</th>
+              <th>模式</th>
               <th>状态</th>
-              <th>大小 MB</th>
+              <th>大小</th>
+              <th>校验和</th>
               <th>时间</th>
               <th>操作</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="b in backups" :key="b.id">
-              <td>{{ b.id }}</td>
-              <td>{{ b.type }}</td>
-              <td>{{ b.status }}</td>
-              <td>{{ b.sizeMB }}</td>
-              <td>{{ b.createdAt }}</td>
+              <td>
+                <span :class="['b-mode', b.mode || 'record']">{{ modeLabel(b) }}</span>
+              </td>
+              <td>
+                <span :class="['b-status', b.status]">{{ statusLabel(b.status) }}</span>
+                <span v-if="b.error" class="hint" :title="b.error">（{{ b.error.slice(0, 40) }}）</span>
+              </td>
+              <td>
+                {{ sizeText(b) }}
+                <span v-if="b.mode === 'record' && b.status === 'completed'" class="hint"
+                  >（无产物，不可恢复）</span
+                >
+                <span v-if="b.restoredResourceId" class="hint"
+                  >→ 恢复目标 {{ b.restoredResourceId }}</span
+                >
+              </td>
+              <td>
+                <span v-if="b.checksum" class="mono" :title="b.checksum">{{
+                  b.checksum.slice(0, 10) + '…'
+                }}</span>
+                <span v-else class="hint">—</span>
+              </td>
+              <td>{{ b.createdAt?.replace('T', ' ').slice(0, 19) }}</td>
               <td>
                 <button
-                  class="act danger"
-                  :disabled="acting"
-                  @click="removeBackup(b)"
+                  v-if="b.mode === 'snapshot' && b.status === 'completed'"
+                  class="act"
+                  :disabled="acting || !caps?.restore.supported"
+                  @click="restoreBackup(b)"
                 >
-                  删除记录
+                  恢复到新实例
+                </button>
+                <button class="act danger" :disabled="acting" @click="removeBackup(b)">
+                  删除
                 </button>
               </td>
             </tr>
             <tr v-if="!backups.length">
-              <td colspan="6">暂无备份记录</td>
+              <td colspan="6">暂无备份记录（真实备份产生可恢复快照；记录模式仅登记意图）</td>
             </tr>
           </tbody>
         </table>
@@ -487,5 +621,32 @@ input {
   .ops-charts {
     grid-template-columns: 1fr;
   }
+}
+/* DS-01：备份状态用「已记录」弱化——completed 不冒充可恢复证据 */
+.b-status { color: var(--text-dim); }
+.b-status.completed { color: var(--success); }
+.b-status.failed { color: var(--danger); }
+.b-status.running,
+.b-status.accepted,
+.b-status.verifying { color: var(--warning); }
+.b-mode {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  background: var(--surface-2, #1e2433);
+  color: var(--text-dim);
+}
+.b-mode.snapshot {
+  background: rgba(16, 185, 129, 0.12);
+  color: var(--success);
+}
+.b-mode.restore {
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--brand);
+}
+.mono {
+  font-family: var(--mono, monospace);
+  font-size: 12px;
 }
 </style>

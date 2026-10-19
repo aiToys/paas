@@ -32,4 +32,8 @@ type Repository interface {
 	ListTraces(ctx context.Context, appID, status string, limit int) ([]Trace, error)
 	// GetTrace 按 traceID 精确查单条（排障直查：日志/告警拿到 traceId 后定位完整链路）。
 	GetTrace(ctx context.Context, traceID string) (Trace, error)
+	// ProbeMetricsQuality 实体维度采集质量诊断（spec 2026-10-17 专项04 §5）：
+	// 逐约定 metric 即时探测，区分 ok/empty/failed（「查询成功无数据」≠「采集源故障」）。
+	// 未接真实采集源的实现返回 Source=memory 的「未接入」报告（不伪造探测结果）。
+	ProbeMetricsQuality(ctx context.Context, targetType, targetID string) (QualityReport, error)
 }

@@ -52,6 +52,8 @@ export interface WorkflowRun {
   status: 'running' | 'paused' | 'succeeded' | 'failed' | 'aborted'
   inputs: Record<string, string>
   nodeRuns: NodeRun[]
+  /** Start 时固化的定义快照（WF-02）：详情端点返回；列表瘦身不带。缺失=存量运行（能力上线前） */
+  defSnapshot?: WorkflowDef | null
   createdAt: string
   finishedAt?: string
 }

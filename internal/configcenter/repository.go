@@ -62,6 +62,14 @@ type LaneOverrideStore interface {
 	ListLaneOverrides(ctx context.Context, appID, envID, laneID string) ([]LaneOverride, error)
 	// ListLaneOverridesForClean 泳道回收级联清理用：按 (env, lane) 跨 app 列出（tenant 从 ctx）。
 	ListLaneOverridesForClean(ctx context.Context, envID, laneID string) ([]LaneOverride, error)
+	// ApplyLaneOverrides 批次原子应用泳道覆盖变更集（spec 2026-10-17 专项04 §3）：
+	// 同领域事务写入；revision 传入预览版本，同数量值变化也阻断。
+	// expectedCount 仅保留旧仓储调用兼容（HTTP 批次必须提供 revision）；与当前
+	// (app, env, lane) 覆盖数不符返回 ErrLaneOverrideConflict（并发漂移可感知）。
+	// upsert 且该 key 无基线 draft 时同事务写 draft 占位（保证提升到基线时有
+	// draft 可合并——语义与旧前端「先写 draft 再写覆盖」一致，收进事务）。
+	// 幂等：upsert 同值重发无副作用，remove 不存在视为成功。返回应用后的全量覆盖。
+	ApplyLaneOverrides(ctx context.Context, appID, envID, laneID string, ops []LaneOverrideOp, expectedCount int, revision ...string) ([]LaneOverride, error)
 }
 
 // ItemStore 配置项仓储（draft）。

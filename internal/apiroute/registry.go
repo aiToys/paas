@@ -14,6 +14,7 @@ type Route struct {
 	Summary     string
 	Tags        []string
 	Description string
+	Parameters  []Parameter
 	Perm        string       // 映射为 BearerAPIKey 的 scope
 	RequestBody reflect.Type // 请求体载荷类型；nil = 无
 	Response    reflect.Type // 响应载荷类型（不含 {data:} 包裹）；nil = 无 schema
@@ -30,6 +31,12 @@ func Tags(tags ...string) Opt { return func(r *Route) { r.Tags = tags } }
 
 // Description 设置详细说明。
 func Description(s string) Opt { return func(r *Route) { r.Description = s } }
+
+func WithHeader(name, description string, required bool) Opt {
+	return func(r *Route) {
+		r.Parameters = append(r.Parameters, Parameter{Name: name, In: "header", Description: description, Required: required, Schema: &Schema{Type: "string"}})
+	}
+}
 
 // Perm 设置所需权限（映射为 security scope）。
 func Perm(p string) Opt { return func(r *Route) { r.Perm = p } }
@@ -146,6 +153,7 @@ func (r *Registry) buildOperation(rt Route) *Operation {
 		Summary:     rt.Summary,
 		Tags:        rt.Tags,
 		Description: rt.Description,
+		Parameters:  rt.Parameters,
 		Responses:   map[int]*Response{},
 	}
 	if rt.Perm != "" {

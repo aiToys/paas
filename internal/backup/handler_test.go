@@ -52,6 +52,46 @@ func (f *fakeRepo) Delete(_ context.Context, tid, id string) error {
 	return nil
 }
 
+// UpdateProgress / ListActive 补齐 Repository 新面（真实快照推进用，handler 测试不触及）。
+func (f *fakeRepo) UpdateProgress(_ context.Context, tid, id string, up ProgressUpdate) error {
+	b, ok := f.items[id]
+	if !ok || b.TenantID != tid {
+		return errNotFound("备份")
+	}
+	if up.Status != nil {
+		b.Status = *up.Status
+	}
+	if up.ArtifactRef != nil {
+		b.ArtifactRef = *up.ArtifactRef
+	}
+	if up.Checksum != nil {
+		b.Checksum = *up.Checksum
+	}
+	if up.SizeBytes != nil {
+		b.SizeBytes = *up.SizeBytes
+	}
+	if up.Error != nil {
+		b.Error = *up.Error
+	}
+	if up.VerifiedAt != nil {
+		b.VerifiedAt = *up.VerifiedAt
+	}
+	if up.FinishedAt != nil {
+		b.FinishedAt = *up.FinishedAt
+	}
+	f.items[id] = b
+	return nil
+}
+func (f *fakeRepo) ListActive(_ context.Context) ([]Backup, error) {
+	var out []Backup
+	for _, b := range f.items {
+		if !b.Terminal() {
+			out = append(out, b)
+		}
+	}
+	return out, nil
+}
+
 // fakeEnv 解析 resourceID→envID 与 envID→type。
 type fakeEnv struct {
 	resEnv  map[string]string // resourceID → envID
@@ -192,7 +232,104 @@ func TestBackupCreateDefaultTypeID(t *testing.T) {
 	if wrap.Data.Type != TypeFull {
 		t.Fatalf("type 应默认 full，got %q", wrap.Data.Type)
 	}
-	if strings.HasSuffix(wrap.Data.ID, "-") || !strings.HasSuffix(wrap.Data.ID, "-"+TypeFull) {
-		t.Fatalf("ID 应为 bk-<rid>-full 无悬挂连字符，got %q", wrap.Data.ID)
+	// R8-B1 本意：默认值补齐后生成无缺陷 ID（无悬挂 '-'）。ID 已改时间基（2026-10-19：
+	// 旧确定性 ID「bk-<rid>-<type>」致同资源第二次创建 409 只能删旧建新）。
+	if !strings.HasPrefix(wrap.Data.ID, "bk-") || strings.HasSuffix(wrap.Data.ID, "-") {
+		t.Fatalf("ID 应为 bk- 前缀且无悬挂连字符，got %q", wrap.Data.ID)
 	}
+	if wrap.Data.Mode != ModeRecord || wrap.Data.Status != StatusCompleted {
+		t.Fatalf("缺省 mode 应为记录模式且直接 completed，got mode=%q status=%q", wrap.Data.Mode, wrap.Data.Status)
+	}
+	if wrap.Data.SizeMB != 0 {
+		t.Fatalf("记录模式不应生成模拟大小（spec 专项05 阶段A），got %d", wrap.Data.SizeMB)
+	}
+}
+
+// fakeTargetsForHandler / fakeRestorer / noopExecutor：snapshot/restore handler 用轻桩。
+type fakeRestorer struct{ newID string }
+
+func (f fakeRestorer) CreateRestored(_ context.Context, _, _, _, _ string) (string, error) {
+	return f.newID, nil
+}
+
+// TestSnapshotWithoutExecutor503 无执行面（内存模式）snapshot 明确拒绝，不假受理。
+func TestSnapshotWithoutExecutor503(t *testing.T) {
+	h := NewHandler(newFakeRepo())
+	h.Authorize = authWith("dataservice:read", "dataservice:write")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, withTenant(httptest.NewRequest(http.MethodPost, "/api/backups",
+		strings.NewReader(`{"resourceId":"ds-test","mode":"snapshot"}`)), "t-acme"))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("无执行面 snapshot 应 503，got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSnapshotAccepted 有执行面 snapshot 受理 accepted（推进归 Pacer）。
+func TestSnapshotAccepted(t *testing.T) {
+	repo := newFakeRepo()
+	h := NewHandler(repo, WithExecutor(
+		newFakeExecutor(ProbeResult{Phase: "pending"}),
+		fakeTargetsForHandler{}, fakeRestorer{newID: "ds-new"}))
+	h.Authorize = authWith("dataservice:read", "dataservice:write")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, withTenant(httptest.NewRequest(http.MethodPost, "/api/backups",
+		strings.NewReader(`{"resourceId":"ds-1","mode":"snapshot"}`)), "t-acme"))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("snapshot 应受理 201，got %d: %s", rec.Code, rec.Body.String())
+	}
+	var wrap struct {
+		Data Backup `json:"data"`
+	}
+	_ = json.NewDecoder(rec.Body).Decode(&wrap)
+	if wrap.Data.Status != StatusAccepted || wrap.Data.Mode != ModeSnapshot || wrap.Data.Engine != "postgres" {
+		t.Fatalf("受理应为 accepted/postgres，got %+v", wrap.Data)
+	}
+}
+
+// TestRestoreRejectsRecordMode 记录模式无恢复证明，恢复 409（spec 阶段A：不冒充可恢复）。
+func TestRestoreRejectsRecordMode(t *testing.T) {
+	repo := newFakeRepo()
+	repo.items["bk-rec"] = Backup{ID: "bk-rec", TenantID: "t-acme", ResourceID: "ds-1",
+		Mode: ModeRecord, Status: StatusCompleted}
+	h := NewHandler(repo, WithExecutor(
+		newFakeExecutor(ProbeResult{}), fakeTargetsForHandler{}, fakeRestorer{newID: "ds-new"}))
+	h.Authorize = authWith("dataservice:read", "dataservice:write")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, withTenant(httptest.NewRequest(http.MethodPost, "/api/backups/bk-rec/restore",
+		strings.NewReader(`{}`)), "t-acme"))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("记录模式恢复应 409，got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestRestoreFromSnapshot 已完成快照恢复：创建新实例 + restore 作业记录。
+func TestRestoreFromSnapshot(t *testing.T) {
+	repo := newFakeRepo()
+	repo.items["bk-snap"] = Backup{ID: "bk-snap", TenantID: "t-acme", ResourceID: "ds-1",
+		Mode: ModeSnapshot, Status: StatusCompleted, ArtifactRef: "file://paas-backups/bk-snap.dump",
+		Engine: "postgres", Checksum: strings.Repeat("a", 64)}
+	h := NewHandler(repo, WithExecutor(
+		newFakeExecutor(ProbeResult{}), fakeTargetsForHandler{}, fakeRestorer{newID: "ds-new"}))
+	h.Authorize = authWith("dataservice:read", "dataservice:write")
+	rec := httptest.NewRecorder()
+	req := withTenant(httptest.NewRequest(http.MethodPost, "/api/backups/bk-snap/restore", strings.NewReader(`{}`)), "t-acme")
+	req.Header.Set("Idempotency-Key", "test-restore-request")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("快照恢复应 201，got %d: %s", rec.Code, rec.Body.String())
+	}
+	var wrap struct {
+		Data Backup `json:"data"`
+	}
+	_ = json.NewDecoder(rec.Body).Decode(&wrap)
+	if wrap.Data.Mode != ModeRestore || wrap.Data.SourceBackupID != "bk-snap" ||
+		wrap.Data.RestoredResourceID != RestoreTargetID(wrap.Data.ID) || wrap.Data.Status != StatusAccepted {
+		t.Fatalf("恢复记录字段不符： %+v", wrap.Data)
+	}
+}
+
+type fakeTargetsForHandler struct{}
+
+func (fakeTargetsForHandler) ResolveTarget(_ context.Context, _, _ string) (Target, error) {
+	return Target{Namespace: "ns", ServiceName: "ds-1", SecretName: "ds-1-secret", Engine: "postgres"}, nil
 }

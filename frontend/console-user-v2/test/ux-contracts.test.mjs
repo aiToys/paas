@@ -286,3 +286,27 @@ test('trace waterfall keeps every span, parent depth and peer/error diagnostics'
   assert.equal(spanServiceLabel(spans[0]), 'api → database')
   assert.equal(traceErrSummary({ spans }), 'timeout')
 })
+
+test('playground refuses unsupported models through every entry and excludes incomplete history', async () => {
+  const { playgroundMode, conversationHistory } = await import('../src/domain/playground.ts')
+  assert.equal(playgroundMode({ id: 'image', capabilities: ['image'] }), 'unsupported')
+  assert.equal(playgroundMode(undefined), 'unsupported')
+  assert.equal(playgroundMode({ id: 'embedding', capabilities: ['embedding'] }), 'embedding')
+  assert.equal(playgroundMode({ id: 'chat', capabilities: ['chat'] }), 'chat')
+  assert.equal(playgroundMode({ id: 'agent:a' }), 'chat')
+  assert.deepEqual(conversationHistory([
+    { role: 'assistant', content: 'error', error: '503' },
+    { role: 'assistant', content: 'partial', interrupted: true },
+    { role: 'assistant', content: 'stopped', stopped: true },
+    { role: 'assistant', content: 'complete' },
+  ]), [{ role: 'assistant', content: 'complete' }])
+  assert.deepEqual(conversationHistory([{ role: 'user', content: 'retry me' }, { role: 'assistant', content: '', error: '503' }]), [])
+})
+
+test('SSE error frames and malformed complete events are failures, DONE is explicit', async () => {
+  const { chatEvent } = await import('../src/domain/playground.ts')
+  assert.deepEqual(chatEvent('data: [DONE]'), { done: true })
+  assert.deepEqual(chatEvent('data: {"choices":[{"delta":{"content":"你好"}}]}'), { delta: { content: '你好' } })
+  assert.throws(() => chatEvent('event: error\ndata: {"error":{"message":"upstream unavailable"}}'), /upstream unavailable/)
+  assert.throws(() => chatEvent('data: {broken}'), /格式错误/)
+})

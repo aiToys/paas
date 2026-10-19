@@ -56,10 +56,11 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
-  # DataService PVC：VolumeClaimTemplates 持久化 + resizePVC 扩容（实例浅管理）。
+  # DataService PVC：VolumeClaimTemplates 持久化 + resizePVC 扩容（实例浅管理）；
+  # backup executor 在租户 ns ensure 备份产物卷 paas-backups（spec 专项05 快照落盘）。
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["get", "list", "watch", "create", "patch"]

@@ -5,7 +5,10 @@
 // 本期独立资源 CRUD（Create 即 running，KISS）；应用 Add-on 绑定、真实引擎纳管留后续。
 package dataservice
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 // 资源 Kind。
 const (
@@ -288,3 +291,6 @@ func (e fieldErr) Error() string {
 }
 
 func errInvalid(field string) error { return fieldErr{field: field} }
+
+// ErrNotFound 允许调用方区分不存在与存储故障，避免故障时误创建。
+var ErrNotFound = errors.New("数据服务不存在")

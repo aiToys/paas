@@ -401,13 +401,9 @@ func (s *MetricsStore) listWorkloadMetrics(ctx context.Context, targetID, name s
 	return s.listPodSeries(ctx, targetID+"-.*", name, observability.TargetWorkload, targetID)
 }
 
-// listPodSeries 按 pod 名正则聚合 Pod 指标（app 级多 workload 与 workload 级单实体的公共实现）。
-// 指标集 = 计算（cAdvisor cpu/mem）+ RED（rps/latency/errorRate，依赖应用暴露 /metrics，
-// 未暴露 → 返空 series 诚实降级）。tenant 从 ctx 取（ns 隔离防跨租户串数据）。
-func (s *MetricsStore) listPodSeries(ctx context.Context, podRegex, name, targetType, targetID string) ([]observability.MetricSeries, error) {
-	out := make([]observability.MetricSeries, 0)
-	tid, _ := tenant.TenantFrom(ctx)
-	ns := tenant.Namespace(tid) // paas-<tenant>，多租户隔离（空 tid 兜底 paas-x）
+// podSeriesDefs 构造 Pod 正则维度的全部指标 PromQL（app 级/workload 级共用；
+// 抽出供 ProbeQuality 复用同源查询——探测与主查询必须查同一 PromQL，否则探测结论失真）。
+func podSeriesDefs(ns, podRegex string) map[string]metricDef {
 	// cAdvisor 指标限定本租户 ns + pod 名正则 + 排除 pause/空容器。
 	lbl := fmt.Sprintf(`{namespace=%q,pod=~%q,container!="POD",container!=""}`, ns, podRegex)
 	// 应用自暴露的 RED 指标（http_requests_total / http_request_duration_seconds）按 ns + pod 正则聚合。
@@ -417,7 +413,7 @@ func (s *MetricsStore) listPodSeries(ctx context.Context, podRegex, name, target
 	redLbl := fmt.Sprintf(`{namespace=%q,pod=~%q}`, ns, podRegex)
 	// 5xx selector：redLbl 内联 code=~"5.."（不可再开 { }，否则两个连续 selector 语法错）。
 	redLbl5xx := fmt.Sprintf(`{namespace=%q,pod=~%q,code=~"5.."}`, ns, podRegex)
-	defs := map[string]metricDef{
+	return map[string]metricDef{
 		observability.MetricCPU: {fmt.Sprintf("sum(rate(container_cpu_usage_seconds_total%s[5m]))", lbl), "cores", 1},
 		observability.MetricMem: {fmt.Sprintf("sum(container_memory_working_set_bytes%s)", lbl), "MiB", 1.0 / 1048576},
 		// RED · Rate：每秒请求数（sum 全部 code）。
@@ -428,6 +424,15 @@ func (s *MetricsStore) listPodSeries(ctx context.Context, podRegex, name, target
 		// 而非空 series——错误率面板应总可见（0% = 健康，缺卡易误判监控失效）。
 		observability.MetricErrorRate: {fmt.Sprintf("(sum(rate(http_requests_total%s[5m])) or on() vector(0)) / clamp_min(sum(rate(http_requests_total%s[5m])), 1) * 100", redLbl5xx, redLbl), "%", 1},
 	}
+}
+
+// listPodSeries 按 pod 名正则聚合 Pod 指标（app 级多 workload 与 workload 级单实体的公共实现）。
+// 指标集 = 计算（cAdvisor cpu/mem）+ RED（rps/latency/errorRate，依赖应用暴露 /metrics，
+// 未暴露 → 返空 series 诚实降级）。tenant 从 ctx 取（ns 隔离防跨租户串数据）。
+func (s *MetricsStore) listPodSeries(ctx context.Context, podRegex, name, targetType, targetID string) ([]observability.MetricSeries, error) {
+	out := make([]observability.MetricSeries, 0)
+	tid, _ := tenant.TenantFrom(ctx)
+	defs := podSeriesDefs(tenant.Namespace(tid), podRegex)
 	names := []string{name}
 	if name == "" {
 		names = []string{observability.MetricCPU, observability.MetricMem, observability.MetricRPS, observability.MetricLatency, observability.MetricErrorRate}

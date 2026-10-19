@@ -43,6 +43,29 @@ func (r *ApplyRepo) applyLog(op, id, host string, err error) {
 	}
 }
 
+// recordApply 回写单条 Route 的下发状态（spec 2026-10-17 专项04 §4 证据链）：
+// 成功=applied+时间；失败=failed+脱敏原因（err 可能含 apiserver 细节，截断防超长）。
+// best-effort：回写失败仅日志（投影本身已 best-effort，状态字段不反阻塞）。
+// ctx 用 WithoutCancel：投影后调用方可能立即结束请求（原 ctx 取消会丢租户与连接）。
+func (r *ApplyRepo) recordApply(ctx context.Context, id string, err error) {
+	wctx := context.WithoutCancel(ctx)
+	if err == nil {
+		//nolint:staticcheck // QF1008：显式走嵌入字段，防本装饰器未来覆写 SetRouteApplyStatus 自递归（同文件既有取舍）
+		if serr := r.Repository.SetRouteApplyStatus(wctx, id, "applied", ""); serr != nil {
+			log.Printf("[governance-route-applier] 回写下发状态失败 id=%s err=%v", id, serr)
+		}
+		return
+	}
+	msg := err.Error()
+	if len(msg) > 200 {
+		msg = msg[:200]
+	}
+	//nolint:staticcheck // QF1008：同上，显式走内层
+	if serr := r.Repository.SetRouteApplyStatus(wctx, id, "failed", msg); serr != nil {
+		log.Printf("[governance-route-applier] 回写下发状态失败 id=%s err=%v", id, serr)
+	}
+}
+
 // routeTenant 补全 route.TenantID：store 从 ctx 写 tenant 但不回填传入的 route，
 // 投影需 tid 派生 ns（paas-<tenant>），空值致 ns 错误。
 func routeTenant(ctx context.Context, r Route) (string, Route) {
@@ -63,7 +86,9 @@ func (r *ApplyRepo) CreateRoute(ctx context.Context, route Route) (Route, error)
 	if r.applier != nil && saved.Host != "" {
 		tid, saved := routeTenant(ctx, saved)
 		if tid != "" {
-			r.applyLog("create", saved.ID, saved.Host, r.applier.Apply(ctx, tid, saved.Host))
+			aerr := r.applier.Apply(ctx, tid, saved.Host)
+			r.applyLog("create", saved.ID, saved.Host, aerr)
+			r.recordApply(ctx, saved.ID, aerr)
 		}
 	}
 	return saved, nil
@@ -80,7 +105,9 @@ func (r *ApplyRepo) UpdateRoute(ctx context.Context, route Route) (Route, error)
 	if r.applier != nil && saved.Host != "" {
 		tid, saved := routeTenant(ctx, saved)
 		if tid != "" {
-			r.applyLog("update", saved.ID, saved.Host, r.applier.Apply(ctx, tid, saved.Host))
+			aerr := r.applier.Apply(ctx, tid, saved.Host)
+			r.applyLog("update", saved.ID, saved.Host, aerr)
+			r.recordApply(ctx, saved.ID, aerr)
 			// Host 变更：旧 host 的聚合 Ingress 需重建（移除本 Route 的 path）。
 			if old.Host != "" && old.Host != saved.Host {
 				r.applyLog("update-old", saved.ID, old.Host, r.applier.Apply(ctx, tid, old.Host))

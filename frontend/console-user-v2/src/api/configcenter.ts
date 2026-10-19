@@ -78,6 +78,22 @@ export const deleteLaneOverride = (appId: string, envId: string, lane: string, k
 export const promoteLaneOverrides = (appId: string, envId: string, lane: string) =>
   fetchAuth(`/api/applications/${appId}/dynamic-configs/lane-overrides/promote?envId=${encodeURIComponent(envId)}&lane=${encodeURIComponent(lane)}`, { method: 'POST' })
     .then(r => unwrap<ConfigPublish>(r))
+// 批次变更集单条操作（原子契约，spec 2026-10-17 专项04 §3）
+export interface LaneOverrideOp {
+  action: 'upsert' | 'remove'; key: string; value?: string; type?: string
+}
+// 预览时保存服务端版本；读取失败或缺版本必须阻止提交。
+export async function fetchLaneOverrideRevision(appId: string, envId: string, lane: string): Promise<{ revision: string; overrides: LaneOverride[] }> {
+  const r = await fetchAuth(`/api/applications/${appId}/dynamic-configs/lane-overrides?envId=${encodeURIComponent(envId)}&lane=${encodeURIComponent(lane)}&preview=1`)
+  const overrides = asList<LaneOverride>(await unwrap<unknown>(r))
+  const revision = r.headers.get('X-Config-Revision')
+  if (!revision) throw new Error('配置预览缺少版本，请确认服务版本后重试')
+  return { revision, overrides }
+}
+export const applyLaneOverridesBatch = (appId: string, envId: string, lane: string, ops: LaneOverrideOp[], expectedRevision: string) =>
+  fetchAuth(`/api/applications/${appId}/dynamic-configs/lane-overrides/batch?envId=${encodeURIComponent(envId)}&lane=${encodeURIComponent(lane)}`,
+    { method: 'POST', body: JSON.stringify({ ops, expectedRevision }) })
+    .then(r => unwrap<{ applied: number; overrides: LaneOverride[] }>(r))
 
 // ---------- 共享配置引用（shared ns → 应用派生 ns，发现时作为三层 merge 基础层） ----------
 

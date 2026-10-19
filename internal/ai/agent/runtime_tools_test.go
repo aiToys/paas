@@ -96,7 +96,10 @@ func TestBuildToolsExactMatch(t *testing.T) {
 		ID: "tl-1", Name: "target_tool", Type: tool.TypeMCP, Enabled: true,
 		Config: map[string]string{tool.CfgMCPServerURL: ts.URL},
 	}}}
-	defs, invokers := rt.buildTools(context.Background(), Agent{Tools: []string{"tl-1"}})
+	defs, invokers, err := rt.buildTools(context.Background(), Agent{Tools: []string{"tl-1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(defs) != 1 || len(invokers) != 1 {
 		t.Fatalf("应构建 1 个工具定义，got defs=%d invokers=%d", len(defs), len(invokers))
 	}
@@ -134,14 +137,14 @@ func TestBuildToolsNameMismatchKeepsEntityName(t *testing.T) {
 		ID: "tl-2", Name: "ghost_tool", Type: tool.TypeMCP, Enabled: true,
 		Config: map[string]string{tool.CfgMCPServerURL: ts.URL},
 	}}}
-	_, invokers := rt.buildTools(context.Background(), Agent{Tools: []string{"tl-2"}})
-	if _, err := invokers["ghost_tool"](context.Background(), "{}"); err != nil {
-		t.Fatalf("ghost 工具调用应透传 MCP 端结果（fake server 不报错），got %v", err)
+	_, _, err := rt.buildTools(context.Background(), Agent{Tools: []string{"tl-2"}})
+	if err == nil || !strings.Contains(err.Error(), "未在 MCP 服务暴露") {
+		t.Fatalf("未知方法必须在调用前阻断，got %v", err)
 	}
 	srv.mu.Lock()
 	called := srv.lastCall
 	srv.mu.Unlock()
-	if called != "ghost_tool" {
-		t.Fatalf("匹配失败应保持实体名 ghost_tool 直调，实际调了 %q", called)
+	if called != "" {
+		t.Fatalf("不应调用未知方法: %s", called)
 	}
 }

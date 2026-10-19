@@ -51,6 +51,23 @@ type Namespace struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
+// 批次变更集操作类型。
+const (
+	OpUpsert = "upsert" // 写/更新覆盖（需 Value）
+	OpRemove = "remove" // 删除覆盖（恢复继承下层来源）
+)
+
+// LaneOverrideOp 批次变更集单条操作（ApplyLaneOverrides 入参）。原子契约见
+// spec 2026-10-17 专项04 §3：整批全成功或全回滚，冲突 409 由前端重预览。
+type LaneOverrideOp struct {
+	Action string `json:"action"` // upsert | remove
+	Key    string `json:"key"`
+	Value  string `json:"value,omitempty"` // action=upsert 必填
+	// Type 是 action=upsert 且该 key 无基线 draft 时的占位类型（保证提升到基线
+	// 时有 draft 可合并，语义与旧前端「先写 draft 再写覆盖」一致，收进事务）。
+	Type string `json:"type,omitempty"`
+}
+
 // LaneOverride 是泳道维度的配置 key 级覆盖（无版本链，即时生效；泳道回收时级联清理）。
 // 发现时在 env 基线快照之上做两层 merge（Task 2 的 mergeSnapshot）。
 type LaneOverride struct {

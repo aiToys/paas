@@ -34,9 +34,19 @@ type Operation struct {
 	Summary     string                `json:"summary,omitempty"`
 	Tags        []string              `json:"tags,omitempty"`
 	Description string                `json:"description,omitempty"`
+	Parameters  []Parameter           `json:"parameters,omitempty"`
 	Security    []SecurityRequirement `json:"security,omitempty"`
 	RequestBody *RequestBody          `json:"requestBody,omitempty"`
 	Responses   map[int]*Response     `json:"responses"`
+}
+
+// Parameter 描述路由级参数，写操作可声明必要的幂等头。
+type Parameter struct {
+	Name        string  `json:"name"`
+	In          string  `json:"in"`
+	Description string  `json:"description,omitempty"`
+	Required    bool    `json:"required,omitempty"`
+	Schema      *Schema `json:"schema"`
 }
 
 // SecurityRequirement 是 {方案名: [所需 scope]}。perm 映射为单元素 scope。

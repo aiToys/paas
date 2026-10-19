@@ -211,6 +211,10 @@ func (h *Handler) serveRuns(w http.ResponseWriter, r *http.Request, id string) {
 			h.writeErr(w, err)
 			return
 		}
+		// 列表不带定义快照（体积：每条含全部节点模板）；详情端点才返回（WF-02）
+		for i := range list {
+			list[i].DefSnapshot = nil
+		}
 		httputil.WriteData(w, list)
 	case http.MethodPost:
 		if !h.allow(w, r, PermWorkflowWrite) {

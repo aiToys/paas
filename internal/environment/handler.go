@@ -21,11 +21,22 @@ const (
 	PermProdWrite = "prod:write"
 )
 
-// EnvUsageChecker 环境占用查询（依赖倒置：environment 不 import workload——后者已 import
-// 本包作 EnvTypeResolver，直接依赖会循环）。cmd/core 桥接 workload store。
+// EnvUsageReport 环境依赖清单（spec 2026-10-17 专项04 §6：删除环境先展示实际依赖，
+// 不用重复确认弹窗代替依赖检查；流水线目标/配置引用为元数据级，留后续）。
+type EnvUsageReport struct {
+	Workloads    int `json:"workloads"`    // 依赖该环境的工作负载
+	Dataservices int `json:"dataservices"` // 绑定该环境的数据服务（有 K8s 实物）
+	Lanes        int `json:"lanes"`        // 归属该环境的泳道
+}
+
+// Total 依赖总数（非 0 时删除被阻断）。
+func (u EnvUsageReport) Total() int { return u.Workloads + u.Dataservices + u.Lanes }
+
+// EnvUsageChecker 环境依赖查询（依赖倒置：environment 不 import workload/dataservice/lane
+// ——workload 已 import 本包作 EnvTypeResolver，直接依赖会循环）。cmd/core 桥接三 store。
 type EnvUsageChecker interface {
-	// CountByEnv 返回该环境下工作负载数（实现内部按 ctx 租户过滤）。
-	CountByEnv(ctx context.Context, envID string) (int, error)
+	// EnvUsage 返回该环境的依赖清单（实现内部按 ctx 租户过滤）。
+	EnvUsage(ctx context.Context, envID string) (EnvUsageReport, error)
 }
 
 // Handler 暴露环境 REST API。
@@ -131,6 +142,27 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	id := strings.Split(rest, "/")[0]
 
+	// GET /api/environments/{id}/usage 依赖预检（spec 2026-10-17 专项04 §6：删除前
+	// 展示实际依赖清单；Usage 未注入返零值——非 K8s 部署语义，前端按无依赖处理）。
+	// 必须先于 GET /{id}：rest 含斜杠时 Split[0] 截出的 id 会误匹配单资源分支。
+	if r.Method == http.MethodGet && strings.HasSuffix(rest, "/usage") {
+		if !h.allow(w, r, PermEnvironmentRead) {
+			return
+		}
+		envID := strings.TrimSuffix(rest, "/usage")
+		var usage EnvUsageReport
+		if h.Usage != nil {
+			var uerr error
+			usage, uerr = h.Usage.EnvUsage(r.Context(), envID)
+			if uerr != nil {
+				httputil.WriteInternalError(w, uerr)
+				return
+			}
+		}
+		httputil.WriteData(w, usage)
+		return
+	}
+
 	// GET /api/environments/{id}
 	if r.Method == http.MethodGet && id != "" {
 		if !h.allow(w, r, PermEnvironmentRead) {
@@ -158,18 +190,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		// 占用校验（与 identity.DeleteTenant 非空 409 同款先例）：环境下仍有工作负载时拒删，
+		// 占用校验（与 identity.DeleteTenant 非空 409 同款先例）：环境下仍有依赖时拒删，
 		// 防悬挂 envId 引用（allowProd fail-closed 全按生产处理 + 发布阶序断裂）。
 		// 查询失败 fail-closed 不删（环境 store 抖动期间不产生孤儿引用）。
 		if h.Usage != nil {
-			n, uerr := h.Usage.CountByEnv(r.Context(), id)
+			usage, uerr := h.Usage.EnvUsage(r.Context(), id)
 			if uerr != nil {
 				httputil.WriteInternalError(w, uerr)
 				return
 			}
-			if n > 0 {
+			if usage.Total() > 0 {
 				httputil.WriteError(w, http.StatusConflict,
-					fmt.Sprintf("环境下仍有 %d 个工作负载，请先删除或迁移后再删除环境", n))
+					fmt.Sprintf("环境仍有依赖：%d 个工作负载、%d 个数据服务、%d 个泳道，请先删除或迁移后再删除环境",
+						usage.Workloads, usage.Dataservices, usage.Lanes))
 				return
 			}
 		}

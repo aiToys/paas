@@ -891,6 +891,8 @@ internal/dataservice/  领域(DataService + 6 Kind 常量 + KindMeta 表单元�
 
 ## 前端架构
 
+2026-10-19 复核修复：泳道批量配置必须携带预览返回的 `X-Config-Revision`（`?preview=1`，请求体 `expectedRevision`），事务级泳道锁串行化单写/删除/批次，不能用条目数替代版本。Agent 显式引用的依赖不可用时阻断，SSE 错误帧及原始 `[DONE]` 由运行端输出；Playground 发送前校验模型能力。PostgreSQL 恢复必需 `Idempotency-Key`，先登记稳定操作，再由 Pacer 幂等创建受配额约束的新目标，归档校验后导入并读取用户表。相关实现与本地/隔离验证边界见 `docs/reviews/2026-10-17-console-next/repairs-2026-10-19.md`，不据此宣称集群部署验收完成。
+
 新版服务运行骨架（2026-10-17）：`/next/workloads` 名称为“工作负载”，`/next/workloads/:id` 提供运行概览/实例/日志/操作记录。后续接入沿用 `WorkloadRuntime`、`RuntimeInstanceTable`、`RuntimeInstanceDrawer`、`RuntimeLogs`，不重建页面框架。终端/事件/重建/滚动重启当前尚未接通，不得仅凭前端按钮宣称能力完成。设计及交接见 `docs/superpowers/specs/2026-10-17-service-runtime-operations-design.md` 与对应 plans 文档。
 
 三套独立 SPA，共享设计系统（Element Plus + 暗黑模式）：

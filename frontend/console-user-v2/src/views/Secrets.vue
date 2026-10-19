@@ -2,19 +2,19 @@
 import PageHeader from '@/components/PageHeader.vue'
 import { formatDateTime } from '@/utils/format'
 // 平台能力 → 安全（密钥/证书 + 审计日志）。
-// Secret/证书是租户级平台资产（区别于 appconfig 应用级 Secret）。
+// Secret/证书是组织级平台资产（区别于 appconfig 应用级 Secret），作用域不随顶栏环境切换。
 // 值后端明文存储、API 掩码返回；写操作（创建/删除）自动记审计，删除走二次确认。
-import { computed, onMounted, ref, watch } from 'vue'
+// 专项06 §4：删除确认按真实作用域（平台共享需名称确认），引用关系平台未提供查询——
+// 按「未知引用」提示，不按「0 引用」提示安全。
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { fetchAuth, fetchList, apiError } from '@/api'
 import StatePanel from '@/components/StatePanel.vue'
-import { useEnvStore } from '@/stores/env'
 import { confirmDangerous } from '@/composables/useDangerConfirm'
 import TablePager from '@/components/TablePager.vue'
+import { copyText } from '@/utils/clipboard'
 
 type TagType = '' | 'primary' | 'success' | 'info' | 'warning' | 'danger'
-
-const envStore = useEnvStore()
 
 interface Secret {
   id: string; name: string; type: string; scope: string; value: string; desc?: string; updatedAt: string
@@ -76,8 +76,12 @@ async function load() {
   }
 }
 
-function openCreate() {
+function resetForm() {
   form.value = { name: '', type: TYPE_SECRET, scope: SCOPE_TENANT, value: '', desc: '' }
+}
+
+function openCreate() {
+  resetForm()
   showCreate.value = true
 }
 
@@ -106,11 +110,16 @@ async function create() {
 }
 
 async function remove(row: Secret) {
+  // 按真实作用域定确认强度（平台共享影响全租户），不看顶栏环境浏览状态；
+  // 引用关系未知（平台未提供查询），不提示「无引用安全」。
   const ok = await confirmDangerous({
-    action: '删除密钥',
+    action: row.scope === SCOPE_PLATFORM ? '删除平台共享密钥' : '删除密钥',
     target: row.name,
-    requireNameConfirm: envStore.isProd,
-    isProd: envStore.isProd,
+    requireNameConfirm: row.scope === SCOPE_PLATFORM,
+    isProd: row.scope === SCOPE_PLATFORM,
+    message: row.scope === SCOPE_PLATFORM
+      ? '平台级凭证全租户共享，删除影响所有引用它的通道/工具。'
+      : '租户私有凭证。当前无法查询引用关系（未知引用），请自行确认没有消费方后再删除。',
   })
   if (!ok) return
   const resp = await fetchAuth(`/api/security/secrets/${row.id}`, { method: 'DELETE' })
@@ -129,8 +138,7 @@ const actionType: Record<string, TagType> = {
 }
 
 onMounted(load)
-// 顶栏切环境联动（R7-5：secrets/audits 按 envId 查询，切环境重拉）
-watch(() => envStore.currentEnvId, () => load())
+// 不随顶栏环境切换重拉：Secret 是组织级资产（后端无 envId 维度），切环境不改变作用域（专项06 §4）。
 </script>
 
 <template>
@@ -140,6 +148,7 @@ watch(() => envStore.currentEnvId, () => load())
     <!-- 密钥/证书 -->
     <section class="block" v-loading="loading">
       <div class="block-title">密钥与证书</div>
+      <p class="scope-note">组织级资产：作用域为租户私有或平台共享，不随顶栏环境切换而变化；当前平台未提供引用关系查询。</p>
       <StatePanel v-if="readErrors.secrets" title="密钥加载失败" :description="readErrors.secrets" error><button class="act" @click="loadSecrets">重试</button></StatePanel>
       <el-table v-else :data="pagedSecrets" size="small" empty-text="暂无密钥资产">
         <el-table-column label="名称" min-width="180">
@@ -196,15 +205,17 @@ watch(() => envStore.currentEnvId, () => load())
         </el-table-column>
         <el-table-column prop="actor" label="操作人" width="150" />
         <el-table-column label="资源" width="200">
-          <template #default="{ row }"><span class="mono">{{ row.resourceType }}/{{ row.resourceId }}</span></template>
+          <template #default="{ row }">
+            <span class="mono audit-res" title="点击复制资源标识" @click="copyText(`${row.resourceType}/${row.resourceId}`, '资源标识已复制')">{{ row.resourceType }}/{{ row.resourceId }}</span>
+          </template>
         </el-table-column>
         <el-table-column prop="detail" label="详情" min-width="200" show-overflow-tooltip />
       </el-table>
       <TablePager v-model="auditPage" :total="audits.length" />
     </section>
 
-    <!-- 创建弹窗 -->
-    <el-dialog v-model="showCreate" title="创建密钥/证书" width="480px">
+    <!-- 创建弹窗：@close 清明文草稿（覆盖 X/Esc/遮罩全部关闭路径，不等下次打开才重置） -->
+    <el-dialog v-model="showCreate" title="创建密钥/证书" width="480px" @close="resetForm">
       <el-form label-width="70px">
         <el-form-item label="名称">
           <el-input v-model="form.name" placeholder="租户内唯一，如 db-password" />
@@ -257,4 +268,7 @@ watch(() => envStore.currentEnvId, () => load())
 .masked { color: var(--text-faint); letter-spacing: 2px; }
 .dim { font-size: 12.5px; color: var(--text-dim); }
 .scope-hint { margin-top: 4px; font-size: 12px; color: var(--el-color-danger); line-height: 1.5; }
+.scope-note { margin: 0 0 10px; font-size: 12px; color: var(--text-faint); }
+.audit-res { cursor: pointer; }
+.audit-res:hover { color: var(--brand); }
 </style>

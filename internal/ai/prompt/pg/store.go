@@ -161,6 +161,56 @@ func (s *Store) Create(ctx context.Context, p prompt.Prompt) (prompt.Prompt, err
 	return p, nil
 }
 
+// CreateDraft 同 name → version=max+1 但不激活、不动现有 active（草稿版本，FOR UPDATE 防并发版本竞争）。
+func (s *Store) CreateDraft(ctx context.Context, p prompt.Prompt) (prompt.Prompt, error) {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return prompt.Prompt{}, err
+	}
+	if err := p.Validate(); err != nil {
+		return prompt.Prompt{}, err
+	}
+	tx, err := s.db.Pool().Begin(ctx)
+	if err != nil {
+		return prompt.Prompt{}, err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	rows, err := tx.Query(ctx, `SELECT version FROM ai_prompts WHERE tenant_id=$1 AND name=$2 FOR UPDATE`, tid, p.Name)
+	if err != nil {
+		return prompt.Prompt{}, err
+	}
+	maxVer := 0
+	for rows.Next() {
+		var v int
+		if err := rows.Scan(&v); err != nil {
+			rows.Close()
+			return prompt.Prompt{}, err
+		}
+		if v > maxVer {
+			maxVer = v
+		}
+	}
+	rows.Close()
+
+	p.ID = s.newID()
+	p.TenantID = tid
+	p.Version = maxVer + 1
+	p.Active = false // 草稿：现有 active 保持不变
+	p.CreatedAt = time.Now()
+	vars, _ := marshalVars(p.Variables)
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO ai_prompts (`+promptCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		p.ID, p.TenantID, p.Name, p.Template, vars, p.Category, p.InstalledFrom, p.Version, p.Active, p.CreatedAt); err != nil {
+		return prompt.Prompt{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return prompt.Prompt{}, err
+	}
+	return p, nil
+}
+
 func (s *Store) SetActive(ctx context.Context, id string) (prompt.Prompt, error) {
 	tid, err := storagepg.TenantOrErr(ctx)
 	if err != nil {

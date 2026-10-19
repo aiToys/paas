@@ -57,6 +57,7 @@ export const listEnvironments = () => fetchList<EnvironmentEntity>('/api/environ
 export interface ApiKeyEntity {
   id: string
   userId: string
+  appId?: string // 可选：绑定应用则用量归因到应用（后端 identity.APIKey.AppID）
   roles: string[]
   key: string // 列表=掩码；创建响应=完整值（仅一次）
   createdAt?: string

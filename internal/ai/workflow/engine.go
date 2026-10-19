@@ -53,12 +53,19 @@ func (e *Engine) Start(ctx context.Context, def WorkflowDef, inputs map[string]s
 		return WorkflowRun{}, fmt.Errorf("工作流未启用")
 	}
 	tid, _ := tenant.TenantFrom(ctx)
+	// 定义快照固化进 run（WF-02）：创建后定义被修改/删除，本 run 的恢复与解释不受影响
+	snap := def
+	snap.Nodes = append([]NodeDef(nil), def.Nodes...)
+	for i := range snap.Nodes {
+		snap.Nodes[i].Branches = append([]Branch(nil), snap.Nodes[i].Branches...)
+	}
 	run, err := e.repo.CreateRun(ctx, WorkflowRun{
-		TenantID:   tid,
-		WorkflowID: def.ID,
-		Status:     StatusRunning,
-		Inputs:     inputs,
-		CreatedAt:  time.Now(),
+		TenantID:    tid,
+		WorkflowID:  def.ID,
+		Status:      StatusRunning,
+		Inputs:      inputs,
+		DefSnapshot: &snap,
+		CreatedAt:   time.Now(),
 	})
 	if err != nil {
 		return WorkflowRun{}, err
@@ -366,10 +373,15 @@ func (e *Engine) Approve(ctx context.Context, runID, nodeID string) error {
 	if e.hasWaiter(runID) {
 		return nil // 本进程等待者轮询感知后自行续跑
 	}
-	// 无等待者：拉起续跑（需定义快照；定义已删则 run 应已被级联清，GetRun 失败路径）
+	// 无等待者（进程重启后/其它副本暂停的）：拉起续跑。定义优先取 run 固化的快照
+	//（WF-02：定义已变更也按启动时的拓扑续跑）；存量 run 无快照才 fallback 当前定义。
+	if run.DefSnapshot != nil {
+		e.goAdvance(runTenant(ctx, run.TenantID), *run.DefSnapshot, run)
+		return nil
+	}
 	def, err := e.repo.Get(ctx, run.WorkflowID)
 	if err != nil {
-		return fmt.Errorf("恢复失败：工作流定义不存在: %w", err)
+		return fmt.Errorf("恢复失败：工作流定义不存在（旧运行无定义快照）: %w", err)
 	}
 	e.goAdvance(runTenant(ctx, run.TenantID), def, run)
 	return nil

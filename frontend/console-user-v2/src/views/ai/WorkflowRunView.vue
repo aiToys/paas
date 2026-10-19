@@ -18,6 +18,8 @@ const emit = defineEmits<{ changed: [] }>()
 
 const runs = ref<WorkflowRun[]>([])
 const cur = ref<WorkflowRun | null>(null)
+// cur 是否已拉取详情（详情端点才带 defSnapshot；列表瘦身）——区分「未拉到」与「存量无快照」
+const curDetailed = ref(false)
 const inputsText = ref('{}')
 const expanded = ref<string>('') // 展开输出的 nodeId
 let timer: number | undefined
@@ -27,8 +29,17 @@ const statusTag = (s: string) =>
 const statusLabel = (s: string) =>
   ({ running: '运行中', paused: '等待确认', succeeded: '成功', failed: '失败', aborted: '已中止' } as Record<string, string>)[s] ?? s
 
-const nodeTypeName = (id: string) => props.workflow.nodes.find(n => n.id === id)?.name || props.workflow.nodes.find(n => n.id === id)?.type || id
-const nodeMeta = computed(() => new Map(props.workflow.nodes.map(n => [n.id, n])))
+// WF-02：节点解释优先用 run 固化的定义快照——定义在此运行启动后被修改/删除，
+// 时间线与等待节点仍按启动时拓扑解释；无快照（存量运行）fallback 当前定义。
+const runNodes = computed(() => cur.value?.defSnapshot?.nodes ?? props.workflow.nodes)
+const nodeTypeName = (id: string) => runNodes.value.find(n => n.id === id)?.name || runNodes.value.find(n => n.id === id)?.type || id
+const nodeMeta = computed(() => new Map(runNodes.value.map(n => [n.id, n])))
+// 快照与当前定义不一致（节点拓扑漂移）→ 详情区提示，防「改了定义看不懂旧运行」
+const defDrifted = computed(() => {
+  const snap = cur.value?.defSnapshot
+  if (!snap?.nodes) return false
+  return JSON.stringify(snap.nodes) !== JSON.stringify(props.workflow.nodes)
+})
 const waitingNode = computed(() => {
   // 最后一个 paused 节点（approve 等待中）
   if (cur.value?.status !== 'paused' || !cur.value.nodeRuns.length) return null
@@ -52,7 +63,10 @@ async function refreshCur() {
   try {
     const run = await getRun(rid)
     // 响应回来时用户可能已 pick 其它 run——仅同 ID 才赋值（防旧响应覆盖）
-    if (cur.value?.id === rid) cur.value = run
+    if (cur.value?.id === rid) {
+      cur.value = run
+      curDetailed.value = true
+    }
   } catch { /* 已被清理（定义删除级联）静默 */ } finally {
     refreshing = false
   }
@@ -61,7 +75,9 @@ let refreshing = false
 
 function pick(r: WorkflowRun) {
   cur.value = r
+  curDetailed.value = false
   expanded.value = ''
+  refreshCur() // 拉详情补定义快照（列表项不带）
 }
 
 async function trigger() {
@@ -175,6 +191,12 @@ v-model="inputsText" type="textarea" :rows="2" class="mono"
         <el-button v-if="waitingNode" size="small" type="primary" @click="approve">✓ 确认继续</el-button>
         <el-button v-if="cur.status === 'running' || cur.status === 'paused'" size="small" type="danger" plain @click="doAbort">中止</el-button>
       </div>
+      <p v-if="curDetailed && !cur.defSnapshot" class="drift-hint">
+        此运行创建于定义快照能力上线前，节点按当前定义解释（若定义已修改可能与实际执行不符）。
+      </p>
+      <p v-else-if="defDrifted" class="drift-hint">
+        工作流定义在此运行启动后已修改——以下按启动时固化的定义快照解释。
+      </p>
       <p v-if="waitingNode" class="wait-hint">
         ⏸ 等待人工确认：节点「{{ nodeTypeName(waitingNode.nodeId) }}」
         <span v-if="nodeMeta.get(waitingNode.nodeId)?.config?.message">——{{ nodeMeta.get(waitingNode.nodeId)?.config?.message }}</span>
@@ -210,6 +232,7 @@ v-model="inputsText" type="textarea" :rows="2" class="mono"
 .warn { color: #e6a23c; font-size: 12px; margin: 6px 0 0; }
 .grow { flex: 1; }
 .mono { font-family: ui-monospace, monospace; font-size: 12px; }
+.drift-hint { margin: 0 0 10px; font-size: 12px; color: var(--text-faint); }
 .wait-hint { padding: 8px 12px; background: rgba(230, 162, 60, 0.1); border-radius: 6px; font-size: 13px; color: #e6a23c; margin: 0 0 10px; }
 .timeline { display: flex; flex-direction: column; gap: 6px; }
 .tl-node { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; }

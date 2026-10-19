@@ -10,6 +10,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
+	"github.com/aitoys/paas/internal/backup"
+
 	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/httputil"
 	"github.com/aitoys/paas/pkg/tenant"
@@ -297,9 +299,45 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request) {
 		h.serveUpgrade(w, r, id)
 	case "pods":
 		h.servePods(w, r, id)
+	case "capabilities":
+		h.serveCapabilities(w, r, id)
 	default:
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
+}
+
+// serveCapabilities 返回数据服务运维能力面（spec 2026-10-17 专项05 §3：前端不硬编码
+// 「所有 db 都能恢复」——按引擎/接入模式判定，unsupported 附原因）。
+// 纯实体派生（无执行面探测）；「平台已装配执行面」由前端按 503 降级提示兜底。
+func (h *Handler) serveCapabilities(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodGet {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "仅支持 GET")
+		return
+	}
+	if !h.allow(w, r, PermDataServiceRead) {
+		return
+	}
+	d, err := h.repo.Get(r.Context(), id)
+	if err != nil {
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
+		return
+	}
+	engine := EngineOf(d)
+	external := IsExternal(d.Source)
+	// 真实快照/恢复仅支持 postgres + 托管实例（外部实例平台无数据面凭据通道）。
+	snapOK := backup.EngineSupported(engine) && !external
+	reason := ""
+	if !snapOK {
+		if external {
+			reason = "外部接入实例：平台不掌握数据面，请在源系统执行备份"
+		} else {
+			reason = "引擎 " + engine + " 暂不支持真实快照（当前支持：postgres）"
+		}
+	}
+	httputil.WriteData(w, map[string]any{
+		"backup":  map[string]any{"supported": snapOK, "mode": "snapshot", "reason": reason},
+		"restore": map[string]any{"supported": snapOK, "mode": "new-instance", "reason": reason},
+	})
 }
 
 // serveItemCRUD 处理 {id} 的 GET/PUT/DELETE（基础资源 CRUD）。

@@ -541,6 +541,157 @@ func (s *Store) ListLaneOverridesForClean(ctx context.Context, envID, laneID str
 	return out, nil
 }
 
+// ApplyLaneOverrides 批次原子应用泳道覆盖变更集（接口注释见 repository.go）。
+// 内存实现：单锁内「校验全部 ops → 快照备份 → 执行 → 失败恢复备份」达成原子性
+// （PG 侧是真事务，这里靠全量恢复备份对齐语义；ops 校验失败在写入前拦截）。
+func (s *Store) ApplyLaneOverrides(ctx context.Context, appID, envID, laneID string, ops []configcenter.LaneOverrideOp, expectedCount int, revision ...string) ([]configcenter.LaneOverride, error) {
+	tid, err := tenant.IDOrErr(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// 先校验全部 op（写入前拦截非法输入，保证执行段零校验失败）。
+	for _, op := range ops {
+		switch op.Action {
+		case configcenter.OpUpsert:
+			if op.Key == "" {
+				return nil, fmt.Errorf("upsert 缺 key")
+			}
+		case configcenter.OpRemove:
+			if op.Key == "" {
+				return nil, fmt.Errorf("remove 缺 key")
+			}
+		default:
+			return nil, fmt.Errorf("未知 action %q", op.Action)
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(revision) > 0 && revision[0] != configcenter.LaneRevision(s.listLaneOverridesLocked(tid, appID, envID, laneID)) {
+		return nil, configcenter.ErrLaneOverrideConflict
+	}
+	// 并发漂移校验：expectedCount 与当前覆盖数不符拒批（前端重预览）。
+	cur := 0
+	for _, o := range s.overrides {
+		if o.TenantID == tid && o.AppID == appID && o.EnvID == envID && o.LaneID == laneID {
+			cur++
+		}
+	}
+	if expectedCount >= 0 && expectedCount != cur {
+		return nil, fmt.Errorf("%w: 期望 %d 项，实际 %d 项", configcenter.ErrLaneOverrideConflict, expectedCount, cur)
+	}
+	// 快照备份（深拷贝）+ 新增 ID 登记（回滚时连同新建条目一起撤）。
+	backup := make(map[string]configcenter.LaneOverride, cur)
+	for id, o := range s.overrides {
+		if o.TenantID == tid && o.AppID == appID && o.EnvID == envID && o.LaneID == laneID {
+			backup[id] = o
+		}
+	}
+	created := make([]string, 0, len(ops))
+	now := time.Now()
+	for _, op := range ops {
+		switch op.Action {
+		case configcenter.OpUpsert:
+			hit := false
+			for id, ex := range s.overrides {
+				if ex.TenantID == tid && ex.AppID == appID && ex.EnvID == envID &&
+					ex.LaneID == laneID && ex.Key == op.Key {
+					ex.Value = op.Value
+					ex.UpdatedAt = now
+					s.overrides[id] = ex
+					hit = true
+					break
+				}
+			}
+			if !hit {
+				s.ovSeq++
+				o := configcenter.LaneOverride{
+					ID: fmt.Sprintf("ovr-%d-%d", now.UnixNano(), s.ovSeq), TenantID: tid,
+					AppID: appID, EnvID: envID, LaneID: laneID,
+					Key: op.Key, Value: op.Value, UpdatedAt: now,
+				}
+				s.overrides[o.ID] = o
+				created = append(created, o.ID)
+			}
+			// draft 占位（无既有 draft 才写）：保证提升到基线时有 draft 可合并。
+			if err := s.ensureDraftPlaceholderLocked(tid, appID, envID, op.Key, op.Value, op.Type, now); err != nil {
+				s.rollbackLaneOverridesLocked(backup, created)
+				return nil, err
+			}
+		case configcenter.OpRemove:
+			// 幂等：不存在视为成功（与 DeleteLaneOverride 的 NotFound 语义不同——
+			// 批次里 remove 是「确保无覆盖」，非「必须存在才删」）。
+			for id, ex := range s.overrides {
+				if ex.TenantID == tid && ex.AppID == appID && ex.EnvID == envID &&
+					ex.LaneID == laneID && ex.Key == op.Key {
+					delete(s.overrides, id)
+					break
+				}
+			}
+		}
+	}
+	return s.listLaneOverridesLocked(tid, appID, envID, laneID), nil
+}
+
+// rollbackLaneOverridesLocked 批次中途失败恢复备份：改过的恢复原值、新建的删除。须持写锁。
+func (s *Store) rollbackLaneOverridesLocked(backup map[string]configcenter.LaneOverride, created []string) {
+	for _, id := range created {
+		delete(s.overrides, id)
+	}
+	for id, o := range backup {
+		s.overrides[id] = o
+	}
+}
+
+// ensureDraftPlaceholderLocked upsert 且 key 无基线 draft 时写占位（同批次原子内）。
+// 须持写锁。type 空回退 text（占位类型不关键，draft 后续可改）。
+func (s *Store) ensureDraftPlaceholderLocked(tid, appID, envID, key, value, typ string, now time.Time) error {
+	// (app, env) 派生 ns 不存在则懒建（batch upsert 隐含该 ns，与 EnsureByAppEnv 同款名字冲突语义）。
+	ns, ok := s.findAppNSLocked(tid, appID, envID)
+	if !ok {
+		name := configcenter.AppNSName(appID, envID)
+		for _, n := range s.namespaces {
+			if n.TenantID == tid && n.Name == name {
+				return fmt.Errorf("%w: %s", configcenter.ErrNamespaceNameTaken, name)
+			}
+		}
+		s.nsSeq++
+		ns = configcenter.Namespace{
+			ID: fmt.Sprintf("ns-%d", s.nsSeq), TenantID: tid,
+			Name: name, Scope: configcenter.ScopeApp, AppID: appID, EnvID: envID,
+			UpdatedAt: now,
+		}
+		s.namespaces[ns.ID] = ns
+	}
+	// 已有同 key draft 则跳过（不覆盖用户已编辑的基线草稿）。
+	for _, it := range s.items {
+		if it.TenantID == tid && it.NamespaceID == ns.ID && it.Key == key {
+			return nil
+		}
+	}
+	if typ == "" {
+		typ = configcenter.TypeText
+	}
+	s.itemSeq++
+	id := fmt.Sprintf("item-%d-%d", now.UnixNano(), s.itemSeq)
+	s.items[id] = configcenter.ConfigItem{
+		ID: id, TenantID: tid,
+		NamespaceID: ns.ID, Key: key, Value: value, Type: typ, UpdatedAt: now,
+	}
+	return nil
+}
+
+// listLaneOverridesLocked 列 (app, env, lane) 覆盖（Key 升序）。须持锁。
+func (s *Store) listLaneOverridesLocked(tid, appID, envID, laneID string) []configcenter.LaneOverride {
+	out := make([]configcenter.LaneOverride, 0)
+	for _, o := range s.overrides {
+		if o.TenantID == tid && o.AppID == appID && o.EnvID == envID && o.LaneID == laneID {
+			out = append(out, o)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out
+}
+
 // ---- 共享配置引用（shared ns → 应用派生 ns）----
 
 func (s *Store) AddNSRef(ctx context.Context, appNSID, sharedNSID string) (configcenter.NSRef, error) {
