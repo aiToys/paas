@@ -5,6 +5,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { copyText } from '@/utils/clipboard'
 import { fetchAuth, apiError } from '@/api'
 import RepoBrowser from './RepoBrowser.vue'
 
@@ -76,8 +77,7 @@ async function showClone(row: Repo & { cloneCommand?: string }) {
       confirmButtonText: '复制命令',
       distinguishCancelAndClose: true,
     })
-    await navigator.clipboard.writeText(row.cloneCommand || '')
-    ElMessage.success('已复制')
+    await copyText(row.cloneCommand || '')
   } catch { /* 直接关闭 */ }
 }
 

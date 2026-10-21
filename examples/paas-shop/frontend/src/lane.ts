@@ -62,11 +62,14 @@ export async function laneFetch(input: string, init?: RequestInit): Promise<Resp
 }
 
 export function detectEnv(hostname: string): { kind: 'prod' | 'test' | 'lane'; lane?: string } {
+  // 按域名结构判定而非具体后缀：演示域名后缀跟随平台 PAAS_DOMAIN_SUFFIX（可变），
+  // 硬编码后缀会随环境漂移失效（曾硬编码 example.com，2026-10-21 改结构化判定）。
+  // 约定：test 侧基线 = shop.test.<suffix>，泳道 = <lane>.shop.test.<suffix>；其余视为 prod。
   const host = hostname.split(':')[0]
-  if (host === 'shop.example.com') return { kind: 'prod' }
-  const m = host.match(/^([a-z0-9-]+)\.shop\.test\.example\.com$/)
+  const m = host.match(/^([a-z0-9-]+)\.shop\.test\.[a-z0-9.-]+$/)
   if (m) return { kind: 'lane', lane: m[1] }
-  return { kind: 'test' }
+  if (/^shop\.test\./.test(host)) return { kind: 'test' }
+  return { kind: 'prod' }
 }
 
 export function currentLane(): string { return lane.value }

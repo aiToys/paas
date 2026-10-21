@@ -73,11 +73,30 @@ async function load() {
 }
 onMounted(async () => { await Promise.all([load(), envStore.loadEnvs()]) })
 watch(() => route.params.id, () => { product.value = null; services.value = []; workloads.value = []; showRun.value = false; void load() })
-const TYPE_LABEL: Record<string, string> = { web: 'Web', backend: '后端', agent: '智能体', static: '静态站点', cron: '定时任务' }
-const rows = computed(() => services.value.filter((s) => s.name.toLowerCase().includes(q.value.trim().toLowerCase())).flatMap((s) => {
-  const runs = baselineRunsFor(s.id, workloads.value, envStore.currentEnvId)
-  return runs.length ? runs.map((w) => ({ key: s.id + ':' + w.id, service: s, workload: w as Workload | undefined })) : [{ key: s.id, service: s, workload: undefined as Workload | undefined }]
-}))
+const TYPE_LABEL: Record<string, string> = { web: 'Web', backend: '后端', agent: '智能体', static: '静态站点', cron: '定时任务', service: '服务', cronjob: '定时任务', job: '任务' }
+// 服务行主语放宽为 {id,name,type}：直建 workload（setup.sh / pipeline 内建路径，无 ServiceEntity）按
+// service 名聚合成虚拟服务行同表展示，服务面不因服务模型为空而整页空白（2026-10-21 paas-shop 实测）。
+type ServiceRow = { id: string; name: string; type: string }
+const directServices = computed<ServiceRow[]>(() => {
+  const seen = new Map<string, ServiceRow>()
+  for (const w of workloads.value) {
+    if (w.serviceId || !w.service) continue
+    if (!seen.has(w.service)) seen.set(w.service, { id: '', name: w.service, type: w.type })
+  }
+  return [...seen.values()]
+})
+const rows = computed(() => {
+  const qn = q.value.trim().toLowerCase()
+  const real = services.value.filter((s) => s.name.toLowerCase().includes(qn)).flatMap((s) => {
+    const runs = baselineRunsFor(s.id, workloads.value, envStore.currentEnvId)
+    return runs.length ? runs.map((w) => ({ key: s.id + ':' + w.id, service: s as ServiceRow, workload: w as Workload | undefined })) : [{ key: s.id, service: s as ServiceRow, workload: undefined as Workload | undefined }]
+  })
+  const direct = directServices.value.filter((s) => s.name.toLowerCase().includes(qn)).flatMap((s) =>
+    workloads.value
+      .filter((w) => !w.serviceId && w.service === s.name && (!w.laneId || w.laneId === 'default') && (!envStore.currentEnvId || w.envId === envStore.currentEnvId))
+      .map((w) => ({ key: s.name + ':' + w.id, service: s, workload: w as Workload | undefined })))
+  return [...real, ...direct]
+})
 const envName = (id?: string) => envStore.envs.find((e) => e.id === id)?.name ?? id ?? envStore.currentEnv?.name ?? '—'
 function addresses(w?: Workload): string[] { if (!w) return []; return routeHosts.value.get(w.name) ?? (w.domain ? [w.domain] : []) }
 function open(w: Workload) { runWlId.value = w.id; showRun.value = true }
@@ -87,7 +106,7 @@ function openFromLink() {
 }
 watch(() => route.query.workload, openFromLink)
 async function refreshWorkloads() { await load() }
-function deploy(s: ServiceEntity, w?: Workload) { deployHint.value = s.name; deployServiceId.value = s.id; deployEnvId.value = w?.envId || ''; showDeploy.value = true }
+function deploy(s: ServiceRow, w?: Workload) { deployHint.value = s.name; deployServiceId.value = s.id; deployEnvId.value = w?.envId || ''; showDeploy.value = true }
 function updated(a: { id: string; bindings?: Product['bindings'] }) { if (product.value?.id === a.id) product.value = { ...product.value, bindings: a.bindings } }
 </script>
 <template>
@@ -107,12 +126,12 @@ function updated(a: { id: string; bindings?: Product['bindings'] }) { if (produc
         <StatePanel v-if="servicesError" title="服务列表加载失败" :description="servicesError" error><button class="act" @click="load">重新加载</button></StatePanel>
         <template v-else>
           <div v-if="workloadsError" class="inline-warning" role="alert">运行状态暂时无法加载，不代表服务未部署。<button class="text-button" @click="load">重试</button></div>
-          <StatePanel v-if="!services.length" title="为产品添加第一个服务" description="服务是可部署的单元，可以是 Web、后端、智能体或定时任务。"><button class="act primary" @click="showCreate = true">新建服务</button></StatePanel>
+          <StatePanel v-if="!services.length && !directServices.length" title="为产品添加第一个服务" description="服务是可部署的单元，可以是 Web、后端、智能体或定时任务。"><button class="act primary" @click="showCreate = true">新建服务</button></StatePanel>
           <StatePanel v-else-if="!rows.length" title="没有匹配的服务"><button class="act" @click="q = ''">清除搜索</button></StatePanel>
           <div class="table-scroll" data-table-scroll tabindex="0" v-else>
 <table class="list-table service-table">
 <thead><tr><th scope="col">服务</th><th scope="col">类型</th><th scope="col">环境</th><th scope="col">运行状态</th><th scope="col">访问地址</th><th scope="col">操作</th></tr></thead><tbody>
-            <tr v-for="row in rows" :key="row.key"><td><button v-if="row.workload" class="text-button service-name" @click="open(row.workload)">{{ row.service.name }}</button><strong v-else>{{ row.service.name }}</strong></td><td class="dim">{{ TYPE_LABEL[row.service.type] || row.service.type }}</td><td>{{ row.workload ? envName(row.workload.envId) : envName() }}</td><td><span v-if="workloadsError" class="status warn">状态未知</span><template v-else-if="row.workload"><span class="status" :class="tagTypeToCls(statusOf(WORKLOAD_STATUS, row.workload.status).type)">{{ statusOf(WORKLOAD_STATUS, row.workload.status).label }}</span><small class="replica-info">{{ row.workload.ready }}/{{ row.workload.replicas }} 副本就绪</small></template><span v-else class="status idle">未部署</span></td><td><template v-if="addresses(row.workload).length"><a v-for="h in addresses(row.workload)" :key="h" :href="'http://' + h" target="_blank" rel="noopener" class="domain-link" :title="h">{{ h }} ↗</a></template><span v-else class="dim">{{ addressError ? '地址暂不可用' : '未暴露' }}</span></td><td><button v-if="row.workload" class="act small" @click="open(row.workload)">实例与日志</button><button class="act small" :disabled="!!workloadsError" @click="deploy(row.service, row.workload)">发起交付</button></td></tr>
+            <tr v-for="row in rows" :key="row.key"><td><button v-if="row.workload" class="text-button service-name" @click="open(row.workload)">{{ row.service.name }}</button><strong v-else>{{ row.service.name }}</strong></td><td class="dim">{{ TYPE_LABEL[row.service.type] || row.service.type }}</td><td>{{ row.workload ? envName(row.workload.envId) : envName() }}</td><td><span v-if="workloadsError" class="status warn">状态未知</span><template v-else-if="row.workload"><span class="status" :class="tagTypeToCls(statusOf(WORKLOAD_STATUS, row.workload.status).type)">{{ statusOf(WORKLOAD_STATUS, row.workload.status).label }}</span><small class="replica-info">{{ row.workload.ready }}/{{ row.workload.replicas }} 副本就绪</small></template><span v-else class="status idle">未部署</span></td><td><template v-if="addresses(row.workload).length"><a v-for="h in addresses(row.workload)" :key="h" :href="'http://' + h" target="_blank" rel="noopener" class="domain-link" :title="h">{{ h }} ↗</a></template><span v-else class="dim">{{ addressError ? '地址暂不可用' : '未暴露' }}</span></td><td><button v-if="row.workload" class="act small" @click="open(row.workload)">实例与日志</button><button v-if="row.service.id" class="act small" :disabled="!!workloadsError" @click="deploy(row.service, row.workload)">发起交付</button></td></tr>
           </tbody>
 </table>
 </div>

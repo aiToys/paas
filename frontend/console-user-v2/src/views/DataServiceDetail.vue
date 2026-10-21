@@ -8,6 +8,7 @@ import StatePanel from '@/components/StatePanel.vue'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { copyText } from '@/utils/clipboard'
 import { fetchJSON, fetchCommand, apiError, fetchList } from '@/api'
 import { statusOf, tagTypeToCls, DATASERVICE_STATUS } from '@/composables/useStatus'
 import { useEnvStore } from '@/stores/env'
@@ -83,14 +84,6 @@ const connectionFields = computed(() => {
   ]
 })
 
-async function copyText(t: string) {
-  try {
-    await navigator.clipboard.writeText(t)
-    ElMessage.success('已复制')
-  } catch {
-    ElMessage.warning('复制失败，请手动选择复制')
-  }
-}
 
 // —— 生命周期（生产 stop/restart 走危险确认） ——
 const acting = ref('')

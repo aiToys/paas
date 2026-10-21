@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { copyText } from '@/utils/clipboard'
 import { formatDateTime } from '@/utils/format'
 import { apiError } from '@/api'
 // 泳道详情页（一等实体）：单泳道的深度视图。
@@ -102,14 +103,6 @@ const fmtTime = (t?: string) => {
   return Number.isNaN(d.getTime()) ? '-' : formatDateTime(d)
 }
 
-async function copyText(text: string) {
-  try {
-    await navigator.clipboard.writeText(text)
-    ElMessage.success('已复制')
-  } catch {
-    ElMessage.warning('复制失败，请手动选择复制')
-  }
-}
 </script>
 
 <template>

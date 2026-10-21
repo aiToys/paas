@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { copyText } from '@/utils/clipboard'
 import { formatDateTime } from '@/utils/format'
 import { statusOf, DATASERVICE_STATUS } from '@/composables/useStatus'
 // 资源中心 -> 数据服务详情。
@@ -194,12 +195,7 @@ async function copyField(key: string, val: string) {
     ElMessage.info('敏感字段已掩码，连接信息已通过应用绑定自动注入应用配置')
     return
   }
-  try {
-    await navigator.clipboard.writeText(val)
-    ElMessage.success('已复制到剪贴板')
-  } catch {
-    ElMessage.error('复制失败，请手动选择文本复制')
-  }
+  await copyText(val, '已复制到剪贴板')
 }
 
 async function loadMeta() {

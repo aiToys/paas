@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { copyText } from '@/utils/clipboard'
 import { fetchList, fetchCommand, apiError } from '@/api'
 import {
   listMetrics,
@@ -228,12 +229,7 @@ async function loadAssociated(traceId: string) {
   }
 }
 async function copyTrace(id: string) {
-  try {
-    await navigator.clipboard.writeText(id)
-    ElMessage.success('TraceID 已复制')
-  } catch {
-    ElMessage.warning('复制失败，请选择完整 TraceID 手动复制')
-  }
+  await copyText(id, 'TraceID 已复制')
 }
 const flat = (t: Trace) => flattenSpanTree(buildSpanTree(t.spans || []))
 const duration = (t: Trace) =>

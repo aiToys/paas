@@ -104,8 +104,7 @@ async function doCreate() {
         confirmButtonText: '复制命令',
         distinguishCancelAndClose: true,
       })
-      await navigator.clipboard.writeText(cmd)
-      ElMessage.success('已复制')
+      await copyText(cmd)
     } catch { /* 用户直接关闭 */ }
   } catch (e) {
     ElMessage.error(apiError(e, '创建失败'))

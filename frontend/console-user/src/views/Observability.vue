@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { copyText } from '@/utils/clipboard'
 import { formatDateTime } from '@/utils/format'
 // 平台能力 → 可观测（综合大屏，多维度）。
 // 设计原则（对标 Datadog/Grafana/Jaeger）：入口全局，维度是过滤器不是门槛。
@@ -174,12 +175,7 @@ async function loadTraceLogs(row: Trace) {
 }
 // 复制 traceID（排障现场贴到日志/告警上下文）
 async function copyTraceId(id: string) {
-  try {
-    await navigator.clipboard.writeText(id)
-    ElMessage.success('traceID 已复制')
-  } catch {
-    ElMessage.warning('复制失败，请手动选择')
-  }
+  await copyText(id, 'traceID 已复制')
 }
 
 // sparkline 高度（公共 composable：基线钉 0 防平坦线 min-max 拉伸失真）

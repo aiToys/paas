@@ -8,6 +8,7 @@ import {
   getPipeline, updatePipeline, listTemplates, listDeliveries, replayDelivery,
   type Pipeline, type StageDef, type PipelineTemplate, type WebhookDelivery,
 } from '@/api/pipeline'
+import { copyText } from '@/utils/clipboard'
 import { apiError } from '@/api'
 import StatePanel from './StatePanel.vue'
 import { listServices, type ServiceEntity } from '@/api/service'
@@ -223,8 +224,7 @@ async function save() {
 async function copyWebhookUrl() {
   if (!webhookUrl.value) return
   try {
-    await navigator.clipboard.writeText(webhookUrl.value)
-    ElMessage.success('已复制 webhook URL（含 token，请妥善保管）')
+    await copyText(webhookUrl.value, '已复制 webhook URL（含 token，请妥善保管）')
   } catch {
     ElMessage.warning('复制失败，请手动选择复制')
   }

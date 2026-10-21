@@ -1204,6 +1204,17 @@ func (h *Handler) serveReleases(w http.ResponseWriter, r *http.Request, appID st
 		if !h.allowProd(w, r, input.EnvID) {
 			return
 		}
+		// 标准基线「生产禁 BestEffort」：prod 发布 resources 全空时拒绝。
+		// 无基线时 CreateRelease 自动新建 Workload，resources 空会让 BestEffort Pod
+		// 直接上生产（绕过 workload Create 入口的拒建护栏）；与流水线 deploy stage
+		// 的 fail-fast（engine.go 同款校验）语义对齐——发布单显式声明规格。
+		if h.envResolver != nil && input.EnvID != "" && input.Resources.IsEmpty() {
+			if et, err := h.envResolver.EnvType(r.Context(), input.EnvID); err == nil && et == "prod" {
+				httputil.WriteError(w, http.StatusBadRequest,
+					"生产环境发布必须有资源规格（cpuRequest/memRequest 至少一项）：请在发布请求带 resources，或在应用配置 tab 设置资源规格默认值")
+				return
+			}
+		}
 		// 多服务防护：app 已部署多个服务时 service 必填。service 空时基线查找
 		// 「不过滤返回全部」，会命中 ID 最小的 Workload 反复覆盖，多服务镜像互相踩。
 		if input.Service == "" && h.svcLister != nil {

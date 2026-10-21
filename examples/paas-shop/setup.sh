@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # setup.sh —— paas-shop 演示资源初始化（spec §9 七步 + 演示编排）。
-# 幂等：先查后建，重复执行安全。域名统一 *.example.com（对外演示材料不泄漏内网地址）；
-# 本机访问演示域名：curl -H 'Host: shop.example.com' http://<集群入口>/ 或 hosts 解析。
+# 幂等：先查后建，重复执行安全。域名后缀经 env PAAS_DOMAIN_SUFFIX 注入（与平台配置同源，
+# 缺省 example.com 仅作占位不可达）；本机访问演示域名：curl -H "Host: shop.${DOMAIN_SUFFIX}" http://<集群入口>/ 或 hosts 解析。
 #
 # 对 brief 的实测偏差（openapi/handler 实证，2026-09-05）：
 # 1. cron_image 不按 tag 子串匹配（Image.Tag=<branch>-<commit8>[-<argsHash8>]，buildArgs 只进
@@ -23,8 +23,13 @@
 #    显式警告跳过模板+pipeline 块）；创建类 POST 检查响应含 data 才报成功（堵虚假成功）。
 set -euo pipefail
 
-PAAS_API="${PAAS_API:-http://paas.k8s.dd}"
+# 平台 API 地址：缺省本地 core（开源零泄漏）；dev 集群经 env PAAS_API=http://paas.<真实后缀> 注入。
+PAAS_API="${PAAS_API:-http://localhost:8080}"
 PAAS_TOKEN="${PAAS_TOKEN:-sk-acme-admin}"
+# 演示域名后缀：与平台 PAAS_DOMAIN_SUFFIX 同源（治理 Route host + 一键暴露自动域名一致，
+# 否则治理页出现两套后缀）。缺省 example.com（RFC 2606 保留域，开源环境零信息泄漏）；
+# 具体部署经 env PAAS_DOMAIN_SUFFIX=<真实后缀> 覆盖。曾硬编码后缀致治理页域名与平台自动域名漂移（2026-10-21 根治）。
+DOMAIN_SUFFIX="${PAAS_DOMAIN_SUFFIX:-example.com}"
 APP_ID="${APP_ID:-}"
 TENANT_ID="t-acme"
 ENV_TEST="env-acme-test"
@@ -110,6 +115,23 @@ for c in json.load(sys.stdin)['data']:
   fi
 }
 
+# cron_image 解析某 SERVICE 最近一次成功构建的镜像全量引用（registry:tag）。
+# 实测偏差（见文件头注释 1）：tag 只含 buildArgs 哈希不含 SERVICE 名，改走 buildruns 列表
+# （两 Store 实现均 StartedAt 降序，首个匹配=该 SERVICE 最近成功构建）。
+cron_image() { # buildArgs SERVICE
+  local bid
+  bid=$(api "$PAAS_API/api/applications/$APP_ID/buildruns" | python3 -c "
+import sys,json
+for b in json.load(sys.stdin)['data']:
+    if b.get('status')=='success' and (b.get('buildArgs') or {}).get('SERVICE')=='$1' and b.get('imageId'):
+        print(b['imageId']); break" 2>/dev/null || true)
+  [ -z "$bid" ] && return 0
+  api "$PAAS_API/api/images/$bid" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)['data']
+print(d['registry']+':'+d['tag'])" 2>/dev/null || true
+}
+
 echo "== part 1: test 侧共享资源（Secret/Action-Token/MQ 登记）=="
 resolve_app_id
 
@@ -158,6 +180,75 @@ else
   echo "  [跳过] test 环境无 mq 实例（shop-nats）——请先确认数据服务"
 fi
 
+# test 数据服务六绑定（prod 绑定只落 prod 桶：绑定注入语义=连接条目注入「实例自身 env 桶」，
+# 见 cmd/core/binding_injector.go OnBind upsert(ds.EnvID)）。test workload 需 test 实例绑定注入
+# DATABASE_URL/REDIS_URL/NATS_URL/QDRANT_*/MEILI_*/MINIO_*，缺则 product/order/recommend 起动即退。
+# 幂等：BindResource 同 type+name 去重；注入 upsert 同 key 覆盖。
+for kv in "db:shop-db" "cache:shop-cache" "mq:shop-mq" "vector:shop-vector" "search:shop-search" "storage:shop-storage"; do
+  kind="${kv%%:*}"; ds="${kv#*:}"
+  DS_ID=$(api "$PAAS_API/api/dataservices" | python3 -c "
+import sys,json
+for d in json.load(sys.stdin)['data']:
+    if d['name']=='$ds': print(d['id']); break" 2>/dev/null || true)
+  [ -n "$DS_ID" ] && api -X POST "$PAAS_API/api/applications/$APP_ID/bindings" -H "Content-Type: application/json" \
+    -d "{\"type\":\"$kind\",\"name\":\"$ds\"}" >/dev/null 2>&1 && echo "  已绑定 $kind=${ds}（注入 test 桶）"
+  [ -z "$DS_ID" ] && echo "  [警告] 数据服务 $ds 不存在，跳过绑定"
+done
+
+echo "== part 1.5: test workload（7 服务；prod 镜像复用链上游）=="
+# test workload 是 prod_svc_image 的取像来源（prod 同 Service 从 test workload 复用 image），
+# 也是 test 域名 Route 的治理 Service 对齐目标（名=paas-shop-<svc>）。旧链路由
+# deploy-paas-shop.sh 以外部推镜像建；重建后构建已走 Gitea→BuildRun，本脚本补齐此环节。
+# port/containerPort 对齐旧脚本：bff/mcp 间硬编码直连 containerPort（product:8081 等），
+# mcp 保持 port:80（Tool serverURL 无端口=80，containerPort:8080 经 Service 转发）。
+for svc in product recommend chatbot bff order frontend mcp; do
+  IMG=$(cron_image "$svc")
+  [ -z "$IMG" ] && { echo "  [警告] $svc 无构建镜像，跳过 test workload"; continue; }
+  case "$svc" in
+    product)   PORT=8081; CPORT=8081;;
+    recommend) PORT=8082; CPORT=8082;;
+    chatbot)   PORT=8083; CPORT=8083;;
+    bff)       PORT=8080; CPORT=8080;;
+    order)     PORT=8084; CPORT=8084;;
+    frontend)  PORT=80;   CPORT=80;;
+    mcp)       PORT=80;   CPORT=8080;;
+  esac
+  # metricsPath 同 prod 规则：Go 服务 /metrics 声明采集；frontend 是 nginx 不声明。
+  MP_LINE=""
+  [ "$svc" != "frontend" ] && MP_LINE='"metricsPath": "/metrics",'
+  cat > /tmp/wl-test.json <<EOF
+{
+  "appId": "$APP_ID", "envId": "$ENV_TEST", "laneId": "default",
+  "service": "$svc", "type": "service", "name": "paas-shop-$svc",
+  "image": "$IMG", "replicas": 1,
+  $MP_LINE
+  "port": $PORT, "containerPort": $CPORT,
+  "resources": {"cpuRequest": "100m", "cpuLimit": "500m", "memRequest": "128Mi", "memLimit": "256Mi"}
+}
+EOF
+  ensure_workload /tmp/wl-test.json
+done
+
+# test 侧 CronJob（spec §3：sweeper */2 + statsworker）——test 订单 TTL=2min 靠 */2 sweeper
+# 清扫闭环（缺它则 pending 订单永不清，spec §5 超时关闭语义断链）。
+SWEEPER_T_IMG="${SWEEPER_T_IMG:-$(cron_image sweeper)}"
+[ -n "$SWEEPER_T_IMG" ] && cat > /tmp/wl-sweeper-test.json <<EOF
+{"appId":"$APP_ID","envId":"$ENV_TEST","laneId":"default","service":"sweeper","type":"cronjob",
+ "name":"paas-shop-sweeper","image":"$SWEEPER_T_IMG","schedule":"*/2 * * * *",
+ "resources":{"cpuRequest":"50m","cpuLimit":"200m","memRequest":"64Mi","memLimit":"128Mi"}}
+EOF
+[ -n "$SWEEPER_T_IMG" ] && ensure_workload /tmp/wl-sweeper-test.json
+[ -z "$SWEEPER_T_IMG" ] && echo "  [警告] sweeper 无构建镜像，跳过 test sweeper（TTL 清扫断链）"
+
+STATSWORKER_T_IMG="${STATSWORKER_T_IMG:-$(cron_image statsworker)}"
+[ -n "$STATSWORKER_T_IMG" ] && cat > /tmp/wl-statsworker-test.json <<EOF
+{"appId":"$APP_ID","envId":"$ENV_TEST","laneId":"default","service":"statsworker","type":"cronjob",
+ "name":"paas-shop-statsworker","image":"$STATSWORKER_T_IMG","schedule":"*/10 * * * *",
+ "resources":{"cpuRequest":"50m","cpuLimit":"200m","memRequest":"64Mi","memLimit":"128Mi"}}
+EOF
+[ -n "$STATSWORKER_T_IMG" ] && ensure_workload /tmp/wl-statsworker-test.json
+[ -z "$STATSWORKER_T_IMG" ] && echo "  [警告] statsworker 无构建镜像，跳过 test statsworker"
+
 echo "== part 2: prod 全套（spec §9）=="
 
 # ① prod 数据服务（环境级数据隔离）。engineId=平台引擎目录（managed 模式，平台生成凭证）。
@@ -201,7 +292,7 @@ if img.startswith('sha256:'):
             img=xi.split('@')[0]+'@'+img; break
 print(img)" 2>/dev/null || true
 }
-for svc in product recommend order chatbot bff frontend; do
+for svc in product recommend order chatbot bff frontend mcp; do
   IMG=$(prod_svc_image "$svc")
   [ -z "$IMG" ] && { echo "  [警告] $svc 无 test 镜像可复用，跳过"; continue; }
   # metricsPath：5 个 Go 服务在业务端口暴露 /metrics（internal/observ 挂 promhttp）→ 声明后平台给 Pod
@@ -210,13 +301,24 @@ for svc in product recommend order chatbot bff frontend; do
   # Prometheus 报 unsupported Content-Type "text/html"）。
   MP_LINE=""
   [ "$svc" != "frontend" ] && MP_LINE='"metricsPath": "/metrics",'
+  # 端口表对齐 test 段（case 结构，显式 containerPort）：mcp 异构（Service 80 / 容器 8080），
+  # 不显式则 readiness probe 打容器 80 → connection refused 永不 ready（2026-10-21 实测）。
+  case "$svc" in
+    product)   PORT=8081; CPORT=8081;;
+    recommend) PORT=8082; CPORT=8082;;
+    chatbot)   PORT=8083; CPORT=8083;;
+    order)     PORT=8084; CPORT=8084;;
+    bff)       PORT=8080; CPORT=8080;;
+    frontend)  PORT=80;   CPORT=80;;
+    mcp)       PORT=80;   CPORT=8080;;
+  esac
   cat > /tmp/wl-prod.json <<EOF
 {
   "appId": "$APP_ID", "envId": "$ENV_PROD", "laneId": "default",
   "service": "$svc", "type": "service", "name": "paas-shop-$svc-prod",
   "image": "$IMG", "replicas": 1,
   $MP_LINE
-  "port": $( [ "$svc" = "bff" ] && echo 8080 || ([ "$svc" = "frontend" ] && echo 80 || ([ "$svc" = "product" ] && echo 8081 || ([ "$svc" = "recommend" ] && echo 8082 || ([ "$svc" = "chatbot" ] && echo 8083 || echo 8084))))),
+  "port": $PORT, "containerPort": $CPORT,
   "resources": {"cpuRequest": "100m", "cpuLimit": "500m", "memRequest": "128Mi", "memLimit": "256Mi"}
 }
 EOF
@@ -224,22 +326,7 @@ EOF
 done
 
 # CronJob：sweeper-prod（TTL=30min）+ statsworker-prod（恢复部署）
-# cron_image 解析某 SERVICE 最近一次成功构建的镜像全量引用（registry:tag）。
-# 实测偏差（见文件头注释 1）：tag 只含 buildArgs 哈希不含 SERVICE 名，改走 buildruns 列表
-# （两 Store 实现均 StartedAt 降序，首个匹配=该 SERVICE 最近成功构建）。
-cron_image() { # buildArgs SERVICE
-  local bid
-  bid=$(api "$PAAS_API/api/applications/$APP_ID/buildruns" | python3 -c "
-import sys,json
-for b in json.load(sys.stdin)['data']:
-    if b.get('status')=='success' and (b.get('buildArgs') or {}).get('SERVICE')=='$1' and b.get('imageId'):
-        print(b['imageId']); break" 2>/dev/null || true)
-  [ -z "$bid" ] && return 0
-  api "$PAAS_API/api/images/$bid" | python3 -c "
-import sys,json
-d=json.load(sys.stdin)['data']
-print(d['registry']+':'+d['tag'])" 2>/dev/null || true
-}
+# 镜像解析复用 cron_image（定义见 part 1 前）。
 SWEEPER_IMG="${SWEEPER_IMG:-$(cron_image sweeper)}"
 [ -n "$SWEEPER_IMG" ] && cat > /tmp/wl-sweeper-prod.json <<EOF
 {"appId":"$APP_ID","envId":"$ENV_PROD","laneId":"default","service":"sweeper","type":"cronjob",
@@ -259,7 +346,7 @@ EOF
 [ -n "$STATSWORKER_IMG" ] && ensure_workload /tmp/wl-statsworker-prod.json
 [ -z "$STATSWORKER_IMG" ] && echo "  [警告] statsworker 无构建镜像（可 STATSWORKER_IMG=registry/repo:tag 覆盖），跳过 statsworker-prod"
 
-# ③ prod 域名 Route：shop.example.com / → frontend-prod、/api → bff-prod（先建治理 Service 再 Route）
+# ③ prod 域名 Route：shop.${DOMAIN_SUFFIX} / → frontend-prod、/api → bff-prod（先建治理 Service 再 Route）
 ensure_gov_service() { # name envId port
   local exists
   exists=$(api "$PAAS_API/api/services" | python3 -c "
@@ -284,13 +371,13 @@ for r in json.load(sys.stdin)['data']:
     -d "{\"name\":\"$1\",\"host\":\"$2\",\"path\":\"$3\",\"serviceId\":\"$4\",\"methods\":[\"ANY\"],\"enabled\":true}" >/dev/null
   echo "  已创建 Route $1（$2$3）"
 }
-ensure_route shop-prod-root shop.example.com / "$SVC_FE"
-ensure_route shop-prod-api shop.example.com /api "$SVC_BFF"
+ensure_route shop-prod-root "shop.${DOMAIN_SUFFIX}" / "$SVC_FE"
+ensure_route shop-prod-api "shop.${DOMAIN_SUFFIX}" /api "$SVC_BFF"
 # test 域名同构（对齐三套域名方案 spec §10）
 SVC_FE_T=$(ensure_gov_service paas-shop-frontend "$ENV_TEST" 80)
 SVC_BFF_T=$(ensure_gov_service paas-shop-bff "$ENV_TEST" 8080)
-ensure_route shop-test-root shop.test.example.com / "$SVC_FE_T"
-ensure_route shop-test-api shop.test.example.com /api "$SVC_BFF_T"
+ensure_route shop-test-root "shop.test.${DOMAIN_SUFFIX}" / "$SVC_FE_T"
+ensure_route shop-test-api "shop.test.${DOMAIN_SUFFIX}" /api "$SVC_BFF_T"
 
 # ④ bff prod 环境配置（按环境隔离，spec §9④）
 ensure_appconfig "$ENV_PROD" "PRODUCT_SERVICE_URL" "http://paas-shop-product-prod:8081" "env"
@@ -303,13 +390,18 @@ ensure_appconfig "$ENV_PROD" "BFF_UPSTREAM" "paas-shop-bff-prod:8080" "env"
 ensure_appconfig "$ENV_PROD" "PAAS_SVC_SUFFIX" "-prod" "env"
 ensure_appconfig "$ENV_PROD" "PAAS_ORDER_ACTION_TOKEN" "$ACTION_TOKEN" "secret"
 # chatbot 必需：平台 Agent 虚拟模型（agent:<id>，缺则起动即退；agent 实体租户级无环境维度，
-# test/prod 同 ID）。从 test 桶自动发现，避免硬编码 agent ID 随 seed 漂移。
-AGENT_MODEL=$(api "$PAAS_API/api/applications/$APP_ID/configs?envId=$ENV_TEST" | python3 -c "
+# test/prod 同 ID）。从租户 Agent 目录按名解析 shop-agent（agent 实体不随应用级联删，应用重建后
+# 仍可解析，避免硬编码 ID 漂移），两桶同值写入。
+AGENT_ID=$(api "$PAAS_API/api/agents" | python3 -c "
 import sys,json
-for c in json.load(sys.stdin)['data']:
-    if c['key']=='PAAS_AGENT_MODEL': print(c['value']); break" 2>/dev/null || true)
-[ -n "$AGENT_MODEL" ] && ensure_appconfig "$ENV_PROD" "PAAS_AGENT_MODEL" "$AGENT_MODEL" "env"
-[ -z "$AGENT_MODEL" ] && echo "  [警告] test 桶无 PAAS_AGENT_MODEL，chatbot-prod 将起动失败（先在 test 配置后重跑）"
+for a in json.load(sys.stdin)['data']:
+    if a['name']=='shop-agent': print(a['id']); break" 2>/dev/null || true)
+if [ -n "$AGENT_ID" ]; then
+  ensure_appconfig "$ENV_TEST" "PAAS_AGENT_MODEL" "agent:$AGENT_ID" "env"
+  ensure_appconfig "$ENV_PROD" "PAAS_AGENT_MODEL" "agent:$AGENT_ID" "env"
+else
+  echo "  [警告] 租户无 shop-agent 实体，chatbot 将起动失败（智能体 → 创建 shop-agent 后重跑）"
+fi
 
 # ③' sweeper TTL 按环境注入（brief 核对点③；sweeper 读 ORDER_TTL_MINUTES，分钟数）：
 # test=2 演示立等可取 / prod=30 语义化显式（fallback 恰为 30）。
@@ -511,6 +603,6 @@ fi
 
 echo "== setup 完成 =="
 echo "  APP_ID=${APP_ID}（tenant=${TENANT_ID}）"
-echo "  演示域名: shop.test.example.com（test）/ shop.example.com（prod，本机 hosts 或 curl -H Host）"
+echo "  演示域名: shop.test.${DOMAIN_SUFFIX}（test）/ shop.${DOMAIN_SUFFIX}（prod，本机 hosts 或 curl -H Host）"
 echo "  发布演示: DevOps → shop-release 手动触发（构建→部署测试→打版本→晋升生产）"
 echo "  退款演示: AI 服务 → 工作流 shop-refund-approval 触发（LLM 分析→人工审批→MCP 退款）"

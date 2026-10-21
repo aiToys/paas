@@ -85,12 +85,51 @@ func Init(serviceName string) func() {
 
 // Handler 包装 http.Handler：先记录 RED 指标（promhttp 自动填 code = 状态码），
 // 再用 otelhttp 自动建 span（含 http 语义属性 + 5xx 异常）。
-// 每个服务的 mux 用此包装，所有请求自动 RED + trace。
-// /metrics 和 /healthz 通过 skipTracePaths 跳过（不建 span，避免高频无意义请求污染链路）。
+// 每个服务的 mux 用此包装，所有请求自动 RED + trace + 访问日志。
+// /metrics 和 /healthz 通过 skipTracePaths 跳过（不建 span 不打日志，避免高频噪音）。
 func Handler(operation string, h http.Handler) http.Handler {
 	h = promhttp.InstrumentHandlerCounter(httpReqs, h)
 	h = promhttp.InstrumentHandlerDuration(httpDuration, h)
-	return otelhttp.NewHandler(h, operation, otelhttp.WithFilter(skipTracePaths))
+	// accessLog 在 otelhttp 内层：执行时 ctx 已带 span，可提取 trace_id。
+	return otelhttp.NewHandler(accessLog(h), operation, otelhttp.WithFilter(skipTracePaths))
+}
+
+// statusWriter 记录下游写入的状态码（访问日志用；promhttp 的包装在外层不共享）。
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// accessLog 请求访问日志：一行一条（method/path/status/耗时/trace_id）。
+// trace_id 从当前请求 span 提取——平台「trace 展开 → 关联日志」按 traceId 匹配日志行
+// （ListLogs 内存 best-effort：stream label 或行内文本），应用此前只在错误时打日志，
+// 成功请求零日志可关联，trace 深链的日志面板永远为空（2026-10-21 实测）。
+func accessLog(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !skipTracePaths(r) { // /metrics /healthz /api/events 不打（与 trace 同策略防刷屏）
+			next.ServeHTTP(w, r)
+			return
+		}
+		sw := &statusWriter{ResponseWriter: w, status: 200}
+		start := time.Now()
+		next.ServeHTTP(sw, r)
+		tid := ""
+		if sc := oteltrace.SpanContextFromContext(r.Context()); sc.HasTraceID() {
+			tid = sc.TraceID().String()
+		}
+		slog.Info("请求",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", sw.status,
+			"durationMs", time.Since(start).Milliseconds(),
+			"trace_id", tid,
+		)
+	})
 }
 
 // MetricsHandler 返回 /metrics handler（promhttp），供 Prometheus scrape。

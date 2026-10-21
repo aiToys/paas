@@ -195,15 +195,30 @@ func TestHandlerReleaseProdGuard(t *testing.T) {
 		t.Fatalf("dev 发布测试应 201，got %d: %s", w.Code, w.Body.String())
 	}
 
-	// admin -> prod 201
+	// admin -> prod 201（resources 显式声明：生产禁 BestEffort 护栏要求）
 	fAdmin := newFixture(true)
 	r = req(acmeCtx(), "POST", "/api/applications/app-cs/releases", devops.ReleaseInput{
 		EnvID: "env-acme-prod-bj", ImageID: fAdmin.acmeImg.ID,
+		Resources: devops.ResourceSpecInput{CPURequest: "100m", CPULimit: "500m", MemRequest: "128Mi", MemLimit: "512Mi"},
 	})
 	w = httptest.NewRecorder()
 	fAdmin.h.ServeHTTP(w, r)
 	if w.Code != http.StatusCreated {
 		t.Fatalf("admin 发布生产应 201，got %d: %s", w.Code, w.Body.String())
+	}
+
+	// admin -> prod + resources 空 -> 400（生产禁 BestEffort 护栏，与流水线 deploy stage fail-fast 同语义）
+	fAdmin2 := newFixture(true)
+	r = req(acmeCtx(), "POST", "/api/applications/app-cs/releases", devops.ReleaseInput{
+		EnvID: "env-acme-prod-bj", ImageID: fAdmin2.acmeImg.ID,
+	})
+	w = httptest.NewRecorder()
+	fAdmin2.h.ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("admin 发布生产 resources 空应 400，got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "资源规格") {
+		t.Fatalf("400 错误应提示资源规格，got: %s", w.Body.String())
 	}
 }
 

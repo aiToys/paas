@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { copyText } from '@/utils/clipboard'
 import { formatDateTime } from '@/utils/format'
 // 应用详情 - 流水线 tab（变更驱动发布，参考 cicd.png / OnePaaS deploy 页）：
 // ① 顶部：默认「测试环境发布流水线」卡（CI 流水线 stages + 最近运行状态 + 集成发车按钮）
@@ -162,8 +163,7 @@ async function doCreate() {
       await ElMessageBox.alert(cmd, '分支已就绪，本地开始开发：', {
         confirmButtonText: '复制命令', distinguishCancelAndClose: true,
       })
-      await navigator.clipboard.writeText(cmd)
-      ElMessage.success('已复制')
+      await copyText(cmd)
     } catch { /* 用户直接关闭 */ }
   } catch (e) {
     ElMessage.error(apiError(e, '创建失败'))
