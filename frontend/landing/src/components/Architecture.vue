@@ -5,18 +5,18 @@ const pillars = [
     n: '01',
     title: 'Core 最小不可分',
     body: '只含所有子系统都依赖的元能力：租户、鉴权、资源纳管、编排、可观测、插件机制。业务领域逻辑绝不进 Core —— 判据："MaaS / 治理 / DevOps 都会用吗？"',
-    foot: '元数据 PostgreSQL · 事件 NATS（Core 自带，避免元设施鸡生蛋）',
+    foot: '元数据 PostgreSQL · 多租户身份与权限 · OpenAPI 契约',
   },
   {
     n: '02',
-    title: '子系统是插件，不是微服务',
-    body: '以插件形式注册进 Core，共享鉴权 / 存储 / 事件总线。插件契约（pkg/plugin）对外可见，拓扑排序 + 环检测 + 依赖倒置注入。',
-    foot: 'MaaS / 治理 / 资源 / DevOps / AI 编排均已按插件接入落地',
+    title: '模块边界与插件契约',
+    body: '插件契约提供拓扑排序、依赖检查与依赖注入。当前 MaaS 通过插件注册，其余领域在控制面内按模块装配，逐步对齐插件边界。',
+    foot: '插件化是演进方向，模块能力以实际配置与接口为准',
   },
   {
     n: '03',
     title: '控制面 / 数据面解耦',
-    body: '控制面只下发期望状态（CRD），数据面负责实际运行。控制面挂了，已部署的模型 / 服务继续跑 —— 数据面有自愈能力。',
+    body: '工作负载与数据服务由 CRD 驱动 Kubernetes 运行。控制面故障时，已落地负载继续由集群管理；平台 API、模型推理网关及实时发现仍依赖控制面。',
     foot: 'WorkloadReconciler / DataServiceReconciler watch CRD → CreateOrUpdate Deployment/StatefulSet',
   },
 ]
@@ -27,9 +27,9 @@ const pillars = [
     <div class="container">
       <div class="section-head">
         <span class="eyebrow">架构</span>
-        <h2 class="section-title">三条不变量，撑起整个平台</h2>
+        <h2 class="section-title">统一控制面，清晰的运行边界</h2>
         <p class="section-sub">
-          设计阶段定稿的核心约束，不轻易推翻。这是 paas 区别于"堆砌功能"型平台的地方。
+          Go 控制面组织元数据与期望状态，Kubernetes 承载工作负载，第三方通道提供模型推理。
         </p>
       </div>
 

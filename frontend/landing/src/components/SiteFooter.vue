@@ -9,7 +9,8 @@ const cols = [
       { label: '能力', href: '#capabilities' },
       { label: '架构', href: '#architecture' },
       { label: '快速开始', href: '#quickstart' },
-      { label: '用户控制台', href: '/console/' },
+      { label: '经典控制台', href: '/console/' },
+      { label: '新版控制台（试验版）', href: '/next/' },
       { label: '管理后台', href: '/admin/' },
     ],
   },
@@ -40,8 +41,8 @@ const year = 2026
   <section class="cta-band">
     <div class="container cta-inner">
       <div>
-        <h2>把你的基础设施，收敛成一个控制面</h2>
-        <p>Apache 2.0 开源 · 三预设 Key 开箱可试 · 双模交付</p>
+        <h2>开始交付应用，连接运行与 AI 能力</h2>
+        <p>Apache 2.0 开源 · 多租户 · SaaS 与私有化交付</p>
       </div>
       <div class="cta-btns">
         <a class="btn primary" href="#quickstart">开始使用 →</a>
@@ -55,7 +56,7 @@ const year = 2026
     <div class="container foot-grid">
       <div class="brand-col">
         <LogoMark :size="32" />
-        <p class="desc">一站式 PaaS 平台 —— 服务治理、资源中心、MaaS、DevOps 的基础设施统一平台。</p>
+        <p class="desc">OnePaaS：围绕应用交付、服务运行与 AI 能力的一站式平台。</p>
         <p class="legal mono">Apache License 2.0 · © {{ year }} aitoys</p>
       </div>
       <div v-for="c in cols" :key="c.title" class="col">
@@ -96,7 +97,8 @@ const year = 2026
 .cta-btns {
   display: flex;
   gap: 10px;
-  flex-shrink: 0;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 
 .footer {

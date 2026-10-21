@@ -10,18 +10,18 @@ const groups = [
       '聚合 OpenAI / DeepSeek / 通义千问（OpenAI 兼容协议）',
       'Model → Channel → Provider 三层抽象',
       '请求级 failover + 流式透传（含 reasoning）+ Token 计量',
-      '平台级凭证托管 · AES-GCM 静态加密，凭证不入库',
+      '平台级凭证托管 · 配置主密钥后加密持久化 · API 掩码展示',
     ],
   },
   {
     icon: '◆',
     title: '服务治理',
-    tagline: '治理四件套已全部落地',
+    tagline: '注册发现 · 路由 · 配置管理',
     items: [
       '服务注册发现（K8s Endpoints 真源）',
       '配置中心：版本 / 发布 / 回滚 / 泳道覆盖 / 客户端发现',
       'API 网关路由（Host 聚合 Ingress 下发）',
-      '熔断器（error_rate / slow_call 策略）',
+      '熔断规则与模拟评估（真实流量驱动待接入）',
     ],
   },
   {
@@ -30,8 +30,8 @@ const groups = [
     tagline: '代码到上线全链路',
     items: [
       '代码 → 构建（K8s Job DooD）→ 镜像（digest 不可变）',
-      '流水线 8 stage：构建 / 部署 / 测试 / 审批 / 发布 / 晋升 / 基线 / 金丝雀',
-      '并行验证式金丝雀 + 回滚指针 + 变更火车发车',
+      '交付预演 · 产物锁定 · 审批决策 · 泳道验证 · 发布回滚',
+      '变更批次协作 · webhook 投递追踪与重放',
       '内置 Gitea 代码托管 · PR 评审 · webhook 自动触发',
     ],
   },
@@ -53,18 +53,18 @@ const groups = [
     items: [
       '应用 × 环境双维主线，prod / test 阶序晋升',
       '全链路泳道灰度：流量染色 · 降级基线 · TTL 自动回收',
-      '工作负载三型（Service / Job / CronJob）+ 资源规格基线',
+      'Service / Job / CronJob · 实例日志与事件 · 重启与重建',
       '应用成员权限（owner / maintainer / developer / viewer）',
     ],
   },
   {
     icon: '✦',
     title: 'AI 编排',
-    tagline: '智能体构建 · 运行 · 交易',
+    tagline: '智能体构建 · 运行 · 共享',
     items: [
       '智能体 / 工具 / 知识库 / 提示词 / 技能五实体',
       '工作流引擎（LLM / 条件 / 审批节点）· DB 状态驱动恢复',
-      '多轮对话记忆 + 评估历史落库',
+      '多轮记忆与评估记录 · 可接 AgentRun 智能研发执行域',
       '智能体市场：快照 fork 安装，凭证自动剔除',
     ],
   },
@@ -76,7 +76,7 @@ const cross = [
   { k: '生产安全防护', v: 'prod:write 权限 · gated 15min 超时 · 视觉强隔离 · 危险操作确认' },
   { k: '可观测', v: 'OTel + Prometheus + Loki + Jaeger；trace/log 关联 + 告警状态机' },
   { k: '安全 · 计费', v: 'AES-256-GCM 静态加密 + 只增审计；租户配额 + 用量 + 账单' },
-  { k: 'PostgreSQL', v: '全模块持久化 + RLS 行级安全；无 PAAS_DB_URL 降级纯内存' },
+  { k: 'PostgreSQL', v: '业务数据持久化 · 查询层租户隔离；未配置数据库时使用内存模式' },
   { k: 'OpenAPI 契约', v: 'route registry 单一真源 · 前端 openapi-typescript 生成' },
 ]
 </script>
@@ -88,7 +88,7 @@ const cross = [
         <span class="eyebrow">能力矩阵</span>
         <h2 class="section-title">六大能力域，一个控制面</h2>
         <p class="section-sub">
-          子系统以插件形式注册进 Core，共享鉴权 / 存储 / 事件总线 —— 不是独立微服务。
+          围绕应用与环境组织资源，共用身份、权限与审计。真实构建、监控、模型推理等能力需配置对应后端。
         </p>
       </div>
 

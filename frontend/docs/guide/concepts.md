@@ -1,48 +1,51 @@
 # 核心概念
 
-## 应用 × 环境 × 工作负载
+## 产品、服务与工作负载
 
+新版控制台把 Application 展示为“产品”，经典版称为“应用”；两者共享同一份数据和 `/api/applications` API。
+
+```text
+租户
+ ├─ 产品 / 应用 (Application)
+ │   ├─ 服务 (ServiceEntity)：可部署单元，描述代码与运行配置
+ │   │   └─ 工作负载 (Workload)：某环境、泳道中的实际运行声明
+ │   ├─ 交付：仓库、流水线、变更、批次、发布记录
+ │   ├─ 配置：应用 × 环境的静态注入
+ │   └─ 数据服务绑定：连接信息按实例所属环境注入
+ └─ 环境 (Environment)：产品可绑定多个环境
+     └─ 泳道 (Lane)：环境内的流量隔离单元
 ```
-应用 (Application)
- ├── 环境绑定: 测试 (test) ←→ 生产 (prod)     # 多对多，发布阶序可配
- ├── 工作负载 (Workload)                       # Service / Job / CronJob
- ├── 配置 (AppConfig)                          # 应用 × 环境静态注入
- └── 数据服务绑定 → 连接串自动注入
-```
 
-- **应用**是主线：配额、计费、成员权限都挂在应用维度
-- **环境**是一等公民（`test` / `prod`），生产环境写操作需要 `prod:write` 权限
-- **发布阶序**：测试 → 生产按 PromoteOrder 晋升，禁止跳级
+已有 API/脚本也能直接创建工作负载，没有 ServiceEntity 的工作负载可从工作负载入口管理。流量治理中的 Service 是注册发现和路由对象，需与运行服务区分。
 
-## 泳道（Lane）
+- **成员权限**归属应用：owner / maintainer / developer / viewer；受限应用启用成员校验。
+- **基础配额与账单**主要按租户管理；应用级 Key 另提供模型用量的应用归因。
+- **环境**区分 `test` / `prod`；生产写需 `prod:write`，晋升受发布阶序约束。
+- 顶栏环境是浏览范围，写操作以资源实际环境和流水线目标为准。
 
-环境内的**流量隔离单元**：
+## 泳道
 
-- 联调泳道 `feature-x`：只部署变更服务，未命中流量降级到基线服务
-- 染色透传：SDK `LaneMiddleware` 入口染色，trace / 日志 / 指标全链路带 lane 标签
-- standard 泳道 TTL 自动回收；permanent 泳道常驻（大项目 / 火车分支）
-- 金丝雀发布 = `canary-<runID>` 临时泳道 1 副本并行验证
+泳道处在一个环境内，不是复制整套环境：只部署变更服务，未覆盖服务可回退基线。需要业务 SDK/中间件接入染色、透传和服务发现，不能只添加请求头就认定全链路隔离成立。
 
-## 流水线（Pipeline）
+standard 泳道按 TTL 回收，permanent 常驻；canary 阶段建立临时验证泳道，由人工确认发布或终止。共享数据服务和消息链路仍需单独设计隔离。见[泳道](../features/lane)。
 
-模板 + 绑定模型：
+## 流水线与发布
 
-- **模板**定义阶段编排（内置 CI / CD 模板，Version 升级自动覆盖）
-- **流水线**绑定模板 + 参数覆盖，占位符（如 `app.env.prod` 双花括号语法）在触发时解析固化
-- 8 种阶段：build / deploy / test / approve / release / promote / baseline / canary
-- 单实例串行（并发触发 409），生产流静态预演防越权组合
+模板定义阶段，流水线绑定模板及参数；触发时解析并固化执行参数。当前支持 build / deploy / test / approve / release / promote / baseline / canary / agent 九类阶段，`agent` 需额外的 AgentRun 执行域。
 
-## 多租户与权限
+- **deploy** 改变目标环境部署，产生可回滚记录。
+- **release** 创建版本里程碑，不等于部署。
+- **promote** 按环境阶序推进基线版本。
+- **agent** 生成代码分支，可接后续构建；与平台内 Agent/Workflow 的业务运行区分。
 
-| 层 | 模型 |
-|----|------|
-| 租户级 RBAC | tenant-admin / developer / viewer |
-| 应用级 | owner / maintainer / developer / viewer（受限应用 AppGuard 强制） |
-| API 认证 | cookie 会话（控制台）/ API Key（程序化），双通道 |
+见[交付指南](../features/devops)与[智能研发](../features/agent-delivery)。
 
-跨租户访问统一 404 不泄漏存在性；生产写操作 fail-closed。
+## 模型、通道与供应商
 
-## 交付形态
+Model 是对外模型目录，包含多个 Channel；Channel 描述具体上游模型和端点，可引用 Vendor 预设。Provider 是运行时协议适配器。它们是平台级目录，应用和 Key 是租户资源。见[MaaS](../features/maas)。
 
-- **SaaS**：Helm 公网安装
-- **私有化**：`airsync bundle` 打离线包 → 物理介质 → `airsync install`（sha256 校验 → 镜像导入 → helm 安装）
+## 身份与交付形态
+
+控制台用 cookie 会话，程序用 API Key；都绑定租户、用户和角色。跨租户资源访问通常返回 404，生产写操作另受权限限制。
+
+平台支持 Helm 安装和 airsync 离线包。离线交付仍要准备模型供应商、观测、知识库等实际使用能力的依赖，见[部署方式](../deploy/)。

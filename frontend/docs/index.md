@@ -3,42 +3,36 @@ layout: home
 
 hero:
   name: OnePaaS
-  text: 一站式 PaaS 平台
-  tagline: 应用 · DevOps · 可观测 · 模型推理 · AI 编排
+  text: 应用交付、服务运行与 AI 平台
+  tagline: 从实际任务开始，了解操作路径、启用条件和验证方法
   actions:
     - theme: brand
       text: 快速开始
       link: /guide/quickstart
     - theme: alt
-      text: 功能总览
-      link: /features/
+      text: 控制台与导航
+      link: /guide/
     - theme: alt
-      text: API 文档
+      text: API 参考
       link: /api/
 
 features:
-  - icon: 🚀
-    title: 应用主线
-    details: 应用 × 环境多对多，工作负载 / 配置 / 数据服务绑定一键编排，配额与计费内建。
-    link: /features/app
-  - icon: 🔬
-    title: 泳道灰度
-    details: 全链路流量染色，联调泳道 TTL 自动回收，金丝雀并行验证零风险发布。
-    link: /features/lane
-  - icon: 🔧
-    title: DevOps
-    details: 内置代码库与 CI/CD 流水线，八种阶段编排，变更管理火车发车模型。
+  - title: 交付应用变更
+    details: 产品与服务、代码构建、交付预演、审批和发布验证。
     link: /features/devops
-  - icon: 📊
-    title: 可观测三支柱
-    details: 指标 / 日志 / 链路追踪一体查询，告警规则持久化与历史回看。
-    link: /features/observability
-  - icon: 🧠
-    title: 模型推理 MaaS
-    details: OpenAI 兼容 API，多供应商通道聚合与故障转移，token 计量计费。
-    link: /features/maas
-  - icon: 🤖
-    title: AI 编排
-    details: 智能体 / 工具 / 知识库 / 工作流引擎，广场一键 fork 安装。
+  - title: 运行与排障
+    details: 实例、日志、事件与链路下钻，跟进重启、重建和操作记录。
+    link: /features/runtime
+  - title: 接入 AI
+    details: 模型通道与 API、智能体与工作流，以及独立接入的智能研发执行域。
     link: /features/ai
+  - title: 管理基础设施
+    details: 数据服务、配置、流量治理，以及当前 PostgreSQL 备份恢复路径。
+    link: /features/dataservice
+  - title: 管理租户与访问
+    details: 账号开通、Key 生命周期、租户冻结、诊断和审计。
+    link: /admin/
+  - title: 部署与离线交付
+    details: 本地体验、K8s 安装、生产配置与离线依赖准备。
+    link: /deploy/
 ---

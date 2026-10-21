@@ -18,7 +18,7 @@
   /* 文字 */
   --text: #e6e9f2;
   --text-dim: #9ca3b8;
-  --text-faint: #6b7390;
+  --text-faint: #9aa4bd;
 
   /* 描边 / 阴影 */
   --border: rgba(255, 255, 255, 0.08);
@@ -55,12 +55,12 @@
   --surface-2: #eef0f8;
 
   --brand-soft: rgba(99, 102, 241, 0.09);
-  --accent: #0891b2; /* cyan-600：#22d3ee 在亮底对比度不足 */
+  --accent: #0e7490; /* 浅色背景下保留小字号文字对比度。 */
   --accent-soft: rgba(8, 145, 178, 0.09);
 
   --text: #1a2036;
   --text-dim: #4d5670;
-  --text-faint: #818aa3;
+  --text-faint: #5e6880;
 
   --border: rgba(26, 32, 54, 0.1);
   --border-strong: rgba(26, 32, 54, 0.2);

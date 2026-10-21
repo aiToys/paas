@@ -6,6 +6,7 @@ import LogoMark from './LogoMark.vue'
 // 文档站经 core 同源 serve（/docs/ 必须带尾斜杠——StripPrefix 前缀匹配，无斜杠会落到 landing 兜底）。
 const open = ref(false)
 const links = [
+  { href: '#journeys', label: '使用路径' },
   { href: '#capabilities', label: '能力' },
   { href: '#architecture', label: '架构' },
   { href: '#quickstart', label: '快速开始' },
@@ -42,6 +43,7 @@ function toggleTheme() {
         </a>
         <!-- 移动端汉堡：补全顶栏放不下的入口（文档/管理后台），与锚点一起折叠 -->
         <a class="m-extra" href="/docs/" @click="open = false">使用文档</a>
+        <a class="m-extra" href="/next/" @click="open = false">新版控制台（试验版）</a>
         <a class="m-extra" href="/admin/" @click="open = false">管理后台</a>
         <a class="btn primary cta-mobile" href="/console/">立即体验</a>
       </nav>
@@ -113,6 +115,7 @@ function toggleTheme() {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-shrink: 0;
 }
 /* 主题切换：icon-only 小方钮，视觉与 ghost 按钮同族 */
 .theme-toggle {
@@ -120,6 +123,7 @@ function toggleTheme() {
   align-items: center;
   justify-content: center;
   width: 34px;
+  flex-shrink: 0;
   height: 34px;
   border: 1px solid var(--border);
   border-radius: 9px;
@@ -159,7 +163,7 @@ function toggleTheme() {
   display: none;
 }
 
-@media (min-width: 880px) {
+@media (min-width: 1200px) {
   .links {
     display: inline-flex;
   }
@@ -172,7 +176,10 @@ function toggleTheme() {
 }
 
 /* 移动端展开菜单 */
-@media (max-width: 879px) {
+@media (max-width: 1199px) {
+  .right > a {
+    display: none;
+  }
   .links.open {
     display: flex;
     flex-direction: column;
@@ -198,6 +205,7 @@ function toggleTheme() {
     display: inline-flex;
     margin-top: 8px;
     justify-content: center;
+    color: #fff;
   }
   .cta-desktop {
     display: none;

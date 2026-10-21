@@ -1,16 +1,9 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-
-// Hero：左侧价值主张，右侧 signature —— 三层架构动态示意
-// （接入层 → 控制面 Core → 数据面，cyan 流线 = 控制面下发期望状态 CRD）。
-// 这是产品核心抽象的可视化，比空泛文字 hero 更有信息量。
-
-// stats 四格分别对应：整体规模 / 治理 / DevOps / 交付模式（覆盖四大能力域）。
-// OpenAI 兼容卖点由 lead 与右侧示意图的接入层 chip 承担，不占格子。
+// 首屏用任务旅程说明平台价值；架构和启用条件在下方展开。
 const stats = [
-  { v: '12+', k: '平台模块已落地' },
-  { v: '4/4', k: '治理四件套（注册/配置/网关/熔断）' },
-  { v: '8 stage', k: 'CI/CD 流水线 · 含并行验证金丝雀' },
+  { v: '交付', k: '变更 · 构建 · 发布' },
+  { v: '运行', k: '实例 · 日志 · 链路' },
+  { v: 'AI', k: '模型 · 智能体 · 工作流' },
   { v: '双模', k: 'SaaS + 私有化离线交付' },
 ]
 </script>
@@ -21,21 +14,20 @@ const stats = [
       <div class="copy">
         <span class="eyebrow">Apache 2.0 · 开源</span>
         <h1>
-          把基础设施收敛成
-          <span class="grad">一个控制面</span>
+          从代码交付到服务运行
+          <span class="grad">统一在一个平台完成</span>
         </h1>
         <p class="lead">
-          服务治理 · 资源中心 · MaaS · DevOps · AI 编排 ——
-          云原生 Go 控制面 + 插件化子系统。多租户隔离、PostgreSQL 持久化、K8s 数据面 CRD，
-          SaaS 与私有化双模交付。
+          管理应用与环境，编排构建发布和泳道验证，关联指标、日志与链路，
+          并接入模型和智能体能力。一个控制面，贯穿开发、交付与运维。
         </p>
         <div class="cta">
           <a class="btn primary" href="/console/">
-            立即体验控制台
+            进入经典控制台
             <span class="arrow">→</span>
           </a>
-          <a class="btn ghost" href="/docs/">
-            使用文档
+          <a class="btn ghost" href="/next/">
+            新版控制台（试验版）
           </a>
           <a class="btn ghost" href="#quickstart">
             快速开始
@@ -56,42 +48,42 @@ const stats = [
         </dl>
       </div>
 
-      <!-- signature: 三层架构动态示意 -->
-      <div class="diagram" aria-hidden="true">
+      <!-- 三条任务旅程；具体操作入口见下方使用路径。 -->
+      <div class="diagram" role="img" aria-label="交付、运行和 AI 三条使用路径，由统一控制面组织">
         <div class="layer l1">
-          <div class="layer-tag">接入层</div>
+          <div class="layer-tag">01 · 交付应用</div>
           <div class="layer-body">
-            <span class="chip">统一 API Gateway</span>
-            <span class="chip">OpenAI-compatible</span>
-            <span class="chip">鉴权 · 多租户 · 计量</span>
+            <span class="chip">代码与变更</span>
+            <span class="chip">预演与审批</span>
+            <span class="chip">构建与发布</span>
           </div>
         </div>
 
-        <div class="flow" data-label="下发期望状态 CRD" />
+        <div class="flow" data-label="观察发布结果" />
 
         <div class="layer l2 primary">
-          <div class="layer-tag">控制面 · Platform Core</div>
+          <div class="layer-tag">02 · 运行与排障</div>
           <div class="layer-body core">
-            <div class="core-title">最小不可分内核</div>
+            <div class="core-title">从运行状态找到问题</div>
             <div class="plugins">
-              <span class="plugin">MaaS</span>
-              <span class="plugin">治理</span>
-              <span class="plugin">资源</span>
-              <span class="plugin">DevOps</span>
-              <span class="plugin">智能体</span>
+              <span class="plugin">实例</span>
+              <span class="plugin">指标</span>
+              <span class="plugin">日志</span>
+              <span class="plugin">链路</span>
+              <span class="plugin">操作记录</span>
             </div>
-            <div class="meta mono">Go · controller-runtime · PostgreSQL · NATS</div>
+            <div class="meta mono">应用 · 环境 · 泳道，同一上下文下钻</div>
           </div>
         </div>
 
-        <div class="flow" data-label=" reconcile " />
+        <div class="flow" data-label="接入模型与自动化" />
 
         <div class="layer l3">
-          <div class="layer-tag">数据面</div>
+          <div class="layer-tag">03 · 接入 AI</div>
           <div class="layer-body">
-            <span class="chip">K8s Workload CRD</span>
-            <span class="chip">StatefulSet</span>
-            <span class="chip">第三方供应商</span>
+            <span class="chip">模型与通道</span>
+            <span class="chip">智能体与工作流</span>
+            <span class="chip">智能研发</span>
           </div>
         </div>
       </div>
@@ -113,12 +105,13 @@ const stats = [
   max-width: 580px;
 }
 h1 {
-  font-size: 52px;
+  font-size: clamp(32px, 3.6vw, 48px);
   font-weight: 800;
   margin: 18px 0 20px;
   letter-spacing: -0.03em;
 }
 .grad {
+  display: block;
   background: linear-gradient(120deg, var(--brand) 0%, var(--brand-2) 50%, var(--accent) 110%);
   -webkit-background-clip: text;
   background-clip: text;
@@ -240,7 +233,7 @@ h1 {
   color: var(--text-faint);
 }
 
-/* 层间流动线（cyan 期望状态下发） */
+/* 旅程之间的连接线 */
 .flow {
   position: relative;
   height: 34px;

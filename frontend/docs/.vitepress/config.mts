@@ -5,7 +5,7 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   lang: 'zh-CN',
   title: 'OnePaaS 文档',
-  description: '一站式 PaaS 平台用户文档——应用、工作负载、DevOps、可观测、MaaS、AI 编排',
+  description: 'OnePaaS 用户文档：应用交付、服务运行、AI 平台、组织访问与部署运维',
   base: '/docs/',
   cleanUrls: false, // 保留 .html 后缀——core 静态 serve 无 cleanUrls 重写，.html 直连最稳
 
@@ -16,6 +16,7 @@ export default defineConfig({
       { text: '指南', link: '/guide/' },
       { text: '功能', link: '/features/' },
       { text: 'API', link: '/api/' },
+      { text: '平台管理', link: '/admin/' },
       { text: '部署', link: '/deploy/' },
     ],
 
@@ -37,9 +38,9 @@ export default defineConfig({
       ],
       '/features/': [
         {
-          text: '应用主线',
+          text: '应用交付',
           items: [
-            { text: '应用与工作负载', link: '/features/app' },
+            { text: '产品与工作负载', link: '/features/app' },
             { text: '环境与发布', link: '/features/env' },
             { text: '泳道（灰度隔离）', link: '/features/lane' },
           ],
@@ -49,25 +50,29 @@ export default defineConfig({
           items: [
             { text: '代码构建与流水线', link: '/features/devops' },
             { text: '变更管理', link: '/features/change' },
+            { text: '智能研发与交付', link: '/features/agent-delivery' },
           ],
         },
         {
-          text: '平台能力',
+          text: '运行与基础设施',
           items: [
+            { text: '服务运行与排障', link: '/features/runtime' },
             { text: '数据服务', link: '/features/dataservice' },
+            { text: '备份与恢复', link: '/features/backup' },
             { text: '服务治理', link: '/features/governance' },
             { text: '配置中心', link: '/features/configcenter' },
             { text: '可观测', link: '/features/observability' },
           ],
         },
         {
-          text: 'AI 服务',
+          text: 'AI 平台',
           items: [
             { text: '模型推理（MaaS）', link: '/features/maas' },
             { text: '智能体编排', link: '/features/ai' },
           ],
         },
       ],
+      '/admin/': [{ text: '平台管理', items: [{ text: '身份、资源与运维', link: '/admin/' }] }],
       '/api/': [{ text: 'API 参考', items: [{ text: '概览', link: '/api/' }] }],
       '/deploy/': [
         {

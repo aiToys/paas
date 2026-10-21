@@ -1,34 +1,42 @@
-# 代码构建与流水线
+# 代码构建与交付
 
-## 代码库
+新版在「产品 → 交付」配置仓库、流水线和发布；「交付中心」跨产品跟进待处理事项、运行、变更和批次。经典版对应应用 DevOps 与全局 DevOps 入口。
 
-- **internal**：内置 Gitea（无头 + paas-bot 账号），PR / 分支 API 完整
-- **external**：外部仓库（校验 clone 可达性防 RCE）
+## 先接入构建依赖
 
-## 构建（BuildRun）
+| builder | 启用方式 | 实际行为 |
+|---|---|---|
+| mock | 默认，未配置 builder | 演示构建，不证明 registry 中有对应镜像 |
+| process | `PAAS_DEVOPS_BUILDER=process` | 本地进程调用 git/docker；需主机具备工具，distroless 不适用 |
+| k8s | `PAAS_DEVOPS_BUILDER=k8s` | K8s Job 构建；需集群、当前 DooD 的节点 Docker socket、registry 与 Git 访问 |
 
-builder 三模式：
+Helm 配置为 `devops.builder`、`devops.registry` 及相关凭证。k8s 模式缺 clientset 时会降级，需检查诊断与启动日志确认实际模式。
 
-| 模式 | 说明 |
-|------|------|
-| k8s | DooD Job 集群内构建（默认） |
-| process | 本地进程 |
-| mock | 演示 |
+内部仓库需单独配置 Gitea；外部仓库需可访问且具备相应凭证。多服务构建通过 `buildArgs.SERVICE` 区分产物；不要根据 tag 是否包含服务名猜测镜像所属服务。
 
-构建产物镜像 digest 不可变；多服务工作负载按 `buildArgs.SERVICE` 分服务构建。
+## 交付一条变更
 
-## 流水线（模板 + 绑定）
+1. 在产品绑定仓库、选择分支并配置流水线。模板定义阶段，流水线保存参数覆盖。
+2. **执行预演**：核对目标环境、泳道、阶段、必需配置及选中的镜像产物；先补齐缺项。
+3. **触发运行**：进入运行详情查看阶段状态、日志与产物信息。
+4. **处理人工决策**：审批、手工测试或金丝雀验证按阶段确认/拒绝，并填写必要理由。暂停等待人工不等于失败。
+5. **验证部署**：确认工作负载镜像/digest、实例就绪和业务入口可达；同 digest 的重复构建或流水线成功不自动证明发生了滚动更新。
 
-```
-PipelineTemplate（内置 tpl-ci / tpl-cd，Version 升级自动覆盖）
-  └── Pipeline（绑定模板 + 参数覆盖）
-        └── PipelineRun / StageRun（占位符触发时解析固化）
-```
+顶栏环境不改变流水线目标。生产发布需要 `prod:write`，并声明资源规格；流水线在触发前也会检查生产阶段组合。
 
-8 种阶段：**build** / **deploy** / **test**（smoke+manual）/ **approve** / **release** / **promote** / **baseline** / **canary**。
+## 九类阶段
 
-## 触发
+build / deploy / test / approve / release / promote / baseline / canary / agent。
 
-- 手动 / webhook（token 常量时间比较 + branch glob 匹配）
-- 单实例串行：并发触发 409
-- 运行详情独立页（GitHub Actions 式全屏视图 + 实时 stage 日志）
+- deploy 改变部署；release 创建版本里程碑；promote 按环境阶序晋升。
+- test 支持 smoke 与人工验证，不能将手工确认当作自动探测证据。
+- canary 创建并行验证泳道，由人工确认发布或终止，仍需业务与依赖隔离验证。
+- agent 需接入外部执行域，见[智能研发](./agent-delivery)。
+
+## webhook 与异常恢复
+
+webhook 按 token 和分支规则校验；在流水线的投递记录中检查跳过、拒绝和关联运行。重放使用已有投递记录的幂等语义，已有运行不应再次创建一份。
+
+单条流水线并发触发会返回 409。失败后先定位阶段错误和产物；按页面提供的重试/终止操作推进，避免在发布仍进行时重复启动。
+
+[API 示例](../api/)给出了预演和触发的正确端点；[变更批次](./change)用于多分支集成与发车。
