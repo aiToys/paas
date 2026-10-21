@@ -9,6 +9,8 @@
       v-loading="loading"
       class="form-drawer-body"
     >
+      <!-- prepend：表单顶部说明区（如编辑影响边界提示），可选 -->
+      <slot name="prepend" />
       <el-form
         ref="formRef"
         :model="formData"

@@ -19,4 +19,6 @@ type Repository interface {
 	// EnsureByName 存在返回既有（不覆盖——permanent 不被懒建降级）；
 	// 不存在懒建 Mode=standard（并发竞态由唯一约束兜底，双实现均幂等）。
 	EnsureByName(ctx context.Context, envID, name string) (Lane, error)
+	// ListAll 跨租户列出全部泳道（admin 平台总览，不过滤 tenant，返回对象带 TenantID）。
+	ListAll(ctx context.Context) ([]Lane, error)
 }

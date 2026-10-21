@@ -146,3 +146,60 @@ func TestHandlerChannelCRUD(t *testing.T) {
 		t.Fatalf("channel model not found want 404, got %d", rr.Code)
 	}
 }
+
+// statusReaderRegistrar 实现 GatewayRegistrar + provider.ChannelStatusReader，
+// 模拟 gateway 请求级 failover 打标后的运行态投影（R3 审计 H-1 回归锁）。
+type statusReaderRegistrar struct {
+	fakeRegistrar
+	status map[string]string // "modelID/channelID" -> status
+}
+
+func (f *statusReaderRegistrar) ChannelStatus(modelID, channelID string) string {
+	return f.status[modelID+"/"+channelID]
+}
+
+func TestHandlerChannelStatusProjection(t *testing.T) {
+	repo := NewMemoryStore()
+	gw := &statusReaderRegistrar{
+		fakeRegistrar: fakeRegistrar{registered: map[string]*provider.Model{}},
+		status:        map[string]string{},
+	}
+	h := NewHandler(repo, gw, nil)
+
+	// 建模型 + 通道（store 值 healthy）
+	_ = repo.CreateModel(t.Context(), &provider.Model{ID: "m1", Name: "M1"})
+	_ = repo.CreateChannel(t.Context(), "m1", &provider.Channel{ID: "ch1", Status: provider.StatusHealthy})
+
+	// 无运行态打标：保持 store 值
+	rr := doReq(t, h, "GET", "/api/admin/models/m1/channels", nil)
+	var listResp struct {
+		Data []*provider.Channel `json:"data"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &listResp)
+	if listResp.Data[0].Status != provider.StatusHealthy {
+		t.Fatalf("未打标应保持 store 值 healthy，got %s", listResp.Data[0].Status)
+	}
+
+	// 请求级 failover 打标 offline（只写 gateway 内存，不回写 store）
+	gw.status["m1/ch1"] = provider.StatusOffline
+	rr = doReq(t, h, "GET", "/api/admin/models/m1/channels", nil)
+	_ = json.Unmarshal(rr.Body.Bytes(), &listResp)
+	if listResp.Data[0].Status != provider.StatusOffline {
+		t.Fatalf("打标后投影应显示 offline，got %s", listResp.Data[0].Status)
+	}
+	// store 值未被回写污染
+	sc, _ := repo.ListChannels(t.Context(), "m1")
+	if sc[0].Status != provider.StatusHealthy {
+		t.Fatalf("store 值不应被投影污染，got %s", sc[0].Status)
+	}
+
+	// 模型详情同投影
+	rr = doReq(t, h, "GET", "/api/admin/models/m1", nil)
+	var modelResp struct {
+		Data provider.Model `json:"data"`
+	}
+	_ = json.Unmarshal(rr.Body.Bytes(), &modelResp)
+	if len(modelResp.Data.Channels) > 0 && modelResp.Data.Channels[0].Status != provider.StatusOffline {
+		t.Fatalf("模型详情投影应显示 offline，got %s", modelResp.Data.Channels[0].Status)
+	}
+}

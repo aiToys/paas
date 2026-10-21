@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"net/http"
 
 	"github.com/aitoys/paas/pkg/attribution"
 )
@@ -20,6 +21,13 @@ func WithRoles(ctx context.Context, roles []string) context.Context {
 func RolesFrom(ctx context.Context) ([]string, bool) {
 	v, ok := ctx.Value(rolesKey{}).([]string)
 	return v, ok && len(v) > 0
+}
+
+// RolesFromRequest 是 RolesFrom 的 request 形态，供装配层以依赖倒置方式注入
+// 回调（如 auth 的菜单裁剪），避免下游包反向依赖 gateway 的私有 ctx 键。
+func RolesFromRequest(r *http.Request) []string {
+	v, _ := RolesFrom(r.Context())
+	return v
 }
 
 // WithUserID 把用户 ID 注入 ctx。

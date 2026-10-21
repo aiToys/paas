@@ -264,7 +264,7 @@ func (h *Handler) restore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 恢复证据链：仅真实快照 + completed + 有产物定位可恢复（记录模式无恢复证明）。
-	if src.EffectiveMode() != ModeSnapshot || src.Status != StatusCompleted || (src.ArtifactRef != "file://"+backupsPVCName+"/"+dumpFile(src) || !ValidChecksum(src.Checksum)) {
+	if !src.Restorable() {
 		httputil.WriteError(w, http.StatusConflict, "仅已完成的真实快照可恢复（记录模式无恢复证明）")
 		return
 	}
@@ -318,11 +318,6 @@ func (h *Handler) restore(w http.ResponseWriter, r *http.Request) {
 	}
 	h.recordAudit(r, tid, "backup_restore", b.ID, "source="+src.ID+" restored="+b.RestoredResourceID)
 	httputil.WriteDataCreated(w, b)
-}
-
-// restoreName 派生恢复实例名（时间基防撞名）。
-func restoreName() string {
-	return "restored-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 }
 
 func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {

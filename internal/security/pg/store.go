@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -283,6 +284,68 @@ func (s *Store) ListAllAuditLogs(ctx context.Context) ([]security.AuditLog, erro
 		out = append(out, l)
 	}
 	return out, rows.Err()
+}
+
+// QueryAllAuditLogs 跨租户后端过滤 + 分页：条件全参数化（无拼接用户输入），
+// count 与分页同一 WHERE；ORDER BY at DESC, id DESC 保证翻页稳定。
+func (s *Store) QueryAllAuditLogs(ctx context.Context, q security.AuditQuery) (security.AuditPage, error) {
+	q = q.Normalize()
+	conds := []string{"TRUE"}
+	args := []any{}
+	add := func(cond string, v any) {
+		args = append(args, v)
+		conds = append(conds, fmt.Sprintf(cond, len(args)))
+	}
+	if q.TenantID != "" {
+		add("tenant_id = $%d", q.TenantID)
+	}
+	if q.Actor != "" {
+		add("actor = $%d", q.Actor)
+	}
+	if q.Action != "" {
+		add("action = $%d", q.Action)
+	}
+	if q.ResourceType != "" {
+		add("resource_type = $%d", q.ResourceType)
+	}
+	if q.ResourceID != "" {
+		add("resource_id = $%d", q.ResourceID)
+	}
+	if !q.From.IsZero() {
+		add("at >= $%d", q.From)
+	}
+	if !q.To.IsZero() {
+		add("at < $%d", q.To)
+	}
+	if q.Keyword != "" {
+		add("(resource_id ILIKE $%d OR detail ILIKE $%[1]d)", "%"+escapeLike(q.Keyword)+"%")
+	}
+	where := strings.Join(conds, " AND ")
+	page := security.AuditPage{Offset: q.Offset, Limit: q.Limit, Items: []security.AuditLog{}}
+	if err := s.db.Pool().QueryRow(ctx, `SELECT count(*) FROM audit_logs WHERE `+where, args...).Scan(&page.Total); err != nil {
+		return page, err
+	}
+	args = append(args, q.Limit, q.Offset)
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+auditCols+` FROM audit_logs WHERE `+where+
+			fmt.Sprintf(` ORDER BY at DESC, id DESC LIMIT $%d OFFSET $%d`, len(args)-1, len(args)), args...)
+	if err != nil {
+		return page, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var l security.AuditLog
+		if err = scanAudit(rows, &l); err != nil {
+			return page, err
+		}
+		page.Items = append(page.Items, l)
+	}
+	return page, rows.Err()
+}
+
+// escapeLike 转义 LIKE 通配符，关键字按字面子串匹配。
+func escapeLike(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }
 
 // RecordAudit INSERT 一条审计；actor 由调用方注入（handler 从身份 ctx 取 UserID）。

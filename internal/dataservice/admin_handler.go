@@ -155,7 +155,7 @@ func (h *AdminHandler) serveList(w http.ResponseWriter, r *http.Request) {
 	for i := range list {
 		list[i].Connection = MaskConnection(list[i].Connection)
 	}
-	httputil.WriteData(w, list)
+	httputil.WriteData(w, adminutil.FilterTenant(r, list, func(d DataService) string { return d.TenantID }))
 }
 
 // tenantCtx 派生资源所属租户 ctx（admin 跨租户操作以资源租户身份执行下游）。

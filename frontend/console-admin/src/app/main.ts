@@ -4,21 +4,23 @@ import App from './App.vue'
 import router from '@/router'
 // 图标按需注册（R8-3：全量 * import 把 ~300 个图标全打进主包）。
 // 仅注册实际用到的：模板 <Xxx/> 组件用法 + 菜单/按钮 icon:'Xxx' 字符串用法。
-// 新增图标时在此追加具名导入即可（漏配表现为该图标不渲染，构建不报错——
-// 需要视觉验证）。
+// 新增图标时在此追加具名导入即可；菜单图标由后端 menus.go 下发，漏配表现为
+// 该图标不渲染且构建不报错——菜单侧已由 TestMenuIconsRegisteredInAdmin
+// （internal/core/auth/menus_test.go）锁对账，模板/按钮字符串用法仍需自查。
 import {
   Avatar, Bell, Box, ChatDotRound, Coin, Connection, Cpu, CreditCard, Document, DocumentCopy,
-  Expand, Files, Fold, FolderOpened, Grid, HomeFilled, Key, Loading, Lock, MagicStick, Menu,
-  Monitor, Moon, Odometer, OfficeBuilding, Promotion, Setting, SetUp, Share, Stamp, Stopwatch,
-  Sunny, Ticket, Tools, User, UserFilled, VideoPlay, Wallet,
+  Expand, Files, FirstAidKit, Fold, FolderChecked, FolderOpened, Goods, Grid, HomeFilled, Key,
+  Loading, Location, Lock, MagicStick, Menu, Money, Monitor, Moon, Odometer, OfficeBuilding,
+  Promotion, Setting, SetUp, Share, Stamp, Stopwatch, Sunny, Ticket, Tickets, Tools, User,
+  UserFilled, VideoCamera, VideoPlay, Wallet, Warning,
 } from '@element-plus/icons-vue'
 const ElementPlusIconsUsed = {
   Avatar, Bell, Box, ChatDotRound, Coin, Connection, Cpu, CreditCard, Document, DocumentCopy,
-  Expand, Files, Fold, FolderOpened, Grid, HomeFilled, Key, Loading, Lock, MagicStick, Menu,
-  Monitor, Moon, Odometer, OfficeBuilding, Promotion, Setting, SetUp, Share, Stamp, Stopwatch,
-  Sunny, Ticket, Tools, User, UserFilled, VideoPlay, Wallet,
+  Expand, Files, FirstAidKit, Fold, FolderChecked, FolderOpened, Goods, Grid, HomeFilled, Key,
+  Loading, Location, Lock, MagicStick, Menu, Money, Monitor, Moon, Odometer, OfficeBuilding,
+  Promotion, Setting, SetUp, Share, Stamp, Stopwatch, Sunny, Ticket, Tickets, Tools, User,
+  UserFilled, VideoCamera, VideoPlay, Wallet, Warning,
 }
-import locale from 'element-plus/es/locale/lang/zh-cn'
 import { defaultMonitor } from '@/lib/error/monitor'
 import { installGlobalErrorHandlers } from '@/lib/error/installGlobalErrorHandlers'
 import { vPermission } from '@/app/directives/permission'

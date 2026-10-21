@@ -23,6 +23,10 @@ func newAuthHandler(t *testing.T) *Handler {
 	idb := idmemory.NewStore()
 	hash, err := HashPassword("123456")
 	require.NoError(t, err)
+	// 登录闸门会读租户状态（冻结即拒），租户行必须存在。
+	require.NoError(t, idb.CreateTenant(context.Background(), identity.Tenant{
+		ID: "t-acme", Name: "Acme", Status: identity.TenantStatusActive,
+	}))
 	require.NoError(t, idb.CreateUser(context.Background(), identity.User{
 		ID: "u-admin", TenantID: "t-acme", Name: "admin",
 		PasswordHash: hash, IsAdmin: true, Roles: []string{"tenant-admin"}, Status: identity.StatusActive,
@@ -167,6 +171,31 @@ func TestRefresh(t *testing.T) {
 
 // TestRefreshDisabledUserRejected 验证安全修复：被禁用用户持未过期 refresh token
 // 不能续期（旧实现因 GetUserByName(userID) 误查失败、fallback 跳过 Status 校验而放行）。
+// TestRefreshRejectsStaleSessionVersion 验证会话代次（D5-3）：撤销会话后旧 refresh token 不得续期。
+// 携带当前代次的 token 正常续期；不带代次（0）的存量 token 按约定不比对。
+func TestRefreshRejectsStaleSessionVersion(t *testing.T) {
+	h := newAuthHandler(t)
+	ver, err := h.idb.RevokeUserSessions(context.Background(), "t-acme", "u-admin")
+	require.NoError(t, err)
+	require.Equal(t, 1, ver)
+
+	// 显式旧代次（非 0）：0 会走「存量 token 不比对」，构造不出失配。
+	stale, _ := Sign(Claims{Sub: "u-admin", Tenant: "t-acme", Roles: []string{"tenant-admin"},
+		Typ: TokenRefresh, Exp: 9999999999, Ver: 5}, hSecret)
+	rec := doJSON(t, h.Refresh, http.MethodPost, "/api/auth/tokens/refresh", `{"refreshToken":"`+stale+`"}`)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	current, _ := Sign(Claims{Sub: "u-admin", Tenant: "t-acme", Roles: []string{"tenant-admin"},
+		Typ: TokenRefresh, Exp: 9999999999, Ver: ver}, hSecret)
+	rec = doJSON(t, h.Refresh, http.MethodPost, "/api/auth/tokens/refresh", `{"refreshToken":"`+current+`"}`)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	legacy, _ := Sign(Claims{Sub: "u-admin", Tenant: "t-acme", Roles: []string{"tenant-admin"},
+		Typ: TokenRefresh, Exp: 9999999999}, hSecret)
+	rec = doJSON(t, h.Refresh, http.MethodPost, "/api/auth/tokens/refresh", `{"refreshToken":"`+legacy+`"}`)
+	assert.Equal(t, http.StatusOK, rec.Code, "存量无代次 token 按约定不比对")
+}
+
 func TestRefreshDisabledUserRejected(t *testing.T) {
 	h := newAuthHandler(t)
 	rt, _ := Sign(Claims{Sub: "u-admin", Tenant: "t-acme", Roles: []string{"tenant-admin"},
@@ -188,23 +217,47 @@ func TestMenusNonEmpty(t *testing.T) {
 	decodeData(t, rec.Body.Bytes(), &menus)
 	assert.NotEmpty(t, menus)
 	assert.Equal(t, "home", menus[0].Name)
-	// system 子菜单含租户管理（P1.1）
-	var sysMenu *Menu
-	for i := range menus {
-		if menus[i].Name == "system" {
-			sysMenu = &menus[i]
-			break
+
+	// 2026-10-19 IA 重构（spec §5）：平台总览 + 六职责域两层菜单。
+	groups := map[string][]string{} // 分组名 -> 子入口名
+	paths := map[string]Menu{}      // 全量叶子（含隐藏/兼容 redirect）
+	var walk func(list []Menu)
+	walk = func(list []Menu) {
+		for i := range list {
+			m := &list[i]
+			if len(m.Children) > 0 {
+				groups[m.Name] = nil
+				for _, c := range m.Children {
+					groups[m.Name] = append(groups[m.Name], c.Name)
+				}
+				walk(m.Children)
+				continue
+			}
+			paths[m.Path] = *m
 		}
 	}
-	require.NotNil(t, sysMenu, "应含 system 菜单")
-	var hasTenant bool
-	for _, c := range sysMenu.Children {
-		if c.Name == "systemTenant" {
-			hasTenant = true
-			break
-		}
+	walk(menus)
+
+	for _, g := range []string{"access", "aiops", "delivery", "infra", "usage", "secops"} {
+		require.Contains(t, groups, g, "应含职责域分组 %s", g)
+		assert.NotEmpty(t, groups[g], "分组 %s 不应为空", g)
 	}
-	assert.True(t, hasTenant, "system 下应含租户管理")
+	// 租户管理归入「租户与访问」域。
+	require.Contains(t, groups["access"], "systemTenant", "access 下应含租户管理")
+
+	// 兼容跳转（spec §5.1）：旧路径必须带 redirect 目标，防死链回归。
+	for path, target := range map[string]string{
+		"/system/role":           "/system/user?tab=roles",
+		"/resources/buildruns":   "/resources/pipelineruns?tab=builds",
+		"/resources/images":      "/resources/pipelineruns?tab=images",
+		"/resources/releases":    "/resources/pipelineruns?tab=releases",
+		"/resources/engines":     "/resources/dataservices?tab=engines",
+		"/resources/alert-rules": "/operations/observability?tab=rules",
+	} {
+		m, ok := paths[path]
+		require.True(t, ok, "应保留兼容入口 %s", path)
+		assert.Equal(t, target, m.Redirect, "兼容入口 %s 应重定向到 %s", path, target)
+	}
 }
 
 func TestLoginSetsCookies(t *testing.T) {
@@ -328,4 +381,33 @@ func TestLogoutRecordsAudit(t *testing.T) {
 	}
 	h.Logout(httptest.NewRecorder(), req)
 	assert.True(t, auditor.hasAction("logout"), "登出应记 logout 审计")
+}
+
+// 冻结租户不能登录、也不能续期：控制面准入关闭，存量 access token 到期后自然失效。
+func TestLoginAndRefreshRejectedForFrozenTenant(t *testing.T) {
+	idb := idmemory.NewStore()
+	hash, err := HashPassword("123456")
+	require.NoError(t, err)
+	require.NoError(t, idb.CreateTenant(context.Background(), identity.Tenant{
+		ID: "t-frozen", Name: "Frozen", Status: identity.TenantStatusFrozen,
+	}))
+	require.NoError(t, idb.CreateUser(context.Background(), identity.User{
+		ID: "u-frozen", TenantID: "t-frozen", Name: "frozen",
+		PasswordHash: hash, Roles: []string{"developer"}, Status: identity.StatusActive,
+	}))
+	h := NewHandler(idb, hSecret, false)
+
+	rec := doJSON(t, h.Login, http.MethodPost, "/api/auth/sessions",
+		`{"username":"frozen","password":"123456"}`)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "冻结")
+
+	refresh, err := Sign(Claims{
+		Sub: "u-frozen", Tenant: "t-frozen", Roles: []string{"developer"},
+		Typ: TokenRefresh, Exp: 9999999999,
+	}, hSecret)
+	require.NoError(t, err)
+	rec = doJSON(t, h.Refresh, http.MethodPost, "/api/auth/tokens/refresh",
+		`{"refreshToken":"`+refresh+`"}`)
+	require.Equal(t, http.StatusForbidden, rec.Code)
 }

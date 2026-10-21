@@ -9,6 +9,44 @@ type Repository interface {
 	QuotaStore
 	UsageStore
 	BillStore
+	BudgetStore
+	TokenUsageStore
+	SettlementStore
+}
+
+// BudgetStore 预算仓储（D5-4）。租户路径从 ctx 取租户强制过滤；admin 路径显式跨租户。
+type BudgetStore interface {
+	// ListBudgets 本租户预算（ctx 租户）。
+	ListBudgets(ctx context.Context) ([]Budget, error)
+	// ListAllBudgets 跨租户预算（admin 总览，返回对象带 TenantID）。
+	ListAllBudgets(ctx context.Context) ([]Budget, error)
+	// GetBudget 按 id 读取（跨租户定位由调用方鉴权；不存在返 ErrBudgetNotFound）。
+	GetBudget(ctx context.Context, id string) (Budget, error)
+	// CreateBudget 新建（b.TenantID 空则取 ctx 租户；Validate 由调用方先行）。
+	CreateBudget(ctx context.Context, b Budget) (Budget, error)
+	// UpdateBudget 覆盖可变字段（租户不可改）；不存在返 ErrBudgetNotFound。
+	UpdateBudget(ctx context.Context, b Budget) (Budget, error)
+	// DeleteBudget 删除；不存在返 ErrBudgetNotFound。
+	DeleteBudget(ctx context.Context, id string) error
+}
+
+// TokenUsageStore 周期 token 用量仓储（meter 回写；预算与结算对账的数据源）。
+type TokenUsageStore interface {
+	// AddTokenUsageForTenant 原子累加 (周期, 应用, 模型) 维度的 token。
+	// 显式传租户而非取 ctx：meter 回调在推理热路径上，不持有请求 ctx；
+	// tenantID 为空视为编程错误（返回 error，不静默丢弃用量）。
+	AddTokenUsageForTenant(tenantID, period, appID, model string, tokens int64) error
+	// ListTokenUsage 本租户用量行；period 空=全部周期。
+	ListTokenUsage(ctx context.Context, period string) ([]TokenUsageRow, error)
+	// ListAllTokenUsage 跨租户用量行（admin）；period 空=全部周期。
+	ListAllTokenUsage(ctx context.Context, period string) ([]TokenUsageRow, error)
+}
+
+// SettlementStore 供应商结算对账记录（平台级，人工登记）。
+type SettlementStore interface {
+	ListSettlements(ctx context.Context, period string) ([]SettlementRecord, error)
+	CreateSettlement(ctx context.Context, s SettlementRecord) (SettlementRecord, error)
+	DeleteSettlement(ctx context.Context, id string) error
 }
 
 // QuotaStore 配额仓储（每租户一份）。
@@ -31,6 +69,8 @@ type UsageStore interface {
 	// 返 ErrQuotaExceeded（不递增）；limit=-1（无限）或未设配额时不拦截。
 	// 横切：各资源 Create 前调用，超限阻断创建。
 	CheckAndInc(ctx context.Context, resource string, delta int) (ResourceUsage, error)
+	// ListAllUsages 跨租户列出全部用量快照（admin 平台总览，不过滤 tenant，返回对象带 TenantID）。
+	ListAllUsages(ctx context.Context) ([]ResourceUsage, error)
 }
 
 // BillStore 账单仓储。

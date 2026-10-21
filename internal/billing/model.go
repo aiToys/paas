@@ -106,6 +106,81 @@ type UsageView struct {
 	Items []UsageLine   `json:"items"`
 }
 
+// AdminUsageRow 是跨租户用量聚合行（admin 平台总览，super_admin 只读）。
+//
+// 语义边界（诚实标注，页面同款）：
+//   - Counts 是「当前快照」而非周期增量：只有账单按 period 固化，用量本身无周期维度；
+//   - ByApp 是应用（产品）维度归因，仅应用级 API Key 调用 token 会归位；
+//   - 模型 / API Key 维度平台未采集（gateway 计量只回写租户 + 应用两级），
+//     故本行不含这两维数据，页面必须显示「未采集」而不是 0。
+type AdminUsageRow struct {
+	TenantID        string                    `json:"tenantId"`
+	Counts          map[string]int            `json:"counts"`
+	Limits          map[string]int            `json:"limits"`
+	ByApp           map[string]map[string]int `json:"byApp,omitempty"`
+	EstimatedAmount float64                   `json:"estimatedAmount"` // 估算金额（mock 单价，与 GenerateBill 同一公式）
+	Over            []string                  `json:"over"`            // 超限资源 key 列表
+	UpdatedAt       time.Time                 `json:"updatedAt"`
+}
+
+// AdminUsageDimension 描述某一查询维度是否可用（前端据此显示「可用/未采集」）。
+type AdminUsageDimension struct {
+	Key       string `json:"key"`
+	Label     string `json:"label"`
+	Available bool   `json:"available"`
+	Note      string `json:"note"`
+}
+
+// AdminUsageDimensions 是维度可用性的单一真源（与计量采集现状一致）。
+func AdminUsageDimensions() []AdminUsageDimension {
+	return []AdminUsageDimension{
+		{Key: "tenant", Label: "租户", Available: true, Note: "平台用量按租户隔离存储"},
+		{Key: "app", Label: "产品（应用）", Available: true, Note: "仅应用级 API Key 的 token 调用携带 appId 归因"},
+		{Key: "resource", Label: "资源类型", Available: true, Note: "应用/负载/数据服务等计数为实时快照"},
+		{Key: "model", Label: "模型", Available: false, Note: "网关计量只回写租户与应用两级，未按模型归因"},
+		{Key: "apikey", Label: "API 密钥", Available: false, Note: "计量按租户与应用聚合，未按密钥归因"},
+		{Key: "period", Label: "周期", Available: false, Note: "用量是当前快照、无周期增量；周期口径只在账单上存在"},
+	}
+}
+
+// EstimateAmount 按 PriceTable 估算金额（与 GenerateBill 完全同一公式，避免两套口径漂移）。
+func EstimateAmount(counts map[string]int) float64 {
+	total := 0.0
+	for _, res := range ResourceOrder {
+		if qty := counts[res]; qty > 0 {
+			total += float64(qty) * PriceTable[res]
+		}
+	}
+	return total
+}
+
+// BuildAdminUsageRow 组装单租户聚合行（配额缺省用默认配额，超限资源逐项列出）。
+func BuildAdminUsageRow(u ResourceUsage, q ResourceQuota) AdminUsageRow {
+	limits := make(map[string]int, len(q.Limits))
+	for k, v := range q.Limits {
+		limits[k] = v
+	}
+	over := make([]string, 0, 2)
+	for _, res := range ResourceOrder {
+		limit := limits[res]
+		if limit == Unlimited {
+			continue
+		}
+		if limit > 0 && u.Counts[res] > limit {
+			over = append(over, res)
+		}
+	}
+	return AdminUsageRow{
+		TenantID:        u.TenantID,
+		Counts:          u.Counts,
+		Limits:          limits,
+		ByApp:           u.ByApp,
+		EstimatedAmount: EstimateAmount(u.Counts),
+		Over:            over,
+		UpdatedAt:       u.UpdatedAt,
+	}
+}
+
 // BuildUsageView 按 ResourceOrder 组装用量视图，标注超限。
 func BuildUsageView(q ResourceQuota, u ResourceUsage) UsageView {
 	lines := make([]UsageLine, 0, len(ResourceOrder))

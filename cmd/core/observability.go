@@ -70,7 +70,10 @@ func buildObservabilityStore(lister observability.AppWorkloadLister, entities ob
 		alertStateStore = pgStore
 		alertEventStore = pgStore
 	}
-	engine := alertengine.NewEngine(rules.(alertengine.RuleSource), metrics, 0, alertStateStore, alertEventStore)
+	// 通知渠道同源注入：规则引用渠道时按渠道配置投递（启用/静默/重复提醒抑制）；
+	// 未注入则保持「只投递规则直连 WebhookURL」的存量行为。
+	engine := alertengine.NewEngine(rules.(alertengine.RuleSource), metrics, 0, alertStateStore, alertEventStore).
+		WithChannels(rules.(alertengine.ChannelSource))
 	repo.WithEngine(engine)
 	return repo, engine
 }
@@ -218,4 +221,35 @@ func seedDefaultAlertRules(ctx context.Context, idRepo identity.Repository, rule
 		}
 		log.Printf("[seed] 租户 %s 灌入 %d 条默认告警规则", t.ID, len(observability.DefaultAlertRules()))
 	}
+}
+
+// collectAdminAlerts 只评估请求范围；任一租户失败返回源错误，不能冒充“无告警”。
+type adminAlertReader interface {
+	ListAllAlertRules(context.Context) ([]observability.AlertRule, error)
+	ListAlerts(context.Context, string, string) ([]observability.Alert, error)
+}
+
+func collectAdminAlerts(ctx context.Context, repo adminAlertReader, tenantID string) ([]observability.Alert, error) {
+	rules, err := repo.ListAllAlertRules(ctx)
+	if err != nil {
+		return nil, err
+	}
+	byTenant := map[string]bool{}
+	for _, rule := range rules {
+		if rule.Enabled && (tenantID == "" || rule.TenantID == tenantID) {
+			byTenant[rule.TenantID] = true
+		}
+	}
+	all := make([]observability.Alert, 0)
+	for tid := range byTenant {
+		alerts, err := repo.ListAlerts(tenant.WithTenant(ctx, tid), "", "")
+		if err != nil {
+			return nil, err
+		}
+		for i := range alerts {
+			alerts[i].TenantID = tid
+		}
+		all = append(all, alerts...)
+	}
+	return all, nil
 }

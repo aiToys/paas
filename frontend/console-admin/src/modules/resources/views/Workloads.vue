@@ -18,18 +18,11 @@
         style="width: 240px"
         @keyup.enter="handleSearch"
       />
-      <el-input
-        v-model="searchForm.tenantId"
-        placeholder="租户 ID 过滤"
-        clearable
-        style="width: 160px; margin-left: 8px"
-        @keyup.enter="handleSearch"
-      />
     </template>
 
     <template #actions>
       <el-button :icon="Refresh" @click="fetchList">刷新</el-button>
-      <el-button :loading="reconciling" @click="doReconcile">Drift 修复</el-button>
+      <el-button :loading="previewing" @click="openReconcilePreview">Drift 对账</el-button>
     </template>
 
     <template #col-tenant="{ row }">
@@ -50,42 +43,111 @@
     </template>
   </SearchTable>
 
-  <WorkloadDrawer v-model="detailVisible" :id="detailId" @refresh="fetchList" />
+  <WorkloadDrawer
+    :key="detailId"
+    v-model="detailVisible"
+    :id="detailId"
+    @refresh="fetchList"
+  />
+
+  <!-- Drift 两段式：先只读预览「将补建哪些」，确认后才执行 -->
+  <el-dialog v-model="previewVisible" title="Drift 对账预览（只读）" width="760px">
+    <template v-if="preview">
+      <el-alert
+        type="info"
+        :closable="false"
+        show-icon
+        title="本次为只读预览：未修改任何 K8s 资源，确认后才执行补建。"
+        description="只处理「平台有记录、K8s 缺 CRD」的条目；补建为仅创建不覆盖，不会改动既有运行态。"
+      />
+      <div class="reconcile-stats">
+        <span>扫描 <b>{{ preview.scanned }}</b></span>
+        <span>已存在 <b>{{ preview.existing ?? 0 }}</b></span>
+        <span :class="{ warn: (preview.missingCount ?? 0) > 0 }">将补建 <b>{{ preview.missingCount ?? 0 }}</b></span>
+        <span v-if="preview.failed" class="warn">探测失败 <b>{{ preview.failed }}</b></span>
+      </div>
+      <el-alert
+        v-if="preview.failed"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="reconcile-alert"
+        :title="`${preview.failed} 条探测失败（权限/连接）——已排除在补建清单外`"
+        :description="`失败 ID：${(preview.failedIds ?? []).join('、') || '（未列出）'}`"
+      />
+      <el-table
+        v-if="(preview.missingCount ?? 0) > 0"
+        :data="preview.missing ?? []"
+        size="small"
+        max-height="300"
+        border
+      >
+        <el-table-column prop="tenantId" label="租户" width="140" />
+        <el-table-column prop="id" label="工作负载 ID" min-width="170" />
+        <el-table-column prop="name" label="名称" min-width="150" />
+      </el-table>
+      <el-empty v-else description="没有缺失的 CRD，无需补建" :image-size="72" />
+      <p v-if="preview.truncated" class="reconcile-note">
+        清单仅显示前 {{ preview.missing?.length ?? 0 }} 条（共 {{ preview.missingCount }} 条），执行时会处理全部。
+      </p>
+    </template>
+    <template #footer>
+      <el-button @click="previewVisible = false">取消</el-button>
+      <el-button
+        type="primary"
+        :loading="reconciling"
+        :disabled="!preview || (preview.missingCount ?? 0) === 0"
+        @click="doReconcile"
+      >
+        执行补建{{ preview?.missingCount ? `（${preview.missingCount}）` : '' }}
+      </el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <script lang="ts" setup>
 import { computed, ref, onMounted } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import { SearchTable } from '@/app/components'
 import { useCrud } from '@/app/composables/useCrud'
+import { useScopeStore } from '@/app/stores/scope'
+import { useScopeChange, useResourceFocus } from '@/app/composables'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
-import { fetchWorkloadList, reconcileWorkloads, type AdminWorkload, type ResSearchRequest } from '../api'
+import { fetchWorkloadList, reconcileWorkloads, type AdminWorkload, type ReconcileResult, type ResSearchRequest } from '../api'
 import WorkloadDrawer from './WorkloadDrawer.vue'
 
 const { listData, loading, pagination, searchForm, fetchList, handleSearch, handleReset, handlePageChange } =
   useCrud<AdminWorkload>({
-    fetch: (params) => fetchWorkloadList(params as unknown as ResSearchRequest),
+    fetch: (params) => fetchWorkloadList({ ...params, tenantId: scopeStore.tenantId } as unknown as ResSearchRequest),
     defaultSearchForm: { keyword: '', tenantId: '' },
     pageSize: 10
   })
 
+const previewVisible = ref(false)
+const previewing = ref(false)
 const reconciling = ref(false)
-// drift 修复：PG 有行无 CRD 的 Workload 补投影（后端返回各分类计数）。
-const doReconcile = async () => {
+const preview = ref<ReconcileResult | null>(null)
+
+// 第一步：只读预览（后端 dryRun=true 不写数据面、不记执行审计）。
+const openReconcilePreview = async () => {
+  previewing.value = true
   try {
-    await ElMessageBox.confirm(
-      '将扫描全部租户工作负载，对「数据库有记录但 K8s 缺 CRD」的补投影（drift 修复）。继续？',
-      'Drift 修复',
-      { type: 'warning', confirmButtonText: '执行' }
-    )
-  } catch {
-    return
+    preview.value = await reconcileWorkloads(true)
+    previewVisible.value = true
+  } finally {
+    previewing.value = false
   }
+}
+
+// 第二步：确认后执行补建（独立动作，不在预览里顺手写）。
+const doReconcile = async () => {
   reconciling.value = true
   try {
-    const res = await reconcileWorkloads()
-    ElMessage.success(`Drift 修复完成：${JSON.stringify(res)}`)
+    const res = await reconcileWorkloads(false)
+    const extra = res.failed ? `，失败 ${res.failed} 条` : ''
+    ElMessage.success(`补建 ${res.created} 条，跳过 ${res.skipped} 条${extra}`)
+    previewVisible.value = false
     fetchList()
   } finally {
     reconciling.value = false
@@ -107,15 +169,20 @@ const columns = computed<ColumnDef[]>(() => [
 
 const detailVisible = ref(false)
 const detailId = ref('')
-const openDetail = (row: AdminWorkload) => {
-  detailId.value = row.id
-  detailVisible.value = true
-}
+const focusDetail = useResourceFocus({ path: '/resources/workloads', visible: detailVisible, id: detailId })
+const openDetail = (row: AdminWorkload) => focusDetail(row.id, { envId: row.envId, appId: row.appId })
 
 const typeLabel = (t: string) => (({ service: '服务', job: '任务', cronjob: '定时' }) as Record<string, string>)[t] ?? t
 const statusType = (s: string) =>
   (({ running: 'success', deploying: 'warning', stopped: 'info', failed: 'danger' }) as Record<string, string>)[s] ??
   'info'
+
+// 浏览范围（顶栏）联动：切租户重拉列表；范围是纯过滤器不改写目标
+const scopeStore = useScopeStore()
+useScopeChange(() => fetchList(), () => {
+  detailVisible.value = false
+  detailId.value = ''
+})
 
 onMounted(() => fetchList())
 </script>
@@ -124,5 +191,33 @@ onMounted(() => fetchList())
 .mono {
   font-family: var(--font-mono, monospace);
   font-size: 13px;
+}
+
+.reconcile-stats {
+  display: flex;
+  gap: 24px;
+  margin: 16px 0;
+  color: var(--el-text-color-regular);
+  font-size: 14px;
+}
+
+.reconcile-stats b {
+  font-family: var(--font-mono, monospace);
+  font-size: 16px;
+  color: var(--el-text-color-primary);
+}
+
+.reconcile-stats .warn b {
+  color: var(--el-color-warning);
+}
+
+.reconcile-alert {
+  margin-bottom: 12px;
+}
+
+.reconcile-note {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
 }
 </style>

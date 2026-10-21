@@ -14,7 +14,8 @@ import { fetchAuth, apiError } from '@/api'
 import {
   listMetrics, listAlertRules, createAlertRule, updateAlertRule, deleteAlertRule, listAlerts, listAlertEvents, listLogs,
   listTraces, getTrace,
-  type MetricPoint, type MetricSeries, type AlertRule, type Alert, type AlertEvent, type LogEntry,
+  listChannels, createChannel, updateChannel, deleteChannel,
+  type MetricPoint, type MetricSeries, type AlertRule, type Alert, type AlertEvent, type LogEntry, type NotificationChannel,
 } from '@/api/observability'
 import { listLanes } from '@/api/workload'
 import {
@@ -218,6 +219,128 @@ async function loadRules() {
   rules.value = await listAlertRules()
 }
 
+// 通知渠道：低频配置，不进 10s 轮询（只在首屏与渠道增删改后刷新）。
+// 加载失败与「没有渠道」必须可区分——失败时规则表单渠道多选显示错误提示，不假装空列表。
+const channels = ref<NotificationChannel[]>([])
+const channelsError = ref('')
+async function loadChannels() {
+  try {
+    channels.value = await listChannels()
+    channelsError.value = ''
+  } catch (e) {
+    channelsError.value = apiError(e, '通知渠道加载失败')
+  }
+}
+
+// ---- 通知渠道管理（增删改） ----
+const showChannel = ref(false)
+const editingChannelId = ref('')
+const channelSubmitting = ref(false)
+// headersText：每行「Key: Value」。编辑回填时值为 ***（服务端原值保留，不回填明文）。
+const channelForm = ref({
+  name: '', url: '', headersText: '', enabled: true, cooldownMinutes: 0, muteUntil: '',
+})
+
+function parseHeaders(text: string): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const line of text.split('\n')) {
+    const t = line.trim()
+    if (!t) continue
+    const i = t.indexOf(':')
+    if (i <= 0) continue
+    out[t.slice(0, i).trim()] = t.slice(i + 1).trim()
+  }
+  return out
+}
+const headersToText = (h?: Record<string, string>) =>
+  h ? Object.entries(h).map(([k, v]) => `${k}: ${v}`).join('\n') : ''
+
+function openChannel() {
+  editingChannelId.value = ''
+  channelForm.value = { name: '', url: '', headersText: '', enabled: true, cooldownMinutes: 0, muteUntil: '' }
+  showChannel.value = true
+}
+
+function openEditChannel(ch: NotificationChannel) {
+  editingChannelId.value = ch.id
+  channelForm.value = {
+    name: ch.name,
+    // 回填掩码地址：服务端认「同 host 掩码 / ***」为保留原值；用户改 host 会提示重新填完整地址。
+    url: ch.url,
+    headersText: headersToText(ch.headers),
+    enabled: ch.enabled,
+    cooldownMinutes: ch.cooldownMinutes,
+    muteUntil: ch.muteUntil && ch.muteUntil.startsWith('0001-') ? '' : (ch.muteUntil ?? ''),
+  }
+  showChannel.value = true
+}
+
+async function saveChannel() {
+  if (!channelForm.value.name.trim()) {
+    ElMessage.warning('请填写渠道名称')
+    return
+  }
+  if (!channelForm.value.url.trim()) {
+    ElMessage.warning('请填写通知地址')
+    return
+  }
+  channelSubmitting.value = true
+  try {
+    const body: Record<string, unknown> = {
+      name: channelForm.value.name.trim(),
+      kind: 'webhook',
+      url: channelForm.value.url.trim(),
+      enabled: channelForm.value.enabled,
+      cooldownMinutes: channelForm.value.cooldownMinutes,
+    }
+    const hdrs = parseHeaders(channelForm.value.headersText)
+    // 全部留空 = 无自定义头（整体替换语义：未出现的键删除）。
+    if (Object.keys(hdrs).length) body.headers = hdrs
+    // 空值不发送：服务端零值即「无静默」（发送空串会 JSON 时间解析失败）。
+    if (channelForm.value.muteUntil) body.muteUntil = channelForm.value.muteUntil
+    if (editingChannelId.value) {
+      await updateChannel(editingChannelId.value, body)
+      ElMessage.success('渠道已更新')
+    } else {
+      await createChannel(body)
+      ElMessage.success('渠道已创建')
+    }
+    showChannel.value = false
+    await loadChannels()
+  } catch (e) {
+    ElMessage.error(apiError(e, '保存失败'))
+  } finally {
+    channelSubmitting.value = false
+  }
+}
+
+async function removeChannel(ch: NotificationChannel) {
+  // 删除会立即影响派发（引用该渠道的规则将跳过它），必须显式确认。
+  try {
+    await ElMessageBox.confirm(
+      `删除通知渠道「${ch.name}」？引用该渠道的告警规则将不再向它投递（其余渠道不受影响）。`,
+      '删除通知渠道',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch { return }
+  try {
+    await deleteChannel(ch.id)
+    ElMessage.success('已删除')
+    await loadChannels()
+  } catch (e) {
+    ElMessage.error(apiError(e, '删除失败'))
+  }
+}
+
+// 渠道状态摘要（列表徽标）：停用 / 静默中 / 正常。
+function channelState(ch: NotificationChannel): { label: string; type: TagType } {
+  if (!ch.enabled) return { label: '停用', type: 'info' }
+  if (ch.muteUntil && !ch.muteUntil.startsWith('0001-') && new Date(ch.muteUntil) > new Date()) {
+    return { label: '静默中', type: 'warning' }
+  }
+  return { label: '正常', type: 'success' }
+}
+
 async function loadAlerts() {
   alerts.value = await listAlerts()
 }
@@ -375,6 +498,7 @@ const editingRuleId = ref('')
 const ruleForm = ref({
   name: '', metricName: 'cpu', targetType: 'app' as 'app' | 'dataservice' | 'workload', targetId: '',
   operator: '>', threshold: 80, severity: 'warning', enabled: true, webhookUrl: '',
+  channelIds: [] as string[],
 })
 const ruleSubmitting = ref(false)
 
@@ -443,13 +567,14 @@ function openRule() {
   ruleForm.value = {
     name: '', metricName: 'cpu', targetType: tt as typeof ruleForm.value.targetType, targetId: tid,
     operator: '>', threshold: 80, severity: 'warning', enabled: true, webhookUrl: '',
+    channelIds: [],
   }
   showRule.value = true
 }
 
 // 编辑规则：复用创建弹窗回填现值（历史规则 targetType 可能为已下架的 env、metricName 可能为
 // 收口前的任意值——不合法值回落安全默认，保存时按新值提交而非原样 400）。
-function openEditRule(rule: { id: string; name: string; metricName: string; targetType: string; targetId: string; operator: string; threshold: number; severity: string; enabled: boolean; webhookUrl?: string }) {
+function openEditRule(rule: { id: string; name: string; metricName: string; targetType: string; targetId: string; operator: string; threshold: number; severity: string; enabled: boolean; webhookUrl?: string; channelIds?: string[] }) {
   editingRuleId.value = rule.id
   // 合法指标全集（base ∪ ds）：回填值不在集合内回落 cpu。
   const allMetrics = [...baseMetricOpts, ...dsMetricOpts].map((m) => m.value)
@@ -463,6 +588,7 @@ function openEditRule(rule: { id: string; name: string; metricName: string; targ
     severity: rule.severity as typeof ruleForm.value.severity,
     enabled: rule.enabled,
     webhookUrl: rule.webhookUrl ?? '',
+    channelIds: rule.channelIds ?? [],
   }
   showRule.value = true
 }
@@ -484,6 +610,8 @@ async function saveRule() {
       severity: ruleForm.value.severity,
       enabled: ruleForm.value.enabled,
       webhookUrl: ruleForm.value.webhookUrl.trim() || undefined,
+      // 空数组 = 不引用渠道（此时直连 webhookUrl 生效）。
+      channelIds: ruleForm.value.channelIds.length ? ruleForm.value.channelIds : undefined,
     }
     if (editingRuleId.value) {
       await updateAlertRule(editingRuleId.value, body)
@@ -526,7 +654,7 @@ async function deleteRule(r: AlertRule) {
 
 onMounted(async () => {
   // 各加载独立 catch：单项网络失败不拖垮整页（Promise.all 一个 reject 会让其余结果丢失）
-  await Promise.allSettled([loadApps(), envStore.loadEnvs(), loadLanes()])
+  await Promise.allSettled([loadApps(), envStore.loadEnvs(), loadLanes(), loadChannels()])
   // 默认维度跟随顶栏环境（进页即呈现当前 scope 数据，而非全租户混合）
   if (!route.query.dim && envStore.currentEnvId) {
     dim.value = 'env'
@@ -720,6 +848,46 @@ v-model="traceIdQuery" placeholder="🔍 TraceID 直查" style="width: 240px; ma
           <template #default="{ row }">
             <el-button text type="primary" size="small" @click="openEditRule(row)">编辑</el-button>
             <el-button text type="danger" size="small" @click="deleteRule(row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </section>
+
+    <!-- 通知渠道（租户级派发目标 + 抑制策略）：URL/Headers 服务端掩码，编辑不回填明文 -->
+    <section class="block">
+      <div class="block-head">
+        <div class="block-title">通知渠道</div>
+        <el-button size="small" type="primary" @click="openChannel">+ 渠道</el-button>
+      </div>
+      <div class="block-desc">
+        告警规则选中渠道后，firing/resolved 通知投递到该地址。抑制策略：停用（整体不投递）、静默截止（临时不投递）、
+        重复提醒间隔（0 = 只在状态转变时通知）。地址与请求头仅显示掩码，明文仅用于出站投递。
+      </div>
+      <el-alert v-if="channelsError" type="error" :title="channelsError" :closable="false" show-icon style="margin-bottom: 10px" />
+      <el-table v-else :data="channels" size="small" empty-text="暂无渠道">
+        <el-table-column prop="name" label="名称" min-width="130" />
+        <el-table-column label="地址" min-width="220">
+          <template #default="{ row }"><span class="mono faint">{{ row.url }}</span></template>
+        </el-table-column>
+        <el-table-column label="状态" width="90">
+          <template #default="{ row }">
+            <el-tag :type="channelState(row).type" size="small">{{ channelState(row).label }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="重复提醒" width="110">
+          <template #default="{ row }">
+            <span class="faint">{{ row.cooldownMinutes ? `每 ${row.cooldownMinutes} 分钟` : '仅状态转变' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="静默至" width="150">
+          <template #default="{ row }">
+            <span class="faint">{{ row.muteUntil && !row.muteUntil.startsWith('0001-') ? formatDateTime(row.muteUntil) : '—' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="110">
+          <template #default="{ row }">
+            <el-button text type="primary" size="small" @click="openEditChannel(row)">编辑</el-button>
+            <el-button text type="danger" size="small" @click="removeChannel(row)">删除</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -934,8 +1102,26 @@ v-for="node in spanRows(row)" :key="node.span.id"
             <el-radio v-for="s in severities" :key="s.value" :value="s.value">{{ s.label }}</el-radio>
           </el-radio-group>
         </el-form-item>
+        <el-form-item label="通知渠道">
+          <el-select
+            v-model="ruleForm.channelIds"
+            multiple clearable collapse-tags style="width: 100%"
+            :disabled="!!channelsError"
+            :placeholder="channelsError ? '渠道列表加载失败，暂不可选' : '选填：选中的渠道接收本规则通知'"
+          >
+            <el-option v-for="c in channels" :key="c.id" :label="c.name + (c.enabled ? '' : '（停用）')" :value="c.id" />
+          </el-select>
+          <div v-if="channelsError" class="field-hint warn">{{ channelsError }}</div>
+          <div v-else-if="ruleForm.channelIds.length" class="field-hint">
+            已选渠道时不再使用下方直连 Webhook；渠道的停用/静默/重复提醒间隔在「通知渠道」中配置。
+          </div>
+          <div v-else-if="!channels.length" class="field-hint">暂无渠道，可先在下方「通知渠道」创建。</div>
+        </el-form-item>
         <el-form-item label="Webhook">
-          <el-input v-model="ruleForm.webhookUrl" placeholder="选填：触发时 POST 通知该 URL" clearable />
+          <el-input
+            v-model="ruleForm.webhookUrl" clearable
+            :placeholder="ruleForm.channelIds.length ? '已选渠道，此地址不再使用' : '选填：触发时 POST 通知该 URL'"
+          />
         </el-form-item>
         <el-form-item label="启用">
           <el-switch v-model="ruleForm.enabled" />
@@ -945,6 +1131,48 @@ v-for="node in spanRows(row)" :key="node.span.id"
         <el-button @click="showRule = false">取消</el-button>
         <el-button type="primary" :disabled="ruleSubmitting" @click="saveRule">
           {{ ruleSubmitting ? '创建中…' : '创建' }}
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 渠道创建/编辑弹窗 -->
+    <el-dialog v-model="showChannel" :title="editingChannelId ? '编辑通知渠道' : '创建通知渠道'" width="520px">
+      <el-form label-width="96px">
+        <el-form-item label="名称">
+          <el-input v-model="channelForm.name" placeholder="如 值班群机器人" />
+        </el-form-item>
+        <el-form-item label="通知地址">
+          <el-input v-model="channelForm.url" :placeholder="editingChannelId ? '保持 *** 不变则沿用原地址' : 'https://hooks.example.com/...'" />
+          <div v-if="editingChannelId" class="field-hint">
+            带 *** 的地址表示保留原值（不回填明文）。改投递目标请填写完整新地址。
+          </div>
+        </el-form-item>
+        <el-form-item label="自定义请求头">
+          <el-input
+            v-model="channelForm.headersText" type="textarea" :rows="3"
+            placeholder="每行一个：Authorization: Bearer xxx（可留空）"
+          />
+          <div class="field-hint">值为 *** 的行保留原值；未出现的行会被删除（整体替换）。</div>
+        </el-form-item>
+        <el-form-item label="重复提醒">
+          <el-input-number v-model="channelForm.cooldownMinutes" :min="0" :max="10080" />
+          <span class="field-hint inline">分钟（0 = 只在 firing/resolved 状态转变时通知一次）</span>
+        </el-form-item>
+        <el-form-item label="静默至">
+          <el-date-picker
+            v-model="channelForm.muteUntil" type="datetime" value-format="YYYY-MM-DDTHH:mm:ssZ"
+            placeholder="留空 = 不静默" clearable style="width: 100%"
+          />
+          <div class="field-hint">静默期内不投递（运维窗口）；到期后不补发积压通知。</div>
+        </el-form-item>
+        <el-form-item label="启用">
+          <el-switch v-model="channelForm.enabled" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showChannel = false">取消</el-button>
+        <el-button type="primary" :disabled="channelSubmitting" @click="saveChannel">
+          {{ channelSubmitting ? '保存中…' : '保存' }}
         </el-button>
       </template>
     </el-dialog>
@@ -961,6 +1189,11 @@ v-for="node in spanRows(row)" :key="node.span.id"
 .block-title { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 600; margin-bottom: 10px; }
 .block-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .block-head .block-title { margin-bottom: 0; }
+.block-desc { font-size: 12px; color: var(--text-dim); margin-bottom: 10px; line-height: 1.6; }
+/* 表单内联提示（渠道/规则弹窗）：失败态 warn 用强调色，不吞掉「加载失败」信号 */
+.field-hint { font-size: 11.5px; color: var(--text-faint); line-height: 1.5; margin-top: 4px; }
+.field-hint.inline { display: inline; margin: 0 0 0 8px; }
+.field-hint.warn { color: var(--danger); }
 .log-filter { display: flex; gap: 8px; align-items: center; }
 .faint { color: var(--text-faint); }
 /* 维度过滤器条 */

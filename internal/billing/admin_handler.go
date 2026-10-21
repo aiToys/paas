@@ -44,6 +44,9 @@ type AdminHandler struct {
 	audit   AdminAuditRecorder
 	tenants AdminTenantChecker
 	actorOf func(*http.Request) string
+	// price/vendor 由装配层桥接 maas 目录；nil = 未定价/未归属（页面如实标注）。
+	price  ModelPrice
+	vendor ModelVendor
 }
 
 // AdminHandlerOpt admin handler 配置。
@@ -88,8 +91,20 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		default:
 			httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		}
+	case path == "/api/admin/usage":
+		if r.Method != http.MethodGet {
+			httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		h.serveUsageOverview(w, r)
 	case strings.HasPrefix(path, "/api/admin/bills"):
 		h.serveBills(w, r, path)
+	case strings.HasPrefix(path, "/api/admin/budgets"):
+		h.serveBudgets(w, r, path)
+	case path == "/api/admin/token-usage":
+		h.serveTokenUsage(w, r)
+	case strings.HasPrefix(path, "/api/admin/settlements"):
+		h.serveSettlements(w, r, path)
 	default:
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
@@ -111,16 +126,55 @@ func (h *AdminHandler) recordAudit(r *http.Request, tenantID, action, resourceTy
 	_ = h.audit.Record(r.Context(), tenantID, h.actor(r), action, resourceType, resourceID, detail)
 }
 
+// ---------- 用量（跨租户聚合） ----------
+
+// AdminUsageOverview 跨租户用量总览响应。
+// 估算与实测分开：Counts 是平台实测计数（资源实时快照 + 网关回写的 token 累计），
+// EstimatedAmount 是按 mock 单价的估算金额——不是结算金额，真实账单以 BillingRecord 为准。
+type AdminUsageOverview struct {
+	Rows       []AdminUsageRow       `json:"rows"`
+	Dimensions []AdminUsageDimension `json:"dimensions"`
+	// EstimatedTotal 是所有租户估算金额之和（口径同上，仅用于横向排序参考）。
+	EstimatedTotal float64 `json:"estimatedTotal"`
+}
+
+// serveUsageOverview 跨租户用量聚合（当前快照，无周期维度；周期口径只在账单上）。
+func (h *AdminHandler) serveUsageOverview(w http.ResponseWriter, r *http.Request) {
+	usages, err := h.repo.ListAllUsages(r.Context())
+	if err != nil {
+		httputil.WriteInternalError(w, err)
+		return
+	}
+	quotas, err := h.repo.ListAllQuotas(r.Context())
+	if err != nil {
+		httputil.WriteInternalError(w, err)
+		return
+	}
+	byTenant := make(map[string]ResourceQuota, len(quotas))
+	for _, q := range quotas {
+		byTenant[q.TenantID] = q
+	}
+	filtered := adminutil.FilterTenant(r, usages, func(u ResourceUsage) string { return u.TenantID })
+	rows := make([]AdminUsageRow, 0, len(filtered))
+	total := 0.0
+	for _, u := range filtered {
+		row := BuildAdminUsageRow(u, byTenant[u.TenantID]) // 无配额记录 → Limits 为空（不臆造默认值）
+		rows = append(rows, row)
+		total += row.EstimatedAmount
+	}
+	httputil.WriteData(w, AdminUsageOverview{Rows: rows, Dimensions: AdminUsageDimensions(), EstimatedTotal: total})
+}
+
 // ---------- 配额 ----------
 
-// serveQuotaList 跨租户配额列表。
+// serveQuotaList 跨租户配额列表（支持 ?tenantId= 浏览范围过滤）。
 func (h *AdminHandler) serveQuotaList(w http.ResponseWriter, r *http.Request) {
 	list, err := h.repo.ListAllQuotas(r.Context())
 	if err != nil {
 		httputil.WriteInternalError(w, err)
 		return
 	}
-	httputil.WriteData(w, list)
+	httputil.WriteData(w, adminutil.FilterTenant(r, list, func(q ResourceQuota) string { return q.TenantID }))
 }
 
 // adminSetQuotaInput 调整配额请求体。tenantId 必填（目标租户）；limits 覆盖。
@@ -195,14 +249,14 @@ func (h *AdminHandler) serveBills(w http.ResponseWriter, r *http.Request, path s
 	}
 }
 
-// serveBillList 跨租户账单列表。
+// serveBillList 跨租户账单列表（支持 ?tenantId= 浏览范围过滤）。
 func (h *AdminHandler) serveBillList(w http.ResponseWriter, r *http.Request) {
 	list, err := h.repo.ListAllBills(r.Context())
 	if err != nil {
 		httputil.WriteInternalError(w, err)
 		return
 	}
-	httputil.WriteData(w, list)
+	httputil.WriteData(w, adminutil.FilterTenant(r, list, func(b BillingRecord) string { return b.TenantID }))
 }
 
 // findBillByID 跨租户取单条账单（ListAllBills filter by id）。
@@ -247,6 +301,9 @@ func (h *AdminHandler) servePay(w http.ResponseWriter, r *http.Request, id strin
 		httputil.WriteServiceError(w, http.StatusBadRequest, err)
 		return
 	}
-	h.recordAudit(rr, b.TenantID, "admin:pay", "bill", id, "标记账单已付")
+	// 人工结算凭据：审计行携带 period/金额/状态迁移，作为「谁在何时结算了哪笔」的独立凭据
+	// （平台无真实支付网关，paid 只是人工标记——detail 如实写明「模拟」）。
+	h.recordAudit(rr, b.TenantID, "admin:pay", "bill", id,
+		fmt.Sprintf("人工标记已结算（模拟）：period=%s total=%.2f 状态=%s→%s", paid.Period, paid.Total, b.Status, paid.Status))
 	httputil.WriteData(w, paid)
 }

@@ -144,6 +144,25 @@ func (s *Store) UpdateProgress(ctx context.Context, tenantID, id string, up back
 	return nil
 }
 
+// ListAll 跨租户列出全部记录（admin 平台总览；不过滤 tenant，与 List 同序）。
+func (s *Store) ListAll(ctx context.Context) ([]backup.Backup, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+bkCols+` FROM backups ORDER BY created_at DESC, id`)
+	if err != nil {
+		return nil, fmt.Errorf("list all backups: %w", err)
+	}
+	defer rows.Close() //nolint:staticcheck // SA3000 defer rows.Close 在 err 判断前已有值
+	var out []backup.Backup
+	for rows.Next() {
+		var b backup.Backup
+		if err := scanBackup(rows, &b); err != nil {
+			return nil, fmt.Errorf("scan backup: %w", err)
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
 // ListActive 跨租户列出全部非终态记录（Pacer 恢复扫描；管理面专用不带租户过滤）。
 func (s *Store) ListActive(ctx context.Context) ([]backup.Backup, error) {
 	rows, err := s.db.Pool().Query(ctx,

@@ -37,6 +37,8 @@
         <div class="block">
           <div class="block-title">运维操作（绕过 prod:write，全记审计）</div>
           <el-button type="danger" size="small" :loading="acting" @click="remove">强制删除（级联清理 + 回收配额）</el-button>
+          <!-- 应用成员入口（P5）：应用级权限观测深链（?appId= 聚焦该应用） -->
+          <el-button size="small" @click="router.push({ path: '/resources/app-members', query: { appId: detail.id } })">应用成员</el-button>
         </div>
 
         <!-- 操作历史（审计） -->
@@ -58,6 +60,8 @@
 </template>
 
 <script lang="ts" setup>
+import { useRouter } from 'vue-router'
+
 import { ref, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { tableTimeFormatter } from '@/lib/format'
@@ -69,6 +73,7 @@ import {
   type AdminAuditLog
 } from '../api'
 
+const router = useRouter()
 const props = defineProps<{ modelValue: boolean; id: string }>()
 const emit = defineEmits<{ (e: 'update:modelValue', v: boolean): void; (e: 'refresh'): void }>()
 

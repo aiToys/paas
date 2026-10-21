@@ -15,7 +15,7 @@ func acmeCtx() context.Context   { return tenant.WithTenant(context.Background()
 func globexCtx() context.Context { return tenant.WithTenant(context.Background(), "t-globex") }
 
 func TestListByType(t *testing.T) {
-	s := NewStore()
+	s := NewStore(WithDemoSeed(true))
 	// acme: cs-api/rec-svc(service) + batch-recall(job) + daily-report(cronjob)；globex: etl-nightly(cronjob)/etl-backfill(job)/agent-gw(service)
 	svcs, err := s.List(acmeCtx(), "", "", "", workload.TypeService, "")
 	require.NoError(t, err)
@@ -27,7 +27,7 @@ func TestListByType(t *testing.T) {
 }
 
 func TestListIsolatedByTenant(t *testing.T) {
-	s := NewStore()
+	s := NewStore(WithDemoSeed(true))
 	acme, _ := s.List(acmeCtx(), "", "", "", "", "")
 	globex, _ := s.List(globexCtx(), "", "", "", "", "")
 	for _, w := range acme {
@@ -43,7 +43,7 @@ func TestListIsolatedByTenant(t *testing.T) {
 }
 
 func TestListByApp(t *testing.T) {
-	s := NewStore()
+	s := NewStore(WithDemoSeed(true))
 	// app-etl 属 globex，挂 cronjob + job
 	got, err := s.List(globexCtx(), "", "app-etl", "", "", "")
 	require.NoError(t, err)
@@ -51,7 +51,7 @@ func TestListByApp(t *testing.T) {
 }
 
 func TestListByEnv(t *testing.T) {
-	s := NewStore()
+	s := NewStore(WithDemoSeed(true))
 	// env-acme-test 下应只有 acme 的 4 条（cs-api/rec-svc/batch-recall/daily-report）
 	got, err := s.List(acmeCtx(), "env-acme-test", "", "", "", "")
 	require.NoError(t, err)
@@ -63,7 +63,7 @@ func TestListByEnv(t *testing.T) {
 }
 
 func TestCreateDefaultsLaneToBaseline(t *testing.T) {
-	s := NewStore()
+	s := NewStore(WithDemoSeed(true))
 	err := s.Create(acmeCtx(), workload.Workload{
 		ID: "wl-x", AppID: "app-cs", EnvID: "env-acme-test", Type: workload.TypeService, Name: "n", Image: "img",
 	})
@@ -73,7 +73,7 @@ func TestCreateDefaultsLaneToBaseline(t *testing.T) {
 }
 
 func TestCreateValidateAndTenant(t *testing.T) {
-	s := NewStore()
+	s := NewStore(WithDemoSeed(true))
 	// 缺 image → Validate 失败
 	err := s.Create(acmeCtx(), workload.Workload{ID: "x", Type: workload.TypeService, Name: "n"})
 	assert.Error(t, err)
@@ -90,14 +90,14 @@ func TestCreateValidateAndTenant(t *testing.T) {
 }
 
 func TestGetRejectsCrossTenant(t *testing.T) {
-	s := NewStore()
+	s := NewStore(WithDemoSeed(true))
 	// wl-cs-api 属 acme，globex 访问应 not found
 	_, err := s.Get(globexCtx(), "wl-cs-api")
 	assert.Error(t, err)
 }
 
 func TestUpdateReplicas(t *testing.T) {
-	s := NewStore()
+	s := NewStore(WithDemoSeed(true))
 	// rec-svc 3/4 deploying → 扩到 6 running
 	w, err := s.Update(acmeCtx(), "wl-rec-svc", 6, workload.StatusRunning)
 	require.NoError(t, err)
@@ -106,13 +106,13 @@ func TestUpdateReplicas(t *testing.T) {
 }
 
 func TestUpdateRejectsCrossTenant(t *testing.T) {
-	s := NewStore()
+	s := NewStore(WithDemoSeed(true))
 	_, err := s.Update(globexCtx(), "wl-cs-api", 1, workload.StatusRunning)
 	assert.Error(t, err)
 }
 
 func TestDelete(t *testing.T) {
-	s := NewStore()
+	s := NewStore(WithDemoSeed(true))
 	require.NoError(t, s.Delete(acmeCtx(), "wl-cs-api"))
 	_, err := s.Get(acmeCtx(), "wl-cs-api")
 	assert.Error(t, err)
@@ -122,13 +122,13 @@ func TestDelete(t *testing.T) {
 }
 
 func TestMissingTenantRejected(t *testing.T) {
-	s := NewStore()
+	s := NewStore(WithDemoSeed(true))
 	_, err := s.List(context.Background(), "", "", "", "", "")
 	assert.Error(t, err)
 }
 
 func TestCronJobRequiresSchedule(t *testing.T) {
-	s := NewStore()
+	s := NewStore(WithDemoSeed(true))
 	err := s.Create(acmeCtx(), workload.Workload{
 		ID: "wl-c", AppID: "app-cs", Type: workload.TypeCronJob, Name: "c", Image: "img",
 	})
@@ -138,7 +138,7 @@ func TestCronJobRequiresSchedule(t *testing.T) {
 // TestListFilterByLane 验证 List 的 laneID 参数：空串=不过滤（返全部泳道），
 // 非空=只返回该泳道。为 deploy/release 分离 + 泳道支持（L1）铺路。
 func TestListFilterByLane(t *testing.T) {
-	s := NewStore()
+	s := NewStore(WithDemoSeed(true))
 	ctx := tenant.WithTenant(context.Background(), "t1")
 	require.NoError(t, s.Create(ctx, workload.Workload{
 		ID: "wl-1", AppID: "a", EnvID: "e", LaneID: workload.LaneDefault,
@@ -170,7 +170,7 @@ func TestListFilterByLane(t *testing.T) {
 // TestListFilterByService 验证 List 的 service 参数：同 app 多服务场景（paas-shop product/recommend/...）
 // 按 service 精确过滤；空串=不过滤返全部。CreateRelease 多服务查找依赖此维度区分各服务 Workload。
 func TestListFilterByService(t *testing.T) {
-	s := NewStore()
+	s := NewStore(WithDemoSeed(true))
 	ctx := tenant.WithTenant(context.Background(), "t1")
 	// 同 app「paas-shop」两个服务（product / recommend），同 env×lane×type
 	for _, w := range []workload.Workload{
@@ -204,7 +204,7 @@ func TestListFilterByService(t *testing.T) {
 
 // TestUpdateSchedule 验证 cronjob schedule 修改 + 类型校验 + 跨租户隔离。
 func TestUpdateSchedule(t *testing.T) {
-	s := NewStore()
+	s := NewStore(WithDemoSeed(true))
 	ctx := tenant.WithTenant(context.Background(), "t1")
 	// 建 cronjob + service 各一
 	require.NoError(t, s.Create(ctx, workload.Workload{

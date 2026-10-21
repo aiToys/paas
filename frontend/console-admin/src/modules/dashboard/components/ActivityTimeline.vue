@@ -19,6 +19,9 @@
           </div>
         </el-timeline-item>
       </el-timeline>
+      <div v-if="error" class="panel-error">
+        {{ error }}
+      </div>
       <el-empty
         v-else
         :description="t('dashboard.noActivity')"
@@ -34,10 +37,17 @@ import { t } from '@/lib/i18n'
 
 defineProps<{
   activities: Activity[]
+  error?: string
 }>()
 </script>
 
 <style scoped>
+.panel-error {
+  padding: 16px 20px;
+  color: var(--el-color-danger);
+  font-size: 13px;
+}
+
 .panel {
   background: var(--el-bg-color);
   border: 1px solid var(--el-border-color-lighter);

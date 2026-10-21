@@ -13,11 +13,12 @@ package dpdisc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -80,64 +81,83 @@ func New() *Discoverer {
 // Enabled 是否启用（nil receiver 安全）。
 func (d *Discoverer) Enabled() bool { return d != nil }
 
-// Instances 查服务实例（10s 缓存）。不可用/失败/空 -> 调用方走静态 URL 兜底。
-func (d *Discoverer) Instances(ctx context.Context, service, lane string) []Instance {
+// ErrNoReadyInstances 表示平台确认无可用实例，不能由调用方静默回退基线。
+var ErrNoReadyInstances = errors.New("no ready instances")
+
+// Instances 查服务实例（10s 成功缓存）；发现错误独立返回，不缓存失败。
+func (d *Discoverer) Instances(ctx context.Context, service, lane string) ([]Instance, error) {
 	if d == nil {
-		return nil
+		return nil, errors.New("discovery not configured")
 	}
 	key := service + "|" + lane
 	d.mu.Lock()
 	if e, ok := d.cache[key]; ok && d.nowFunc().Sub(e.at) < 10*time.Second {
 		d.mu.Unlock()
-		return e.instances
+		return e.instances, nil
 	}
 	d.mu.Unlock()
 
-	ins := d.fetch(ctx, service, lane)
+	ins, err := d.fetch(ctx, service, lane)
+	if err != nil {
+		return nil, err
+	}
 	d.mu.Lock()
 	d.cache[key] = cacheEnt{at: d.nowFunc(), instances: ins}
 	d.mu.Unlock()
-	return ins
+	return ins, nil
 }
 
-// Addr 取一个可用地址（http://ip:port）。无实例返空（调用方兜底静态 URL）。
-// 平台侧仅返回 ready 实例，此处直接取首个有地址的。
-func (d *Discoverer) Addr(ctx context.Context, service, lane string) string {
-	for _, i := range d.Instances(ctx, service, lane) {
+// Resolve 保留平台实际选中的泳道与实例；未覆盖时由平台负责回退。
+func (d *Discoverer) Resolve(ctx context.Context, service, lane string) (Instance, error) {
+	instances, err := d.Instances(ctx, service, lane)
+	if err != nil {
+		return Instance{}, err
+	}
+	for _, i := range instances {
 		if a := i.addr(); a != "" {
-			return "http://" + a
+			return i, nil
 		}
 	}
-	return ""
+	return Instance{}, ErrNoReadyInstances
 }
 
-func (d *Discoverer) fetch(ctx context.Context, service, lane string) []Instance {
-	u := fmt.Sprintf("%s/instances?service=%s", d.base, service)
+// URL 返回已验证实例的访问地址。
+func (i Instance) URL() string { return "http://" + i.addr() }
+
+func (d *Discoverer) fetch(ctx context.Context, service, lane string) ([]Instance, error) {
+	query := url.Values{"service": {service}}
 	if lane != "" {
-		u += "&lane=" + lane
+		query.Set("lane", lane)
 	}
+	u := d.base + "/instances?" + query.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	if d.token != "" {
 		req.Header.Set("Authorization", "Bearer "+d.token)
 	}
 	resp, err := d.http.Do(req)
 	if err != nil {
-		slog.Warn("dp 发现失败（兜底静态 URL）", "service", service, "err", err)
-		return nil
+		return nil, fmt.Errorf("discovery request: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil
+		return nil, fmt.Errorf("discovery HTTP %d", resp.StatusCode)
 	}
 	// /dp/* 裸 JSON 契约（平台例外，无 {data} 包裹）。
 	var out struct {
-		Instances []Instance `json:"instances"`
+		Instances json.RawMessage `json:"instances"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
-		return nil
+		return nil, fmt.Errorf("discovery response: %w", err)
 	}
-	return out.Instances
+	if len(out.Instances) == 0 {
+		return nil, errors.New("discovery response missing instances")
+	}
+	var instances []Instance
+	if err := json.Unmarshal(out.Instances, &instances); err != nil {
+		return nil, err
+	}
+	return instances, nil
 }

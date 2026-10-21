@@ -5,8 +5,8 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
-  getPipeline, updatePipeline, listTemplates,
-  type Pipeline, type StageDef, type PipelineTemplate,
+  getPipeline, updatePipeline, listTemplates, listDeliveries, replayDelivery,
+  type Pipeline, type StageDef, type PipelineTemplate, type WebhookDelivery,
 } from '@/api/pipeline'
 import { apiError } from '@/api'
 import { useEnvStore } from '@/stores/env'
@@ -44,6 +44,63 @@ async function load() {
     triggerBranch.value = p.trigger?.branch ?? ''
   } catch (e) {
     ElMessage.error(apiError(e, '加载失败'))
+  }
+  // 投递记录独立结算：加载失败不拖垮整个编辑器，但要如实显示失败（不冒充「无投递」）。
+  if (pipeline.value?.trigger?.type === 'webhook') await loadDeliveries()
+}
+
+// ---------- webhook 投递记录（D5-5） ----------
+const deliveries = ref<WebhookDelivery[]>([])
+const deliveriesError = ref('')
+const deliveriesLoading = ref(false)
+const replayingId = ref('')
+
+// 以服务端已保存的触发配置为准（本地 radio 是未保存的编辑态）
+const isWebhook = computed(() => pipeline.value?.trigger?.type === 'webhook')
+
+async function loadDeliveries() {
+  deliveriesLoading.value = true
+  deliveriesError.value = ''
+  try {
+    deliveries.value = await listDeliveries(props.appId, props.pid)
+  } catch (e) {
+    deliveries.value = []
+    deliveriesError.value = apiError(e, '投递记录加载失败')
+  } finally {
+    deliveriesLoading.value = false
+  }
+}
+
+const DELIVERY_STATUS: Record<WebhookDelivery['status'], { text: string; type: 'success' | 'info' | 'warning' | 'danger' }> = {
+  accepted: { text: '已触发', type: 'success' },
+  duplicate: { text: '重复投递（未重复触发）', type: 'info' },
+  skipped: { text: '已跳过', type: 'info' },
+  rejected: { text: '已拒绝', type: 'warning' },
+  failed: { text: '失败', type: 'danger' },
+}
+function statusText(s: WebhookDelivery['status']) { return DELIVERY_STATUS[s]?.text ?? s }
+function statusType(s: WebhookDelivery['status']) { return DELIVERY_STATUS[s]?.type ?? 'info' }
+
+// 可重放：必须记录到分支与提交（非分支引用/分支删除事件无可重放对象）。
+function canReplay(d: WebhookDelivery): boolean {
+  return !!d.branch && !!d.commit && d.commit.replace(/0/g, '') !== ''
+}
+
+async function replay(d: WebhookDelivery) {
+  replayingId.value = d.id
+  try {
+    const res = await replayDelivery(props.appId, props.pid, d.id)
+    if (res.replayed) {
+      ElMessage.success(`已重放并创建运行 ${res.run.id}`)
+      emit('saved')
+    } else {
+      ElMessage.info(res.reason || `该投递已生成运行 ${res.run.id}，未重复创建`)
+    }
+    await loadDeliveries()
+  } catch (e) {
+    ElMessage.error(apiError(e, '重放失败'))
+  } finally {
+    replayingId.value = ''
   }
 }
 
@@ -141,6 +198,7 @@ async function save() {
       trigger,
     })
     pipeline.value = updated // 更新含 token（webhook 时展示 URL）
+    if (updated.trigger?.type === 'webhook') await loadDeliveries() // 首次切 webhook 后展示记录区
     ElMessage.success('已保存')
     emit('saved')
   } catch (e) {
@@ -201,6 +259,54 @@ onMounted(load)
           保存后生成 webhook URL（首次切到 webhook 会自动生成 token）。
         </el-alert>
       </template>
+    </div>
+
+    <!-- webhook 投递记录（D5-5）：push 了为什么没触发，看这里而不是猜 -->
+    <div v-if="isWebhook" class="section">
+      <div class="section-title">
+        最近投递记录
+        <el-button size="small" text :loading="deliveriesLoading" @click="loadDeliveries" style="margin-left: 8px;">刷新</el-button>
+      </div>
+      <el-alert v-if="deliveriesError" type="error" :closable="false" :title="deliveriesError" style="margin-bottom: 8px;" />
+      <el-table v-else :data="deliveries" size="small" empty-text="尚无投递记录（配置 webhook 后 push 一次即可见）">
+        <el-table-column label="接收时间" width="170">
+          <template #default="{ row }">{{ new Date(row.receivedAt).toLocaleString() }}</template>
+        </el-table-column>
+        <el-table-column label="分支 / 提交" min-width="180">
+          <template #default="{ row }">
+            <div>{{ row.branch || row.event || '-' }}</div>
+            <div class="delivery-commit">{{ row.commit ? row.commit.slice(0, 10) : '' }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="150">
+          <template #default="{ row }">
+            <el-tag size="small" :type="statusType(row.status)" effect="plain">{{ statusText(row.status) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="原因 / 关联运行" min-width="220">
+          <template #default="{ row }">
+            <div class="delivery-reason">{{ row.reason || '-' }}</div>
+            <router-link v-if="row.runId" :to="`/devops/runs/${row.runId}`" class="delivery-run-link">
+              查看运行 {{ row.runId }}
+            </router-link>
+          </template>
+        </el-table-column>
+        <el-table-column label="重放" width="120" align="right">
+          <template #default="{ row }">
+            <el-tooltip :disabled="canReplay(row)" content="非分支引用或分支删除事件无可重放提交" placement="top">
+              <span>
+                <el-button size="small" :disabled="!canReplay(row)" :loading="replayingId === row.id" @click="replay(row)">
+                  重放
+                </el-button>
+              </span>
+            </el-tooltip>
+            <div v-if="row.replays" class="delivery-replays">已重放 {{ row.replays }} 次</div>
+          </template>
+        </el-table-column>
+      </el-table>
+      <div class="override-hint">
+        重放复用当次记录的分支与提交，不只是重发 HTTP 请求；该投递已生成运行时会直接返回该运行，不会重复创建。
+      </div>
     </div>
 
     <!-- 参数覆盖表单 -->
@@ -330,5 +436,9 @@ v-if="getOverride(t.i, 'mode') !== 'manual'"
 .override-label { font-size: 13px; margin-bottom: 6px; color: var(--el-text-color-regular); }
 .override-hint { font-size: 12px; color: var(--el-text-color-secondary); margin-top: 4px; }
 .webhook-url-box { margin-top: 12px; padding: 12px; background: var(--el-fill-color-light); border-radius: 6px; }
+.delivery-commit { font-size: 12px; color: var(--el-text-color-secondary); font-family: var(--el-font-family-mono, monospace); }
+.delivery-reason { font-size: 13px; }
+.delivery-run-link { font-size: 12px; }
+.delivery-replays { font-size: 11px; color: var(--el-text-color-secondary); }
 .footer { margin-top: 24px; text-align: right; }
 </style>

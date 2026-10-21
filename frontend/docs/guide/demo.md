@@ -1,6 +1,6 @@
 # 示例演示：paas-shop 全能力旅程
 
-paas-shop 是平台的完整能力演示应用（电商域）：一份代码、六个微服务，贯穿应用主线、DevOps、数据服务、可观测与 AI 编排。本章是一条 **30 分钟演示旅程**——下单 → 事件流 → 超卖防护 → 超时关单 → 退款审批 → 泳道对比 → promote 上线 → 环境对比，每步标注平台控制台的停留点。
+paas-shop 是平台主要业务能力的演示应用（电商域）：一份代码、六个微服务，贯穿应用主线、DevOps、数据服务、可观测与 AI 编排。本章是一条 **30 分钟演示旅程**——下单 → 事件流 → 超卖防护 → 超时关单 → 退款审批 → 泳道对比 → promote 上线 → 环境对比，每步标注平台控制台的停留点。
 
 演示资源由示例库的初始化脚本一键创建（幂等，可重复执行；`PAAS_API` / `PAAS_TOKEN` 环境变量可覆盖默认平台地址与凭证，默认值面向内置演示集群）。演示账号见[快速开始](./quickstart)。
 
@@ -13,9 +13,26 @@ paas-shop 是平台的完整能力演示应用（电商域）：一份代码、�
 | `shop.test.example.com` + `x-paas-lane: feat-order-v2` | 泳道（全链路灰度，Feature Lane） | 变更验证 |
 
 - 演示域名经 Ingress host 匹配；本机访问用 `curl -H 'Host: shop.example.com' http://<集群入口>/`，或配置 hosts 解析。
-- 泳道不是独立域名：平台 Route 无泳道维度（host 只有基线域名），染色入口是**基线域名 + `x-paas-lane` 请求头**（或页面顶栏泳道输入框）——`*.shop.test.example.com` 泛子域名需 Ingress 额外配 wildcard 泛解析方可使用。
+- 泳道不是独立域名：平台 Route 无泳道维度（host 只有基线域名），染色入口是**基线域名 + `x-paas-lane` 请求头**（或页面顶栏泳道选择器）——`*.shop.test.example.com` 泛子域名需 Ingress 额外配 wildcard 泛解析方可使用。
 - 页面顶栏环境徽标一眼区分：红「生产」/ 绿「测试」/ 蓝「泳道」。
 - 泳道域名取 hostname 首段为泳道名，前端自动为所有请求附加 `x-paas-lane` 染色头。
+
+## 泳道选择与平台入口配置
+
+Shop BFF 提供只读 `GET /api/platform/lanes`，使用服务端凭证查询平台环境及 `GET /api/lanes?envId=...`，仅返回当前环境的 active 泳道。浏览器不能指定平台地址或切换到其他环境，平台令牌不会返回前端。泳道属于环境，因此列表包含该环境的泳道；能选择不代表该泳道覆盖了 Shop 服务，实际覆盖由每次选路结果验证。
+
+- 平台地址：`PAAS_PLATFORM_URL`，兼容已有 `PAAS_APPCONFIG_URL` / `PAAS_CORE_URL`。
+- 服务端凭证：`PAAS_PLATFORM_TOKEN`，兼容已有 `PAAS_API_KEY` / `PAAS_DP_TOKEN`；需 `environment:read`、`governance:read`。沿用已有只读开发者凭证，无需注入管理员令牌。
+- 运行环境：controller 注入的 `PAAS_CONFIG_ENV`，兼容 `PAAS_ENV_ID`；环境类型以平台读取结果为准。生产配置 `PAAS_ENV_TYPE=prod`，BFF 额外拒绝联调染色，已有 `-prod` 服务后缀同样保护。
+- 数据面发现：已有 `PAAS_DP_ENDPOINT` + `PAAS_DP_TOKEN`（`dp:read`）。未启用时只允许静态基线访问，页面明确显示未接入。
+- 浏览器可访问的控制台：`PAAS_CONSOLE_URL=https://<平台域名>/next/`；与服务端集群内地址分开。未配置时显示说明，不猜测外部地址。
+- 产品入口：`PAAS_SHOP_APP_ID` 为实际应用 ID。`examples/paas-shop/setup.sh` 已补齐上述环境类型、产品 ID 和控制台地址配置；覆盖控制台地址时设置 `PAAS_CONSOLE_URL`。
+
+选择按「环境 + 泳道稳定 ID」保存，发送请求时解析为平台泳道名。泳道关闭/消失后刷新目录会回到基线；域名固定泳道若无法核实则停止请求并提示。切换时重置商品详情、客服和运营视图，避免继续操作上一泳道的状态。
+
+点击「平台能力体验」可进入六条操作路径：泳道、配置热更新、AI 审批、事件与任务、交付、数据服务。每条都链接平台控制台；状态只陈述目录读取和发现配置情况，不据此宣称底层能力已验收。
+
+> 事件通知、经营统计当前按环境聚合，不按 HTTP 泳道隔离。多租户权限、配额计费、离线交付需要单独验证；备份记录也不能替代恢复后数据核验。退款 MCP 仍连接测试环境订单。
 
 ## 演示旅程
 
@@ -61,14 +78,14 @@ curl -H 'Host: shop.test.example.com' http://<集群入口>/api/orders
 
 ### 6. 泳道对比（5 分钟）
 
-泳道（全链路灰度）是**环境内的流量染色**，不是环境复制——只部署变更服务，未命中请求自动降级基线。
+泳道（全链路灰度）是**环境内的流量染色**，不是环境复制——只部署变更服务，未覆盖的服务由平台回退基线；已覆盖但没有就绪实例或发现失败时，Shop 明确报错，不再静默使用静态基线。
 
 1. 控制台「环境」→ 测试环境详情创建泳道 `feat-order-v2`（standard 联调泳道，TTL 自动回收）；
 2. 把 order v2 部署到泳道——**只部署 order**（v2 为演示用自制变更：给下单响应加「预计送达」字段并在页面横幅展示）；
-3. 访问 `shop.test.example.com` 并携带泳道染色——页面顶栏泳道输入框填 `feat-order-v2` 切换（或 `curl -H 'Host: shop.test.example.com' -H 'x-paas-lane: feat-order-v2' <集群入口>/api/orders...`）：bff 经数据面发现 API 按泳道查 order 命中 v2 副本；product / recommend 未命中降级基线；
-4. 对比：清空泳道输入框（或不带 `x-paas-lane` 头）同操作 → v1 响应无新字段。
+3. 访问 `shop.test.example.com` 并携带泳道染色——页面顶栏从平台活跃泳道列表选择 `feat-order-v2`（或 `curl -H 'Host: shop.test.example.com' -H 'x-paas-lane: feat-order-v2' <集群入口>/api/orders...`）：bff 经数据面发现 API 按泳道查 order 命中 v2 副本；product / recommend 未命中降级基线；
+4. 对比：选择「基线（default）」（或不带 `x-paas-lane` 头）同操作 → v1 响应无新字段。
 
-**停留点**：「环境」详情泳道区看泳道归属工作负载；「可观测」链路看 `paas.lane` 属性、日志按 lane 过滤；页面顶栏「实际命中实例」指纹在切换后变化，即流量走了不同副本。演示毕关闭泳道，级联回收全部泳道内工作负载。
+**停留点**：「环境」详情泳道区看泳道归属工作负载；「可观测」链路看 `paas.lane` 属性、日志按 lane 过滤；页面选路结果分别展示请求泳道、平台返回的实际泳道、回退原因和实例指纹；它只证明该商品/推荐请求的选路，完整调用链及下游版本仍需 Trace 核实。演示毕关闭泳道，级联回收全部泳道内工作负载。
 
 ### 7. promote 上线（6 分钟）
 

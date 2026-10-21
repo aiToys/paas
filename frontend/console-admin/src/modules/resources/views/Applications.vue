@@ -18,13 +18,6 @@
         style="width: 220px"
         @keyup.enter="handleSearch"
       />
-      <el-input
-        v-model="searchForm.tenantId"
-        placeholder="租户 ID 过滤"
-        clearable
-        style="width: 160px; margin-left: 8px"
-        @keyup.enter="handleSearch"
-      />
     </template>
 
     <template #actions>
@@ -51,13 +44,15 @@ import { computed, ref, onMounted } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import { SearchTable } from '@/app/components'
 import { useCrud } from '@/app/composables/useCrud'
+import { useScopeStore } from '@/app/stores/scope'
+import { useScopeChange } from '@/app/composables'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
 import { fetchAppList, type AdminApplication, type ResSearchRequest } from '../api'
 import ApplicationDrawer from './ApplicationDrawer.vue'
 
 const { listData, loading, pagination, searchForm, fetchList, handleSearch, handleReset, handlePageChange } =
   useCrud<AdminApplication>({
-    fetch: (params) => fetchAppList(params as unknown as ResSearchRequest),
+    fetch: (params) => fetchAppList({ ...params, tenantId: scopeStore.tenantId } as unknown as ResSearchRequest),
     defaultSearchForm: { keyword: '', tenantId: '' },
     pageSize: 10
   })
@@ -83,6 +78,13 @@ const openDetail = (row: AdminApplication) => {
 
 const statusType = (s: string) =>
   (({ healthy: 'success', degraded: 'warning', idle: 'info' }) as Record<string, string>)[s] ?? 'info'
+
+// 浏览范围（顶栏）联动：切租户重拉列表；范围是纯过滤器不改写目标
+const scopeStore = useScopeStore()
+useScopeChange(() => fetchList(), () => {
+  detailVisible.value = false
+  detailId.value = ''
+})
 
 onMounted(() => fetchList())
 </script>

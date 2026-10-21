@@ -60,7 +60,7 @@ func seedRelease(s *Store, id, tid, appID, envID, imageID, imageDigest, workload
 
 // TestBuildRunMockCI 验证 mock CI runner 异步流转 pending->running->success 并产出 Image。
 func TestBuildRunMockCI(t *testing.T) {
-	s := NewStore(wlmemory.NewStore())
+	s := NewStore(wlmemory.NewStore(wlmemory.WithDemoSeed(true)))
 	ctx := acmeCtx()
 	// 自建仓库（构建需校验仓库归属应用）
 	if err := s.CreateRepo(ctx, devops.CodeRepo{
@@ -112,7 +112,7 @@ func TestBuildRunMockCI(t *testing.T) {
 
 // TestReleaseOrchestration 验证发布编排：找基线 Workload + 更新 ImageRef + 记录发布单。
 func TestReleaseOrchestration(t *testing.T) {
-	wl := wlmemory.NewStore()
+	wl := wlmemory.NewStore(wlmemory.WithDemoSeed(true))
 	s := NewStore(wl)
 	ctx := acmeCtx()
 	// 自建镜像 fixture（构建产物）
@@ -145,7 +145,7 @@ func TestReleaseOrchestration(t *testing.T) {
 
 // TestReleasePreviousAndRollback 验证二次发布记录回滚指针 + 回滚回退镜像。
 func TestReleasePreviousAndRollback(t *testing.T) {
-	wl := wlmemory.NewStore()
+	wl := wlmemory.NewStore(wlmemory.WithDemoSeed(true))
 	s := NewStore(wl)
 	ctx := acmeCtx()
 	// 自建镜像 img-acme-001 + 仓库（构建 img2 需要）
@@ -206,7 +206,7 @@ func TestReleasePreviousAndRollback(t *testing.T) {
 
 // TestRollbackNoPrevious 验证无上一镜像时回滚报错。
 func TestRollbackNoPrevious(t *testing.T) {
-	wl := wlmemory.NewStore()
+	wl := wlmemory.NewStore(wlmemory.WithDemoSeed(true))
 	s := NewStore(wl)
 	ctx := acmeCtx()
 	// 自建镜像 fixture
@@ -227,7 +227,7 @@ func TestRollbackNoPrevious(t *testing.T) {
 
 // TestReleaseCreateWorkload 验证目标环境无基线 Workload 时自动创建。
 func TestReleaseCreateWorkload(t *testing.T) {
-	wl := wlmemory.NewStore()
+	wl := wlmemory.NewStore(wlmemory.WithDemoSeed(true))
 	s := NewStore(wl)
 	ctx := acmeCtx()
 	// 自建镜像 fixture
@@ -260,7 +260,7 @@ func TestReleaseCreateWorkload(t *testing.T) {
 // TestReleaseCreateWorkloadQuota 验证 Release 内建基线 Workload 的配额接入：
 // 超限拒发（无副作用）、正常发布 +1、既有基线发布不重复计数。
 func TestReleaseCreateWorkloadQuota(t *testing.T) {
-	wl := wlmemory.NewStore()
+	wl := wlmemory.NewStore(wlmemory.WithDemoSeed(true))
 	var count int
 	s := NewStore(wl, WithQuotaInc(func(_ context.Context, delta int) error {
 		if count+delta > 1 {
@@ -308,7 +308,7 @@ func TestReleaseCreateWorkloadQuota(t *testing.T) {
 
 // TestTenantIsolation 验证跨租户访问 not found 不泄漏。
 func TestTenantIsolation(t *testing.T) {
-	s := NewStore(wlmemory.NewStore())
+	s := NewStore(wlmemory.NewStore(wlmemory.WithDemoSeed(true)))
 	// 自建跨租户数据：acme 仓库+镜像+发布，globex 镜像
 	if err := s.CreateRepo(acmeCtx(), devops.CodeRepo{
 		ID: "repo-acme-cs", AppID: "app-cs", GitURL: "https://github.com/acme/cs.git", Branch: "main",
@@ -340,7 +340,7 @@ func TestTenantIsolation(t *testing.T) {
 
 // TestCreateRepoDefaults 验证仓库默认值填充。
 func TestCreateRepoDefaults(t *testing.T) {
-	s := NewStore(wlmemory.NewStore())
+	s := NewStore(wlmemory.NewStore(wlmemory.WithDemoSeed(true)))
 	ctx := acmeCtx()
 
 	if err := s.CreateRepo(ctx, devops.CodeRepo{
@@ -372,7 +372,7 @@ func TestCreateRepoDefaults(t *testing.T) {
 
 // TestReleaseVersionRoundTrip 验证 Version 字段的读写透传。
 func TestReleaseVersionRoundTrip(t *testing.T) {
-	s := NewStore(wlmemory.NewStore())
+	s := NewStore(wlmemory.NewStore(wlmemory.WithDemoSeed(true)))
 	ctx := acmeCtx()
 
 	// 自建镜像 fixture
@@ -400,7 +400,7 @@ func TestReleaseVersionRoundTrip(t *testing.T) {
 // ② LaneID=feature-x -> 新建 feature-x 泳道 Workload（不复用 default）；
 // Release.LaneID 填充正确。
 func TestCreateReleaseUsesLane(t *testing.T) {
-	wl := wlmemory.NewStore()
+	wl := wlmemory.NewStore(wlmemory.WithDemoSeed(true))
 	s := NewStore(wl)
 	ctx := acmeCtx()
 	seedImage(s, "img-lane-test", "t-acme", "app-cs")
@@ -449,7 +449,7 @@ func TestCreateReleaseUsesLane(t *testing.T) {
 // 继承 Port/ContainerPort（泳道是基线的联调克隆，需建 Service 供 smoke 探活/跨泳道发现）。
 // baseline wl-cs-api seed Port=80；feature-x 新建应继承 80，否则 reconciler 不建 Service。
 func TestCreateReleaseLaneInheritsPort(t *testing.T) {
-	wl := wlmemory.NewStore()
+	wl := wlmemory.NewStore(wlmemory.WithDemoSeed(true))
 	s := NewStore(wl)
 	ctx := acmeCtx()
 	seedImage(s, "img-port-test", "t-acme", "app-cs")
@@ -474,7 +474,7 @@ func TestCreateReleaseLaneInheritsPort(t *testing.T) {
 // baseline 继承，写入新建 Workload。端口驱动 reconciler 建 Service（paas-shop 多微服务模型
 // 下 generic <app>-svc-<lane> 无 baseline 可继承，须 deploy 显式指定）。
 func TestCreateReleaseExplicitPort(t *testing.T) {
-	wl := wlmemory.NewStore()
+	wl := wlmemory.NewStore(wlmemory.WithDemoSeed(true))
 	s := NewStore(wl)
 	ctx := acmeCtx()
 	seedImage(s, "img-explicit-port", "t-acme", "app-cs")
@@ -496,7 +496,7 @@ func TestCreateReleaseExplicitPort(t *testing.T) {
 // TestCreateReleaseMultiService 验证同 app 多服务场景（paas-shop 模型）：
 // 同 app×env×lane 下不同 service 各自独立 Workload（不互相覆盖），CreateRelease 按 service 精确查找。
 func TestCreateReleaseMultiService(t *testing.T) {
-	wl := wlmemory.NewStore()
+	wl := wlmemory.NewStore(wlmemory.WithDemoSeed(true))
 	s := NewStore(wl)
 	ctx := acmeCtx()
 	seedImage(s, "img-prod", "t-acme", "paas-shop")

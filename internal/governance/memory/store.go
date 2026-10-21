@@ -340,6 +340,18 @@ func (s *Store) ListRoutes(ctx context.Context, serviceID string) ([]governance.
 	return out, nil
 }
 
+// ListAllRoutes 跨租户列出全部路由（admin 平台总览；不做 tenant 过滤，带 TenantID）。
+func (s *Store) ListAllRoutes(ctx context.Context) ([]governance.Route, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]governance.Route, 0, len(s.routes))
+	for _, r := range s.routes {
+		out = append(out, cloneRoute(r))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	return out, nil
+}
+
 func (s *Store) GetRoute(ctx context.Context, id string) (governance.Route, error) {
 	tid, err := tenant.IDOrErr(ctx)
 	if err != nil {
@@ -478,6 +490,18 @@ func (s *Store) ListBreakers(ctx context.Context, serviceID string) ([]governanc
 		if serviceID != "" && b.ServiceID != serviceID {
 			continue
 		}
+		out = append(out, b)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })
+	return out, nil
+}
+
+// ListAllBreakers 跨租户列出全部熔断器（admin 平台总览；不做 tenant 过滤，带 TenantID）。
+func (s *Store) ListAllBreakers(ctx context.Context) ([]governance.CircuitBreaker, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]governance.CircuitBreaker, 0, len(s.breakers))
+	for _, b := range s.breakers {
 		out = append(out, b)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt.After(out[j].UpdatedAt) })

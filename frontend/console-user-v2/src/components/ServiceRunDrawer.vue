@@ -9,7 +9,7 @@ import { ElMessage } from 'element-plus'
 import { apiError } from '@/api'
 import { useEnvStore } from '@/stores/env'
 import { getWorkload, getWorkloadLogs, updateWorkload, type WorkloadDetail } from '@/api/workload'
-import { listPipelines, type PipelineRun } from '@/api/pipeline'
+import { type PipelineRun } from '@/api/pipeline'
 import CdDeployDialog from '@/components/CdDeployDialog.vue'
 import { statusOf, tagTypeToCls, WORKLOAD_STATUS, POD_STATUS } from '@/composables/useStatus'
 
@@ -135,24 +135,8 @@ const domainHref = computed(() =>
 )
 
 // —— 部署（spec §9.5 主按钮）：有 CD 流水线才显示按钮，确认弹窗复用 CdDeployDialog ——
-const hasCd = ref(false)
 const showDeploy = ref(false)
 
-async function loadCdPipeline() {
-  hasCd.value = false
-  if (!props.appId) return
-  try {
-    const pipes = await listPipelines(props.appId)
-    hasCd.value = pipes.some((p) => p.kind === 'cd')
-  } catch {
-    hasCd.value = false // 拉不到流水线不显示部署按钮（不阻塞运行详情）
-  }
-}
-watch(
-  () => [props.modelValue, props.appId] as const,
-  ([open]) => { if (open) void loadCdPipeline() },
-  { immediate: true },
-)
 
 // —— 高级折叠（spec：泳道不进一级界面，藏进服务详情「高级」）——
 const showAdvanced = ref(false)
@@ -230,7 +214,7 @@ async function togglePrevious() {
 
         <!-- 主操作行：部署是主按钮（spec §9.5「部署是按钮不是并列 tab」）；伸缩次级 -->
         <div class="ops-row">
-          <button v-if="hasCd" class="act primary deploy-btn" @click="showDeploy = true">部署</button>
+          <button v-if="props.appId" class="act primary deploy-btn" @click="showDeploy = true">发起交付</button>
           <span class="ops-label">伸缩</span>
           <input v-model.number="scaleInput" type="number" min="0" class="scale-input mono" />
           <button class="act" :disabled="scaling" @click="applyScale">应用</button>
@@ -256,7 +240,8 @@ async function togglePrevious() {
         <CdDeployDialog
           v-model="showDeploy"
           :app-id="props.appId"
-          :hint="detail?.workload.name"
+          :hint="detail?.workload.service || detail?.workload.name"
+          :service-id="detail?.workload.serviceId" :env-id="detail?.workload.envId"
           @deployed="(run) => { emit('update:modelValue', false); emit('deployed', run) }"
         />
 

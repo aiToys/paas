@@ -35,6 +35,8 @@ type Handler struct {
 	Authorize func(r *http.Request, perm string) bool
 	audit     AdminAuditRecorder // 租户侧写操作审计（SetQuota/GenerateBill/PayBill 敏感财务写）
 	actor     func(*http.Request) string
+	// price 模型单价查询器（元/百万 token），nil = 全部未定价（预算状态如实标注）。
+	price ModelPrice
 }
 
 // NewHandler 创建配额计费 handler。
@@ -98,6 +100,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveGenerate(w, r)
 	case strings.HasPrefix(path, "/api/billing/records/") && strings.HasSuffix(path, "/pay"):
 		h.servePay(w, r)
+	case path == "/api/billing/budgets":
+		h.serveBudgets(w, r)
+	case strings.HasPrefix(path, "/api/billing/budgets/"):
+		h.serveBudgetItem(w, r)
 	default:
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}

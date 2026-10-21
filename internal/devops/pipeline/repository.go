@@ -22,6 +22,8 @@ var (
 // Repository Pipeline CRUD（应用 1:N 主线实体，租户隔离）。
 type Repository interface {
 	ListPipelines(ctx context.Context, appID string) ([]Pipeline, error)
+	// ListAllPipelines 跨租户列表（admin 模板引用预检用，返回对象带 TenantID）；created_at 升序。
+	ListAllPipelines(ctx context.Context) ([]Pipeline, error)
 	GetPipeline(ctx context.Context, id string) (Pipeline, error)
 	CreatePipeline(ctx context.Context, p Pipeline) (Pipeline, error)
 	UpdatePipeline(ctx context.Context, p Pipeline) (Pipeline, error)
@@ -36,6 +38,10 @@ type RunRepository interface {
 	ListRuns(ctx context.Context, appID, pipelineID, status string) ([]PipelineRun, error)
 	// ListAllRuns 跨租户列表（admin 总览用，返回对象带 TenantID）；可选 status 过滤；created_at 倒序。
 	ListAllRuns(ctx context.Context, status string) ([]PipelineRun, error)
+	// ListAdminRuns 先按租户/状态过滤，再取最近1000条；仅管理端调用。
+	ListAdminRuns(ctx context.Context, status, tenantID string) ([]PipelineRun, error)
+	// GetRunAny 仅管理端鉴权后按ID精确读取；不受列表窗口限制。
+	GetRunAny(ctx context.Context, id string) (PipelineRun, error)
 	GetRun(ctx context.Context, id string) (PipelineRun, error)
 	CreateRun(ctx context.Context, r PipelineRun) (PipelineRun, error)
 	UpdateRun(ctx context.Context, r PipelineRun) (PipelineRun, error)
@@ -64,4 +70,6 @@ type Store interface {
 	Repository
 	RunRepository
 	TemplateRepository
+	// DeliveryRepository webhook 投递记录（D5-5）：memory/PG 同一实例共享。
+	DeliveryRepository
 }

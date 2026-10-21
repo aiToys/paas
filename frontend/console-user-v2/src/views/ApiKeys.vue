@@ -1,14 +1,26 @@
 <script setup lang="ts">
 import { confirmAction } from '@/composables/useConfirmAction'
-// API 密钥（v2 原生闭环）：列表 + 创建（空 body 零提权，明文仅显示一次）+ 删除。
+// API 密钥（v2 原生闭环）：列表 + 创建（空 body 零提权，明文仅显示一次）+ 轮换 + 吊销 + 删除。
 // 程序化调用平台 API 的凭证（OpenAI 兼容 /v1/* 与 /api/*）。
 // 专项06 §3：明文 ref 在关闭/切页/卸载时全路径清除；创建确认明确「与当前账号相同权限」；
-// 接入说明给可执行示例；到期/最近使用后端暂无字段，不渲染假列。
-import { onMounted, onUnmounted, ref } from 'vue'
+// 接入说明给可执行示例。D5-3：状态/到期/最近使用来自后端派生字段（state 由 KeyState 计算，
+// 前端只做文案映射）；到期时间仅平台管理员可设置，此处如实展示「永不过期」。
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { listApiKeys, createApiKey, deleteApiKey, type ApiKeyEntity } from '@/api/platform'
+import {
+  listApiKeys,
+  createApiKey,
+  deleteApiKey,
+  revokeApiKey,
+  rotateApiKey,
+  type ApiKeyEntity,
+  type ApiKeyState
+} from '@/api/platform'
 import { apiError } from '@/api'
 import { copyText } from '@/utils/clipboard'
+import { useSessionStore } from '@/stores/session'
+
+const session = useSessionStore()
 
 const keys = ref<ApiKeyEntity[]>([])
 const loading = ref(true)
@@ -19,10 +31,32 @@ const creating = ref(false)
 // 切页卸载都清除 ref（AC-02 完整版：不在组件状态里残留明文）。
 const createdKey = ref('')
 const showCreated = ref(false)
+const createdTitle = ref('密钥已创建')
 
 function clearCreated() {
   createdKey.value = ''
 }
+
+// —— 状态 / 时间文案（state 由后端派生，前端不重复「7 天内到期」判定）——
+const STATE_LABEL: Record<ApiKeyState, string> = {
+  active: '启用',
+  expiring: '即将到期',
+  expired: '已过期',
+  revoked: '已吊销'
+}
+const stateLabel = (k: ApiKeyEntity) => STATE_LABEL[k.state ?? 'active']
+const stateClass = (k: ApiKeyEntity) => `st st-${k.state ?? 'active'}`
+const fmtTime = (s?: string) => (s ? new Date(s).toLocaleString() : '')
+const fmtDay = (s?: string) => (s ? new Date(s).toLocaleDateString() : '')
+// 可用 = 既未吊销也未过期（expiring 仍可用，只是提醒轮换）。
+const usable = computed(
+  () => keys.value.filter((k) => k.state !== 'revoked' && k.state !== 'expired').length
+)
+
+// 写权限与后端 apiKeyWritable 同源：tenant-admin 可管全租户，其余仅本人。
+// 前端只做入口显隐，后端 403 兜底（轮换他人 Key 会返回继承其角色的明文 = 提权链）。
+const canManage = (k: ApiKeyEntity) =>
+  (session.profile?.roles ?? []).includes('tenant-admin') || k.userId === session.profile?.id
 
 async function load() {
   loading.value = true
@@ -46,13 +80,46 @@ async function create() {
   creating.value = true
   try {
     const k = await createApiKey()
-    createdKey.value = k.key
-    showCreated.value = true
+    showPlaintext(k.key, '密钥已创建')
     await load()
   } catch (e) {
     ElMessage.error(apiError(e, '创建失败'))
   } finally {
     creating.value = false
+  }
+}
+
+// 明文只在弹窗里出现一次；关闭即清除（@close → clearCreated）。
+function showPlaintext(key: string, title: string) {
+  createdKey.value = key
+  createdTitle.value = title
+  showCreated.value = true
+}
+
+// 轮换：新 Key 不继承原到期时间（后端语义），旧 Key 立即吊销。
+async function rotate(k: ApiKeyEntity) {
+  if (!await confirmAction(
+    `为密钥 ${k.key} 生成同权限的新密钥并立即吊销旧密钥？使用旧密钥的程序会立即失效；` +
+    '新密钥不继承原到期时间（默认永不过期），完整值仅显示一次。')) return
+  try {
+    const nk = await rotateApiKey(k.id)
+    showPlaintext(nk.key, '密钥已轮换（旧密钥已吊销）')
+    await load()
+  } catch (e) {
+    ElMessage.error(apiError(e, '轮换失败'))
+  }
+}
+
+// 吊销（软吊销）：保留记录供审计，与删除（移除记录）语义不同。
+async function revoke(k: ApiKeyEntity) {
+  if (!await confirmAction(
+    `吊销密钥 ${k.key} ？调用方将立即无法使用；记录会保留（区别于「删除」）。`)) return
+  try {
+    await revokeApiKey(k.id)
+    ElMessage.success('已吊销')
+    await load()
+  } catch (e) {
+    ElMessage.error(apiError(e, '吊销失败'))
   }
 }
 
@@ -73,7 +140,7 @@ async function remove(k: ApiKeyEntity) {
   <div class="page">
     <div class="head-row">
       <h2 class="title">API 密钥</h2>
-      <span class="sub">程序化调用平台 API 的凭证</span>
+      <span class="sub">程序化调用平台 API 的凭证<span v-if="keys.length"> · {{ usable }} 个可用</span></span>
       <button class="head-create" :disabled="creating" @click="create">
         {{ creating ? '创建中…' : '新建密钥' }}
       </button>
@@ -95,7 +162,10 @@ async function remove(k: ApiKeyEntity) {
       <thead>
         <tr>
           <th>密钥</th>
+          <th>状态</th>
           <th>权限</th>
+          <th>到期</th>
+          <th>最近使用</th>
           <th>用量归因</th>
           <th>创建于</th>
           <th class="col-act"></th>
@@ -103,17 +173,31 @@ async function remove(k: ApiKeyEntity) {
       </thead>
       <tbody>
         <tr v-for="k in keys" :key="k.id">
-          <td><span class="s-name mono">{{ k.key }}</span></td>
+          <td>
+            <span class="s-name mono">{{ k.key }}</span>
+            <div class="dim">归属 {{ k.userId }}</div>
+            <div v-if="k.rotatedFrom" class="dim">由 {{ k.rotatedFrom }} 轮换而来</div>
+          </td>
+          <td><span :class="stateClass(k)">{{ stateLabel(k) }}</span></td>
           <td>
             <span v-for="r in k.roles" :key="r" class="cap-tag">{{ r }}</span>
           </td>
+          <td class="dim">{{ k.expiresAt ? fmtTime(k.expiresAt) : '永不过期' }}</td>
+          <td class="dim">{{ k.lastUsedAt ? fmtTime(k.lastUsedAt) : '未使用' }}</td>
           <td>
             <span v-if="k.appId" class="mono dim">{{ k.appId }}</span>
             <span v-else class="dim">组织级（不归因应用）</span>
           </td>
-          <td class="dim">{{ (k.createdAt ?? '').slice(0, 10) || '—' }}</td>
+          <td class="dim">{{ fmtDay(k.createdAt) || '—' }}</td>
           <td class="col-act">
-            <button class="act danger" @click="remove(k)">删除</button>
+            <template v-if="canManage(k)">
+              <template v-if="k.state !== 'revoked'">
+                <button class="act" @click="rotate(k)">轮换</button>
+                <button class="act danger" @click="revoke(k)">吊销</button>
+              </template>
+              <button class="act danger" @click="remove(k)">删除</button>
+            </template>
+            <span v-else class="dim">他人密钥（只读）</span>
           </td>
         </tr>
       </tbody>
@@ -121,7 +205,7 @@ async function remove(k: ApiKeyEntity) {
 </div>
 
     <!-- 完整密钥一次性展示：@close 覆盖按钮/X/Esc/遮罩全部关闭路径 -->
-    <el-dialog v-model="showCreated" title="密钥已创建" width="480px" append-to-body @close="clearCreated">
+    <el-dialog v-model="showCreated" :title="createdTitle" width="480px" append-to-body @close="clearCreated">
       <p class="created-tip">完整值仅此一次显示，请立即复制保存：</p>
       <div class="created-key mono">{{ createdKey }}</div>
       <template #footer>
@@ -137,6 +221,12 @@ async function remove(k: ApiKeyEntity) {
 .empty.err { color: var(--danger); display: flex; flex-direction: column; gap: 10px; align-items: center; }
 .col-act { text-align: right; }
 .dim { color: var(--text-faint); font-size: 12px; }
+/* 状态徽章：颜色与文案同源（state 由后端派生），不额外叠图标避免噪声 */
+.st { display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 11px; white-space: nowrap; }
+.st-active { color: var(--success); background: var(--success-soft); }
+.st-expiring { color: var(--warning); background: var(--warning-soft); }
+.st-expired { color: var(--danger); background: var(--danger-soft); }
+.st-revoked { color: var(--text-faint); background: var(--surface-2); }
 .created-key {
   padding: 12px;
   border: 1px solid var(--border);

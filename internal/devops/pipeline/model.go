@@ -109,6 +109,8 @@ const (
 	TriggerManual  = "manual"
 	TriggerWebhook = "webhook"
 	TriggerCron    = "cron"
+	// TriggerReplay webhook 投递记录的人工重放（D5-5）——与 webhook 区分，便于审计追溯来源。
+	TriggerReplay = "replay"
 )
 
 // WebhookPath 返回 pipeline 的 webhook 接收端点路径（不含 token；前端拼接 baseURL+token 展示）。

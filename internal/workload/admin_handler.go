@@ -3,9 +3,11 @@ package workload
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/aitoys/paas/internal/httputil"
@@ -41,6 +43,7 @@ type AdminHandler struct {
 	audit    AdminAuditRecorder
 	actorOf  func(*http.Request) string
 	applier  Applier                                    // 可选；注入后支持 drift 修复（POST /reconcile 补投影 PG 有行无 CRD 的 Workload）
+	ops      OperationsRepo                             // 可选；注入后支持滚动重启与操作记录查询
 	fillStat func(ctx context.Context, list []Workload) // 便于测试注入 stub；默认走 status.FillStatus
 }
 
@@ -78,6 +81,11 @@ func WithAdminAudit(a AdminAuditRecorder) AdminHandlerOpt {
 func WithAdminActor(f func(*http.Request) string) AdminHandlerOpt {
 	return func(h *AdminHandler) { h.actorOf = f }
 }
+
+// WithAdminOps 注入运维操作仓储，启用后台滚动重启与操作记录查询
+// （POST /{id}/restart、GET /{id}/operations；与租户侧同一状态机，202 只表示受理，
+// 生效看操作记录 status）。
+func WithAdminOps(o OperationsRepo) AdminHandlerOpt { return func(h *AdminHandler) { h.ops = o } }
 
 // WithAdminApplier 注入 K8s 数据面 applier，启用 drift 修复端点（POST /api/admin/workloads/reconcile）。
 // 注入后 super_admin 可手动触发「PG 有行无 CRD」的 Workload 补投影（CreateOrUpdate 幂等）。
@@ -120,10 +128,38 @@ func (h *AdminHandler) recordAudit(r *http.Request, tenantID, action, resourceID
 	_ = h.audit.Record(r.Context(), tenantID, h.actor(r), action, "workload", resourceID, detail)
 }
 
-// serveReconcile POST /api/admin/workloads/reconcile 手动触发 drift 修复：
+// reconcilePreviewLimit 预览清单单类上限（防全平台大规模漂移时响应体膨胀）。
+const reconcilePreviewLimit = 200
+
+// ReconcileMissing 预览中「PG 有行、CRD 缺失」的条目（仅供人读，不含内部字段）。
+type ReconcileMissing struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	TenantID string `json:"tenantId"`
+}
+
+// ReconcileResult 对账结果。dryRun=true 时只填 missing/existing，created 恒 0（未写任何东西）。
+type ReconcileResult struct {
+	DryRun   bool               `json:"dryRun"`
+	Scanned  int                `json:"scanned"`
+	Created  int                `json:"created"`
+	Skipped  int                `json:"skipped"`
+	Failed   int                `json:"failed"`
+	Existing int                `json:"existing,omitempty"`
+	Missing  []ReconcileMissing `json:"missing,omitempty"`
+	// MissingCount 缺失总数（missing 清单超上限被截断时仍准确；truncated=true 时有意义）。
+	MissingCount int      `json:"missingCount,omitempty"`
+	FailedIDs    []string `json:"failedIds,omitempty"`
+	Truncated    bool     `json:"truncated,omitempty"`
+}
+
+// serveReconcile POST /api/admin/workloads/reconcile[?dryRun=true] 手动触发 drift 修复：
 // 扫 PG workloads 全部行，对「PG 有行无 CRD」的补投影（EnsureIfMissing：仅缺失才补建，
 // 绝不覆盖 K8s 既有运行态，防 PG 陈旧状态如 replicas=0 把 service 缩到 0）。
-// applier 未注入（K8s 未启用）返 503 友好提示。记审计（平台级运维操作）。
+//
+// dryRun=true 是只读预览：逐行 Exists 汇总「将补建哪些」，不写数据面、不记执行审计；
+// 执行（无 dryRun 参数）保持原有语义并记审计——预览与执行是两个独立动作，执行须显式发起。
+// applier 未注入（K8s 未启用）返 503 友好提示；dry-run 同样 503（无数据面可查）。
 func (h *AdminHandler) serveReconcile(w http.ResponseWriter, r *http.Request) {
 	if h.applier == nil {
 		httputil.WriteError(w, http.StatusServiceUnavailable, "K8s 数据面未启用，drift 修复不可用")
@@ -134,32 +170,63 @@ func (h *AdminHandler) serveReconcile(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteInternalError(w, err)
 		return
 	}
-	created := 0
-	skipped := 0
-	failed := 0
+	if strings.EqualFold(r.URL.Query().Get("dryRun"), "true") {
+		h.serveReconcilePreview(w, r, list)
+		return
+	}
+	res := ReconcileResult{Scanned: len(list)}
 	for i := range list {
-		w := list[i]
-		if w.TenantID == "" {
+		wl := list[i]
+		if wl.TenantID == "" {
+			res.Skipped++ // 无租户行无法派生数据面 ns，不计入 created/failed（与预览同口径）
 			continue
 		}
-		ok, err := h.applier.EnsureIfMissing(r.Context(), w)
-		if err != nil {
-			failed++
-			continue
-		}
-		if ok {
-			created++
-		} else {
-			skipped++
+		created, err := h.applier.EnsureIfMissing(r.Context(), wl)
+		switch {
+		case err != nil:
+			res.Failed++
+		case created:
+			res.Created++
+		default:
+			res.Skipped++
 		}
 	}
-	h.recordAudit(r, "", "reconcile-drift", "", "")
-	httputil.WriteData(w, map[string]int{
-		"scanned": len(list),
-		"created": created,
-		"skipped": skipped,
-		"failed":  failed,
-	})
+	h.recordAudit(r, "", "reconcile-drift", "",
+		fmt.Sprintf("scanned=%d created=%d skipped=%d failed=%d", res.Scanned, res.Created, res.Skipped, res.Failed))
+	httputil.WriteData(w, res)
+}
+
+// serveReconcilePreview dry-run：只读探测每条 CRD 是否存在，返回将补建清单。
+// 探测失败（权限/连接）单独计数并列出 ID——不能当作「缺失」混进将补建清单，
+// 否则预览会夸大动作范围。
+func (h *AdminHandler) serveReconcilePreview(w http.ResponseWriter, r *http.Request, list []Workload) {
+	res := ReconcileResult{DryRun: true, Scanned: len(list), Missing: []ReconcileMissing{}}
+	for i := range list {
+		wl := list[i]
+		if wl.TenantID == "" {
+			res.Skipped++
+			continue
+		}
+		exists, err := h.applier.Exists(r.Context(), wl)
+		if err != nil {
+			res.Failed++
+			if len(res.FailedIDs) < reconcilePreviewLimit {
+				res.FailedIDs = append(res.FailedIDs, wl.ID)
+			}
+			continue
+		}
+		if exists {
+			res.Existing++
+			continue
+		}
+		res.MissingCount++
+		if len(res.Missing) >= reconcilePreviewLimit {
+			res.Truncated = true
+			continue // 继续计数，仅清单截断
+		}
+		res.Missing = append(res.Missing, ReconcileMissing{ID: wl.ID, Name: wl.Name, TenantID: wl.TenantID})
+	}
+	httputil.WriteData(w, res)
 }
 
 // findByID 跨租户取单条工作负载（ListAll filter by id）。
@@ -190,7 +257,7 @@ func (h *AdminHandler) serveList(w http.ResponseWriter, r *http.Request) {
 		// 与单租户 List 区别（admin 跨租户 Pod 查询需多 K8s namespace 跨租户路由，留后续）。
 		_ = list
 	}
-	httputil.WriteData(w, list)
+	httputil.WriteData(w, adminutil.FilterTenant(r, list, func(w Workload) string { return w.TenantID }))
 }
 
 // serveItem 按路径细分：/{id}、/{id}/logs、/{id}/scale。
@@ -219,6 +286,10 @@ func (h *AdminHandler) serveItem(w http.ResponseWriter, r *http.Request) {
 		h.serveLogs(w, r, id)
 	case "scale":
 		h.serveScale(w, r, id)
+	case "restart":
+		h.serveRestart(w, r, id)
+	case "operations":
+		h.serveOperations(w, r, id)
 	default:
 		httputil.WriteError(w, http.StatusNotFound, "not found")
 	}
@@ -336,6 +407,101 @@ func (h *AdminHandler) serveScale(w http.ResponseWriter, r *http.Request, id str
 	}
 	h.recordAudit(rr, wl.TenantID, "admin:scale", id, detail)
 	httputil.WriteData(w, updated)
+}
+
+// serveRestart 后台滚动重启（POST /{id}/restart）。
+// 与租户侧同一操作状态机：202 只表示受理，生效看操作记录 status（accepted→reconciling→running→
+// succeeded|failed|unknown）。admin 必须填原因（审计留痕），不默认代办生产发布审批。
+func (h *AdminHandler) serveRestart(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodPost {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.ops == nil || h.status == nil {
+		httputil.WriteError(w, http.StatusServiceUnavailable, "重启不可用（非集群部署或运维仓储未装配）")
+		return
+	}
+	wl, err := h.findByID(r.Context(), id)
+	if err != nil {
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
+		return
+	}
+	if wl.Type != TypeService {
+		httputil.WriteError(w, http.StatusBadRequest, "仅常驻服务（service）支持滚动重启")
+		return
+	}
+	if wl.Replicas <= 0 {
+		httputil.WriteError(w, http.StatusBadRequest, "副本为 0，先恢复副本再执行重启")
+		return
+	}
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && err.Error() != "EOF" {
+			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
+			return
+		}
+	}
+	reason := strings.TrimSpace(body.Reason)
+	if reason == "" {
+		httputil.WriteError(w, http.StatusBadRequest, "请填写重启原因（后台代操作必须留痕）")
+		return
+	}
+	ctx, rr := adminutil.TenantCtx(r, wl.TenantID)
+	op, created, err := h.ops.CreateRestart(ctx, wl, reason, h.actor(r), r.Header.Get("Idempotency-Key"))
+	if err != nil {
+		if errors.Is(err, ErrOpConflict) {
+			httputil.WriteError(w, http.StatusConflict, "该工作负载已有进行中的运维操作，请等待完成后再试")
+			return
+		}
+		httputil.WriteServiceError(w, http.StatusBadRequest, err)
+		return
+	}
+	if !created {
+		// 幂等命中：复用既有操作，不重复受理也不重复审计。
+		httputil.WriteData(w, op)
+		return
+	}
+	h.recordAudit(rr, wl.TenantID, "admin:restart", id, "reason="+reason+" op="+op.ID)
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]any{"data": op})
+}
+
+// serveOperations 运维操作记录查询（GET /{id}/operations?limit=&offset=）。
+// 后台据此展示受理/执行/生效/失败，不把 HTTP 202 当「已生效」。
+func (h *AdminHandler) serveOperations(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodGet {
+		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if h.ops == nil {
+		httputil.WriteError(w, http.StatusServiceUnavailable, "运维仓储未装配")
+		return
+	}
+	wl, err := h.findByID(r.Context(), id)
+	if err != nil {
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
+		return
+	}
+	limit, offset := 50, 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, e := strconv.Atoi(v); e == nil {
+			limit = n
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, e := strconv.Atoi(v); e == nil {
+			offset = n
+		}
+	}
+	ctx, _ := adminutil.TenantCtx(r, wl.TenantID)
+	ops, err := h.ops.ListByWorkload(ctx, id, limit, offset)
+	if err != nil {
+		httputil.WriteInternalError(w, err)
+		return
+	}
+	httputil.WriteData(w, ops)
 }
 
 // serveDelete 强制删除（先以资源租户 ctx 删，成功后回收配额，与租户侧/application admin 对齐）。

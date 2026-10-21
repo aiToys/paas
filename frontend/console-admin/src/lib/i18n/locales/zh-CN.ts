@@ -16,6 +16,7 @@ export default {
     small: '小'
   },
   common: {
+    platformScope: '平台级供给，不按租户过滤（浏览范围不影响本页）',
     welcome: '欢迎, {name}',
     action: {
       search: '搜索',
@@ -27,6 +28,7 @@ export default {
       batchDelete: '批量删除',
       export: '导出',
       refresh: '刷新',
+      more: '更多',
       confirm: '确认',
       cancel: '取消',
       close: '关闭',
@@ -242,8 +244,9 @@ export default {
     noQuickAction: '暂无可用快捷入口',
     latestActivity: '最新动态',
     noActivity: '暂无动态',
-    visitTrend: '访问趋势',
-    roleDistribution: '用户角色分布',
+    visitTrend: '平台趋势',
+    noTrendData: '暂无历史数据（平台未接入按日历史计量，接入后自动展示）',
+    roleDistribution: '租户用户分布',
     lastLoginPrefix: '上次登录'
   },
   profile: {

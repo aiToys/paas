@@ -17,6 +17,9 @@ type Applier interface {
 	// （如裸 workload 空 image_ref/replicas=0）覆盖 K8s 既有运行态。
 	// 返回 (created bool, err error)：true=本次补建，false=已存在跳过。
 	EnsureIfMissing(ctx context.Context, w Workload) (bool, error)
+	// Exists 只读判断数据面是否已有该 CRD（reconcile dry-run 预览用）。
+	// 不建不删不改；NotFound 返 (false, nil)，其余错误上抛（权限/连接问题不能被当成「缺失」）。
+	Exists(ctx context.Context, w Workload) (bool, error)
 	// Delete 从数据面移除（级联清 K8s 资源）。
 	Delete(ctx context.Context, id string) error
 }

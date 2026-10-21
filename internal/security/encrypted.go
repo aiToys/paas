@@ -72,3 +72,7 @@ func (e *encryptedRepo) RecordAudit(ctx context.Context, log AuditLog) error {
 func (e *encryptedRepo) ListAllAuditLogs(ctx context.Context) ([]AuditLog, error) {
 	return e.inner.ListAllAuditLogs(ctx)
 }
+
+func (e *encryptedRepo) QueryAllAuditLogs(ctx context.Context, q AuditQuery) (AuditPage, error) {
+	return e.inner.QueryAllAuditLogs(ctx, q)
+}

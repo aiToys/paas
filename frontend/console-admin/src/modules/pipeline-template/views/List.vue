@@ -1,4 +1,13 @@
 <template>
+  <el-alert
+    type="info"
+    :closable="false"
+    show-icon
+    style="margin-bottom: 12px"
+  >
+    {{ t('common.platformScope') }}
+  </el-alert>
+
   <SearchTable
     title="流水线模板管理"
     :loading="loading"
@@ -51,6 +60,7 @@
 </template>
 
 <script lang="ts" setup>
+import { t } from '@/lib/i18n'
 import { ref, computed, onMounted } from 'vue'
 import { Plus, Refresh, Lock } from '@element-plus/icons-vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
@@ -59,6 +69,7 @@ import { useCrud } from '@/app/composables/useCrud'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
 import {
   fetchTemplateListPage,
+  fetchAdminPipelines,
   deleteTemplate,
   type PipelineTemplate,
   type TemplateSearchRequest
@@ -110,11 +121,27 @@ const onFormSuccess = () => {
   fetchList()
 }
 
+// 删除模板：引用预检（spec D2b）先列出绑定流水线，无安全同步能力——不提供一键传播。
 const handleDelete = async (row: Record<string, unknown>) => {
   const id = row.id as string
+  let refLines = ''
+  try {
+    const pipes = (await fetchAdminPipelines()) ?? []
+    const bound = pipes.filter((p) => p.templateId === id)
+    if (bound.length > 0) {
+      const detail = bound
+        .slice(0, 8)
+        .map((p) => `  · 租户 ${p.tenantId} / 应用 ${p.appId} / 流水线 ${p.name}`)
+        .join('\n')
+      const more = bound.length > 8 ? `\n  …共 ${bound.length} 条` : ''
+      refLines = `\n\n该模板被 ${bound.length} 条流水线引用：\n${detail}${more}\n（删除后已绑定流水线不受影响，后续 run 仍按旧 stage 执行；平台无模板同步能力，需人工通知各租户）`
+    }
+  } catch {
+    refLines = '\n\n（引用预检加载失败，无法确认绑定流水线数量）'
+  }
   try {
     await ElMessageBox.prompt(
-      `请输入模板 ID "${id}" 确认删除（已绑定该模板的应用流水线不受影响，后续 run 仍按旧 stage 执行）：`,
+      `请输入模板 ID "${id}" 确认删除：${refLines}`,
       '删除模板',
       {
         confirmButtonText: '删除',

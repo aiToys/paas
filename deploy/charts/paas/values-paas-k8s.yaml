@@ -105,3 +105,7 @@ agentrun:
 
 # 集群对外域名后缀：dev 集群 Ingress 域名空间 *.k8s.dd（本机访问需 /etc/hosts 或内网泛解析到节点 IP）。
 domainSuffix: "k8s.dd"
+
+# 集群不自动创建演示工作负载；不影响既有登录、模型目录与业务工作负载。
+seed:
+  workloads: false

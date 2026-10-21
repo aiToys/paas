@@ -48,8 +48,45 @@
                 <el-button type="primary" size="small" :loading="acting" @click="doScale">应用</el-button>
               </el-form>
             </el-popover>
+            <el-button
+              size="small"
+              :disabled="detail.workload.type !== 'service' || !detail.workload.replicas"
+              @click="openRestart"
+            >
+              滚动重启
+            </el-button>
             <el-button type="danger" size="small" :loading="acting" @click="remove">强制删除</el-button>
           </el-space>
+          <div class="ops-note">
+            滚动重启需填写原因；平台返回「已受理」不等于已生效——以下方操作记录 status 为准。{{
+              envHint
+            }}
+          </div>
+        </div>
+
+        <!-- 运维操作记录（受理/执行/生效证据；没有终态源就保持未知） -->
+        <div class="block">
+          <div class="block-title">
+            运维操作记录
+            <el-button link type="primary" size="small" class="title-action" @click="loadOperations">刷新</el-button>
+          </div>
+          <el-table :data="operations" size="small" empty-text="无运维操作记录">
+            <el-table-column label="类型" width="90">
+              <template #default="{ row }">{{ opKindLabel(row.kind) }}</template>
+            </el-table-column>
+            <el-table-column label="状态" width="110">
+              <template #default="{ row }">
+                <el-tag :type="opStatusType(row.status)" size="small">{{ opStatusLabel(row.status) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="reason" label="原因" min-width="160" show-overflow-tooltip />
+            <el-table-column prop="actor" label="操作者" width="120" show-overflow-tooltip />
+            <el-table-column prop="acceptedAt" label="受理时间" width="170" :formatter="tableTimeFormatter" />
+            <el-table-column prop="updatedAt" label="最近观察" width="170" :formatter="tableTimeFormatter" />
+            <el-table-column label="证据" min-width="200" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.evidence || '-' }}</template>
+            </el-table-column>
+          </el-table>
         </div>
 
         <!-- 运行实例 -->
@@ -104,12 +141,52 @@
       </el-form>
       <pre class="log-view">{{ logs.text || '（加载中...）' }}</pre>
     </el-dialog>
+
+    <!-- 滚动重启（原因必填；受理 ≠ 生效） -->
+    <el-dialog v-model="restart.visible" title="滚动重启工作负载" width="480px" append-to-body>
+      <el-alert
+        v-if="envType === 'prod'"
+        type="warning"
+        :closable="false"
+        show-icon
+        title="目标是生产环境"
+        description="后台代操作绕过 prod:write，将以你的账号记审计。请确认已完成变更评审。"
+        class="restart-alert"
+      />
+      <el-alert
+        v-else-if="!envType"
+        type="info"
+        :closable="false"
+        show-icon
+        title="环境类型未知"
+        description="未能读取目标环境类型，可能包含生产环境；操作同样记审计。"
+        class="restart-alert"
+      />
+      <el-form label-width="64px">
+        <el-form-item label="原因" required>
+          <el-input
+            v-model="restart.reason"
+            type="textarea"
+            :rows="3"
+            maxlength="200"
+            show-word-limit
+            placeholder="例如：实例内存异常增长，按变更单 CHG-123 重启"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="restart.visible = false">取消</el-button>
+        <el-button type="primary" :loading="restart.submitting" :disabled="!restart.reason.trim()" @click="doRestart">
+          提交重启
+        </el-button>
+      </template>
+    </el-dialog>
   </el-drawer>
 </template>
 
 <script lang="ts" setup>
 import { visibleTick } from '@/app/composables/useAdminPolling'
-import { ref, onUnmounted } from 'vue'
+import { computed, ref, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { tableTimeFormatter } from "@/lib/format"
 import {
@@ -118,8 +195,12 @@ import {
   deleteWorkload,
   fetchWorkloadLogs,
   fetchAuditLogList,
+  restartWorkload,
+  fetchWorkloadOperations,
+  fetchEnvironmentDetail,
   type AdminWorkloadDetail,
-  type AdminAuditLog
+  type AdminAuditLog,
+  type WorkloadOperation
 } from '../api'
 
 const props = defineProps<{ modelValue: boolean; id: string }>()
@@ -127,10 +208,51 @@ const emit = defineEmits<{ (e: 'update:modelValue', v: boolean): void; (e: 'refr
 
 const detail = ref<AdminWorkloadDetail | null>(null)
 const audits = ref<AdminAuditLog[]>([])
+const operations = ref<WorkloadOperation[]>([])
 const loading = ref(false)
 const acting = ref(false)
 const scale = ref<{ replicas?: number }>({})
+// 环境类型（prod 提示用）：'' = 未读取/读取失败——不猜测为非生产。
+const envType = ref('')
+const restart = ref<{ visible: boolean; reason: string; submitting: boolean }>({
+  visible: false,
+  reason: '',
+  submitting: false
+})
 let timer: number | undefined
+
+const envHint = computed(() => {
+  if (!envType.value) return '目标环境类型未知。'
+  return envType.value === 'prod' ? '目标是生产环境。' : '目标是测试环境。'
+})
+
+const opKindLabel = (k: string) => (({ restart: '滚动重启', recreate: '重建实例' }) as Record<string, string>)[k] ?? k
+// 语义：accepted/reconciling/running 都是「进行中」，succeeded 才算确认完成，
+// unknown/superseded 如实显示，不折叠成成功或失败。
+const opStatusLabel = (s: string) =>
+  (
+    {
+      accepted: '已受理',
+      reconciling: '下发中',
+      running: '执行中',
+      succeeded: '已完成',
+      failed: '失败',
+      superseded: '已被覆盖',
+      unknown: '无法确认'
+    } as Record<string, string>
+  )[s] ?? s
+const opStatusType = (s: string) =>
+  (
+    {
+      succeeded: 'success',
+      failed: 'danger',
+      accepted: 'info',
+      reconciling: 'warning',
+      running: 'warning',
+      superseded: 'info',
+      unknown: 'info'
+    } as Record<string, string>
+  )[s] ?? 'info'
 
 const logs = ref<{ visible: boolean; pod: string; tail: number; previous: boolean; text: string }>({
   visible: false,
@@ -156,8 +278,24 @@ const loadDetail = async () => {
     if (scale.value.replicas === undefined && detail.value?.workload.replicas !== undefined) {
       scale.value.replicas = detail.value.workload.replicas
     }
+    await loadEnvType(detail.value?.workload.envId)
+    await loadOperations()
   } finally {
     loading.value = false
+  }
+}
+
+// 环境类型只用于提示（生产/测试/未知）；读取失败保持空串，不默认按测试环境处理。
+const loadEnvType = async (envId?: string) => {
+  if (!envId) {
+    envType.value = ''
+    return
+  }
+  try {
+    const env = await fetchEnvironmentDetail(envId)
+    envType.value = env?.type ?? ''
+  } catch {
+    envType.value = ''
   }
 }
 const loadAudits = async () => {
@@ -165,26 +303,60 @@ const loadAudits = async () => {
   const res = await fetchAuditLogList({ page: 1, size: 1000 })
   audits.value = (res.records ?? []).filter((a) => a.resourceId === props.id)
 }
+// 操作记录是「是否生效」的唯一证据源；失败保持上一次结果（不打成空表冒充无记录）。
+const loadOperations = async () => {
+  if (!props.id) return
+  try {
+    operations.value = await fetchWorkloadOperations(props.id, { limit: 50 })
+  } catch {
+    /* 保留原记录；下次轮询重试 */
+  }
+}
 const loadAll = () => {
   if (timer) clearInterval(timer) // 防重复打开叠加（R3-9）
   loadDetail()
   loadAudits()
-  timer = window.setInterval(visibleTick(loadDetail), 10000)
+  loadOperations()
+  // 轮询并列刷操作记录（R4 审计 F5）：它是「是否生效」的唯一证据源，
+  // 只刷 detail 不刷 operations，用户提交重启/伸缩后状态永远停在受理态。
+  timer = window.setInterval(visibleTick(() => { loadDetail(); loadOperations() }), 10000)
 }
 const onClose = () => {
   if (timer) clearInterval(timer)
   timer = undefined
   detail.value = null
   scale.value = {}
+  operations.value = []
+  envType.value = ''
+  restart.value = { visible: false, reason: '', submitting: false }
 }
 onUnmounted(onClose)
+
+const openRestart = () => {
+  restart.value = { visible: true, reason: '', submitting: false }
+}
+const doRestart = async () => {
+  const reason = restart.value.reason.trim()
+  if (!reason) return
+  restart.value.submitting = true
+  try {
+    const op = await restartWorkload(props.id, reason)
+    // 202 只表示受理：文案明确指向操作记录，不宣称已生效。
+    ElMessage.success(`已受理（${op.id}），生效与否请看操作记录状态`)
+    restart.value.visible = false
+    await loadOperations()
+    emit('refresh')
+  } finally {
+    restart.value.submitting = false
+  }
+}
 
 const doScale = async () => {
   if (scale.value.replicas === undefined) return
   acting.value = true
   try {
     await scaleWorkload(props.id, { replicas: scale.value.replicas })
-    ElMessage.success('已扩缩容')
+    ElMessage.success('伸缩指令已下发，副本数由控制器异步推进')
     await loadDetail()
     emit('refresh')
   } finally {
@@ -244,6 +416,18 @@ const loadLogs = async () => {
   color: var(--el-text-color-primary);
 }
 .log-form {
+  margin-bottom: 12px;
+}
+.ops-note {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  line-height: 1.6;
+}
+.title-action {
+  margin-left: 8px;
+}
+.restart-alert {
   margin-bottom: 12px;
 }
 .log-view {

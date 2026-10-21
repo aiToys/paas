@@ -676,7 +676,7 @@ func (s *Store) UpsertLaneOverride(ctx context.Context, o configcenter.LaneOverr
 	if err != nil {
 		return configcenter.LaneOverride{}, err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // 提交后 Rollback 返回 ErrTxClosed 属正常
 	if err = lockLane(ctx, tx, tid, o.AppID, o.EnvID, o.LaneID); err != nil {
 		return configcenter.LaneOverride{}, err
 	}
@@ -713,7 +713,7 @@ func (s *Store) DeleteLaneOverride(ctx context.Context, appID, envID, laneID, ke
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }() //nolint:errcheck // 提交后 Rollback 返回 ErrTxClosed 属正常
 	if err = lockLane(ctx, tx, tid, appID, envID, laneID); err != nil {
 		return err
 	}

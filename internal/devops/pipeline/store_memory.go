@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"sync"
 	"time"
@@ -12,18 +13,20 @@ import (
 // memoryStore 三仓储的进程内实现。供 cmd/core 在 PAAS_DB_URL 为空时装配。
 // 所有方法强制按 ctx 租户过滤；跨租户访问返 NotFound 不泄漏存在性。
 type memoryStore struct {
-	mu        sync.RWMutex
-	pipes     map[string]Pipeline
-	runs      map[string]PipelineRun
-	templates map[string]PipelineTemplate
+	mu         sync.RWMutex
+	pipes      map[string]Pipeline
+	runs       map[string]PipelineRun
+	templates  map[string]PipelineTemplate
+	deliveries map[string]WebhookDelivery // key = pipelineID + "\x00" + deliveryID
 }
 
 // NewMemoryStore 创建空 store（不 seed 演示数据，去假数据门控由 cmd/core 控制）。
 func NewMemoryStore() *memoryStore {
 	return &memoryStore{
-		pipes:     map[string]Pipeline{},
-		runs:      map[string]PipelineRun{},
-		templates: map[string]PipelineTemplate{},
+		pipes:      map[string]Pipeline{},
+		runs:       map[string]PipelineRun{},
+		templates:  map[string]PipelineTemplate{},
+		deliveries: map[string]WebhookDelivery{},
 	}
 }
 
@@ -37,6 +40,23 @@ func tenantOrErr(ctx context.Context) (string, error) {
 }
 
 // ---------- Repository: Pipeline ----------
+
+// ListAllPipelines 跨租户列表（admin 模板引用预检用）；created_at 升序，对齐 ListPipelines。
+func (s *memoryStore) ListAllPipelines(ctx context.Context) ([]Pipeline, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Pipeline, 0, len(s.pipes))
+	for _, p := range s.pipes {
+		out = append(out, clonePipeline(p))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
 
 func (s *memoryStore) ListPipelines(ctx context.Context, appID string) ([]Pipeline, error) {
 	tid, err := tenantOrErr(ctx)
@@ -210,11 +230,19 @@ func (s *memoryStore) ListRuns(ctx context.Context, appID, pipelineID, status st
 
 // ListAllRuns 跨租户列表（admin 总览用，返回对象带 TenantID）；可选 status 过滤；倒序。
 func (s *memoryStore) ListAllRuns(ctx context.Context, status string) ([]PipelineRun, error) {
+	return s.listAdminRuns(status, "", 0)
+}
+
+func (s *memoryStore) ListAdminRuns(ctx context.Context, status, tenantID string) ([]PipelineRun, error) {
+	return s.listAdminRuns(status, tenantID, 1000)
+}
+
+func (s *memoryStore) listAdminRuns(status, tenantID string, limit int) ([]PipelineRun, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]PipelineRun, 0)
 	for _, r := range s.runs {
-		if status != "" && r.Status != status {
+		if (status != "" && r.Status != status) || (tenantID != "" && r.TenantID != tenantID) {
 			continue
 		}
 		out = append(out, cloneRun(r))
@@ -226,7 +254,20 @@ func (s *memoryStore) ListAllRuns(ctx context.Context, status string) ([]Pipelin
 		}
 		return out[i].ID > out[j].ID
 	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
 	return out, nil
+}
+
+func (s *memoryStore) GetRunAny(ctx context.Context, id string) (PipelineRun, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	r, ok := s.runs[id]
+	if !ok {
+		return PipelineRun{}, ErrRunNotFound
+	}
+	return cloneRun(r), nil
 }
 
 func (s *memoryStore) GetRun(ctx context.Context, id string) (PipelineRun, error) {
@@ -290,6 +331,10 @@ func (s *memoryStore) UpdateRun(ctx context.Context, r PipelineRun) (PipelineRun
 	ex, ok := s.runs[r.ID]
 	if !ok || ex.TenantID != tid {
 		return PipelineRun{}, ErrRunNotFound
+	}
+	// Abort 是不可恢复终态；异步阶段的旧快照不得重新占据运行槽位。
+	if ex.Status == RunAborted && r.Status != RunAborted {
+		return PipelineRun{}, ErrNotRunning
 	}
 	stored := cloneRun(r)
 	stored.TenantID = tid
@@ -542,4 +587,107 @@ func cloneStringAnyMap(in map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+// ---------- DeliveryRepository: webhook 投递记录 ----------
+
+func deliveryKey(pipelineID, id string) string { return pipelineID + "\x00" + id }
+
+func (s *memoryStore) ListDeliveries(ctx context.Context, pipelineID string, limit int) ([]WebhookDelivery, error) {
+	tid, err := tenantOrErr(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]WebhookDelivery, 0, len(s.deliveries))
+	for _, d := range s.deliveries {
+		if d.PipelineID == pipelineID && d.TenantID == tid {
+			out = append(out, cloneDelivery(d))
+		}
+	}
+	// received_at 倒序，同刻按 ID 稳定排序（列表结果确定）。
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].ReceivedAt.Equal(out[j].ReceivedAt) {
+			return out[i].ReceivedAt.After(out[j].ReceivedAt)
+		}
+		return out[i].ID > out[j].ID
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *memoryStore) GetDelivery(ctx context.Context, pipelineID, id string) (WebhookDelivery, error) {
+	tid, err := tenantOrErr(ctx)
+	if err != nil {
+		return WebhookDelivery{}, err
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	d, ok := s.deliveries[deliveryKey(pipelineID, id)]
+	if !ok || d.TenantID != tid {
+		return WebhookDelivery{}, ErrDeliveryNotFound
+	}
+	return cloneDelivery(d), nil
+}
+
+func (s *memoryStore) CreateDelivery(ctx context.Context, d WebhookDelivery) (WebhookDelivery, error) {
+	tid, err := tenantOrErr(ctx)
+	if err != nil {
+		return WebhookDelivery{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := deliveryKey(d.PipelineID, d.ID)
+	if _, exists := s.deliveries[k]; exists {
+		return WebhookDelivery{}, errors.New("webhook delivery already exists")
+	}
+	d.TenantID = tid // 归属以 ctx 为准（防请求体伪造）
+	if d.ReceivedAt.IsZero() {
+		d.ReceivedAt = time.Now()
+	}
+	s.deliveries[k] = cloneDelivery(d)
+	s.trimDeliveriesLocked(tid, d.PipelineID)
+	return cloneDelivery(d), nil
+}
+
+func (s *memoryStore) UpdateDelivery(ctx context.Context, d WebhookDelivery) (WebhookDelivery, error) {
+	tid, err := tenantOrErr(ctx)
+	if err != nil {
+		return WebhookDelivery{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := deliveryKey(d.PipelineID, d.ID)
+	old, ok := s.deliveries[k]
+	if !ok || old.TenantID != tid {
+		return WebhookDelivery{}, ErrDeliveryNotFound
+	}
+	// 归属与时间戳不可被请求体改写。
+	d.TenantID = old.TenantID
+	d.ReceivedAt = old.ReceivedAt
+	s.deliveries[k] = cloneDelivery(d)
+	return cloneDelivery(d), nil
+}
+
+// trimDeliveriesLocked 裁剪单 pipeline 记录上限（内存长期运行防无界增长；PG 保留全量靠查询 limit）。
+func (s *memoryStore) trimDeliveriesLocked(tid, pipelineID string) {
+	var list []WebhookDelivery
+	for _, d := range s.deliveries {
+		if d.TenantID == tid && d.PipelineID == pipelineID {
+			list = append(list, d)
+		}
+	}
+	if len(list) <= maxDeliveriesPerPipeline {
+		return
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].ReceivedAt.After(list[j].ReceivedAt) })
+	for _, d := range list[maxDeliveriesPerPipeline:] {
+		delete(s.deliveries, deliveryKey(d.PipelineID, d.ID))
+	}
 }

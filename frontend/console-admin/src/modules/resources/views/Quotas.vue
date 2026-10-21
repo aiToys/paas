@@ -18,13 +18,6 @@
         style="width: 240px"
         @keyup.enter="handleSearch"
       />
-      <el-input
-        v-model="searchForm.tenantId"
-        placeholder="租户 ID 过滤"
-        clearable
-        style="width: 160px; margin-left: 8px"
-        @keyup.enter="handleSearch"
-      />
     </template>
 
     <template #actions>
@@ -70,13 +63,15 @@ import { Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { SearchTable } from '@/app/components'
 import { useCrud } from '@/app/composables/useCrud'
+import { useScopeStore } from '@/app/stores/scope'
+import { useScopeChange } from '@/app/composables'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
 import { tableTimeFormatter } from '@/lib/format'
 import { fetchQuotaList, setQuotaForTenant, type AdminQuota, type ResSearchRequest } from '../api'
 
 const { listData, loading, pagination, searchForm, fetchList, handleSearch, handleReset, handlePageChange } =
   useCrud<AdminQuota>({
-    fetch: (params) => fetchQuotaList(params as unknown as ResSearchRequest),
+    fetch: (params) => fetchQuotaList({ ...params, tenantId: scopeStore.tenantId } as unknown as ResSearchRequest),
     defaultSearchForm: { keyword: '', tenantId: '' },
     pageSize: 10
   })
@@ -90,8 +85,8 @@ const columns = computed<ColumnDef[]>(() => [
   { prop: 'action', label: '操作', width: 90, slot: 'action', hideable: false }
 ])
 
-// 6 资源维度（与 billing.ResXxx 对齐）。
-const resourceKeys = ['applications', 'workloads', 'models', 'gpu', 'tokens', 'storage_gb']
+// 7 资源维度（与 billing.ResourceOrder 对齐；漏项会导致该资源配额无处可设）。
+const resourceKeys = ['applications', 'workloads', 'models', 'dataservices', 'gpu', 'tokens', 'storage_gb']
 
 const adjustVisible = ref(false)
 const adjustTenant = ref('')
@@ -119,6 +114,10 @@ const doAdjust = async () => {
     adjusting.value = false
   }
 }
+
+// 浏览范围（顶栏）联动：切租户重拉列表；范围是纯过滤器不改写目标
+const scopeStore = useScopeStore()
+useScopeChange(() => fetchList())
 
 fetchList()
 </script>

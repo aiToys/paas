@@ -18,13 +18,6 @@
         style="width: 240px"
         @keyup.enter="handleSearch"
       />
-      <el-input
-        v-model="searchForm.tenantId"
-        placeholder="租户 ID 过滤"
-        clearable
-        style="width: 160px; margin-left: 8px"
-        @keyup.enter="handleSearch"
-      />
     </template>
 
     <template #actions>
@@ -40,7 +33,7 @@
       <el-tag size="small" type="info">{{ kindLabel(row.kind) }}</el-tag>
     </template>
     <template #col-engine="{ row }">
-      <span v-if="row.engineId">{{ row.engineId }}</span>
+      <el-button v-if="row.engineId" link type="primary" size="small" @click="router.push('/resources/engines?tab=engines')">{{ row.engineId }}</el-button>
       <span v-else style="color: var(--el-text-color-secondary)">-</span>
     </template>
     <template #col-status="{ row }">
@@ -56,11 +49,13 @@
 </template>
 
 <script lang="ts" setup>
-import { computed, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { watch, computed, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { SearchTable } from '@/app/components'
 import { useCrud } from '@/app/composables/useCrud'
+import { useScopeStore } from '@/app/stores/scope'
+import { useScopeChange } from '@/app/composables'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
 import { fetchDataserviceList, type AdminDataservice, type ResSearchRequest } from '../api'
 import DataserviceDrawer from './DataserviceDrawer.vue'
@@ -68,12 +63,13 @@ import DataserviceCreateDrawer from './DataserviceCreateDrawer.vue'
 
 // 引擎互链：从引擎目录「查看实例」跳入时带 ?engine=<id> 预过滤。
 const route = useRoute()
+const router = useRouter()
 const engineFilter = () => (typeof route.query.engine === 'string' ? route.query.engine : '')
 
 const { listData, loading, pagination, searchForm, fetchList, handleSearch, handleReset, handlePageChange } =
   useCrud<AdminDataservice>({
     fetch: (params) =>
-      fetchDataserviceList(params as unknown as ResSearchRequest).then((res) => {
+      fetchDataserviceList({ ...params, tenantId: scopeStore.tenantId } as unknown as ResSearchRequest).then((res) => {
         const eng = engineFilter()
         if (!eng) return res
         const filtered = (res.records ?? []).filter((d) => d.engineId === eng)
@@ -84,6 +80,15 @@ const { listData, loading, pagination, searchForm, fetchList, handleSearch, hand
   })
 
 const tableData = computed(() => listData.value as unknown as Record<string, unknown>[])
+
+// F3：已在本页时再点其他引擎「查看实例」，query 变化组件复用不会重挂——
+// watch engine 参数重拉，否则永远显示旧引擎的实例。
+watch(
+  () => route.query.engine,
+  (nv, ov) => {
+    if (nv !== ov) fetchList()
+  }
+)
 
 const columns = computed<ColumnDef[]>(() => [
   { prop: 'tenantId', label: '租户', width: 130, slot: 'tenant' },
@@ -110,6 +115,14 @@ const kindLabel = (k: string) =>
   >)[k] ?? k
 const statusType = (s: string) =>
   (({ running: 'success', creating: 'warning', stopped: 'info', failed: 'danger' }) as Record<string, string>)[s] ?? 'info'
+
+// 浏览范围（顶栏）联动：切租户重拉列表；范围是纯过滤器不改写目标
+const scopeStore = useScopeStore()
+useScopeChange(() => fetchList(), () => {
+  detailVisible.value = false
+  detailId.value = ''
+  createVisible.value = false
+})
 
 fetchList()
 </script>

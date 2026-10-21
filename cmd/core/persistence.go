@@ -148,6 +148,9 @@ type Stores struct {
 	// AlertEvents 是告警状态机/历史事件存储（migration 0042）。PG 路径非 nil
 	//（重启恢复 pending/firing + firing/resolved 历史可回看）；内存路径 nil（纯内存行为）。
 	AlertEvents *obspg.Store
+	// DB 是元数据库句柄（仅 PG 路径非 nil；内存路径为 nil）。供平台诊断只读检查
+	// （ping 延迟 / 迁移版本）——业务仓储不直接暴露连接池，诊断不另开连接。
+	DB *storagepg.DB
 }
 
 // buildAllStores 选择持久化后端、构造全模块 store 并完成 seed。
@@ -300,6 +303,7 @@ func buildAllStores(ctx context.Context, appliers k8sAppliers, secCipher *crypto
 			Lane:           laneRepo,
 			AlertRules:     alertStore,
 			AlertEvents:    alertStore,
+			DB:             db,
 		}
 		return stores, db.Close, nil
 	}
@@ -596,11 +600,10 @@ func seedEnginesIfEmpty(ctx context.Context, repo dataservice.EngineRepository) 
 }
 
 // seedWorkloads 灌入工作负载预置数据。
-// PAAS_DISABLE_DEMO_SEED=true 跳过（与 seedApplications 同款门控）——生产必须跳过：
-// 演示 workload 经 ApplyRepo 直接投影 CRD 会真实拉起 Deployment，且 AppID 指向演示应用
-// （生产被 seedApplications 跳过）成孤儿引用 + 占用租户配额。
+// 只有PAAS_ENABLE_DEMO_WORKLOADS=true且全局演示未关闭时才灌入。
+// 演示workload经ApplyRepo会创建真实Pod，必须独立显式开启。
 func seedWorkloads(ctx context.Context, repo workload.Repository) {
-	if os.Getenv("PAAS_DISABLE_DEMO_SEED") == "true" {
+	if !wlmemory.DemoSeedEnabled() {
 		return
 	}
 	// 内网部署 seed 镜像拼 PAAS_IMAGE_REGISTRY 前缀（集群节点可拉）；空用公开名（dev 内存模式）。

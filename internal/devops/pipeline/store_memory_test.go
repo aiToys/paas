@@ -354,3 +354,36 @@ func TestPipelineDeepCopy(t *testing.T) {
 		t.Fatalf("stageRun output deep copy failed: %v", gr2.StageRuns[0].Output["imageId"])
 	}
 }
+
+func TestListAllPipelinesCrossTenant(t *testing.T) {
+	s := NewMemoryStore()
+	ctxA := tenant.WithTenant(context.Background(), "t-acme")
+	ctxB := tenant.WithTenant(context.Background(), "t-globex")
+
+	if _, err := s.CreatePipeline(ctxA, Pipeline{Name: "p1", AppID: "a1", Kind: KindCI, TemplateID: "tpl-test"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreatePipeline(ctxA, Pipeline{Name: "p2", AppID: "a2", Kind: KindCD, TemplateID: "tpl-test"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreatePipeline(ctxB, Pipeline{Name: "p3", AppID: "b1", Kind: KindCI, TemplateID: "tpl-ci"}); err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := s.ListAllPipelines(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("跨租户应聚齐 3 条，got %d", len(all))
+	}
+	acme := 0
+	for _, p := range all {
+		if p.TenantID == "t-acme" {
+			acme++
+		}
+	}
+	if acme != 2 {
+		t.Fatalf("t-acme 应 2 条，got %d", acme)
+	}
+}

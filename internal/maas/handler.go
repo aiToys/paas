@@ -130,6 +130,9 @@ func (h *Handler) serveModels(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteInternalError(w, err)
 			return
 		}
+		for _, m := range list {
+			h.projectChannelStatus(m.ID, m.Channels)
+		}
 		httputil.WriteData(w, list)
 	case http.MethodPost:
 		var m provider.Model
@@ -165,6 +168,7 @@ func (h *Handler) serveModel(w http.ResponseWriter, r *http.Request, id string) 
 			writeMaasErr(w, err)
 			return
 		}
+		h.projectChannelStatus(id, m.Channels)
 		httputil.WriteData(w, m)
 	case http.MethodPut:
 		var m provider.Model
@@ -198,6 +202,25 @@ func (h *Handler) serveModel(w http.ResponseWriter, r *http.Request, id string) 
 	}
 }
 
+// projectChannelStatus 用 gateway 运行态状态投影覆盖 store 值（R3 审计 H-1）。
+// store 里的 status 只有创建/更新时写入；请求级 failover 打标（degraded/offline，
+// MarkChannelStatus 写 gateway 内存）不回写 store——不投影会让 admin「状态」列
+// 永远显示静态值，通道已被摘出路由而列表毫无感知。gw 未实现读取接口（如测试桩）时跳过。
+func (h *Handler) projectChannelStatus(modelID string, chs []*provider.Channel) {
+	if h.gw == nil {
+		return
+	}
+	sr, ok := h.gw.(provider.ChannelStatusReader)
+	if !ok {
+		return
+	}
+	for _, c := range chs {
+		if st := sr.ChannelStatus(modelID, c.ID); st != "" {
+			c.Status = st
+		}
+	}
+}
+
 func (h *Handler) serveChannels(w http.ResponseWriter, r *http.Request, modelID string) {
 	switch r.Method {
 	case http.MethodGet:
@@ -206,6 +229,7 @@ func (h *Handler) serveChannels(w http.ResponseWriter, r *http.Request, modelID 
 			writeMaasErr(w, err)
 			return
 		}
+		h.projectChannelStatus(modelID, list)
 		httputil.WriteData(w, list)
 	case http.MethodPost:
 		var c provider.Channel

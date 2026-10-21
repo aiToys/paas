@@ -3,12 +3,13 @@ export {}
 
 declare module 'vue-router' {
   interface RouteMeta {
-    title?: string
+	title?: string
     icon?: string
     showMenu?: boolean
     showInBreadcrumb?: boolean
     public?: boolean // 免登录（白名单）
     cache?: boolean // 参与 KeepAlive
+    keywords?: string[] // 菜单搜索/别名元数据（俗称与旧名，与后端菜单真源同源下发）
     permissions?: {
       any?: string[]
       all?: string[]

@@ -119,3 +119,11 @@ type GatewayRegistrar interface {
 	// UnregisterModel 注销一个逻辑模型（含通道）。未知 ID 忽略（幂等）。
 	UnregisterModel(modelID string)
 }
+
+// ChannelStatusReader 读取请求级 failover 打标的运行态通道状态（可选接口，Gateway 实现）。
+// admin 列表投影用：store 里的 status 只有创建/更新时写入的值，运行态 degraded/offline
+// 打标不回写 store——不投影会让「最近诊断」列永远显示静态值（R3 审计 H-1 断链）。
+// 返回空串表示无运行态打标（保持 store 值）。
+type ChannelStatusReader interface {
+	ChannelStatus(modelID, channelID string) string
+}

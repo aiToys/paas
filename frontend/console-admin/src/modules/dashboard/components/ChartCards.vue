@@ -20,7 +20,19 @@
           </el-radio-button>
         </el-radio-group>
       </div>
+      <!-- 加载失败显示错误态：失败 ≠ 空数据（R4 审计 M-1），不画空坐标轴冒充正常 -->
+      <div v-if="error" class="chart-body chart-empty chart-error">
+        {{ error }}
+      </div>
+      <!-- 无历史计量时后端返回空数组：显示如实空态，不渲染假曲线坐标轴 -->
       <div
+        v-else-if="!trendData.length && !loading"
+        class="chart-body chart-empty"
+      >
+        {{ t('dashboard.noTrendData') }}
+      </div>
+      <div
+        v-else
         ref="trendRef"
         v-loading="loading"
         class="chart-body"
@@ -32,7 +44,11 @@
       <div class="chart-header">
         <span class="chart-title">{{ t('dashboard.roleDistribution') }}</span>
       </div>
+      <div v-if="error" class="chart-body chart-empty chart-error">
+        {{ error }}
+      </div>
       <div
+        v-else
         ref="distRef"
         v-loading="loading"
         class="chart-body"
@@ -69,6 +85,7 @@ const props = defineProps<{
   distributionData: DistItem[]
   range: ChartRange
   loading?: boolean
+  error?: string
 }>()
 
 const emit = defineEmits<{
@@ -249,6 +266,18 @@ onUnmounted(() => {
 
 .chart-body {
   height: 280px;
+}
+
+.chart-error {
+  color: var(--el-color-danger);
+}
+
+.chart-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
 }
 
 @media (max-width: 992px) {

@@ -18,7 +18,12 @@
         style="width: 200px"
         @change="handleSearch"
       >
-        <el-option v-for="t in tenants" :key="t.id" :label="`${t.name} (${t.id})`" :value="t.id" />
+        <el-option
+          v-for="t in tenants"
+          :key="t.id"
+          :label="`${t.name} (${t.id})`"
+          :value="t.id"
+        />
       </el-select>
       <el-input
         v-model="searchForm.keyword"
@@ -30,34 +35,183 @@
     </template>
 
     <template #actions>
-      <el-button type="primary" :icon="Plus" @click="openDrawer">新建密钥</el-button>
-      <el-button :icon="Refresh" @click="fetchList">刷新</el-button>
+      <el-button
+        type="primary"
+        :icon="Plus"
+        @click="openDrawer"
+      >
+        新建密钥
+      </el-button>
+      <el-button
+        :icon="Refresh"
+        @click="fetchList"
+      >
+        刷新
+      </el-button>
     </template>
 
     <template #col-roles="{ row }">
-      <el-tag v-for="r in (row.roles as string[])" :key="r" size="small" style="margin-right: 4px">
+      <el-tag
+        v-for="r in (row.roles as string[])"
+        :key="r"
+        size="small"
+        style="margin-right: 4px"
+      >
         {{ r }}
       </el-tag>
     </template>
 
+    <template #col-state="{ row }">
+      <el-tooltip
+        :content="stateHint(row as unknown as ApiKeyInfo)"
+        placement="top"
+      >
+        <el-tag
+          size="small"
+          :type="stateTagType(row.state as ApiKeyState)"
+        >
+          {{ stateLabel(row.state as ApiKeyState) }}
+        </el-tag>
+      </el-tooltip>
+    </template>
+
+    <template #col-lastUsedAt="{ row }">
+      <span v-if="row.lastUsedAt">{{ fmtTime(row.lastUsedAt as string) }}</span>
+      <span
+        v-else
+        class="muted"
+      >未使用</span>
+    </template>
+
+    <template #col-expiresAt="{ row }">
+      <span v-if="row.expiresAt">{{ fmtTime(row.expiresAt as string) }}</span>
+      <span
+        v-else
+        class="muted"
+      >永不过期</span>
+    </template>
+
     <template #col-actions="{ row }">
-      <el-button link type="danger" size="small" @click="handleDelete(row)">吊销</el-button>
+      <template v-if="row.state !== 'revoked'">
+        <el-button
+          link
+          type="primary"
+          size="small"
+          @click="handleRotate(row)"
+        >
+          轮换
+        </el-button>
+        <el-dropdown
+          trigger="click"
+          @command="(cmd: string) => handleCommand(cmd, row)"
+        >
+          <el-button
+            link
+            type="primary"
+            size="small"
+            style="margin-left: 8px"
+          >
+            更多
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="expiry">
+                设置到期
+              </el-dropdown-item>
+              <el-dropdown-item
+                command="revoke"
+                divided
+              >
+                吊销（保留记录）
+              </el-dropdown-item>
+              <el-dropdown-item command="delete">
+                删除记录
+              </el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
+      </template>
+      <el-button
+        v-else
+        link
+        type="danger"
+        size="small"
+        @click="handleDelete(row)"
+      >
+        删除记录
+      </el-button>
     </template>
   </SearchTable>
 
-  <ApiKeyFormDrawer v-model="drawerVisible" @created="onCreated" />
+  <!-- 设置到期：本地时区选择 → 提交 RFC3339（UTC） -->
+  <el-dialog
+    v-model="expiryVisible"
+    title="设置密钥到期时间"
+    width="420px"
+  >
+    <el-alert
+      type="info"
+      :closable="false"
+      style="margin-bottom: 12px"
+    >
+      到期后该密钥立即失效（401 之外的 403「已过期」，可通过状态列区分）。如需立即失效请用「吊销」。
+    </el-alert>
+    <el-date-picker
+      v-model="expiryValue"
+      type="datetime"
+      placeholder="选择到期时间（留空 = 永不过期）"
+      style="width: 100%"
+    />
+    <template #footer>
+      <el-button @click="expiryVisible = false">
+        取消
+      </el-button>
+      <el-button
+        type="primary"
+        :loading="expirySubmitting"
+        @click="submitExpiry"
+      >
+        保存
+      </el-button>
+    </template>
+  </el-dialog>
+
+  <ApiKeyFormDrawer
+    v-model="drawerVisible"
+    @created="onCreated"
+  />
 
   <!-- 创建后明文仅展示一次 -->
-  <el-dialog v-model="showPlaintext" title="密钥已创建" width="560px" :close-on-click-modal="false">
-    <el-alert type="warning" :closable="false" style="margin-bottom: 12px">
+  <el-dialog
+    v-model="showPlaintext"
+    :title="plaintextTitle"
+    width="560px"
+    :close-on-click-modal="false"
+  >
+    <el-alert
+      type="warning"
+      :closable="false"
+      style="margin-bottom: 12px"
+    >
       完整密钥仅显示这一次，关闭后无法再次查看。请立即复制保存。
     </el-alert>
     <div style="display: flex; align-items: center; gap: 8px">
       <code style="flex: 1; padding: 8px 10px; background: var(--el-fill-color-light); border-radius: 6px; word-break: break-all; font-size: 12.5px">{{ plaintext }}</code>
-      <el-button type="primary" size="small" @click="copy(plaintext)">复制</el-button>
+      <el-button
+        type="primary"
+        size="small"
+        @click="copy(plaintext)"
+      >
+        复制
+      </el-button>
     </div>
     <template #footer>
-      <el-button type="primary" @click="showPlaintext = false">我已保存</el-button>
+      <el-button
+        type="primary"
+        @click="showPlaintext = false"
+      >
+        我已保存
+      </el-button>
     </template>
   </el-dialog>
 </template>
@@ -72,9 +226,13 @@ import type { ColumnDef } from '@/app/components/SearchTable/types'
 import {
   fetchApiKeyList,
   deleteApiKey,
+  revokeApiKey,
+  setApiKeyExpiry,
+  rotateApiKey,
   fetchAllTenants,
   type ApiKeyInfo,
   type ApiKeySearchRequest,
+  type ApiKeyState,
   type TenantInfo
 } from '../api'
 import ApiKeyFormDrawer from './ApiKeyFormDrawer.vue'
@@ -101,12 +259,33 @@ const tableData = computed(() => listData.value as unknown as Record<string, unk
 const columns = computed<ColumnDef[]>(() => [
   { prop: 'id', label: '密钥 ID', minWidth: 180 },
   { prop: 'tenantId', label: '租户', minWidth: 120 },
-  { prop: 'userId', label: '用户', minWidth: 140 },
+  { prop: 'userId', label: '用户', minWidth: 120 },
+  { prop: 'appId', label: '应用', minWidth: 120 },
   { prop: 'roles', label: '角色', minWidth: 160, slot: 'roles' },
   { prop: 'key', label: '密钥（掩码）', minWidth: 200 },
-  { prop: 'createdAt', label: '创建时间', minWidth: 180 },
-  { prop: 'actions', label: '操作', width: 100, fixed: 'right', slot: 'actions' }
+  { prop: 'state', label: '状态', width: 100, slot: 'state' },
+  { prop: 'expiresAt', label: '到期时间', minWidth: 170, slot: 'expiresAt' },
+  { prop: 'lastUsedAt', label: '最近使用', minWidth: 170, slot: 'lastUsedAt' },
+  { prop: 'createdAt', label: '创建时间', minWidth: 170 },
+  { prop: 'actions', label: '操作', width: 150, fixed: 'right', slot: 'actions' }
 ])
+
+// —— 状态派生（后端 KeyState 回填；前端只做文案映射）——
+const stateLabel = (s?: ApiKeyState) =>
+  ({ active: '启用', expiring: '即将到期', expired: '已过期', revoked: '已吊销' })[s ?? 'active']
+const stateTagType = (s?: ApiKeyState) =>
+  (({ active: 'success', expiring: 'warning', expired: 'danger', revoked: 'info' }) as const)[
+    s ?? 'active'
+  ]
+const stateHint = (row: ApiKeyInfo) => {
+  if (row.state === 'revoked') {
+    return row.revokedAt ? `已吊销于 ${fmtTime(row.revokedAt)}，记录保留供审计` : '已吊销'
+  }
+  if (row.state === 'expired') return '已过到期时间，调用会被拒绝（403 已过期）'
+  if (row.state === 'expiring') return '7 天内到期，请及时轮换'
+  return row.rotatedFrom ? `由 ${row.rotatedFrom} 轮换而来` : '正常可用'
+}
+const fmtTime = (s?: string) => (s ? new Date(s).toLocaleString() : '')
 
 const drawerVisible = ref(false)
 const openDrawer = () => {
@@ -116,8 +295,10 @@ const openDrawer = () => {
 // 创建成功：弹明文展示框 + 刷新列表。
 const showPlaintext = ref(false)
 const plaintext = ref('')
+const plaintextTitle = ref('密钥已创建')
 const onCreated = (key: string) => {
   plaintext.value = key
+  plaintextTitle.value = '密钥已创建'
   showPlaintext.value = true
   fetchList()
 }
@@ -131,11 +312,42 @@ const copy = async (text: string) => {
   }
 }
 
-const handleDelete = async (row: Record<string, unknown>) => {
+// —— 轮换 / 到期 / 吊销 ——
+
+const handleRotate = async (row: Record<string, unknown>) => {
   const id = row.id as string
   try {
     await ElMessageBox.confirm(
-      `确认吊销密钥「${id}」？此操作不可逆，关联的程序化调用将立即失效。`,
+      `为密钥「${id}」生成同权限的新密钥并立即吊销旧密钥。\n` +
+        '新密钥不继承原到期时间（默认永不过期），明文只展示一次。',
+      '轮换密钥',
+      { confirmButtonText: '确认轮换', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  try {
+    const nk = await rotateApiKey(id)
+    plaintext.value = nk.key
+    plaintextTitle.value = '密钥已轮换（旧密钥已吊销）'
+    showPlaintext.value = true
+    fetchList()
+  } catch {
+    // 拦截器提示
+  }
+}
+
+const handleCommand = (cmd: string, row: Record<string, unknown>) => {
+  if (cmd === 'expiry') openExpiry(row)
+  else if (cmd === 'revoke') handleRevoke(row)
+  else if (cmd === 'delete') handleDelete(row)
+}
+
+const handleRevoke = async (row: Record<string, unknown>) => {
+  const id = row.id as string
+  try {
+    await ElMessageBox.confirm(
+      `确认吊销密钥「${id}」？调用方将立即无法使用；记录会保留（区别于「删除记录」）。`,
       '吊销密钥',
       { confirmButtonText: '确认吊销', cancelButtonText: '取消', type: 'warning' }
     )
@@ -143,8 +355,54 @@ const handleDelete = async (row: Record<string, unknown>) => {
     return
   }
   try {
-    await deleteApiKey(id)
+    await revokeApiKey(id)
     ElMessage.success('已吊销')
+    fetchList()
+  } catch {
+    // 拦截器提示
+  }
+}
+
+const expiryVisible = ref(false)
+const expirySubmitting = ref(false)
+const expiryValue = ref<Date | null>(null)
+const expiryTarget = ref('')
+
+const openExpiry = (row: Record<string, unknown>) => {
+  expiryTarget.value = row.id as string
+  expiryValue.value = row.expiresAt ? new Date(row.expiresAt as string) : null
+  expiryVisible.value = true
+}
+
+const submitExpiry = async () => {
+  expirySubmitting.value = true
+  try {
+    await setApiKeyExpiry(expiryTarget.value, expiryValue.value ? expiryValue.value.toISOString() : '')
+    ElMessage.success(expiryValue.value ? '已设置到期时间' : '已取消到期（永不过期）')
+    expiryVisible.value = false
+    fetchList()
+  } catch {
+    // 拦截器提示（后端拒绝过去时间）
+  } finally {
+    expirySubmitting.value = false
+  }
+}
+
+const handleDelete = async (row: Record<string, unknown>) => {
+  const id = row.id as string
+  try {
+    await ElMessageBox.confirm(
+      `确认删除密钥记录「${id}」？记录将被移除，无法再从审计中按 ID 回溯。` +
+        '若只是想停用凭据，请用「吊销（保留记录）」。',
+      '删除密钥记录',
+      { confirmButtonText: '确认删除', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  try {
+    await deleteApiKey(id)
+    ElMessage.success('已删除')
     fetchList()
   } catch {
     // 拦截器提示
@@ -160,3 +418,10 @@ onMounted(async () => {
   }
 })
 </script>
+
+<style scoped>
+.muted {
+  color: var(--el-text-color-secondary);
+  font-size: 12.5px;
+}
+</style>

@@ -18,13 +18,6 @@
         style="width: 240px"
         @keyup.enter="handleSearch"
       />
-      <el-input
-        v-model="searchForm.tenantId"
-        placeholder="租户 ID 过滤"
-        clearable
-        style="width: 160px; margin-left: 8px"
-        @keyup.enter="handleSearch"
-      />
     </template>
 
     <template #actions>
@@ -47,7 +40,12 @@
     </template>
   </SearchTable>
 
-  <PipelineRunDrawer v-model="drawerVisible" :id="detailId" @refresh="fetchList" />
+  <PipelineRunDrawer
+    :key="detailId"
+    v-model="drawerVisible"
+    :id="detailId"
+    @refresh="fetchList"
+  />
 </template>
 
 <script lang="ts" setup>
@@ -56,6 +54,8 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import { SearchTable } from '@/app/components'
 import { useCrud } from '@/app/composables/useCrud'
+import { useScopeStore } from '@/app/stores/scope'
+import { useScopeChange, useResourceFocus } from '@/app/composables'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
 import { tableTimeFormatter } from '@/lib/format'
 import { fetchPipelineRunList, type AdminPipelineRun, type ResSearchRequest } from '../api'
@@ -63,17 +63,14 @@ import PipelineRunDrawer from './PipelineRunDrawer.vue'
 
 const { listData, loading, pagination, searchForm, fetchList, handleSearch, handleReset, handlePageChange } =
   useCrud<AdminPipelineRun>({
-    fetch: (params) => fetchPipelineRunList(params as unknown as ResSearchRequest),
+    fetch: (params) => fetchPipelineRunList({ ...params, tenantId: scopeStore.tenantId } as unknown as ResSearchRequest),
     defaultSearchForm: { keyword: '', tenantId: '' },
     pageSize: 10
   })
 
 const drawerVisible = ref(false)
 const detailId = ref('')
-const openDetail = (id: string) => {
-  detailId.value = id
-  drawerVisible.value = true
-}
+const openDetail = useResourceFocus({ path: '/resources/pipelineruns', tab: 'runs', visible: drawerVisible, id: detailId })
 
 const tableData = computed(() => listData.value as unknown as Record<string, unknown>[])
 
@@ -103,6 +100,13 @@ const columns = computed<ColumnDef[]>(() => [
 
 // 10s 轮询（运行态实时刷新，与 console-user DevOps 运行记录同款）。
 let timer: ReturnType<typeof setInterval> | undefined
+// 浏览范围（顶栏）联动：切租户重拉列表；范围是纯过滤器不改写目标
+const scopeStore = useScopeStore()
+useScopeChange(() => fetchList(), () => {
+  drawerVisible.value = false
+  detailId.value = ''
+})
+
 onMounted(() => {
   fetchList()
   timer = setInterval(visibleTick(fetchList), 10000)

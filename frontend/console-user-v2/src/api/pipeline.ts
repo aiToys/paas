@@ -41,6 +41,24 @@ export interface Pipeline {
   createdAt: string
 }
 
+/** Webhook 投递记录（D5-5）：每次通过鉴权的投递都留一条，「push 了为何没触发」可查。 */
+export interface WebhookDelivery {
+  id: string
+  tenantId?: string
+  pipelineId: string
+  appId: string
+  event?: string
+  branch?: string
+  commit?: string
+  /** accepted=已触发 / duplicate=同键重复（未重复触发）/ skipped=有意跳过 / rejected=门禁拒绝 / failed=链路失败 */
+  status: 'accepted' | 'duplicate' | 'skipped' | 'rejected' | 'failed'
+  reason?: string
+  runId?: string
+  replays: number
+  receivedAt: string
+  lastReplayAt?: string
+}
+
 export interface PipelineTemplate {
   id: string
   name: string
@@ -213,7 +231,7 @@ const listTemplates = () => fetchList<PipelineTemplate>('/api/pipeline-templates
 async function triggerRun(appId: string, pid: string, body: {
   branch: string; commit?: string; version?: string
   /** run 级一次性 stage 参数（需求文本载体）：key "<stageIdx>.<paramKey>"，如 {"0.request":"实现XX"} */
-  stageParams?: Record<string, string>
+  stageParams?: Record<string, unknown>
   /** preview 返回的执行计划指纹：非空时服务端比对，漂移（新构建改变候选）409 */
   planHash?: string
 }): Promise<PipelineRun> {
@@ -229,7 +247,7 @@ const getRun = (id: string) => fetchJSON<PipelineRun>(`/api/pipelineruns/${id}`)
 
 /** 执行计划预演（spec §6）：只读计算最终解析结果 + 触发时将锁定的候选产物 + planHash。 */
 async function previewRun(appId: string, pid: string, body: {
-  branch: string; commit?: string; stageParams?: Record<string, string>
+  branch: string; commit?: string; stageParams?: Record<string, unknown>
 }): Promise<RunPreview> {
   const resp = await fetchAuth(`/api/applications/${appId}/pipelines/${pid}/preview`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -330,21 +348,38 @@ async function retryRun(runId: string): Promise<void> {
 export interface BuildRun {
   id: string; appId: string; repoId: string
   trigger: string; commit?: string; branch: string; message?: string
-  status: string; createdAt: string; finishedAt?: string
+  status: string; startedAt: string; finishedAt?: string
 }
 export interface Image {
   id: string; registry: string; tag: string; digest: string
-  source: ImageSource; branch?: string; buildRunId?: string
-  version?: string; createdAt?: string
+  source: string; status?: string; appId?: string; branch?: string; buildRunId?: string
+  version?: string; builtAt?: string
 }
 export interface Release {
-  id: string; envId: string; imageId: string; imageDigest: string
+  id: string; appId: string; envId: string; imageId: string; imageDigest: string
   strategy: string; status: string; workloadId: string
-  previousImageId?: string; promotedFrom?: string; createdAt: string
+  previousImageId?: string; promotedFrom?: string; sourceRunId?: string; laneId?: string; createdAt: string
 }
 export interface Repo {
-  id: string; name: string; url?: string; internal?: boolean; defaultBranch?: string
+  id: string; name?: string; gitUrl?: string; giteaRepo?: string; source?: string; branch?: string; dockerfile?: string; buildContext?: string; url?: string; internal?: boolean; defaultBranch?: string
 }
+/** webhook 投递记录（倒序，含跳过/拒绝原因）。 */
+const listDeliveries = (appId: string, pid: string, limit = 50) =>
+  fetchList<WebhookDelivery>(`/api/applications/${appId}/pipelines/${pid}/deliveries?limit=${limit}`)
+
+/** 重放投递：已有运行则幂等返回原 run（replayed=false），否则新建 run（trigger=replay）。 */
+async function replayDelivery(appId: string, pid: string, did: string): Promise<{
+  run: PipelineRun; delivery: WebhookDelivery; replayed: boolean; reason?: string
+}> {
+  const resp = await fetchAuth(
+    `/api/applications/${appId}/pipelines/${pid}/deliveries/${encodeURIComponent(did)}/replay`,
+    { method: 'POST' },
+  )
+  const json = await resp.json()
+  if (!resp.ok) throw new Error(json.error || '重放失败')
+  return json.data
+}
+
 const listBuildRuns = (appId: string) => fetchList<BuildRun>(`/api/applications/${appId}/buildruns`)
 const listImages = (appId: string) => fetchList<Image>(`/api/applications/${appId}/images`)
 const listReleases = (appId: string) => fetchList<Release>(`/api/applications/${appId}/releases`)
@@ -354,5 +389,5 @@ export {
   listPipelines, getPipeline, createPipeline, updatePipeline, deletePipeline,
   listTemplates, triggerRun, getRun, listRuns, approveStage, abortRun, retryRun, getBuildRun,
   canaryDecision, listBuildRuns, listImages, listReleases, listRepositories,
-  previewRun, decideStage, getDeliveryMatrix,
+  previewRun, decideStage, getDeliveryMatrix, listDeliveries, replayDelivery,
 }

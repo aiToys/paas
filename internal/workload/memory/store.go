@@ -1,5 +1,5 @@
 // Package memory 提供 workload.Repository 的内存实现。
-// 初始化时 seed 一批工作负载（跨两租户），便于控制台演示；未来替换为 K8s controller-runtime。
+// 演示工作负载需显式开启，默认空仓储，避免初始化触发真实K8s资源。
 package memory
 
 import (
@@ -19,6 +19,7 @@ type Store struct {
 	mu            sync.RWMutex
 	workloads     map[string]workload.Workload
 	imageRegistry string // seed 镜像 registry 前缀（内网部署拼 <registry>/library/...）
+	demoSeed      bool
 }
 
 // StoreOpt 配置 Store。
@@ -31,15 +32,24 @@ func WithImageRegistry(registry string) StoreOpt {
 	return func(s *Store) { s.imageRegistry = registry }
 }
 
-// NewStore 创建仓储并 seed 示例工作负载（真实 nginx 业务服务镜像）。
-// PAAS_DISABLE_DEMO_SEED=true（chart seed.demo=false）时跳过演示 seed（与 application memory
-// 同款门控）：演示 workload 的 AppID 指向演示应用，生产灌入成孤儿引用 + K8s 投影拉起 Deployment。
+// WithDemoSeed 显式启用演示夹具；全局关闭演示数据时仍禁止灌入。
+func WithDemoSeed(enabled bool) StoreOpt {
+	return func(s *Store) { s.demoSeed = enabled }
+}
+
+// DemoSeedEnabled 决定启动时是否灌入演示工作负载，两种存储后端共用。
+// 必须独立显式开启；演示登录或模型目录开启不代表允许创建真实Pod。
+func DemoSeedEnabled() bool {
+	return os.Getenv("PAAS_ENABLE_DEMO_WORKLOADS") == "true" && os.Getenv("PAAS_DISABLE_DEMO_SEED") != "true"
+}
+
+// NewStore 默认创建空仓储；显式开启演示工作负载后才灌入示例。
 func NewStore(opts ...StoreOpt) *Store {
-	s := &Store{workloads: map[string]workload.Workload{}}
+	s := &Store{workloads: map[string]workload.Workload{}, demoSeed: DemoSeedEnabled()}
 	for _, o := range opts {
 		o(s)
 	}
-	if os.Getenv("PAAS_DISABLE_DEMO_SEED") == "true" {
+	if !s.demoSeed || os.Getenv("PAAS_DISABLE_DEMO_SEED") == "true" {
 		return s
 	}
 	for _, w := range seed(s.imageRegistry) {

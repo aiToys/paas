@@ -3,6 +3,8 @@
 package gateway
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -10,11 +12,17 @@ import (
 	"github.com/aitoys/paas/pkg/provider"
 )
 
+// ErrBudgetExceeded 预算闸门拒绝（handler 映射为 429，不是上游故障）。
+var ErrBudgetExceeded = errors.New("monthly budget exceeded")
+
 // Gateway 维护逻辑模型路由表，实现 provider.GatewayRegistrar。
 // 路由策略：按通道 Priority 升序取首个非 offline 通道的 Provider。
 type Gateway struct {
 	mu     sync.RWMutex
 	models map[string]*provider.Model
+	// BudgetGate 月度预算闸门（装配层注入）：返回 ErrBudgetExceeded 表示当期费用已达上限。
+	// nil = 不启用。实现方必须 fail-open（查询失败不阻断推理）——预算是护栏，不是可用性前置。
+	BudgetGate func(ctx context.Context, tenantID, appID string) error
 }
 
 // New 创建空 Gateway。
@@ -105,4 +113,21 @@ func (g *Gateway) MarkChannelStatus(modelID, channelID, status string) {
 			return
 		}
 	}
+}
+
+// ChannelStatus 返回运行态通道状态（ChannelStatusReader 接口实现）。
+// 未打标（初始状态）返回空串，admin 投影保持 store 值。
+func (g *Gateway) ChannelStatus(modelID, channelID string) string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	m, ok := g.models[modelID]
+	if !ok {
+		return ""
+	}
+	for _, c := range m.Channels {
+		if c.ID == channelID {
+			return c.Status
+		}
+	}
+	return ""
 }

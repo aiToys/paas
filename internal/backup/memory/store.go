@@ -113,6 +113,23 @@ func (s *Store) UpdateProgress(_ context.Context, tenantID, id string, up backup
 	return nil
 }
 
+// ListAll 跨租户列出全部记录（admin 平台总览，不过滤 tenant），与 List 同序。
+func (s *Store) ListAll(_ context.Context) ([]backup.Backup, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]backup.Backup, 0, len(s.backups))
+	for _, b := range s.backups {
+		out = append(out, b)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.After(out[j].CreatedAt)
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
+
 // ListActive 列出全部非终态记录（Pacer 恢复扫描，跨租户管理面专用）。
 func (s *Store) ListActive(_ context.Context) ([]backup.Backup, error) {
 	s.mu.RLock()

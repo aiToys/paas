@@ -23,8 +23,9 @@ type fakeBuilder struct {
 	imageID     string
 }
 
-func (f fakeBuilder) CreateBuildRun(ctx context.Context, appID, repoID, branch, commit string, buildArgs map[string]string) (devops.BuildRun, error) {
-	return devops.BuildRun{ID: "b1", AppID: appID, RepoID: repoID, Branch: branch, Commit: commit, Status: devops.BuildRunning}, nil
+func (f fakeBuilder) CreateBuildRun(ctx context.Context, input devops.BuildRun) (devops.BuildRun, error) {
+	input.ID, input.Status = "b1", devops.BuildRunning
+	return input, nil
 }
 
 func (f fakeBuilder) PollBuildRun(ctx context.Context, buildID string) (devops.BuildRun, error) {

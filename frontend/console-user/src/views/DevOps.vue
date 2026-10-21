@@ -188,7 +188,7 @@ async function rollback(row: Release) {
   if (!ok) return
   try {
     const resp = await fetchAuth(`/api/releases/${row.id}/rollback`, { method: 'POST' })
-    if (resp.ok) { ElMessage.success('已回滚'); loadReleases() }
+    if (resp.ok) { ElMessage.success('回滚已受理，滚动更新进行中'); loadReleases() }
     else { const err = await resp.json().catch(() => ({})); ElMessage.error(err.error || '回滚失败') }
   } catch (e) {
     ElMessage.error(apiError(e, '回滚失败'))

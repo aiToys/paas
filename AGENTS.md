@@ -2,6 +2,10 @@
 
 This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
+## 所有 Agent 必须遵守的研发规范
+
+所有 agent（含子 agent）开始工作前须遵守 [贡献指南：临时文件与验证产物](CONTRIBUTING.md#临时文件与验证产物)：**截图、录屏、日志、临时导出、试验脚本及原型统一输出到项目根目录的 `tmp/<任务名>/`，禁止散落根目录或源码目录**；从任何子项目执行工具时也必须显式使用根目录 `tmp/` 的路径，该目录不入 Git、不进入镜像构建上下文，正式交付资产按指南放入对应目录，交付前检查本任务没有新增散落或暂存的临时文件。
+
 ## 项目定位
 
 一站式 PaaS 平台 —— 面向基础设施的统一平台，覆盖服务治理、中间件管理、MaaS、DevOps。

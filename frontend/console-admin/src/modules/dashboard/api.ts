@@ -3,7 +3,7 @@ import { api } from '@/lib/http/client'
 
 export interface StatItem {
   value: number
-  trendPct: number
+  trendPct?: number // 平台未接入历史计量时后端缺省输出，前端不渲染趋势角标
 }
 
 export interface DashboardStats {

@@ -102,9 +102,15 @@ export const ALL_MENUS = [
             meta: { title: '数据服务', icon: 'Coin', showMenu: true }
           },
           {
+            path: '/resources/backups',
+            name: 'resBackups',
+            component: 'resources/views/Backups',
+            meta: { title: '备份与恢复', icon: 'FolderChecked', showMenu: true }
+          },
+          {
             path: '/resources/environments',
             name: 'resEnvironments',
-            component: 'resources/views/Environments',
+            component: 'resources/views/EnvironmentsTabs',
             meta: { title: '环境', icon: 'Location', showMenu: true }
           }
         ]
@@ -180,6 +186,12 @@ export const ALL_MENUS = [
             name: 'resSecrets',
             component: 'resources/views/Secrets',
             meta: { title: '密钥', icon: 'DocumentCopy', showMenu: true }
+          },
+          {
+            path: '/operations/diagnostics',
+            name: 'opsDiagnostics',
+            component: 'operations/views/Diagnostics',
+            meta: { title: '平台诊断', icon: 'FirstAidKit', showMenu: true }
           }
         ]
       },
@@ -205,7 +217,7 @@ export const ALL_MENUS = [
           {
             path: '/resources/quotas',
             name: 'resQuotas',
-            component: 'resources/views/Quotas',
+            component: 'resources/views/UsageQuotasTabs',
             meta: { title: '配额', icon: 'Odometer', showMenu: true }
           },
           {
@@ -213,6 +225,18 @@ export const ALL_MENUS = [
             name: 'resBills',
             component: 'resources/views/Bills',
             meta: { title: '账单', icon: 'CreditCard', showMenu: true }
+          },
+          {
+            path: '/resources/budgets',
+            name: 'resBudgets',
+            component: 'resources/views/Budgets',
+            meta: { title: '预算', icon: 'Money', showMenu: true }
+          },
+          {
+            path: '/resources/settlements',
+            name: 'resSettlements',
+            component: 'resources/views/Settlements',
+            meta: { title: '供应商对账', icon: 'Tickets', showMenu: true }
           },
           {
             path: '/resources/audit-logs',

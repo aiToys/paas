@@ -31,7 +31,7 @@ import (
 // BuildRunner 桥接 devops BuildRunRepository（依赖倒置）。
 // PollBuildRun 阻塞轮询到终态（success/failed），engine goroutine 在此等待。
 type BuildRunner interface {
-	CreateBuildRun(ctx context.Context, appID, repoID, branch, commit string, buildArgs map[string]string) (devops.BuildRun, error)
+	CreateBuildRun(ctx context.Context, input devops.BuildRun) (devops.BuildRun, error)
 	PollBuildRun(ctx context.Context, buildID string) (devops.BuildRun, error)
 }
 
@@ -379,6 +379,9 @@ func (e *Engine) execStage(ctx context.Context, run *PipelineRun, stage StageDef
 	// StartedAt 立即可见；stage 内 logf 增量仍随终态一并落库（秒级延迟可接受）。
 	// best-effort：可见性写失败不阻断执行（终态落库在 Advance/markFailed 仍有守门）。
 	if _, err := e.Runs.UpdateRun(ctx, *run); err != nil {
+		if errors.Is(err, ErrNotRunning) {
+			return true, err
+		}
 		log.Printf("pipeline: stage 开始态落库失败 run=%s stage=%d: %v", run.ID, run.CurrentStage, err) //nolint:gosec // runID 平台生成
 	}
 	switch stage.Type {
@@ -438,7 +441,12 @@ func (e *Engine) execBuild(ctx context.Context, run *PipelineRun, stage StageDef
 		sr.Error = err.Error()
 		return true, err
 	}
-	br, err := e.Builds.CreateBuildRun(ctx, run.AppID, run.RepoID, branch, run.Commit, buildArgs)
+	br, err := e.Builds.CreateBuildRun(ctx, devops.BuildRun{
+		AppID: run.AppID, RepoID: strOr(stage.Params, "repoId", run.RepoID),
+		Branch: branch, Commit: strOr(stage.Params, "commit", run.Commit),
+		BuildArgs: buildArgs, Dockerfile: strOr(stage.Params, "dockerfile", ""),
+		BuildContext: strOr(stage.Params, "buildContext", ""),
+	})
 	if err != nil {
 		sr.Error = err.Error()
 		return true, err

@@ -18,13 +18,6 @@
         style="width: 240px"
         @keyup.enter="handleSearch"
       />
-      <el-input
-        v-model="searchForm.tenantId"
-        placeholder="租户 ID 过滤"
-        clearable
-        style="width: 160px; margin-left: 8px"
-        @keyup.enter="handleSearch"
-      />
     </template>
 
     <template #actions>
@@ -65,6 +58,8 @@ import { Refresh } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { SearchTable } from '@/app/components'
 import { useCrud } from '@/app/composables/useCrud'
+import { useScopeStore } from '@/app/stores/scope'
+import { useScopeChange } from '@/app/composables'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
 import { tableTimeFormatter } from '@/lib/format'
 import { fetchBillList, payBill, type AdminBill, type ResSearchRequest } from '../api'
@@ -72,7 +67,7 @@ import BillDrawer from './BillDrawer.vue'
 
 const { listData, loading, pagination, searchForm, fetchList, handleSearch, handleReset, handlePageChange } =
   useCrud<AdminBill>({
-    fetch: (params) => fetchBillList(params as unknown as ResSearchRequest),
+    fetch: (params) => fetchBillList({ ...params, tenantId: scopeStore.tenantId } as unknown as ResSearchRequest),
     defaultSearchForm: { keyword: '', tenantId: '' },
     pageSize: 10
   })
@@ -111,6 +106,13 @@ const doPay = async (id: string) => {
     payingId.value = ''
   }
 }
+
+// 浏览范围（顶栏）联动：切租户重拉列表；范围是纯过滤器不改写目标
+const scopeStore = useScopeStore()
+useScopeChange(() => fetchList(), () => {
+  drawerVisible.value = false
+  detailId.value = ''
+})
 
 fetchList()
 </script>

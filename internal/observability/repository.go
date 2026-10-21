@@ -17,6 +17,15 @@ type Repository interface {
 	UpdateAlertRule(ctx context.Context, id string, rule AlertRule) (AlertRule, error)
 	// DeleteAlertRule 删除规则。
 	DeleteAlertRule(ctx context.Context, id string) error
+	// ListNotificationChannels 通知渠道列表（当前租户）。
+	// 渠道 URL/Headers 明文仅出站投递使用，handler 一律经 Masked() 输出。
+	ListNotificationChannels(ctx context.Context) ([]NotificationChannel, error)
+	// CreateNotificationChannel 创建渠道（ctx 租户为准；同租户重名拒绝）。
+	CreateNotificationChannel(ctx context.Context, ch NotificationChannel) (NotificationChannel, error)
+	// UpdateNotificationChannel 更新渠道（ID/TenantID 不变；敏感字段掩码占位保留原值）。
+	UpdateNotificationChannel(ctx context.Context, id string, ch NotificationChannel) (NotificationChannel, error)
+	// DeleteNotificationChannel 删除渠道（不级联规则；引用方在引擎解析时忽略悬空 ID）。
+	DeleteNotificationChannel(ctx context.Context, id string) error
 	// ListAlerts 即时评估所有 enabled 规则，返回命中（firing）告警列表。
 	// targetType/targetId 非空时只返回该维度的告警（前端依赖资源卡按数据服务过滤减传输）；
 	// 任一为空表示该维度不限（向后兼容原全量评估）。

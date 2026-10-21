@@ -1,0 +1,2 @@
+DROP POLICY IF EXISTS pipeline_webhook_deliveries_tenant_isolation ON pipeline_webhook_deliveries;
+DROP TABLE IF EXISTS pipeline_webhook_deliveries;

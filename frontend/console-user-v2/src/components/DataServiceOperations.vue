@@ -137,7 +137,14 @@ async function load() {
 }
 watch([tab, range], load)
 usePolling(load, 15000, {
-  active: () => tab.value === 'metrics' || tab.value === 'pods',
+  // backup tab 也要轮询：备份/恢复作业是异步推进的（accepted→running→completed），
+  // 不轮询则用户停在 backup tab 永远看不到作业终态（R4 审计 F1）；有活跃作业时
+  // 切到别的 tab 仍继续观察，全部落终态后停。
+  active: () =>
+    tab.value === 'metrics' ||
+    tab.value === 'pods' ||
+    tab.value === 'backup' ||
+    (tab.value !== 'backup' && hasActiveJob.value),
 })
 async function mutate(task: () => Promise<unknown>, message: string) {
   if (acting.value) return

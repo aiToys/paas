@@ -123,14 +123,14 @@ func (h *AdminHandler) findByID(ctx context.Context, id string) (Application, er
 	return Application{}, fmt.Errorf("应用不存在: %s", id)
 }
 
-// serveList 跨租户列表。
+// serveList 跨租户列表（支持 ?tenantId= 浏览范围过滤）。
 func (h *AdminHandler) serveList(w http.ResponseWriter, r *http.Request) {
 	list, err := h.repo.ListAll(r.Context())
 	if err != nil {
 		httputil.WriteInternalError(w, err)
 		return
 	}
-	httputil.WriteData(w, list)
+	httputil.WriteData(w, adminutil.FilterTenant(r, list, func(a Application) string { return a.TenantID }))
 }
 
 // serveItem 按路径细分：/{id}（GET 详情 / DELETE 删除）。

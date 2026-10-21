@@ -21,6 +21,12 @@
         :placeholder="t('user.placeholder.selectRole')"
       />
     </template>
+
+    <!-- 平台超管：与租户域角色正交（core User.IsAdmin），决定能否进入后台管理台 -->
+    <template #field-isAdmin>
+      <el-switch v-model="formData.isAdmin" :disabled="mode === 'view'" />
+      <span class="is-admin-hint">授予 super_admin（跨租户管理台全权）；平台角色见「角色」页</span>
+    </template>
   </FormDrawer>
 </template>
 
@@ -67,6 +73,7 @@ const formData = reactive<UserCreateRequest & { confirmPassword: string }>({
   email: '',
   phone: '',
   roles: [],
+  isAdmin: false,
   status: 'active',
   password: '',
   confirmPassword: '',
@@ -106,6 +113,12 @@ const fields = computed<FormField[]>(() => [
     prop: 'roles',
     label: t('user.field.roles'),
     type: 'select',
+    span: 12,
+  },
+  {
+    prop: 'isAdmin',
+    label: '平台超管',
+    type: 'switch',
     span: 12,
   },
   {
@@ -203,6 +216,7 @@ const initForm = () => {
     email: '',
     phone: '',
     roles: [] as string[],
+    isAdmin: false,
     status: 'active' as const,
     password: '',
     confirmPassword: '',
@@ -216,6 +230,8 @@ const initForm = () => {
       email: u.email,
       phone: u.phone,
       roles: u.roles ?? [],
+      // 回填真实超管标记：缺失会把超管静默降权（update 会提交 isAdmin=false）
+      isAdmin: u.isAdmin ?? false,
       status: u.status,
       password: '',
       confirmPassword: '',
@@ -254,3 +270,11 @@ onMounted(() => {
   loadTenants()
 })
 </script>
+
+<style scoped>
+.is-admin-hint {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+</style>

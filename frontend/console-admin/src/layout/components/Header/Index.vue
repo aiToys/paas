@@ -13,6 +13,7 @@
         </el-icon>
       </div>
       <Breadcrumb v-if="layoutStore.showBreadcrumb" />
+      <TenantScope />
     </div>
     <div class="header-right">
       <NoticeCenter />
@@ -71,6 +72,7 @@ import { _resetMenusRegistered } from '@/lib/router/guards'
 import Breadcrumb from '../Breadcrumb/Index.vue'
 import SettingsDrawer from '../SettingsDrawer.vue'
 import NoticeCenter from '../NoticeCenter.vue'
+import TenantScope from './TenantScope.vue'
 
 const router = useRouter()
 const sidebarStore = useSidebarStore()

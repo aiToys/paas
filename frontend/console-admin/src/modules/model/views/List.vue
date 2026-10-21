@@ -1,4 +1,13 @@
 <template>
+  <el-alert
+    type="info"
+    :closable="false"
+    show-icon
+    style="margin-bottom: 12px"
+  >
+    {{ t('common.platformScope') }}
+  </el-alert>
+
   <SearchTable
     title="模型管理"
     :loading="loading"
@@ -29,6 +38,14 @@
       <el-tag size="small" type="info">{{ channelCount(row) }} 个通道</el-tag>
     </template>
 
+    <template #col-configStatus="{ row }">
+      <el-tag size="small" :type="configStatusType(row)">{{ configStatusText(row) }}</el-tag>
+    </template>
+
+    <template #col-diagnosis="{ row }">
+      <span class="diag-text">{{ diagnosisText(row) }}</span>
+    </template>
+
     <template #col-actions="{ row }">
       <el-button link type="primary" size="small" @click="openChannels(row)">通道</el-button>
       <el-button link type="primary" size="small" @click="openEdit(row)">编辑</el-button>
@@ -45,6 +62,7 @@
 </template>
 
 <script lang="ts" setup>
+import { t } from '@/lib/i18n'
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Plus, Refresh } from '@element-plus/icons-vue'
@@ -88,8 +106,45 @@ const columns = computed<ColumnDef[]>(() => [
   { prop: 'vendor', label: '供应商', minWidth: 110 },
   { prop: 'contextWindow', label: '上下文', width: 100 },
   { prop: 'channels', label: '通道', width: 110, slot: 'channels' },
+  { prop: 'configStatus', label: '配置状态', width: 120, slot: 'configStatus' },
+  { prop: 'diagnosis', label: '最近诊断', width: 150, slot: 'diagnosis' },
   { prop: 'actions', label: '操作', width: 140, fixed: 'right', slot: 'actions' }
 ])
+
+// 配置状态聚合（spec §8.3/M07）：任一真实通道缺凭证即「缺少凭证」；
+// 全部真实通道已配置 = 已配置；无通道 = 未配置通道。
+interface ChannelLike {
+  type?: string
+  credentialRef?: string
+  status?: string
+}
+const channelsOf = (row: Record<string, unknown>): ChannelLike[] =>
+  Array.isArray(row.channels) ? (row.channels as ChannelLike[]) : []
+const configStatusText = (row: Record<string, unknown>) => {
+  const chs = channelsOf(row)
+  if (chs.length === 0) return '未配置通道'
+  const real = chs.filter((c) => c.type === 'openai-compatible')
+  if (real.length === 0) return '已配置'
+  return real.every((c) => c.credentialRef) ? '已配置' : '缺少凭证'
+}
+const configStatusType = (row: Record<string, unknown>) => {
+  const text = configStatusText(row)
+  if (text === '已配置') return 'success'
+  if (text === '缺少凭证') return 'danger'
+  return 'info'
+}
+
+// 最近诊断聚合：网关运行态投影（请求级 failover 打标实时回显），无主动探活；
+// 全 healthy 且无失败记录时如实显示「未诊断」。运行态标记重启后重置为配置值。
+const diagnosisText = (row: Record<string, unknown>) => {
+  const chs = channelsOf(row)
+  if (chs.length === 0) return '-'
+  const degraded = chs.filter((c) => c.status === 'degraded').length
+  const offline = chs.filter((c) => c.status === 'offline').length
+  if (offline > 0) return `有离线（${offline}）`
+  if (degraded > 0) return `有降级（${degraded}）`
+  return '未诊断'
+}
 
 const drawerVisible = ref(false)
 const drawerMode = ref<'add' | 'edit'>('add')
@@ -140,3 +195,10 @@ onMounted(() => {
   fetchList()
 })
 </script>
+
+<style scoped>
+.diag-text {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+</style>

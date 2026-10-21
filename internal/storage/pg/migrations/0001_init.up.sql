@@ -5,9 +5,12 @@
 
 -- ===== identity：租户 / 用户 / 角色 / API Key =====
 CREATE TABLE IF NOT EXISTS tenants (
-    id         TEXT PRIMARY KEY,
-    name       TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL
+    id            TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'active',  -- active | frozen（冻结只阻控制面准入）
+    frozen_at     TIMESTAMPTZ,
+    frozen_reason TEXT NOT NULL DEFAULT '',
+    created_at    TIMESTAMPTZ NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS users (
@@ -18,6 +21,7 @@ CREATE TABLE IF NOT EXISTS users (
     email         TEXT NOT NULL DEFAULT '',
     password_hash TEXT NOT NULL DEFAULT '',          -- bcrypt；空=不可密码登录（仅 API Key）
     status        TEXT NOT NULL DEFAULT 'active',    -- active | disabled
+    session_version INT NOT NULL DEFAULT 0,          -- 会话代次；改密/停用/改角色/撤销 +1（见 0056）
     created_at    TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);
@@ -35,9 +39,13 @@ CREATE TABLE IF NOT EXISTS api_keys (
     tenant_id  TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     -- user_id 不加 FK：内存实现中 api_key 自带 Roles，鉴权不依赖独立 user 记录，
     -- 且 seed 仅建 tenants + api_keys（不建 users）。保持松耦合与现状一致。
-    user_id    TEXT NOT NULL,
-    key        TEXT NOT NULL UNIQUE,
-    created_at TIMESTAMPTZ NOT NULL
+    user_id      TEXT NOT NULL,
+    key          TEXT NOT NULL UNIQUE,
+    expires_at   TIMESTAMPTZ,                        -- 空=永不过期
+    last_used_at TIMESTAMPTZ,
+    revoked_at   TIMESTAMPTZ,                        -- 软吊销，保留记录供审计
+    rotated_from TEXT NOT NULL DEFAULT '',
+    created_at   TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_apikeys_tenant ON api_keys(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_apikeys_key ON api_keys(key);
@@ -385,6 +393,59 @@ CREATE TABLE IF NOT EXISTS billing_records (
 );
 CREATE INDEX IF NOT EXISTS idx_billing_records_tenant ON billing_records(tenant_id);
 
+-- D5-4 财务深化：月度预算 / 周期 token 用量 / 供应商结算对账（详见 0057）。
+-- billing_usages.counts 是当前快照（无周期），预算必须建在周期维度上（token_usage）。
+CREATE TABLE IF NOT EXISTS billing_budgets (
+    id             TEXT PRIMARY KEY,
+    tenant_id      TEXT NOT NULL,
+    scope          TEXT NOT NULL,                 -- tenant | app
+    app_id         TEXT NOT NULL DEFAULT '',
+    monthly_amount DOUBLE PRECISION NOT NULL,
+    warn_ratio     DOUBLE PRECISION NOT NULL DEFAULT 0.8,
+    enforce        BOOLEAN NOT NULL DEFAULT FALSE,
+    note           TEXT NOT NULL DEFAULT '',
+    created_at     TIMESTAMPTZ NOT NULL,
+    updated_at     TIMESTAMPTZ NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_budgets_scope
+    ON billing_budgets(tenant_id, scope, app_id);
+CREATE INDEX IF NOT EXISTS idx_billing_budgets_tenant ON billing_budgets(tenant_id);
+
+CREATE TABLE IF NOT EXISTS token_usage (
+    tenant_id  TEXT NOT NULL,
+    period     TEXT NOT NULL,                     -- YYYY-MM（UTC）
+    app_id     TEXT NOT NULL DEFAULT '',
+    model      TEXT NOT NULL,
+    tokens     BIGINT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (tenant_id, period, app_id, model)
+);
+CREATE INDEX IF NOT EXISTS idx_token_usage_period ON token_usage(period);
+
+-- 平台级人工对账记录（无 tenant_id 列，按性质不启用 RLS）。
+CREATE TABLE IF NOT EXISTS vendor_settlements (
+    id          TEXT PRIMARY KEY,
+    vendor      TEXT NOT NULL,
+    period      TEXT NOT NULL,
+    amount      DOUBLE PRECISION NOT NULL,
+    currency    TEXT NOT NULL DEFAULT 'CNY',
+    invoice_no  TEXT NOT NULL DEFAULT '',
+    note        TEXT NOT NULL DEFAULT '',
+    recorded_by TEXT NOT NULL DEFAULT '',
+    created_at  TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_vendor_settlements_period ON vendor_settlements(period);
+
+ALTER TABLE billing_budgets ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS billing_budgets_tenant_isolation ON billing_budgets;
+CREATE POLICY billing_budgets_tenant_isolation ON billing_budgets
+  USING (tenant_id = current_setting('app.tenant_id', true) OR current_setting('app.tenant_id', true) IS NULL);
+
+ALTER TABLE token_usage ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS token_usage_tenant_isolation ON token_usage;
+CREATE POLICY token_usage_tenant_isolation ON token_usage
+  USING (tenant_id = current_setting('app.tenant_id', true) OR current_setting('app.tenant_id', true) IS NULL);
+
 -- ===== security：密钥/证书（平台级 + 租户级） + 审计日志 =====
 -- 平台级 tenant_id 为 NULL，全租户可见（ListSecrets OR scope='platform'，Resolve 仅 platform 返明文）。
 -- 两个 partial unique index 互不干扰：platform 按 name 全局唯一；tenant 按 (tenant_id,name) 租户内唯一。
@@ -520,3 +581,51 @@ CREATE TABLE IF NOT EXISTS integration_batches (
     finished_at TIMESTAMPTZ
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_batches_tenant_branch ON integration_batches(tenant_id, branch);
+
+-- ===== 0058 双写：通知渠道（告警派发目标 + 三段抑制） =====
+CREATE TABLE IF NOT EXISTS notification_channels (
+    id               TEXT PRIMARY KEY,
+    tenant_id        TEXT NOT NULL,
+    name             TEXT NOT NULL,
+    kind             TEXT NOT NULL DEFAULT 'webhook',
+    url              TEXT NOT NULL,
+    headers          JSONB NOT NULL DEFAULT '{}',
+    enabled          BOOLEAN NOT NULL DEFAULT TRUE,
+    cooldown_minutes INTEGER NOT NULL DEFAULT 0,
+    mute_until       TIMESTAMPTZ,
+    created_at       TIMESTAMPTZ NOT NULL,
+    updated_at       TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notification_channels_tenant ON notification_channels(tenant_id);
+ALTER TABLE notification_channels ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS notification_channels_tenant_isolation ON notification_channels;
+CREATE POLICY notification_channels_tenant_isolation ON notification_channels
+  USING (tenant_id = current_setting('app.tenant_id', true) OR current_setting('app.tenant_id', true) IS NULL);
+
+-- ===== 0058 双写：告警规则 channel_ids 列不在此双写 =====
+-- alert_rules 表由 0030 创建（晚于 0001），此处 ALTER 会在其建表前执行而失败；
+-- channel_ids 列由 0058 增量迁移负责（migrate 全序执行，0058 > 0030 顺序正确）。
+
+-- ===== 0059 双写：Pipeline webhook 投递记录（幂等键 = 源 delivery ID） =====
+CREATE TABLE IF NOT EXISTS pipeline_webhook_deliveries (
+    tenant_id       TEXT NOT NULL,
+    pipeline_id     TEXT NOT NULL,
+    id              TEXT NOT NULL,
+    app_id          TEXT NOT NULL,
+    event           TEXT,
+    branch          TEXT,
+    commit_sha      TEXT,
+    status          TEXT NOT NULL,
+    reason          TEXT,
+    run_id          TEXT,
+    replays         INTEGER NOT NULL DEFAULT 0,
+    received_at     TIMESTAMPTZ NOT NULL,
+    last_replay_at  TIMESTAMPTZ,
+    PRIMARY KEY (tenant_id, pipeline_id, id)
+);
+CREATE INDEX IF NOT EXISTS idx_pipeline_webhook_deliveries_recent
+    ON pipeline_webhook_deliveries(tenant_id, pipeline_id, received_at DESC);
+ALTER TABLE pipeline_webhook_deliveries ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS pipeline_webhook_deliveries_tenant_isolation ON pipeline_webhook_deliveries;
+CREATE POLICY pipeline_webhook_deliveries_tenant_isolation ON pipeline_webhook_deliveries
+  USING (tenant_id = current_setting('app.tenant_id', true) OR current_setting('app.tenant_id', true) IS NULL);

@@ -1,4 +1,13 @@
 <template>
+  <el-alert
+    type="info"
+    :closable="false"
+    show-icon
+    style="margin-bottom: 12px"
+  >
+    {{ t('common.platformScope') }}
+  </el-alert>
+
   <SearchTable
     title="供应商管理"
     :loading="loading"
@@ -44,6 +53,7 @@
 </template>
 
 <script lang="ts" setup>
+import { t } from '@/lib/i18n'
 import { ref, computed, onMounted } from 'vue'
 import { Plus, Refresh } from '@element-plus/icons-vue'
 import { ElMessageBox, ElMessage } from 'element-plus'
@@ -56,6 +66,7 @@ import {
   type Vendor,
   type VendorSearchRequest
 } from '../api'
+import { fetchModelList } from '@/modules/model/api'
 import ProviderFormDrawer from './ProviderFormDrawer.vue'
 
 const {
@@ -103,12 +114,29 @@ const onFormSuccess = () => {
   fetchList()
 }
 
-// 删除供应商：输入 ID 确认（不级联清通道，但通道 vendor_id 变空引用）。
+// 删除供应商：引用预检（spec D2b）列出引用通道；不级联清通道（vendor_id 变空引用），
+// 无安全同步能力——不提供一键传播。
 const handleDelete = async (row: Record<string, unknown>) => {
   const id = row.id as string
+  let refLines = ''
+  try {
+    const models = (await fetchModelList()) ?? []
+    const refs: string[] = []
+    for (const m of models) {
+      for (const ch of m.channels ?? []) {
+        if (ch.vendorId === id) refs.push(`  · 模型 ${m.id} / 通道 ${ch.id}`)
+      }
+    }
+    if (refs.length > 0) {
+      const more = refs.length > 8 ? `\n  …共 ${refs.length} 条` : ''
+      refLines = `\n\n该供应商被 ${refs.length} 个通道引用：\n${refs.slice(0, 8).join('\n')}${more}\n（删除后通道不受影响，其供应商引用变空；新建通道不再可选该供应商）`
+    }
+  } catch {
+    refLines = '\n\n（引用预检加载失败，无法确认通道引用数量）'
+  }
   try {
     await ElMessageBox.prompt(
-      `请输入供应商 ID "${id}" 确认删除（已绑定该供应商的通道不受影响，其 vendor_id 变空引用）：`,
+      `请输入供应商 ID "${id}" 确认删除：${refLines}`,
       '删除供应商',
       {
         confirmButtonText: '删除',

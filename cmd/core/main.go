@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -50,6 +51,7 @@ import (
 	"github.com/aitoys/paas/internal/devops/gitea"
 	"github.com/aitoys/paas/internal/devops/pipeline"
 	"github.com/aitoys/paas/internal/devops/registry"
+	"github.com/aitoys/paas/internal/diagnostics"
 	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/governance"
 	"github.com/aitoys/paas/internal/httputil"
@@ -64,6 +66,7 @@ import (
 	"github.com/aitoys/paas/internal/security"
 	"github.com/aitoys/paas/internal/service"
 	"github.com/aitoys/paas/internal/web"
+	adminutil "github.com/aitoys/paas/internal/web/admin"
 	"github.com/aitoys/paas/internal/workload"
 	"github.com/aitoys/paas/pkg/plugin"
 	"github.com/aitoys/paas/pkg/provider"
@@ -444,11 +447,13 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 	apiKey := resolveAPIKey()
 	// P3-2 计量采集：推理 token 用量回写 billing（meter.OnTokens 钩子）。
 	// appID 来自应用级 Key（强制归因到应用）；user 是 agent 软标签（仅日志，不入 billing 聚合）。
-	meter.OnTokens = func(tenantID, appID, user string, tokens int) {
+	meter.OnTokens = func(tenantID, appID, model, user string, tokens int) {
 		if tenantID != "" {
 			ctx := tenant.WithTenant(context.Background(), tenantID)
 			ctx = gateway.WithApp(ctx, appID)
 			_, _ = stores.Billing.IncUsage(ctx, billing.ResTokens, tokens)
+			// 周期维度用量（预算 / 供应商对账数据源）：快照计数无周期，月度预算不能建在其上。
+			billing.RecordTokens(stores.Billing, tenantID, appID, model, tokens, time.Now())
 		}
 	}
 	jwtSecret := resolveJWTSecret()
@@ -471,6 +476,8 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 	authHandler := authPkg.NewHandler(stores.Identity, jwtSecret, cookieSecure)
 	// 注入审计记录器：登录/登出/失败记 security.AuditLog（adapter 桥接 + 注入 ctx tenant）。
 	authHandler = authHandler.WithAudit(&authAuditAdapter{store: stores.Security})
+	// 菜单按平台角色裁剪（D5-2）：角色来源用 gateway ctx（auth 中间件已解析）。
+	authHandler = authHandler.WithMenuRoles(gateway.RolesFromRequest)
 	// identity 管理 API（/api/admin/tenants、/api/admin/users、/api/admin/api-keys、/api/admin/roles）：平台运维域，需 super_admin。
 	idmHandler := identity.NewHandler(stores.Identity).
 		HashPassword(authPkg.HashPassword).
@@ -488,12 +495,33 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 	// 注入审计记录器：identity 写操作（签发/吊销密钥、增删用户/租户）记 security.AuditLog
 	// （adapter 桥接 + 注入 ctx tenant），与 auth 登录审计同源，满足合规「审计只增不删」。
 	idmHandler = idmHandler.WithAudit(&identityAuditAdapter{store: stores.Security})
+	// D5-2 细分角色的 handler 层同源放行：guard 层特例（安全角色冻结租户/身份只读列租户）
+	// 必须在 handler 内 second check 同源放行，否则「过 guard 但 403」死路径（R5 审计 C1）。
+	idmHandler.PlatformAuthorize = func(r *http.Request, perm identity.Permission) bool {
+		return identity.PlatformGrantsAny(gateway.RolesFromRequest(r), perm)
+	}
+	// 注销预检统计：identity 不依赖业务域，跨域计数在装配层桥接（只读，不触发删除）。
+	idmHandler = idmHandler.WithOffboardingCounter(tenantOffboardingBridge{
+		users: stores.Identity, apps: stores.Application, wls: stores.Workload,
+		ds: stores.DataService, lanes: stores.Lane, billing: stores.Billing,
+	}.Count)
 	adminGuard := func(h http.Handler) http.Handler {
-		// 平台级管理（租户/用户/API Key/dashboard 跨租户聚合）需 super_admin 角色，
-		// 防 tenant-admin 越权枚举全部租户与用户。auth 先解析身份注入 roles，再校验超管。
+		// 平台级管理（租户/用户/API Key/dashboard 跨租户聚合）：super_admin 全权；
+		// 其余按细分平台角色（D5-2）授权，所需权限由 (HTTP 方法, 路径) 派生——
+		// GET/HEAD → domain:read，其余 → domain:write。
+		// 未登记的路径 fail-closed（仅超管），新端点不会默认对平台角色开放。
 		return auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !gateway.IsPlatformAdmin(r) {
+			if gateway.IsPlatformAdmin(r) {
+				h.ServeHTTP(w, r)
+				return
+			}
+			perms, ok := identity.PlatformPermissionsFor(r.Method, r.URL.Path)
+			if !ok {
 				httputil.WriteError(w, http.StatusForbidden, "需要平台超管权限")
+				return
+			}
+			if !identity.PlatformGrantsAny(gateway.RolesFromRequest(r), perms...) {
+				httputil.WriteError(w, http.StatusForbidden, "缺少平台权限："+string(perms[0]))
 				return
 			}
 			h.ServeHTTP(w, r)
@@ -504,6 +532,7 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 		dashboard.WithAppCounter(appCountBridge{repo: stores.Application}),
 		dashboard.WithBillCounter(billCountBridge{repo: stores.Billing}),
 		dashboard.WithRunCounter(runCountBridge{repo: stores.Pipeline}),
+		dashboard.WithAuditLister(auditListBridge{repo: stores.Security}),
 	)
 	// messaging（MQ topic/消费组）：方法级权限 dataservice:read/write（MQ 属数据服务）。
 	msgHandler := messaging.NewHandler(stores.Messaging)
@@ -729,20 +758,31 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 		pipeline.WithParamResolver(&paramResolverBridge{apps: stores.Application, envs: stores.Environment, repos: stores.DevOpsRepos}),
 		pipeline.WithAudit(&identityAuditAdapter{store: stores.Security}),
 		pipeline.WithActorFn(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
-		pipeline.WithPlatformAdmin(func(r *http.Request) bool { return gateway.IsPlatformAdmin(r) }),
+		// admin 路径二道检查（外层 adminGuard 已按 method 精确控权）：超管或平台资源角色
+		// 通过；纯租户角色即便菜单不可见后手输 URL 也被挡（D5-2 细分角色可达，修复 guard
+		// 与 handler 内部 super_admin 硬检查的错配——平台资源运维看得到菜单却被 403）。
+		pipeline.WithPlatformAdmin(func(r *http.Request) bool {
+			if gateway.IsPlatformAdmin(r) {
+				return true
+			}
+			return identity.PlatformGrantsAny(gateway.RolesFromRequest(r),
+				identity.PermPlatformResourceRead, identity.PermPlatformResourceWrite)
+		}),
 		// 应用级权限 enforcement（受限应用流水线触发/审批需成员角色）。
 		pipeline.WithAppGuard(appGuard),
+		// webhook 投递记录（D5-5）：内存/PG 同源，供运维查询与幂等重放。
+		pipeline.WithDeliveries(stores.Pipeline),
 		// 产物锁定元数据（spec 2026-10-17 §6）：Image（digest/buildRunId）+ BuildRun（commit）
 		// 填充 run.Artifact 五元组；查询失败仅降级为 imageId 锁定。
 		pipeline.WithImageMeta(func(ctx context.Context, appID, imageID string) (pipeline.ImageMeta, bool) {
 			img, err := stores.DevOpsImages.GetImage(ctx, imageID)
-			if err != nil {
+			if err != nil || img.AppID != appID || img.Status != devops.ImageReady || img.Digest == "" {
 				return pipeline.ImageMeta{}, false
 			}
 			meta := pipeline.ImageMeta{Digest: img.Digest, BuildRunID: img.BuildRunID}
 			if img.BuildRunID != "" {
 				if br, berr := stores.DevOpsBuilds.GetBuildRun(ctx, img.BuildRunID); berr == nil {
-					meta.Commit = br.Commit
+					meta.Commit, meta.RepoID = br.Commit, br.RepoID
 				}
 			}
 			return meta, true
@@ -938,9 +978,14 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 	// 配额计费（租户级资源配额 + 用量 + 账单，多租户商业化根基）。
 	// 独立于物理环境，不接 prod:write；权限 billing:read/write（admin 写，dev/view 读）。
 	// stores.Billing 与资源 Create 配额拦截共享同一 Store（用量真源唯一）。
+	// 模型目录适配器：预算/对账按 token 行查单价与供应商（60s 快照缓存，见 billing_adapters.go）。
+	pricingCatalog := newMaaSPricingCatalog(stores.MaaS)
+	// 预算强制闸门（Enforce=true 的预算超限即 429）。未启用强制的预算只做展示，不影响推理。
+	gw.BudgetGate = newBudgetGate(stores.Billing, pricingCatalog.Price).Check
 	billingHandler := billing.NewHandler(stores.Billing,
 		billing.WithAudit(&identityAuditAdapter{store: stores.Security}),
 		billing.WithActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
+		billing.WithModelCatalog(pricingCatalog.Price),
 	)
 	billingHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
 
@@ -988,6 +1033,8 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 		environment.WithAdminTenants(tenantChecker{repo: stores.Identity}),
 		environment.WithAdminAudit(&identityAuditAdapter{store: stores.Security}),
 		environment.WithAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
+		// 依赖预检与租户侧 DELETE 前置检查同源（同一 checker 实现，admin 视图不另算一套）。
+		environment.WithAdminUsage(envUsageChecker{wl: stores.Workload, ds: stores.DataService, lne: stores.Lane}),
 	)
 
 	// 引擎目录 handler：/api/engines（用户 enabled 列表）+ /api/admin/engines（super_admin CRUD）。
@@ -1005,6 +1052,8 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 		workload.WithAdminAudit(&identityAuditAdapter{store: stores.Security}),
 		workload.WithAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
 		workload.WithAdminApplier(appliers.workload),
+		// 后台滚动重启 + 操作记录查询（与租户侧同一状态机；nil 时端点 503）。
+		workload.WithAdminOps(stores.WorkloadOps),
 	)
 
 	// admin devops handler（构建/镜像/发布 详情 + 回滚）。不代建（业务编排类）。
@@ -1048,6 +1097,7 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 		billing.WithAdminAudit(&identityAuditAdapter{store: stores.Security}),
 		billing.WithAdminTenants(tenantChecker{repo: stores.Identity}),
 		billing.WithAdminActor(func(r *http.Request) string { return gateway.UserIDFrom(r.Context()) }),
+		billing.WithAdminModelCatalog(pricingCatalog.Price, pricingCatalog.Vendor),
 	)
 
 	// admin security handler（L1 密钥详情（掩码）/ L2 删除）。平台级 Secret TenantID 空，target_tenant 记空。
@@ -1130,7 +1180,7 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 	mux.Handle("/api/releases/", auth(devopsHandler))
 	// 流水线（平台预置模板 + run 列表/详情/审批/终止）。应用作用域 pipelines 经 composite 分发。
 	mux.Handle("/api/pipeline-templates", auth(pipelineHandler))
-	mux.Handle("/api/admin/pipeline-templates", auth(pipelineHandler))
+	mux.Handle("/api/admin/pipeline-templates", adminGuard(pipelineHandler))
 	mux.Handle("/api/admin/pipeline-templates/", auth(pipelineHandler))
 	mux.Handle("/api/pipelineruns", auth(pipelineHandler))
 	mux.Handle("/api/pipelineruns/", auth(pipelineHandler))
@@ -1157,8 +1207,10 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 	mux.Handle("/api/batches", auth(globalChanges))
 	mux.Handle("/api/notifications", auth(globalChanges))
 	// admin 跨租户 PipelineRun 总览（super_admin，handler 内 platformAdmin 判定，与 admin 模板同款）。
-	mux.Handle("/api/admin/pipelineruns", auth(pipelineHandler))
+	mux.Handle("/api/admin/pipelineruns", adminGuard(pipelineHandler))
 	mux.Handle("/api/admin/pipelineruns/", auth(pipelineHandler)) // {id} 详情（深度审计 R4：漏注册致 admin 运行详情 404）
+	// admin 跨租户 Pipeline 列表（模板引用预检，super_admin 只读）。
+	mux.Handle("/api/admin/pipelines", adminGuard(pipelineHandler))
 	// webhook 触发端点（无 auth 中间件，token 鉴权）：Gitea push event -> 触发 pipeline run。
 	// 用户在 Gitea 配 webhook URL = <baseURL>/api/webhooks/pipeline/<pid>?token=<token>。
 	mux.Handle("/api/webhooks/pipeline/", pipelineHandler)
@@ -1196,6 +1248,9 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 	mux.Handle("/api/observability/alert-rules/", auth(obsHandler))
 	mux.Handle("/api/observability/alerts", auth(obsHandler))
 	mux.Handle("/api/observability/alerts/events", auth(obsHandler))
+	// 通知渠道（告警派发目标 + 抑制策略）
+	mux.Handle("/api/observability/channels", auth(obsHandler))
+	mux.Handle("/api/observability/channels/", auth(obsHandler))
 	mux.Handle("/api/observability/logs", auth(obsHandler))
 	mux.Handle("/api/observability/traces", auth(obsHandler))
 	mux.Handle("/api/observability/traces/", auth(obsHandler))
@@ -1208,6 +1263,8 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 	mux.Handle("/api/billing/usage", auth(billingHandler))
 	mux.Handle("/api/billing/records", auth(billingHandler))
 	mux.Handle("/api/billing/records/", auth(billingHandler))
+	mux.Handle("/api/billing/budgets", auth(billingHandler))
+	mux.Handle("/api/billing/budgets/", auth(billingHandler))
 	// 数据服务（资源中心 CRUD + meta + 实例管理）
 	mux.Handle("/api/dataservices", auth(dsHandler))
 	mux.Handle("/api/dataservices/", auth(dsHandler))
@@ -1617,6 +1674,8 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 		Branch      string                    `json:"branch"`
 		StageParams map[string]map[string]any `json:"stageParams"`
 	}{}), apiroute.WithResp(pipeline.RunPreview{}))
+	reg.Operation("GET", "/api/applications/{id}/pipelines/{pid}/deliveries", apiroute.Tags("流水线"), apiroute.Summary("webhook 投递记录（?limit=，含跳过/拒绝原因与关联运行）"), apiroute.Perm("pipeline:read"), apiroute.WithResp([]pipeline.WebhookDelivery{}))
+	reg.Operation("POST", "/api/applications/{id}/pipelines/{pid}/deliveries/{deliveryId}/replay", apiroute.Tags("流水线"), apiroute.Summary("重放 webhook 投递（幂等：已有运行则返回该运行不新建）"), apiroute.Perm("pipeline:write"))
 	reg.Operation("GET", "/api/applications/{id}/delivery-matrix", apiroute.Tags("流水线"), apiroute.Summary("服务×环境版本矩阵（基线 digest/发布/状态聚合）"), apiroute.Perm("pipeline:read"), apiroute.WithResp([]MatrixCell{}))
 	reg.Operation("POST", "/api/applications/{id}/agent-ship/run", apiroute.Tags("流水线"), apiroute.Summary("智能研发一条龙触发（需求文本+勾选段，自动绑定 tpl-agent-ship）"), apiroute.Perm("pipeline:write"), apiroute.WithReqBody(struct {
 		Request string `json:"request"`
@@ -1625,7 +1684,8 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 		Release bool   `json:"release"`
 	}{}), apiroute.WithResp(pipeline.PipelineRun{}))
 	reg.Operation("GET", "/api/pipelineruns", apiroute.Tags("流水线"), apiroute.Summary("运行列表（?appId=&pipelineId=&status=）"), apiroute.Perm("pipeline:read"), apiroute.WithResp([]pipeline.PipelineRun{}))
-	reg.Operation("GET", "/api/admin/pipelineruns", apiroute.Tags("流水线"), apiroute.Summary("运行总览（管理员跨租户，?status=）"), apiroute.Perm("super_admin"), apiroute.WithResp([]pipeline.PipelineRun{}))
+	reg.Operation("GET", "/api/admin/pipelines", apiroute.Tags("流水线"), apiroute.Summary("流水线列表（管理员跨租户，模板引用预检用）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]pipeline.Pipeline{}))
+	reg.Operation("GET", "/api/admin/pipelineruns", apiroute.Tags("流水线"), apiroute.Summary("运行总览（先筛租户/状态，再取最近1000条）"), apiroute.WithQuery("status", "运行状态过滤，如failed；在截取最近1000条前生效"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]pipeline.PipelineRun{}))
 	reg.Operation("GET", "/api/admin/pipelineruns/{id}", apiroute.Tags("流水线"), apiroute.Summary("运行详情（管理员跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp(pipeline.PipelineRun{}))
 	reg.Operation("GET", "/api/pipelineruns/{id}", apiroute.Tags("流水线"), apiroute.Summary("运行详情（含各 stage 状态/输入输出）"), apiroute.Perm("pipeline:read"), apiroute.WithResp(pipeline.PipelineRun{}))
 	reg.Operation("POST", "/api/pipelineruns/{id}/stages/{idx}/approve", apiroute.Tags("流水线"), apiroute.Summary("审批/人工确认通过（恢复 paused run）"), apiroute.Perm("pipeline:write"))
@@ -1732,6 +1792,10 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 	reg.Operation("POST", "/api/observability/alert-rules", apiroute.Tags("可观测"), apiroute.Summary("创建告警规则"), apiroute.Perm("observability:write"), apiroute.WithReqBody(observability.AlertRule{}), apiroute.WithResp(observability.AlertRule{}))
 	reg.Operation("PUT", "/api/observability/alert-rules/{id}", apiroute.Tags("可观测"), apiroute.Summary("更新告警规则"), apiroute.Perm("observability:write"), apiroute.WithReqBody(observability.AlertRule{}), apiroute.WithResp(observability.AlertRule{}))
 	reg.Operation("DELETE", "/api/observability/alert-rules/{id}", apiroute.Tags("可观测"), apiroute.Summary("删除告警规则"), apiroute.Perm("observability:write"))
+	reg.Operation("GET", "/api/observability/channels", apiroute.Tags("可观测"), apiroute.Summary("通知渠道列表（地址与请求头掩码）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.NotificationChannel{}))
+	reg.Operation("POST", "/api/observability/channels", apiroute.Tags("可观测"), apiroute.Summary("创建通知渠道"), apiroute.Perm("observability:write"), apiroute.WithReqBody(observability.NotificationChannel{}), apiroute.WithResp(observability.NotificationChannel{}))
+	reg.Operation("PUT", "/api/observability/channels/{id}", apiroute.Tags("可观测"), apiroute.Summary("更新通知渠道（掩码占位保留原值）"), apiroute.Perm("observability:write"), apiroute.WithReqBody(observability.NotificationChannel{}), apiroute.WithResp(observability.NotificationChannel{}))
+	reg.Operation("DELETE", "/api/observability/channels/{id}", apiroute.Tags("可观测"), apiroute.Summary("删除通知渠道"), apiroute.Perm("observability:write"))
 	reg.Operation("GET", "/api/observability/alerts", apiroute.Tags("可观测"), apiroute.Summary("当前告警（即时评估）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.Alert{}))
 	reg.Operation("GET", "/api/observability/alerts/events", apiroute.Tags("可观测"), apiroute.Summary("告警历史事件（firing/resolved，PG 持久化）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.AlertEvent{}))
 	reg.Operation("GET", "/api/observability/logs", apiroute.Tags("可观测"), apiroute.Summary("日志聚合（?lane= 泳道过滤、?traceId= 按 trace 关联日志，真实 Loki 模式生效）"), apiroute.Perm("observability:read"), apiroute.WithResp([]observability.LogEntry{}))
@@ -1749,6 +1813,11 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 	reg.Operation("GET", "/api/billing/records", apiroute.Tags("配额计费"), apiroute.Summary("账单列表"), apiroute.Perm("billing:read"), apiroute.WithResp([]billing.BillingRecord{}))
 	reg.Operation("POST", "/api/billing/records/generate", apiroute.Tags("配额计费"), apiroute.Summary("生成账单"), apiroute.Perm("billing:write"), apiroute.WithResp(billing.BillingRecord{}))
 	reg.Operation("POST", "/api/billing/records/{id}/pay", apiroute.Tags("配额计费"), apiroute.Summary("支付账单"), apiroute.Perm("billing:write"), apiroute.WithResp(billing.BillingRecord{}))
+	// D5-4 财务深化：预算（费用金额闸门，区别于配额管的资源数量）。
+	reg.Operation("GET", "/api/billing/budgets", apiroute.Tags("配额计费"), apiroute.Summary("预算列表与当期执行状态"), apiroute.WithQuery("period", "账期 YYYY-MM，缺省当月（UTC）"), apiroute.Perm("billing:read"), apiroute.WithResp(billing.BudgetOverview{}))
+	reg.Operation("POST", "/api/billing/budgets", apiroute.Tags("配额计费"), apiroute.Summary("新建预算"), apiroute.Perm("billing:quota-manage"), apiroute.WithReqBody(billing.Budget{}), apiroute.WithResp(billing.Budget{}))
+	reg.Operation("PUT", "/api/billing/budgets/{id}", apiroute.Tags("配额计费"), apiroute.Summary("调整预算额度/阈值/强制开关"), apiroute.Perm("billing:quota-manage"), apiroute.WithReqBody(billing.Budget{}), apiroute.WithResp(billing.Budget{}))
+	reg.Operation("DELETE", "/api/billing/budgets/{id}", apiroute.Tags("配额计费"), apiroute.Summary("删除预算"), apiroute.Perm("billing:quota-manage"))
 	// 数据服务（资源中心）
 	reg.Operation("GET", "/api/dataservices", apiroute.Tags("数据服务"), apiroute.Summary("资源列表（按 kind）"), apiroute.Perm("dataservice:read"), apiroute.WithResp([]dataservice.DataService{}))
 	reg.Operation("GET", "/api/dataservices/meta", apiroute.Tags("数据服务"), apiroute.Summary("Kind 表单元数据"), apiroute.Perm("dataservice:read"))
@@ -1818,16 +1887,20 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 	// spec 经 reg.Operation 登记。handler 内 ServeHTTP 已含 GET 列表 + GET/{id} 详情 + GET/{id}/logs + PUT/{id}/scale + DELETE/{id}。
 	mux.Handle("/api/admin/workloads", adminGuard(wlAdminHandler))
 	mux.Handle("/api/admin/workloads/", adminGuard(wlAdminHandler))
-	reg.Operation("GET", "/api/admin/workloads", apiroute.Tags("工作负载管理"), apiroute.Summary("工作负载列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]workload.Workload{}))
-	reg.Operation("POST", "/api/admin/workloads/reconcile", apiroute.Tags("工作负载管理"), apiroute.Summary("drift 修复（PG 有行无 CRD 的 Workload 补投影）"), apiroute.Perm("super_admin"), apiroute.WithResp(map[string]int{}))
+	reg.Operation("GET", "/api/admin/workloads", apiroute.Tags("工作负载管理"), apiroute.Summary("工作负载列表（跨租户）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]workload.Workload{}))
+	reg.Operation("POST", "/api/admin/workloads/reconcile", apiroute.Tags("工作负载管理"), apiroute.Summary("drift 对账（dryRun=true 只读预览将补建清单；执行补投影 PG 有行无 CRD 的 Workload）"), apiroute.WithQuery("dryRun", "true=只读预览（不写数据面、不记执行审计），缺省=执行补建"), apiroute.Perm("super_admin"), apiroute.WithResp(workload.ReconcileResult{}))
 	reg.Operation("GET", "/api/admin/workloads/{id}", apiroute.Tags("工作负载管理"), apiroute.Summary("工作负载详情（跨租户，含实例）"), apiroute.Perm("super_admin"))
 	reg.Operation("GET", "/api/admin/workloads/{id}/logs", apiroute.Tags("工作负载管理"), apiroute.Summary("实例日志（Pod 级）"), apiroute.Perm("super_admin"))
 	reg.Operation("PUT", "/api/admin/workloads/{id}/scale", apiroute.Tags("工作负载管理"), apiroute.Summary("扩缩容（绕过 prod:write）"), apiroute.Perm("super_admin"))
+	reg.Operation("POST", "/api/admin/workloads/{id}/restart", apiroute.Tags("工作负载管理"), apiroute.Summary("滚动重启（202 受理；生效看操作记录 status，必须填原因）"), apiroute.WithReqBody(struct {
+		Reason string `json:"reason"`
+	}{}), apiroute.WithResp(workload.Operation{}))
+	reg.Operation("GET", "/api/admin/workloads/{id}/operations", apiroute.Tags("工作负载管理"), apiroute.Summary("运维操作记录（受理/执行/生效证据，时间倒序）"), apiroute.WithQuery("limit", "每页条数，缺省 50"), apiroute.WithQuery("offset", "偏移，缺省 0"), apiroute.WithResp([]workload.Operation{}))
 	reg.Operation("DELETE", "/api/admin/workloads/{id}", apiroute.Tags("工作负载管理"), apiroute.Summary("强制删除（回收配额）"), apiroute.Perm("super_admin"))
 	// admin 应用管理（详情 / 删除）：mux.Handle 到 appAdminHandler（按 method 分发）。不代建（业务编排类）。
 	mux.Handle("/api/admin/applications", adminGuard(appAdminHandler))
 	mux.Handle("/api/admin/applications/", adminGuard(appAdminHandler))
-	reg.Operation("GET", "/api/admin/applications", apiroute.Tags("应用管理"), apiroute.Summary("应用列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]application.Application{}))
+	reg.Operation("GET", "/api/admin/applications", apiroute.Tags("应用管理"), apiroute.Summary("应用列表（跨租户）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]application.Application{}))
 	reg.Operation("GET", "/api/admin/applications/{id}", apiroute.Tags("应用管理"), apiroute.Summary("应用详情（跨租户）"), apiroute.Perm("super_admin"))
 	reg.Operation("DELETE", "/api/admin/applications/{id}", apiroute.Tags("应用管理"), apiroute.Summary("强制删除（级联清理 + 回收配额）"), apiroute.Perm("super_admin"))
 	// admin 应用成员总览（应用级权限跨租户观测）：ListAllMembers 只读。
@@ -1841,14 +1914,14 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 			httputil.WriteInternalError(w, err)
 			return
 		}
-		httputil.WriteData(w, ms)
+		httputil.WriteData(w, adminutil.FilterTenant(r, ms, func(m application.Member) string { return m.TenantID }))
 	})))
-	reg.Operation("GET", "/api/admin/app-members", apiroute.Tags("应用管理"), apiroute.Summary("应用成员列表（跨租户，应用级权限观测）"), apiroute.Perm("super_admin"), apiroute.WithResp([]application.Member{}))
+	reg.Operation("GET", "/api/admin/app-members", apiroute.Tags("应用管理"), apiroute.Summary("应用成员列表（跨租户，应用级权限观测）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]application.Member{}))
 	// admin 数据服务管理（详情+实例 / 运维 / 代建）：mux.Handle 到 dsAdminHandler（按 method+action 分发），
 	// spec 经 reg.Operation 登记。handler 内 ServeHTTP 已含 GET 列表（掩码 Connection）+ POST 代建 + {id}/{action}。
 	mux.Handle("/api/admin/dataservices", adminGuard(dsAdminHandler))
 	mux.Handle("/api/admin/dataservices/", adminGuard(dsAdminHandler))
-	reg.Operation("GET", "/api/admin/dataservices", apiroute.Tags("数据服务管理"), apiroute.Summary("数据服务列表（跨租户，掩码）"), apiroute.Perm("super_admin"), apiroute.WithResp([]dataservice.DataService{}))
+	reg.Operation("GET", "/api/admin/dataservices", apiroute.Tags("数据服务管理"), apiroute.Summary("数据服务列表（跨租户，掩码）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]dataservice.DataService{}))
 	reg.Operation("POST", "/api/admin/dataservices", apiroute.Tags("数据服务管理"), apiroute.Summary("代建数据服务（指定租户，消耗配额）"), apiroute.Perm("super_admin"))
 	reg.Operation("GET", "/api/admin/dataservices/{id}", apiroute.Tags("数据服务管理"), apiroute.Summary("数据服务详情（跨租户，含实例）"), apiroute.Perm("super_admin"))
 	reg.Operation("DELETE", "/api/admin/dataservices/{id}", apiroute.Tags("数据服务管理"), apiroute.Summary("强制删除（回收配额）"), apiroute.Perm("super_admin"))
@@ -1863,13 +1936,50 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 	// 双注册（无尾斜杠 + 有尾斜杠）兼容客户端追加尾斜杠访问，与 dataservice/workload/application 对齐。
 	mux.Handle("/api/admin/environments", adminGuard(envAdminHandler))
 	mux.Handle("/api/admin/environments/", adminGuard(envAdminHandler))
-	reg.Operation("GET", "/api/admin/environments", apiroute.Tags("环境管理"), apiroute.Summary("环境列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]environment.Environment{}))
+	reg.Operation("GET", "/api/admin/environments", apiroute.Tags("环境管理"), apiroute.Summary("环境列表（跨租户）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]environment.Environment{}))
 	reg.Operation("GET", "/api/admin/environments/{id}", apiroute.Tags("环境管理"), apiroute.Summary("环境详情（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp(environment.Environment{}))
+	reg.Operation("GET", "/api/admin/environments/{id}/usage", apiroute.Tags("环境管理"), apiroute.Summary("环境依赖预检（跨租户只读：工作负载/数据服务/泳道清单；删除仍走租户侧 409 拦截）"), apiroute.Perm("super_admin"), apiroute.WithResp(environment.EnvUsageReport{}))
 	reg.Operation("POST", "/api/admin/environments", apiroute.Tags("环境管理"), apiroute.Summary("代建环境（指定租户）"), apiroute.Perm("super_admin"))
+	// 泳道跨租户只读总览（D4）：关闭/过期回收结果平台不持久化（CloseResult 只在执行时返回），
+	// 故只展示实体终态 status + updatedAt，不臆造「回收成功/失败」结论。
+	reg.Register("GET", "/api/admin/lanes", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		list, err := stores.Lane.ListAll(r.Context())
+		if err != nil {
+			renderList(w, nil, err)
+			return
+		}
+		q := r.URL.Query()
+		envID, status, mode := q.Get("envId"), q.Get("status"), q.Get("mode")
+		filtered := make([]lane.Lane, 0, len(list))
+		for _, l := range list {
+			if envID != "" && l.EnvID != envID {
+				continue
+			}
+			if status != "" && l.Status != status {
+				continue
+			}
+			if mode != "" && l.Mode != mode {
+				continue
+			}
+			filtered = append(filtered, l)
+		}
+		renderList(w, adminutil.FilterTenant(r, filtered, func(l lane.Lane) string { return l.TenantID }), nil)
+	})),
+		apiroute.Tags("环境管理"), apiroute.Summary("泳道列表（跨租户只读：生命周期终态，不含回收任务结果）"),
+		apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"),
+		apiroute.WithQuery("envId", "环境 ID 过滤"),
+		apiroute.WithQuery("status", "状态过滤：active|closed"),
+		apiroute.WithQuery("mode", "模式过滤：standard|permanent"),
+		apiroute.Perm("super_admin"), apiroute.WithResp([]lane.Lane{}))
 
-	// AI 编排跨租户总览（super_admin 只读）：Agent/工具/知识库/提示词/Skill 五实体。
+	// AI 编排跨租户总览（super_admin 只读）：Agent/工具/知识库/提示词/Skill/工作流 定义与运行。
 	// 闭环此前缺口：AI 编排资产此前无任何 admin 入口。资源运维仍在 console-user 租户内。
-	aiAdminHandler := aiadmin.NewHandler(stores.Agent, stores.Tool, stores.KnowledgeBase, stores.Prompt, stores.Skill, stores.Marketplace)
+	// 广场下架是治理写操作：独立契约（DELETE /api/admin/ai/marketplace/{id}?reason=）+ 审计。
+	aiAdminHandler := aiadmin.NewHandler(stores.Agent, stores.Tool, stores.KnowledgeBase, stores.Prompt, stores.Skill, stores.Marketplace, stores.Workflow,
+		aiadmin.WithAudit(&identityAuditAdapter{store: stores.Security}, func(r *http.Request) string {
+			return gateway.UserIDFrom(r.Context())
+		}),
+		aiadmin.WithPlatformAdmin(gateway.IsPlatformAdmin))
 	mux.Handle("/api/admin/ai/agents", adminGuard(aiAdminHandler))
 	mux.Handle("/api/admin/ai/agents/", adminGuard(aiAdminHandler))
 	mux.Handle("/api/admin/ai/tools", adminGuard(aiAdminHandler))
@@ -1880,28 +1990,34 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 	mux.Handle("/api/admin/ai/prompts/", adminGuard(aiAdminHandler))
 	mux.Handle("/api/admin/ai/skills", adminGuard(aiAdminHandler))
 	mux.Handle("/api/admin/ai/skills/", adminGuard(aiAdminHandler))
+	mux.Handle("/api/admin/ai/workflows", adminGuard(aiAdminHandler))
+	mux.Handle("/api/admin/ai/workflow-runs", adminGuard(aiAdminHandler))
 	mux.Handle("/api/admin/ai/marketplace", adminGuard(aiAdminHandler))
+	mux.Handle("/api/admin/ai/marketplace/", adminGuard(aiAdminHandler)) // DELETE 下架（{id}）
 	reg.Operation("GET", "/api/admin/ai/marketplace", apiroute.Tags("AI编排管理"), apiroute.Summary("广场条目列表（跨租户，含 snapshot 元信息）"), apiroute.Perm("super_admin"), apiroute.WithResp([]marketplace.Item{}))
-	reg.Operation("GET", "/api/admin/ai/agents", apiroute.Tags("AI编排管理"), apiroute.Summary("Agent 列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]agent.Agent{}))
-	reg.Operation("GET", "/api/admin/ai/tools", apiroute.Tags("AI编排管理"), apiroute.Summary("工具列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]tool.Tool{}))
-	reg.Operation("GET", "/api/admin/ai/knowledgebases", apiroute.Tags("AI编排管理"), apiroute.Summary("知识库列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]knowledgebase.KnowledgeBase{}))
-	reg.Operation("GET", "/api/admin/ai/prompts", apiroute.Tags("AI编排管理"), apiroute.Summary("提示词列表（跨租户，仅激活版本）"), apiroute.Perm("super_admin"), apiroute.WithResp([]prompt.Prompt{}))
-	reg.Operation("GET", "/api/admin/ai/skills", apiroute.Tags("AI编排管理"), apiroute.Summary("Skill 列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]skill.Skill{}))
+	reg.Operation("DELETE", "/api/admin/ai/marketplace/{id}", apiroute.Tags("AI编排管理"), apiroute.Summary("广场下架（平台治理；原因必填）"), apiroute.Perm("super_admin"), apiroute.WithQuery("reason", "下架原因（必填，入审计）"))
+	reg.Operation("GET", "/api/admin/ai/workflows", apiroute.Tags("AI编排管理"), apiroute.Summary("工作流定义列表（跨租户）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]workflow.WorkflowDef{}))
+	reg.Operation("GET", "/api/admin/ai/workflow-runs", apiroute.Tags("AI编排管理"), apiroute.Summary("工作流运行列表（跨租户，含节点状态；列表不含定义快照）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]workflow.WorkflowRun{}))
+	reg.Operation("GET", "/api/admin/ai/agents", apiroute.Tags("AI编排管理"), apiroute.Summary("Agent 列表（跨租户）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]agent.Agent{}))
+	reg.Operation("GET", "/api/admin/ai/tools", apiroute.Tags("AI编排管理"), apiroute.Summary("工具列表（跨租户）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]tool.Tool{}))
+	reg.Operation("GET", "/api/admin/ai/knowledgebases", apiroute.Tags("AI编排管理"), apiroute.Summary("知识库列表（跨租户）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]knowledgebase.KnowledgeBase{}))
+	reg.Operation("GET", "/api/admin/ai/prompts", apiroute.Tags("AI编排管理"), apiroute.Summary("提示词列表（跨租户，仅激活版本）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]prompt.Prompt{}))
+	reg.Operation("GET", "/api/admin/ai/skills", apiroute.Tags("AI编排管理"), apiroute.Summary("Skill 列表（跨租户）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]skill.Skill{}))
 	reg.Register("GET", "/api/admin/buildruns", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		list, err := stores.DevOpsBuilds.ListAllBuildRuns(r.Context())
-		renderList(w, list, err)
+		renderList(w, adminutil.FilterTenant(r, list, func(b devops.BuildRun) string { return b.TenantID }), err)
 	})),
-		apiroute.Tags("资源总览"), apiroute.Summary("构建列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]devops.BuildRun{}))
+		apiroute.Tags("资源总览"), apiroute.Summary("构建列表（跨租户）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]devops.BuildRun{}))
 	reg.Register("GET", "/api/admin/images", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		list, err := stores.DevOpsImages.ListAllImages(r.Context())
-		renderList(w, list, err)
+		renderList(w, adminutil.FilterTenant(r, list, func(i devops.Image) string { return i.TenantID }), err)
 	})),
-		apiroute.Tags("资源总览"), apiroute.Summary("镜像列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]devops.Image{}))
+		apiroute.Tags("资源总览"), apiroute.Summary("镜像列表（跨租户）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]devops.Image{}))
 	reg.Register("GET", "/api/admin/releases", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		list, err := stores.DevOpsReleases.ListAllReleases(r.Context())
-		renderList(w, list, err)
+		renderList(w, adminutil.FilterTenant(r, list, func(rel devops.Release) string { return rel.TenantID }), err)
 	})),
-		apiroute.Tags("资源总览"), apiroute.Summary("发布列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]devops.Release{}))
+		apiroute.Tags("资源总览"), apiroute.Summary("发布列表（跨租户）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]devops.Release{}))
 	// admin devops 管理（构建/镜像/发布 详情 + 发布回滚）：mux.Handle 到 devopsAdminHandler（按 path 前缀分发）。
 	// /api/admin/buildruns|images|releases（无尾斜杠）GET 列表仍走上面 reg.Register；
 	// /api/admin/buildruns|images|releases/（有尾斜杠，{id}）走 devopsAdminHandler。Go 1.22 ServeMux 最长前缀匹配区分两者。
@@ -1914,14 +2030,14 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 	reg.Operation("POST", "/api/admin/releases/{id}/rollback", apiroute.Tags("DevOps管理"), apiroute.Summary("回滚发布（绕过 prod:write，记审计）"), apiroute.Perm("super_admin"), apiroute.WithResp(devops.Release{}))
 	reg.Register("GET", "/api/admin/namespaces", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		list, err := stores.ConfigCenter.ListAllNamespaces(r.Context())
-		renderList(w, list, err)
+		renderList(w, adminutil.FilterTenant(r, list, func(n configcenter.Namespace) string { return n.TenantID }), err)
 	})),
-		apiroute.Tags("资源总览"), apiroute.Summary("配置命名空间列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]configcenter.Namespace{}))
+		apiroute.Tags("资源总览"), apiroute.Summary("配置命名空间列表（跨租户）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]configcenter.Namespace{}))
 	reg.Register("GET", "/api/admin/services", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		list, err := stores.Governance.ListAllServices(r.Context())
-		renderList(w, list, err)
+		renderList(w, adminutil.FilterTenant(r, list, func(s governance.Service) string { return s.TenantID }), err)
 	})),
-		apiroute.Tags("资源总览"), apiroute.Summary("服务列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]governance.Service{}))
+		apiroute.Tags("资源总览"), apiroute.Summary("服务列表（跨租户）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]governance.Service{}))
 	// admin governance 管理（服务详情+实例 / 注销实例·删服务）：mux.Handle 到 govAdminHandler（按 path 分发）。
 	// /api/admin/services（无尾斜杠）GET 列表仍走 reg.Register；/api/admin/services/（有尾斜杠，{id}）走 govAdminHandler。
 	mux.Handle("/api/admin/services/", adminGuard(govAdminHandler))
@@ -1930,40 +2046,189 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 	reg.Operation("DELETE", "/api/admin/services/{id}/instances/{iid}", apiroute.Tags("治理管理"), apiroute.Summary("注销实例（绕过 prod:write）"), apiroute.Perm("super_admin"))
 	reg.Register("GET", "/api/admin/alert-rules", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		list, err := obsRepo.ListAllAlertRules(r.Context())
-		renderList(w, list, err)
+		renderList(w, adminutil.FilterTenant(r, list, func(a observability.AlertRule) string { return a.TenantID }), err)
 	})),
-		apiroute.Tags("资源总览"), apiroute.Summary("告警规则列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]observability.AlertRule{}))
+		apiroute.Tags("资源总览"), apiroute.Summary("告警规则列表（跨租户）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]observability.AlertRule{}))
 	// admin observability 管理（告警规则详情 / 删除）：mux.Handle 到 obsAdminHandler。
 	// /api/admin/alert-rules（无尾斜杠）GET 列表仍走 reg.Register；/api/admin/alert-rules/（有尾斜杠，{id}）走 obsAdminHandler。
 	mux.Handle("/api/admin/alert-rules/", adminGuard(obsAdminHandler))
 	reg.Operation("GET", "/api/admin/alert-rules/{id}", apiroute.Tags("可观测管理"), apiroute.Summary("告警规则详情（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp(observability.AlertRule{}))
 	reg.Operation("DELETE", "/api/admin/alert-rules/{id}", apiroute.Tags("可观测管理"), apiroute.Summary("强制删除告警规则（绕过 prod:write）"), apiroute.Perm("super_admin"))
+	// —— D3 配置/治理/观测 admin 只读扩展（spec 2026-10-19 §8.6）——
+	// 配置中心：聚合列表（draft 条数/active 版本/引用数）+ 详情四区（草稿掩码/active 仅键/
+	// 键 diff/引用影响面/发布记录）。与 /api/admin/namespaces（资源总览轻量列表）正交：
+	// 该端点服务资源总览页，本族服务配置中心详情排障。
+	ccAdminHandler := configcenter.NewAdminHandler(stores.ConfigCenter)
+	mux.Handle("/api/admin/configcenter/", adminGuard(ccAdminHandler))
+	reg.Operation("GET", "/api/admin/configcenter/namespaces", apiroute.Tags("配置中心管理"), apiroute.Summary("配置命名空间列表（跨租户，聚合 draft/版本/引用计数）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]configcenter.AdminNamespaceRow{}))
+	reg.Operation("GET", "/api/admin/configcenter/namespaces/{id}", apiroute.Tags("配置中心管理"), apiroute.Summary("命名空间详情（跨租户：草稿掩码/active 键清单/键 diff/引用/发布记录）"), apiroute.Perm("super_admin"), apiroute.WithResp(configcenter.AdminNSDetail{}))
+	// 治理路由/熔断跨租户列表：Route 带下发证据链（ApplyStatus/ApplyError/AppliedAt）；
+	// Breaker State/Stats 即时评估填充（与租户侧列表同源语义）。
+	reg.Register("GET", "/api/admin/governance/routes", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		list, err := stores.Governance.ListAllRoutes(r.Context())
+		renderList(w, adminutil.FilterTenant(r, list, func(rt governance.Route) string { return rt.TenantID }), err)
+	})),
+		apiroute.Tags("治理管理"), apiroute.Summary("网关路由列表（跨租户，含下发状态证据链）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]governance.Route{}))
+	reg.Register("GET", "/api/admin/governance/breakers", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		list, err := stores.Governance.ListAllBreakers(r.Context())
+		if err == nil {
+			for i := range list {
+				stats, state := governance.EvaluateBreaker(list[i], time.Now())
+				list[i].Stats, list[i].State = stats, state
+			}
+		}
+		renderList(w, adminutil.FilterTenant(r, list, func(b governance.CircuitBreaker) string { return b.TenantID }), err)
+	})),
+		apiroute.Tags("治理管理"), apiroute.Summary("熔断器列表（跨租户，含即时评估状态）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]governance.CircuitBreaker{}))
+	// 当前告警（跨租户即时评估）：ListAllAlertRules 按租户分组 → 逐租户 ctx 调 ListAlerts
+	// （与租户侧同源评估链），聚合填 TenantID。规则配置与告警事件分列（有规则 ≠ 发生告警）。
+	reg.Register("GET", "/api/admin/observability/alerts", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		alerts, err := collectAdminAlerts(r.Context(), obsRepo, r.URL.Query().Get("tenantId"))
+		renderList(w, alerts, err)
+	})),
+		apiroute.Tags("可观测管理"), apiroute.Summary("当前告警列表（跨租户即时评估，firing）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]observability.Alert{}))
+	// 告警历史事件（跨租户）：PG 侧 ListAllAlertEvents；内存路径无事件存储 501（同租户侧
+	// history 端点降级语义）。
+	reg.Register("GET", "/api/admin/observability/alert-events", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if stores.AlertEvents == nil {
+			httputil.WriteError(w, http.StatusNotImplemented, "告警历史需启用 PG 持久化")
+			return
+		}
+		limit := 0
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, perr := strconv.Atoi(v); perr == nil {
+				limit = n
+			}
+		}
+		events, err := stores.AlertEvents.ListAllAlertEvents(r.Context(), limit)
+		renderList(w, adminutil.FilterTenant(r, events, func(e observability.AlertEvent) string { return e.TenantID }), err)
+	})),
+		apiroute.Tags("可观测管理"), apiroute.Summary("告警历史事件（跨租户，时间倒序）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.WithQuery("limit", "最多返回条数，缺省 200"), apiroute.Perm("super_admin"), apiroute.WithResp([]observability.AlertEvent{}))
 	reg.Register("GET", "/api/admin/secrets", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		list, err := stores.Security.ListAllSecrets(r.Context())
-		renderList(w, list, err)
+		renderList(w, adminutil.FilterTenant(r, list, func(s security.Secret) string { return s.TenantID }), err)
 	})),
-		apiroute.Tags("资源总览"), apiroute.Summary("密钥列表（跨租户，掩码）"), apiroute.Perm("super_admin"), apiroute.WithResp([]security.Secret{}))
+		apiroute.Tags("资源总览"), apiroute.Summary("密钥列表（跨租户，掩码）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]security.Secret{}))
 	// admin security 管理（密钥详情（掩码）/ 删除）：mux.Handle 到 secAdminHandler。
 	// /api/admin/secrets（无尾斜杠）GET 列表仍走 reg.Register；/api/admin/secrets/（有尾斜杠，{id}）走 secAdminHandler。
 	mux.Handle("/api/admin/secrets/", adminGuard(secAdminHandler))
 	reg.Operation("GET", "/api/admin/secrets/{id}", apiroute.Tags("安全管理"), apiroute.Summary("密钥详情（跨租户，掩码）"), apiroute.Perm("super_admin"), apiroute.WithResp(security.Secret{}))
 	reg.Operation("DELETE", "/api/admin/secrets/{id}", apiroute.Tags("安全管理"), apiroute.Summary("强制删除密钥（绕过 prod:write）"), apiroute.Perm("super_admin"))
 	reg.Register("GET", "/api/admin/audit-logs", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		list, err := stores.Security.ListAllAuditLogs(r.Context())
-		renderList(w, list, err)
+		// D4：后端过滤 + 分页（不在浏览器下载全量再过滤）。tenantId 同时是浏览范围与查询条件。
+		q := r.URL.Query()
+		aq := security.AuditQuery{
+			TenantID:     q.Get("tenantId"),
+			Actor:        q.Get("actor"),
+			Action:       q.Get("action"),
+			ResourceType: q.Get("resourceType"),
+			ResourceID:   q.Get("resourceId"),
+			Keyword:      q.Get("keyword"),
+		}
+		if v := q.Get("offset"); v != "" {
+			if n, e := strconv.Atoi(v); e == nil {
+				aq.Offset = n
+			}
+		}
+		if v := q.Get("limit"); v != "" {
+			if n, e := strconv.Atoi(v); e == nil {
+				aq.Limit = n
+			}
+		}
+		if v := q.Get("from"); v != "" {
+			if t, e := time.Parse(time.RFC3339, v); e == nil {
+				aq.From = t
+			}
+		}
+		if v := q.Get("to"); v != "" {
+			if t, e := time.Parse(time.RFC3339, v); e == nil {
+				aq.To = t
+			}
+		}
+		page, err := stores.Security.QueryAllAuditLogs(r.Context(), aq)
+		if err != nil {
+			httputil.WriteServiceError(w, http.StatusInternalServerError, err)
+			return
+		}
+		httputil.WriteData(w, page)
 	})),
-		apiroute.Tags("资源总览"), apiroute.Summary("审计日志列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]security.AuditLog{}))
+		apiroute.Tags("资源总览"), apiroute.Summary("审计日志查询（跨租户，后端过滤 + 分页）"),
+		apiroute.WithQuery("tenantId", "浏览范围/查询条件：按租户过滤，缺省返回全部租户"),
+		apiroute.WithQuery("actor", "操作人精确匹配"),
+		apiroute.WithQuery("action", "动作精确匹配（如 admin:delete）"),
+		apiroute.WithQuery("resourceType", "资源类型精确匹配"),
+		apiroute.WithQuery("resourceId", "资源 ID 精确匹配"),
+		apiroute.WithQuery("keyword", "关键字：resourceId/detail 子串（大小写不敏感）"),
+		apiroute.WithQuery("from", "起始时间 RFC3339（含）"),
+		apiroute.WithQuery("to", "截止时间 RFC3339（不含）"),
+		apiroute.WithQuery("offset", "偏移，缺省 0"),
+		apiroute.WithQuery("limit", "每页条数，缺省 50，上限 500"),
+		apiroute.Perm("super_admin"), apiroute.WithResp(security.AuditPage{}))
+	// 备份/恢复跨租户总览（D4）：真实产物字段与恢复作业链一并返回。
+	// restorable 与租户侧 restore 端点同一判定（record 恒不可恢复），HTTP 200 不代表恢复生效——
+	// 生效看 restore 记录自身 status（accepted→running→completed|failed，Pacer 推进）。
+	reg.Register("GET", "/api/admin/backups", adminGuard(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		list, err := stores.Backup.ListAll(r.Context())
+		if err != nil {
+			renderList(w, nil, err)
+			return
+		}
+		q := r.URL.Query()
+		mode, status, resID := q.Get("mode"), q.Get("status"), q.Get("resourceId")
+		filtered := make([]backup.Backup, 0, len(list))
+		for _, b := range list {
+			if mode != "" && b.EffectiveMode() != mode {
+				continue
+			}
+			if status != "" && b.Status != status {
+				continue
+			}
+			if resID != "" && b.ResourceID != resID {
+				continue
+			}
+			filtered = append(filtered, b)
+		}
+		renderList(w, backup.AdminRows(adminutil.FilterTenant(r, filtered, func(b backup.Backup) string { return b.TenantID })), nil)
+	})),
+		apiroute.Tags("数据服务"), apiroute.Summary("备份/恢复记录（跨租户，含真实产物与恢复作业链）"),
+		apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"),
+		apiroute.WithQuery("mode", "模式过滤：record|snapshot|restore"),
+		apiroute.WithQuery("status", "状态过滤：accepted|running|verifying|completed|failed"),
+		apiroute.WithQuery("resourceId", "数据服务资源 ID 过滤"),
+		apiroute.Perm("super_admin"), apiroute.WithResp([]backup.AdminBackupRow{}))
+	// 平台诊断（D4）：只读快照——版本/部署模式/存储与迁移/依赖可达性/K8s RBAC/安全配置状态。
+	// 安全配置只报状态不回显值；漂移检查不在此处（走 reconcile dry-run）。
+	reg.Register("GET", "/api/admin/diagnostics",
+		adminGuard(diagnostics.Handler(diagProvider{startedAt: processStartedAt, clientset: appliers.clientset, db: stores.DB}.snapshot)),
+		apiroute.Tags("平台诊断"), apiroute.Summary("平台只读诊断（版本/部署/存储迁移/依赖可达性/K8s RBAC/安全配置状态）"),
+		apiroute.Perm("super_admin"), apiroute.WithResp(diagnostics.Snapshot{}))
 	// admin billing 管理（配额列表+调整 / 账单列表+详情+标记已付）：mux.Handle 到 billAdminHandler（按 method+path 分发）。
 	// PUT /quotas 与 GET /quotas 同路径需同 handler 分发，原 reg.Register GET 列表删并入 billAdminHandler.ServeHTTP。
 	mux.Handle("/api/admin/quotas", adminGuard(billAdminHandler))
 	mux.Handle("/api/admin/quotas/", adminGuard(billAdminHandler))
 	mux.Handle("/api/admin/bills", adminGuard(billAdminHandler))
 	mux.Handle("/api/admin/bills/", adminGuard(billAdminHandler))
-	reg.Operation("GET", "/api/admin/quotas", apiroute.Tags("计费管理"), apiroute.Summary("配额列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]billing.ResourceQuota{}))
+	mux.Handle("/api/admin/usage", adminGuard(billAdminHandler))
+	mux.Handle("/api/admin/budgets", adminGuard(billAdminHandler))
+	mux.Handle("/api/admin/budgets/", adminGuard(billAdminHandler))
+	mux.Handle("/api/admin/token-usage", adminGuard(billAdminHandler))
+	mux.Handle("/api/admin/settlements", adminGuard(billAdminHandler))
+	mux.Handle("/api/admin/settlements/", adminGuard(billAdminHandler))
+	reg.Operation("GET", "/api/admin/quotas", apiroute.Tags("计费管理"), apiroute.Summary("配额列表（跨租户）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]billing.ResourceQuota{}))
 	reg.Operation("PUT", "/api/admin/quotas", apiroute.Tags("计费管理"), apiroute.Summary("调整配额（绕过 prod:write）"), apiroute.Perm("super_admin"))
-	reg.Operation("GET", "/api/admin/bills", apiroute.Tags("计费管理"), apiroute.Summary("账单列表（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp([]billing.BillingRecord{}))
+	reg.Operation("GET", "/api/admin/bills", apiroute.Tags("计费管理"), apiroute.Summary("账单列表（跨租户）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp([]billing.BillingRecord{}))
+	reg.Operation("GET", "/api/admin/usage", apiroute.Tags("计费管理"), apiroute.Summary("用量总览（跨租户当前快照；估算金额按 mock 单价，与账单分开；模型/Key/周期维度未采集）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.Perm("super_admin"), apiroute.WithResp(billing.AdminUsageOverview{}))
 	reg.Operation("GET", "/api/admin/bills/{id}", apiroute.Tags("计费管理"), apiroute.Summary("账单详情（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithResp(billing.BillingRecord{}))
 	reg.Operation("POST", "/api/admin/bills/{id}/pay", apiroute.Tags("计费管理"), apiroute.Summary("标记账单已付（绕过 prod:write）"), apiroute.Perm("super_admin"), apiroute.WithResp(billing.BillingRecord{}))
+	// D5-4 财务深化：跨租户预算 / 周期 token 用量 / 供应商人工对账。
+	reg.Operation("GET", "/api/admin/budgets", apiroute.Tags("计费管理"), apiroute.Summary("预算列表与当期执行状态（跨租户）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.WithQuery("period", "账期 YYYY-MM，缺省当月（UTC）"), apiroute.Perm("super_admin"), apiroute.WithResp(billing.BudgetOverview{}))
+	reg.Operation("POST", "/api/admin/budgets", apiroute.Tags("计费管理"), apiroute.Summary("代建预算（需 tenantId）"), apiroute.Perm("super_admin"), apiroute.WithReqBody(billing.Budget{}), apiroute.WithResp(billing.Budget{}))
+	reg.Operation("PUT", "/api/admin/budgets/{id}", apiroute.Tags("计费管理"), apiroute.Summary("调整预算（跨租户）"), apiroute.Perm("super_admin"), apiroute.WithReqBody(billing.Budget{}), apiroute.WithResp(billing.Budget{}))
+	reg.Operation("DELETE", "/api/admin/budgets/{id}", apiroute.Tags("计费管理"), apiroute.Summary("删除预算（跨租户）"), apiroute.Perm("super_admin"))
+	reg.Operation("GET", "/api/admin/token-usage", apiroute.Tags("计费管理"), apiroute.Summary("周期 token 用量（跨租户，按租户/应用/模型）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.WithQuery("period", "账期 YYYY-MM，缺省当月（UTC）"), apiroute.Perm("super_admin"), apiroute.WithResp(billing.TokenUsageOverview{}))
+	reg.Operation("GET", "/api/admin/settlements", apiroute.Tags("计费管理"), apiroute.Summary("供应商对账（平台估算 vs 人工登记）"), apiroute.WithQuery("tenantId", "浏览范围：按租户过滤，缺省返回全部租户"), apiroute.WithQuery("period", "账期 YYYY-MM，缺省当月（UTC）"), apiroute.Perm("super_admin"), apiroute.WithResp(billing.SettlementOverview{}))
+	reg.Operation("POST", "/api/admin/settlements", apiroute.Tags("计费管理"), apiroute.Summary("登记供应商账单金额（人工，非付款）"), apiroute.Perm("super_admin"), apiroute.WithReqBody(billing.SettlementRecord{}), apiroute.WithResp(billing.SettlementRecord{}))
+	reg.Operation("DELETE", "/api/admin/settlements/{id}", apiroute.Tags("计费管理"), apiroute.Summary("删除对账记录"), apiroute.Perm("super_admin"))
 
 	// messaging（MQ topic/消费组 CRUD，租户隔离，方法级 dataservice 权限）。
 	mux.Handle("/api/mq-topics", auth(msgHandler))
@@ -2006,6 +2271,18 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 		apiroute.Tags("身份管理"), apiroute.Summary("创建租户"), apiroute.WithReqBody(identity.Tenant{}), apiroute.WithResp(identity.Tenant{}))
 	reg.Register("DELETE", "/api/admin/tenants/{id}", adminGuard(http.HandlerFunc(idmHandler.DeleteTenant)),
 		apiroute.Tags("身份管理"), apiroute.Summary("删除租户（级联）"))
+	reg.Register("POST", "/api/admin/tenants/{id}/freeze", adminGuard(http.HandlerFunc(idmHandler.FreezeTenant)),
+		apiroute.Tags("身份管理"), apiroute.Summary("冻结租户（阻断控制面准入，reason 必填；数据面业务继续运行）"),
+		apiroute.WithReqBody(struct {
+			Reason string `json:"reason"`
+		}{}), apiroute.WithResp(identity.Tenant{}))
+	reg.Register("POST", "/api/admin/tenants/{id}/unfreeze", adminGuard(http.HandlerFunc(idmHandler.UnfreezeTenant)),
+		apiroute.Tags("身份管理"), apiroute.Summary("恢复租户（重新开放控制面准入）"),
+		apiroute.WithReqBody(struct {
+			Reason string `json:"reason,omitempty"`
+		}{}), apiroute.WithResp(identity.Tenant{}))
+	reg.Register("GET", "/api/admin/tenants/{id}/offboarding", adminGuard(http.HandlerFunc(idmHandler.TenantOffboarding)),
+		apiroute.Tags("身份管理"), apiroute.Summary("注销预检（只读列出将受影响的资源与阻塞项，不触发删除）"), apiroute.WithResp(identity.OffboardingReport{}))
 	reg.Register("GET", "/api/admin/users", adminGuard(http.HandlerFunc(idmHandler.ListUsers)),
 		apiroute.Tags("身份管理"), apiroute.Summary("用户列表（?tenantId= 过滤）"), apiroute.WithResp([]identity.User{}))
 	reg.Register("POST", "/api/admin/users", adminGuard(http.HandlerFunc(idmHandler.CreateUser)),
@@ -2020,6 +2297,17 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 		apiroute.Tags("身份管理"), apiroute.Summary("创建 API Key（返明文一次）"), apiroute.WithReqBody(identity.APIKey{}), apiroute.WithResp(identity.APIKey{}))
 	reg.Register("DELETE", "/api/admin/api-keys/{id}", adminGuard(http.HandlerFunc(idmHandler.DeleteAPIKey)),
 		apiroute.Tags("身份管理"), apiroute.Summary("删除 API Key"))
+	reg.Register("POST", "/api/admin/api-keys/{id}/revoke", adminGuard(http.HandlerFunc(idmHandler.RevokeAPIKey)),
+		apiroute.Tags("身份管理"), apiroute.Summary("吊销 API Key（软吊销，保留记录供审计；幂等）"), apiroute.WithResp(identity.APIKey{}))
+	reg.Register("PUT", "/api/admin/api-keys/{id}/expiry", adminGuard(http.HandlerFunc(idmHandler.SetAPIKeyExpiry)),
+		apiroute.Tags("身份管理"), apiroute.Summary("设置/取消 API Key 到期时间（expiresAt 空=永不过期）"),
+		apiroute.WithReqBody(struct {
+			ExpiresAt string `json:"expiresAt"`
+		}{}), apiroute.WithResp(identity.APIKey{}))
+	reg.Register("POST", "/api/admin/api-keys/{id}/rotate", adminGuard(http.HandlerFunc(idmHandler.RotateAPIKey)),
+		apiroute.Tags("身份管理"), apiroute.Summary("轮换 API Key（新建同权限 Key 并吊销旧的，明文只返一次）"), apiroute.WithResp(identity.APIKey{}))
+	reg.Register("POST", "/api/admin/users/{id}/sessions/revoke", adminGuard(http.HandlerFunc(idmHandler.RevokeUserSessions)),
+		apiroute.Tags("身份管理"), apiroute.Summary("撤销用户全部会话（已签发 token 失效；refresh 立即拒绝）"))
 	reg.Register("GET", "/api/admin/roles", adminGuard(http.HandlerFunc(idmHandler.ListRoles)),
 		apiroute.Tags("身份管理"), apiroute.Summary("内置角色列表（只读）"))
 
@@ -2032,6 +2320,12 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 		apiroute.Tags("API 密钥"), apiroute.Summary("创建本租户 API Key（返明文一次，roles 封顶自身）"), apiroute.WithReqBody(identity.APIKey{}), apiroute.WithResp(identity.APIKey{}))
 	reg.Register("DELETE", "/api/api-keys/{id}", auth(http.HandlerFunc(idmHandler.DeleteAPIKey)),
 		apiroute.Tags("API 密钥"), apiroute.Summary("删除本租户 API Key"))
+	reg.Register("POST", "/api/api-keys/{id}/revoke", auth(http.HandlerFunc(idmHandler.RevokeAPIKey)),
+		apiroute.Tags("API 密钥"), apiroute.Summary("吊销本租户 API Key（软吊销，幂等）"), apiroute.WithResp(identity.APIKey{}))
+	reg.Register("PUT", "/api/api-keys/{id}/expiry", auth(http.HandlerFunc(idmHandler.SetAPIKeyExpiry)),
+		apiroute.Tags("API 密钥"), apiroute.Summary("设置/取消本租户 API Key 到期时间"), apiroute.WithReqBody(identity.APIKey{}), apiroute.WithResp(identity.APIKey{}))
+	reg.Register("POST", "/api/api-keys/{id}/rotate", auth(http.HandlerFunc(idmHandler.RotateAPIKey)),
+		apiroute.Tags("API 密钥"), apiroute.Summary("轮换本租户 API Key（明文只返一次，旧 Key 立即吊销）"), apiroute.WithResp(identity.APIKey{}))
 
 	// 中间件链（内→外）：mux → errorTrace → csrf → recovery → metrics → otelhttp → securityHeaders。
 	// errorTrace 紧贴 mux（otelhttp 内层、recovery 内层）：4xx/5xx 响应体 {error:msg} 与 panic

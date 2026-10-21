@@ -93,6 +93,11 @@ func (a *fakeApplier) EnsureIfMissing(ctx context.Context, w Workload) (bool, er
 	a.applied = append(a.applied, w)
 	return true, nil
 }
+
+// Exists 测试桩：本文件不覆盖 dry-run（见 admin_handler_test.go），恒报缺失。
+func (a *fakeApplier) Exists(ctx context.Context, w Workload) (bool, error) {
+	return false, nil
+}
 func (a *fakeApplier) Delete(ctx context.Context, id string) error {
 	a.deleted = append(a.deleted, id)
 	return nil

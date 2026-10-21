@@ -10,7 +10,16 @@ export interface MetricSeries {
 export interface AlertRule {
   id: string; name: string; metricName: string; targetType: string; targetId: string
   operator: string; threshold: number; severity: string; enabled: boolean
-  webhookUrl?: string // firing 时 POST 通知出站（可选）
+  webhookUrl?: string // 直连地址（存量兼容）；channelIds 非空时不再使用
+  channelIds?: string[] // 引用通知渠道（非空时忽略 webhookUrl）
+}
+// 通知渠道（租户级）：告警派发目标 + 抑制策略（停用/静默截止/重复提醒冷却）。
+// 服务端返回的 url 与 headers 一律掩码，编辑时回传掩码占位表示保留原值。
+export interface NotificationChannel {
+  id: string; name: string; kind: string
+  url: string; headers?: Record<string, string>
+  enabled: boolean; cooldownMinutes: number; muteUntil?: string | null
+  createdAt?: string; updatedAt?: string
 }
 export interface Alert {
   ruleId: string; ruleName: string; targetType?: string; targetId: string
@@ -53,6 +62,23 @@ export const updateAlertRule = (id: string, body: Partial<AlertRule>) =>
 
 export const deleteAlertRule = (id: string) =>
   fetchAuth(`/api/observability/alert-rules/${id}`, { method: 'DELETE' })
+
+// ---- 通知渠道（URL/Headers 服务端掩码；PUT 回传掩码占位=保留原值） ----
+export const listChannels = () =>
+  fetchAuth('/api/observability/channels').then(r => unwrap<NotificationChannel[]>(r))
+
+export const createChannel = (body: Partial<NotificationChannel>) =>
+  fetchAuth('/api/observability/channels', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(r => unwrap<NotificationChannel>(r))
+
+export const updateChannel = (id: string, body: Partial<NotificationChannel>) =>
+  fetchAuth(`/api/observability/channels/${id}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }).then(r => unwrap<NotificationChannel>(r))
+
+export const deleteChannel = (id: string) =>
+  fetchAuth(`/api/observability/channels/${id}`, { method: 'DELETE' })
 
 export const listAlerts = (params: Record<string, string> = {}) => {
   const q = new URLSearchParams(params).toString()

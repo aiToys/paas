@@ -3,6 +3,7 @@ package builder
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -71,7 +72,23 @@ func (r Real) Build(ctx context.Context, p Params) (Result, error) {
 		return Result{Log: log.String()}, fmt.Errorf("git clone 失败: %w\n%s", err, out)
 	}
 
-	// clone 后取真实 commit（HEAD）。
+	// 指定提交时必须检出该提交；浅克隆的分支 HEAD 可能已在预览后变化。
+	if p.Commit != "" {
+		if _, err := hex.DecodeString(p.Commit); err != nil || (len(p.Commit) != 40 && len(p.Commit) != 64) {
+			return Result{Log: log.String()}, fmt.Errorf("构建需提供完整提交 SHA")
+		}
+		if _, err := runCmd(cloneCtx, log, dir, gitBin, "fetch", "--depth", "1", "origin", p.Commit); err != nil {
+			return Result{Log: log.String()}, fmt.Errorf("获取锁定提交失败: %w", err)
+		}
+		if _, err := runCmd(cloneCtx, log, dir, gitBin, "checkout", "--detach", "FETCH_HEAD"); err != nil {
+			return Result{Log: log.String()}, fmt.Errorf("检出锁定提交失败: %w", err)
+		}
+		actual, err := runCmd(ctx, log, dir, gitBin, "rev-parse", "HEAD")
+		if err != nil || !strings.EqualFold(strings.TrimSpace(actual), p.Commit) {
+			return Result{Log: log.String()}, fmt.Errorf("锁定提交校验失败")
+		}
+	}
+	// 未指定提交时取真实 HEAD。
 	if p.Commit == "" {
 		out, err := runCmd(ctx, log, dir, gitBin, "rev-parse", "HEAD")
 		if err != nil {

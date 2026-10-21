@@ -127,6 +127,17 @@ export const fetchPlatformSecrets = async (): Promise<SecretOption[]> => {
     .map((s) => ({ id: s.id, name: s.name }))
 }
 
+// 平台凭证创建（供应商/通道表单内嵌入口，spec 2026-10-19 §8.3）。
+// 复用 POST /api/security/secrets + scope=platform：服务端经 IsPlatformAdmin 判定
+// （super_admin 会话），不放宽跨租户写语义；明文值仅提交不入前端状态。
+export interface PlatformSecretCreateRequest {
+  name: string
+  value: string
+  desc?: string
+}
+export const createPlatformSecret = (data: PlatformSecretCreateRequest) =>
+  api.post<SecretOption>('/api/security/secrets', { scope: 'platform', type: 'secret', ...data })
+
 // ===== 供应商管理（Vendor：预设 BaseURL+凭证+Type，创建通道选供应商即带入） =====
 // 供应商类型（与通道 type 同源；当前仅 openai-compatible 有意义）。
 export const PROVIDER_TYPES = [{ label: 'OpenAI 兼容', value: 'openai-compatible' }]

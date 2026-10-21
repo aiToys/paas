@@ -8,7 +8,7 @@ const menus: RouteRecordRaw[] = [
     name: 'home',
     component: () => import('@/modules/dashboard/views/Home.vue'),
     meta: {
-      title: '首页',
+      title: '平台总览', // 与后端菜单真源（auth/menus.go）标题保持一致，避免面包屑与侧栏不一致
       icon: 'HomeFilled',
       showMenu: true
     }

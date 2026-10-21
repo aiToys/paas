@@ -115,6 +115,20 @@ func BuiltinTemplates() []PipelineTemplate {
 				}},
 			},
 		},
+		{ID: "tpl-delivery-build", Name: "标准构建", Kind: KindCI, Builtin: true, Version: 1,
+			Description: "构建指定服务与提交，保留构建日志及镜像产物",
+			Stages:      []StageDef{{Name: "构建", Type: StageBuild}}},
+		{ID: "tpl-delivery-deploy", Name: "部署已有镜像", Kind: KindCD, Builtin: true, Version: 1,
+			Description: "将指定镜像滚动部署到明确的服务、环境与泳道，等待工作负载就绪",
+			Stages: []StageDef{{Name: "部署并等待就绪", Type: StageDeploy, Params: map[string]any{
+				"imageSource": ImageSelected, "strategy": "rolling",
+			}}}},
+		{ID: "tpl-delivery-build-deploy", Name: "构建并部署", Kind: KindCI, Builtin: true, Version: 1,
+			Description: "构建指定提交，再将本次产物滚动部署到明确目标，等待工作负载就绪",
+			Stages: []StageDef{{Name: "构建", Type: StageBuild},
+				{Name: "部署并等待就绪", Type: StageDeploy, Params: map[string]any{
+					"imageSource": ImagePriorBuild, "strategy": "rolling",
+				}}}},
 	}
 }
 

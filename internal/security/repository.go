@@ -31,4 +31,6 @@ type AuditStore interface {
 	RecordAudit(ctx context.Context, log AuditLog) error
 	// ListAllAuditLogs 跨租户列出全部审计日志（admin 平台总览，不过滤 tenant，返回对象带 TenantID）。
 	ListAllAuditLogs(ctx context.Context) ([]AuditLog, error)
+	// QueryAllAuditLogs 跨租户后端过滤 + 分页（时间倒序，同刻按 ID 稳定）；Total 为过滤后全量。
+	QueryAllAuditLogs(ctx context.Context, q AuditQuery) (AuditPage, error)
 }

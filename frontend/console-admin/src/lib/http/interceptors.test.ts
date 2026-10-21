@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest'
-import axios, { type AxiosInstance, type InternalAxiosRequestConfig } from 'axios'
+import axios, { AxiosError, type AxiosInstance, type InternalAxiosRequestConfig } from 'axios'
 import { installInterceptors } from './interceptors'
 import { HttpError } from '@/lib/error/types'
 
@@ -14,7 +14,7 @@ function newClient(respData: unknown, status = 200): AxiosInstance {
       statusText: 'OK',
       headers: {},
       config
-    } as any)
+    })
   return inst
 }
 
@@ -39,11 +39,9 @@ describe('响应拦截器：PaaS core 格式兼容', () => {
     const inst = axios.create({ baseURL: 'http://test' })
     installInterceptors(inst)
     inst.defaults.adapter = (config: InternalAxiosRequestConfig) =>
-      Promise.reject({
-        response: { data: { error: '用户名或密码错误' }, status: 401, statusText: 'Unauthorized', headers: {}, config },
-        config,
-        isAxiosError: true
-      } as any)
+      Promise.reject(new AxiosError('用户名或密码错误', AxiosError.ERR_BAD_REQUEST, config, undefined, {
+        data: { error: '用户名或密码错误' }, status: 401, statusText: 'Unauthorized', headers: {}, config
+      }))
     try {
       await inst.get('/x')
       expect.unreachable('应抛错')

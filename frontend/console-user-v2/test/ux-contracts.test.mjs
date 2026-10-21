@@ -310,3 +310,19 @@ test('SSE error frames and malformed complete events are failures, DONE is expli
   assert.throws(() => chatEvent('event: error\ndata: {"error":{"message":"upstream unavailable"}}'), /upstream unavailable/)
   assert.throws(() => chatEvent('data: {broken}'), /格式错误/)
 })
+
+test('delivery history includes independent deployments without inventing pipeline ownership', async () => {
+  const { deliveryRecords } = await import('../src/domain/delivery.ts')
+  const rows = deliveryRecords(
+    [{ id: 'run', appId: 'shop', trigger: 'manual', branch: 'feat/ui', status: 'succeeded', createdAt: '2026-10-20T01:00:00Z', stageRuns: [{ type: 'build', input: { buildRunId: 'build' } }] }],
+    [{ id: 'build', appId: 'shop', branch: 'feat/ui', trigger: 'manual', status: 'success', startedAt: '2026-10-20T01:01:00Z' }],
+    [{ id: 'legacy-release', appId: 'shop', envId: 'test', imageId: 'img', status: 'succeeded', createdAt: '2026-10-20T01:02:00Z' }],
+  )
+  assert.equal(rows.length, 3)
+  assert.equal(rows[0].to, '/releases/legacy-release')
+  assert.equal(rows[0].sourceRunId, undefined)
+  assert.match(rows[0].source, /未关联流水线/)
+  assert.equal(rows[0].lane, 'default')
+  assert.equal(rows.find(r => r.id === 'build').sourceRunId, 'run')
+  assert.equal(rows.find(r => r.id === 'build').createdAt, '2026-10-20T01:01:00Z')
+})

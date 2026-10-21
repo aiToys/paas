@@ -23,8 +23,8 @@ func TestSeedTemplatesIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTemplates 失败: %v", err)
 	}
-	if len(first) != 4 {
-		t.Fatalf("首次 want 4 模板，got %d", len(first))
+	if len(first) != 7 {
+		t.Fatalf("首次 want 7 模板，got %d", len(first))
 	}
 
 	// 幂等：再 seed 不报错不翻倍
@@ -32,8 +32,8 @@ func TestSeedTemplatesIdempotent(t *testing.T) {
 		t.Fatalf("二次 seed 失败: %v", err)
 	}
 	second, _ := s.ListTemplates(viewCtx)
-	if len(second) != 4 {
-		t.Fatalf("幂等 want 4，got %d", len(second))
+	if len(second) != 7 {
+		t.Fatalf("幂等 want 7，got %d", len(second))
 	}
 }
 
@@ -115,8 +115,8 @@ func TestSeedTemplatesSameVersionNoOverwrite(t *testing.T) {
 // TestBuiltinTemplatesContent 验证预置模板的 stages 类型序列与 Kind。
 func TestBuiltinTemplatesContent(t *testing.T) {
 	tpls := BuiltinTemplates()
-	if len(tpls) != 4 {
-		t.Fatalf("want 4 预置模板，got %d", len(tpls))
+	if len(tpls) != 7 {
+		t.Fatalf("want 7 预置模板，got %d", len(tpls))
 	}
 
 	ci := tpls[0]
@@ -239,7 +239,7 @@ func TestSeedTemplatesCrossTenantVisible(t *testing.T) {
 	}
 	acme, _ := s.ListTemplates(tenant.WithTenant(context.Background(), "t-acme"))
 	globex, _ := s.ListTemplates(tenant.WithTenant(context.Background(), "t-globex"))
-	if len(acme) != 4 || len(globex) != 4 {
+	if len(acme) != 7 || len(globex) != 7 {
 		t.Fatalf("平台预置应跨租户可见，acme=%d globex=%d", len(acme), len(globex))
 	}
 	// 都是平台预置（TenantID=""）

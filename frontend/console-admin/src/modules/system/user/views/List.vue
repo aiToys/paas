@@ -116,7 +116,35 @@
       >
         {{ t('common.action.edit') }}
       </el-button>
+      <el-dropdown
+        v-if="canWrite"
+        trigger="click"
+        @command="(cmd: string) => handleCommand(cmd, row)"
+      >
+        <el-button
+          link
+          type="primary"
+          size="small"
+          style="margin-left: 8px"
+        >
+          {{ t('common.action.more') }}
+        </el-button>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="revoke-sessions">
+              撤销全部会话
+            </el-dropdown-item>
+            <el-dropdown-item
+              command="delete"
+              divided
+            >
+              {{ t('common.action.delete') }}
+            </el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
       <el-button
+        v-else
         link
         type="danger"
         size="small"
@@ -138,8 +166,10 @@
 <script lang="ts" setup>
 import { ref, computed, onMounted } from 'vue'
 import { Plus, Delete, Refresh } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { SearchTable, StatusTag } from '@/app/components'
 import { useCrud } from '@/app/composables/useCrud'
+import { usePermissionStore } from '@/app/stores/permission'
 import { formatDate } from '@/lib/format'
 import { t } from '@/lib/i18n'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
@@ -147,6 +177,7 @@ import {
   fetchUserList,
   deleteUser,
   batchDeleteUsers,
+  revokeUserSessions,
   type UserInfo,
   type UserSearchRequest,
 } from '../api'
@@ -178,6 +209,35 @@ const onSelectionChange = (rows: Record<string, unknown>[]) => {
   handleSelectionChange(rows as unknown as UserInfo[])
 }
 
+const permissionStore = usePermissionStore()
+// 撤销会话/删除属平台身份写操作（core adminGuard 同权限，前端只做入口显隐）。
+const canWrite = computed(() => permissionStore.hasPermission('platform:identity:write'))
+
+const handleCommand = (cmd: string, row: Record<string, unknown>) => {
+  if (cmd === 'revoke-sessions') handleRevokeSessions(row)
+  else if (cmd === 'delete') handleDelete(row.id as string)
+}
+
+const handleRevokeSessions = async (row: Record<string, unknown>) => {
+  const id = row.id as string
+  try {
+    await ElMessageBox.confirm(
+      `确认撤销用户「${row.username ?? id}」的全部已登录会话？\n` +
+        '该用户在 ≤30 秒内被强制下线，且无法用旧 refresh token 续期；需重新登录。',
+      '撤销全部会话',
+      { confirmButtonText: '确认撤销', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  try {
+    const ver = await revokeUserSessions(id)
+    ElMessage.success(`已撤销全部会话（session_version=${ver}），最坏 30 秒内生效`)
+  } catch {
+    // 拦截器已提示
+  }
+}
+
 const tableData = computed(() => listData.value as unknown as Record<string, unknown>[])
 const tableSelectedRows = computed(() => selectedRows.value as unknown as Record<string, unknown>[])
 
@@ -190,7 +250,7 @@ const columns = computed<ColumnDef[]>(() => [
   { prop: 'status', label: t('common.column.status'), minWidth: 90, slot: 'status' },
   { prop: 'createTime', label: t('common.column.createTime'), minWidth: 170, slot: 'createTime' },
   { prop: 'lastLoginTime', label: t('common.column.lastLoginTime'), minWidth: 170, slot: 'lastLoginTime' },
-  { prop: 'actions', label: t('common.column.actions'), width: 200, fixed: 'right', slot: 'actions' },
+  { prop: 'actions', label: t('common.column.actions'), width: 240, fixed: 'right', slot: 'actions' },
 ])
 
 // 角色列表：搜索栏 options 与列表 code→name 映射共用一次请求

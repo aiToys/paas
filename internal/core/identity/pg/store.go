@@ -25,10 +25,27 @@ func NewStore(db *pg.DB) *Store { return &Store{db: db} }
 
 // —— Tenant ——
 
+// tenantColumns tenants 表读取列（与 scanTenant 顺序一致）。
+const tenantColumns = `id, name, status, frozen_at, frozen_reason, created_at`
+
+func scanTenant(row pgx.Row) (identity.Tenant, error) {
+	var t identity.Tenant
+	if err := row.Scan(&t.ID, &t.Name, &t.Status, &t.FrozenAt, &t.FrozenReason, &t.CreatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return identity.Tenant{}, identity.ErrTenantNotFound
+		}
+		return identity.Tenant{}, err
+	}
+	return t, nil
+}
+
 func (s *Store) CreateTenant(ctx context.Context, t identity.Tenant) error {
+	if t.Status == "" {
+		t.Status = identity.TenantStatusActive
+	}
 	_, err := s.db.Pool().Exec(ctx,
-		`INSERT INTO tenants (id, name, created_at) VALUES ($1, $2, $3)`,
-		t.ID, t.Name, t.CreatedAt)
+		`INSERT INTO tenants (id, name, status, created_at) VALUES ($1, $2, $3, $4)`,
+		t.ID, t.Name, t.Status, t.CreatedAt)
 	if pg.IsUniqueViolation(err) {
 		return fmt.Errorf("租户%w: %s", pg.ErrAlreadyExists, t.ID)
 	}
@@ -36,16 +53,12 @@ func (s *Store) CreateTenant(ctx context.Context, t identity.Tenant) error {
 }
 
 func (s *Store) GetTenant(ctx context.Context, id string) (identity.Tenant, error) {
-	row := s.db.Pool().QueryRow(ctx,
-		`SELECT id, name, created_at FROM tenants WHERE id=$1`, id)
-	var t identity.Tenant
-	if err := row.Scan(&t.ID, &t.Name, &t.CreatedAt); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return identity.Tenant{}, fmt.Errorf("租户不存在: %s", id)
-		}
-		return identity.Tenant{}, err
+	t, err := scanTenant(s.db.Pool().QueryRow(ctx,
+		`SELECT `+tenantColumns+` FROM tenants WHERE id=$1`, id))
+	if errors.Is(err, identity.ErrTenantNotFound) {
+		return identity.Tenant{}, fmt.Errorf("%w: %s", identity.ErrTenantNotFound, id)
 	}
-	return t, nil
+	return t, err
 }
 
 // —— User ——
@@ -76,8 +89,8 @@ func (s *Store) CreateUser(ctx context.Context, u identity.User) error {
 	return tx.Commit(ctx)
 }
 
-// userColumns 是 users 表的统一读取列（CreateUser 写入字段对齐）。
-const userColumns = "id, tenant_id, name, email, password_hash, is_admin, status, created_at"
+// userColumns 是 users 表的统一读取列（与 scanUser 顺序一致）。
+const userColumns = "id, tenant_id, name, email, password_hash, is_admin, status, session_version, created_at"
 
 func defaultStatus(s string) string {
 	if s == "" {
@@ -89,7 +102,8 @@ func defaultStatus(s string) string {
 // scanUser 把一行扫描为 User（角色需另行聚合）。
 func scanUser(row pgx.Row) (identity.User, error) {
 	var u identity.User
-	err := row.Scan(&u.ID, &u.TenantID, &u.Name, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.Status, &u.CreatedAt)
+	err := row.Scan(&u.ID, &u.TenantID, &u.Name, &u.Email, &u.PasswordHash, &u.IsAdmin, &u.Status,
+		&u.SessionVersion, &u.CreatedAt)
 	return u, err
 }
 
@@ -145,9 +159,11 @@ func (s *Store) GetUserByName(ctx context.Context, name string) (*identity.User,
 }
 
 // GetUser 取单个用户（租户内隔离）；聚合角色。
+// tenantID 为空时跨租户按用户 ID 定位（与 DeleteUser / RevokeUserSessions 同约定）。
 func (s *Store) GetUser(ctx context.Context, tenantID, userID string) (*identity.User, error) {
 	u, err := scanUser(s.db.Pool().QueryRow(ctx,
-		`SELECT `+userColumns+` FROM users WHERE tenant_id=$1 AND id=$2`, tenantID, userID))
+		`SELECT `+userColumns+` FROM users WHERE id=$2 AND ($1 = '' OR tenant_id=$1)`,
+		tenantID, userID))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("用户不存在: %s", userID)
@@ -204,6 +220,26 @@ func (s *Store) usersRolesBatch(ctx context.Context, userIDs []string) (map[stri
 
 // —— APIKey ——
 
+// apiKeyColumns api_keys 表读取列（与 scanAPIKey 顺序一致）。
+// app_id 可空（旧租户级 Key 行 app_id=NULL，migration 0004 增量加列）。
+//
+//nolint:gosec // 列名常量含 "key" 被 gosec 误判为凭证
+const apiKeyColumns = `id, tenant_id, user_id, app_id, key, created_at, expires_at, last_used_at, revoked_at, rotated_from`
+
+// scanAPIKey 把一行扫描为 APIKey（角色需另行聚合）。无行时原样返回 pgx.ErrNoRows，由调用方决定文案。
+func scanAPIKey(row pgx.Row) (identity.APIKey, error) {
+	var k identity.APIKey
+	var appID *string
+	if err := row.Scan(&k.ID, &k.TenantID, &k.UserID, &appID, &k.Key, &k.CreatedAt,
+		&k.ExpiresAt, &k.LastUsedAt, &k.RevokedAt, &k.RotatedFrom); err != nil {
+		return identity.APIKey{}, err
+	}
+	if appID != nil {
+		k.AppID = *appID
+	}
+	return k, nil
+}
+
 func (s *Store) CreateAPIKey(ctx context.Context, k identity.APIKey) error {
 	tx, err := s.db.Pool().Begin(ctx)
 	if err != nil {
@@ -212,8 +248,9 @@ func (s *Store) CreateAPIKey(ctx context.Context, k identity.APIKey) error {
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err = tx.Exec(ctx,
-		`INSERT INTO api_keys (id, tenant_id, user_id, app_id, key, created_at) VALUES ($1, $2, $3, $4, $5, $6)`,
-		k.ID, k.TenantID, k.UserID, k.AppID, k.Key, k.CreatedAt); err != nil {
+		`INSERT INTO api_keys (id, tenant_id, user_id, app_id, key, created_at, expires_at, rotated_from)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		k.ID, k.TenantID, k.UserID, k.AppID, k.Key, k.CreatedAt, k.ExpiresAt, k.RotatedFrom); err != nil {
 		if pg.IsUniqueViolation(err) {
 			return fmt.Errorf("API Key%w", pg.ErrAlreadyExists)
 		}
@@ -229,21 +266,31 @@ func (s *Store) CreateAPIKey(ctx context.Context, k identity.APIKey) error {
 }
 
 // LookupAPIKey 按 bearer key 解析 (租户, 用户, 角色)。找不到返回错误（不泄漏存在性）。
+// 到期/吊销/租户冻结一律拒绝：与内存实现同源，鉴权结论不因后端而变。
 func (s *Store) LookupAPIKey(ctx context.Context, key string) (identity.APIKey, error) {
-	row := s.db.Pool().QueryRow(ctx,
-		`SELECT id, tenant_id, user_id, app_id, created_at FROM api_keys WHERE key=$1`, key)
-	var k identity.APIKey
-	k.Key = key
-	// app_id 可空（旧租户级 Key 行 app_id=NULL，migration 0004 增量加列），用 *string 接 NULL。
-	var appID *string
-	if err := row.Scan(&k.ID, &k.TenantID, &k.UserID, &appID, &k.CreatedAt); err != nil {
+	k, err := scanAPIKey(s.db.Pool().QueryRow(ctx,
+		`SELECT `+apiKeyColumns+` FROM api_keys WHERE key=$1`, key))
+	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return identity.APIKey{}, fmt.Errorf("API Key 无效")
 		}
 		return identity.APIKey{}, err
 	}
-	if appID != nil {
-		k.AppID = *appID
+	if err := k.Usable(time.Now()); err != nil {
+		return identity.APIKey{}, err
+	}
+	// 冻结租户的密钥一律拒绝：控制面准入关闭，数据面已部署业务不受影响。
+	var tenantStatus string
+	switch err := s.db.Pool().QueryRow(ctx,
+		`SELECT status FROM tenants WHERE id=$1`, k.TenantID).Scan(&tenantStatus); {
+	case errors.Is(err, pgx.ErrNoRows):
+		// 租户行缺失：Key 属孤儿数据，按无效处理（不泄漏存在性）。
+		return identity.APIKey{}, fmt.Errorf("API Key 无效")
+	case err != nil:
+		return identity.APIKey{}, err
+	}
+	if tenantStatus == identity.TenantStatusFrozen {
+		return identity.APIKey{}, identity.ErrTenantFrozen
 	}
 	roles, err := s.apiKeyRoles(ctx, k.ID)
 	if err != nil {
@@ -303,15 +350,15 @@ func (s *Store) TenantsCount(ctx context.Context) (int, error) {
 // —— 平台级管理方法（跨租户；handler 强制 tenant:admin）——
 
 func (s *Store) ListTenants(ctx context.Context) ([]identity.Tenant, error) {
-	rows, err := s.db.Pool().Query(ctx, `SELECT id, name, created_at FROM tenants ORDER BY id`)
+	rows, err := s.db.Pool().Query(ctx, `SELECT `+tenantColumns+` FROM tenants ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []identity.Tenant
 	for rows.Next() {
-		var t identity.Tenant
-		if err := rows.Scan(&t.ID, &t.Name, &t.CreatedAt); err != nil {
+		t, err := scanTenant(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -463,7 +510,7 @@ func (s *Store) DeleteUser(ctx context.Context, tenantID, userID string) error {
 
 // ListAPIKeys tenantID 空则全租户。
 func (s *Store) ListAPIKeys(ctx context.Context, tenantID string) ([]identity.APIKey, error) {
-	q := `SELECT id, tenant_id, user_id, app_id, key, created_at FROM api_keys`
+	q := `SELECT ` + apiKeyColumns + ` FROM api_keys`
 	args := []any{}
 	if tenantID != "" {
 		q += ` WHERE tenant_id=$1`
@@ -477,14 +524,9 @@ func (s *Store) ListAPIKeys(ctx context.Context, tenantID string) ([]identity.AP
 	defer rows.Close()
 	var out []identity.APIKey
 	for rows.Next() {
-		var k identity.APIKey
-		// app_id 可空（旧租户级 Key 行），用 *string 接 NULL。
-		var appID *string
-		if err := rows.Scan(&k.ID, &k.TenantID, &k.UserID, &appID, &k.Key, &k.CreatedAt); err != nil {
+		k, err := scanAPIKey(rows)
+		if err != nil {
 			return nil, err
-		}
-		if appID != nil {
-			k.AppID = *appID
 		}
 		out = append(out, k)
 	}
@@ -515,4 +557,94 @@ func (s *Store) DeleteAPIKey(ctx context.Context, id string) error {
 		return fmt.Errorf("API Key 不存在: %s", id)
 	}
 	return nil // api_key_roles FK CASCADE
+}
+
+// —— 生命周期（D5）——
+
+// SetTenantStatus 冻结/恢复租户：状态与冻结元数据在同一条 UPDATE 内落库，
+// 避免两次写之间被读到「status=frozen 但 frozen_at 为空」的半态。
+func (s *Store) SetTenantStatus(ctx context.Context, id, status, reason string) (identity.Tenant, error) {
+	if status != identity.TenantStatusActive && status != identity.TenantStatusFrozen {
+		return identity.Tenant{}, fmt.Errorf("非法租户状态: %s", status)
+	}
+	q := `UPDATE tenants SET status=$2, frozen_at=NULL, frozen_reason='' WHERE id=$1 RETURNING ` + tenantColumns
+	args := []any{id, status}
+	if status == identity.TenantStatusFrozen {
+		q = `UPDATE tenants SET status=$2, frozen_at=now(), frozen_reason=$3 WHERE id=$1 RETURNING ` + tenantColumns
+		args = append(args, reason)
+	}
+	t, err := scanTenant(s.db.Pool().QueryRow(ctx, q, args...))
+	if errors.Is(err, identity.ErrTenantNotFound) {
+		return identity.Tenant{}, identity.ErrTenantNotFound
+	}
+	return t, err
+}
+
+// GetAPIKey 按 id 取（跨租户 admin 轮换用）；聚合角色，与 LookupAPIKey 同构。
+func (s *Store) GetAPIKey(ctx context.Context, id string) (identity.APIKey, error) {
+	k, err := scanAPIKey(s.db.Pool().QueryRow(ctx,
+		`SELECT `+apiKeyColumns+` FROM api_keys WHERE id=$1`, id))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return identity.APIKey{}, fmt.Errorf("API Key 不存在: %s", id)
+		}
+		return identity.APIKey{}, err
+	}
+	roles, err := s.apiKeyRoles(ctx, k.ID)
+	if err != nil {
+		return identity.APIKey{}, err
+	}
+	k.Roles = roles
+	return k, nil
+}
+
+// TouchAPIKeyUsage 回写最近使用时间；Key 已被删除时静默返回（不把使用统计失败升级为鉴权失败）。
+func (s *Store) TouchAPIKeyUsage(ctx context.Context, id string, at time.Time) error {
+	_, err := s.db.Pool().Exec(ctx, `UPDATE api_keys SET last_used_at=$2 WHERE id=$1`, id, at)
+	return err
+}
+
+// RevokeAPIKey 软吊销：只写 revoked_at，保留记录与角色供审计；LookupAPIKey 的 Usable() 据此拒绝。
+func (s *Store) RevokeAPIKey(ctx context.Context, id string, at time.Time) error {
+	ct, err := s.db.Pool().Exec(ctx, `UPDATE api_keys SET revoked_at=$2 WHERE id=$1`, id, at)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("API Key 不存在: %s", id)
+	}
+	return nil
+}
+
+// SetAPIKeyExpiry 设置到期时间；零值写 NULL = 永不过期（取消到期）。
+func (s *Store) SetAPIKeyExpiry(ctx context.Context, id string, at time.Time) error {
+	var exp *time.Time
+	if !at.IsZero() {
+		exp = &at
+	}
+	ct, err := s.db.Pool().Exec(ctx, `UPDATE api_keys SET expires_at=$2 WHERE id=$1`, id, exp)
+	if err != nil {
+		return err
+	}
+	if ct.RowsAffected() == 0 {
+		return fmt.Errorf("API Key 不存在: %s", id)
+	}
+	return nil
+}
+
+// RevokeUserSessions 撤销用户已签发的全部会话：单条 UPDATE 原子递增并回传新代次
+// （并发撤销各得不同版本，不会出现两个调用读到同一值）。
+func (s *Store) RevokeUserSessions(ctx context.Context, tenantID, userID string) (int, error) {
+	var v int
+	err := s.db.Pool().QueryRow(ctx,
+		`UPDATE users SET session_version = session_version + 1
+		 WHERE id=$2 AND ($1 = '' OR tenant_id=$1)
+		 RETURNING session_version`, tenantID, userID).Scan(&v)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, fmt.Errorf("用户不存在: %s", userID)
+		}
+		return 0, err
+	}
+	return v, nil
 }

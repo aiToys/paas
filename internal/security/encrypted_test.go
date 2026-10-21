@@ -45,6 +45,10 @@ func (f *fakeSecStore) ListAllAuditLogs(ctx context.Context) ([]security.AuditLo
 	return nil, nil
 }
 
+func (f *fakeSecStore) QueryAllAuditLogs(ctx context.Context, q security.AuditQuery) (security.AuditPage, error) {
+	return security.AuditPage{Items: []security.AuditLog{}}, nil
+}
+
 // 测试 cipher（64 位 hex）。
 func testCipher(t *testing.T) *crypto.Cipher {
 	t.Helper()

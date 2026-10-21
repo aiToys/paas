@@ -63,6 +63,37 @@ const (
 
 // ---------- Repository: Pipeline ----------
 
+// ListAllPipelines 跨租户列表（admin 模板引用预检用）；created_at 升序。
+func (s *pgStore) ListAllPipelines(ctx context.Context) ([]Pipeline, error) {
+	rows, err := s.db.Query(ctx, `SELECT `+pipeCols+` FROM pipelines ORDER BY created_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanPipelines(rows)
+}
+
+// scanPipelines 统一 Pipeline 行扫描（pipeCols 加列只改这里；ListPipelines/ListAllPipelines 共用）。
+func scanPipelines(rows pgx.Rows) ([]Pipeline, error) {
+	out := make([]Pipeline, 0)
+	for rows.Next() {
+		var p Pipeline
+		var overridesB, trigB []byte
+		if err := rows.Scan(&p.ID, &p.TenantID, &p.AppID, &p.Name, &p.Kind, &p.TemplateID,
+			&overridesB, &trigB, &p.Disabled, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		if len(overridesB) > 0 {
+			_ = json.Unmarshal(overridesB, &p.ParamOverrides)
+		}
+		if len(trigB) > 0 {
+			_ = json.Unmarshal(trigB, &p.Trigger)
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
 // ListPipelines 按租户 + 可选 appID 过滤；created_at 升序（与内存版 sort.Slice ID 升序语义近似）。
 func (s *pgStore) ListPipelines(ctx context.Context, appID string) ([]Pipeline, error) {
 	tid, err := tenantOrErr(ctx)
@@ -81,23 +112,7 @@ func (s *pgStore) ListPipelines(ctx context.Context, appID string) ([]Pipeline, 
 		return nil, err
 	}
 	defer rows.Close()
-	out := make([]Pipeline, 0)
-	for rows.Next() {
-		var p Pipeline
-		var overridesB, trigB []byte
-		if err = rows.Scan(&p.ID, &p.TenantID, &p.AppID, &p.Name, &p.Kind, &p.TemplateID,
-			&overridesB, &trigB, &p.Disabled, &p.CreatedAt); err != nil {
-			return nil, err
-		}
-		if len(overridesB) > 0 {
-			_ = json.Unmarshal(overridesB, &p.ParamOverrides)
-		}
-		if len(trigB) > 0 {
-			_ = json.Unmarshal(trigB, &p.Trigger)
-		}
-		out = append(out, p)
-	}
-	return out, rows.Err()
+	return scanPipelines(rows)
 }
 
 // GetPipeline 取单个；跨租户访问 NotFound 不泄漏。
@@ -297,11 +312,19 @@ func (s *pgStore) ListRuns(ctx context.Context, appID, pipelineID, status string
 // ListAllRuns 跨租户列表（admin 总览用，返回对象带 TenantID）；可选 status 过滤；created_at 倒序。
 // 与 ListRuns 区别：不按 ctx tenant 过滤（admin 跨租户视图）。LIMIT 1000 防御上界（与审计日志同款）。
 func (s *pgStore) ListAllRuns(ctx context.Context, status string) ([]PipelineRun, error) {
-	q := `SELECT ` + runCols + ` FROM pipeline_runs`
+	return s.ListAdminRuns(ctx, status, "")
+}
+
+func (s *pgStore) ListAdminRuns(ctx context.Context, status, tenantID string) ([]PipelineRun, error) {
+	q := `SELECT ` + runCols + ` FROM pipeline_runs WHERE TRUE`
 	args := []any{}
 	if status != "" {
 		args = append(args, status)
-		q += fmt.Sprintf(` WHERE status=$%d`, len(args))
+		q += fmt.Sprintf(` AND status=$%d`, len(args))
+	}
+	if tenantID != "" {
+		args = append(args, tenantID)
+		q += fmt.Sprintf(` AND tenant_id=$%d`, len(args))
 	}
 	q += ` ORDER BY created_at DESC, id DESC LIMIT 1000`
 	rows, err := s.db.Query(ctx, q, args...)
@@ -321,6 +344,21 @@ func (s *pgStore) ListAllRuns(ctx context.Context, status string) ([]PipelineRun
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+func (s *pgStore) GetRunAny(ctx context.Context, id string) (PipelineRun, error) {
+	var r PipelineRun
+	row := s.db.QueryRow(ctx, `SELECT `+runCols+` FROM pipeline_runs WHERE id=$1`, id)
+	if err := scanRunInto(row, &r); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return PipelineRun{}, ErrRunNotFound
+		}
+		return PipelineRun{}, err
+	}
+	if err := loadStageRuns(ctx, s.db, &r); err != nil {
+		return PipelineRun{}, err
+	}
+	return r, nil
 }
 
 // GetRun 取单个（含 stageRuns）；跨租户 NotFound 不泄漏。
@@ -494,7 +532,7 @@ func (s *pgStore) UpdateRun(ctx context.Context, in PipelineRun) (PipelineRun, e
 	defer func() { _ = tx.Rollback(ctx) }()
 	tag, err := tx.Exec(ctx,
 		`UPDATE pipeline_runs SET branch=$1, lane=$2, commit=$3, trigger=$4, trigger_ref=$5, status=$6, current_stage=$7, version=$8, finished_at=$9, artifact=$10, decisions=$11
-		 WHERE id=$12 AND tenant_id=$13`,
+		 WHERE id=$12 AND tenant_id=$13 AND (status <> 'aborted' OR $6 = 'aborted')`,
 		in.Branch, in.Lane, in.Commit, in.Trigger, in.TriggerRef, in.Status, in.CurrentStage, in.Version, nullTime(in.FinishedAt),
 		jsonbOrNull(in.Artifact), jsonbOrNull(in.Decisions),
 		in.ID, tid)
@@ -502,6 +540,14 @@ func (s *pgStore) UpdateRun(ctx context.Context, in PipelineRun) (PipelineRun, e
 		return PipelineRun{}, err
 	}
 	if tag.RowsAffected() == 0 {
+		// 条件更新与行锁原子判定：不能让 Abort 被并发推进的旧快照复活。
+		var exists bool
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pipeline_runs WHERE id=$1 AND tenant_id=$2)`, in.ID, tid).Scan(&exists); err != nil {
+			return PipelineRun{}, err
+		}
+		if exists {
+			return PipelineRun{}, ErrNotRunning
+		}
 		return PipelineRun{}, ErrRunNotFound
 	}
 	// 全量重写 stage_runs

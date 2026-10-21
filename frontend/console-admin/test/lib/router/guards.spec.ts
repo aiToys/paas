@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { setActivePinia, createPinia } from 'pinia'
+import { useScopeStore } from '@/app/stores/scope'
 import { useUserStore } from '@/app/stores/user'
 import type { UserProfile } from '@/lib/auth/types'
 
@@ -65,6 +66,7 @@ function makeRouter(
 
 describe('guards', () => {
   beforeEach(() => {
+    sessionStorage.clear()
     setActivePinia(createPinia())
     vi.clearAllMocks()
     // 每个用例重置 menusRegistered 标志，确保 bootstrap 子步骤可重复触发
@@ -196,4 +198,20 @@ describe('guards', () => {
     // resolve 后总调用数仍为 1
     expect(vi.mocked(api.get).mock.calls.length).toBe(1)
   })
+  it.each([true, false])('只有已授权导航同步租户范围，授权=%s', async (allowed) => {
+    const router = makeRouter([{ path: '/resources/workloads', component: { template: '<div />' }, meta: { permissions: { all: ['resource:read'] } } }])
+    installGuards(router)
+    vi.mocked(authService.isAuthenticated).mockReturnValue(true)
+    const user = useUserStore()
+    user.profile = { id: '1', username: 'operator', roles: [], permissions: allowed ? ['resource:read'] : [] }
+    user.isLoaded = true
+    const scope = useScopeStore()
+    scope.setTenant('t-acme')
+    await router.push('/resources/workloads?tenantId=t-globex&id=wl-1')
+    expect(scope.tenantId).toBe(allowed ? 't-globex' : 't-acme')
+    expect(user.profile.roles).toEqual([])
+    expect(user.profile.permissions).toEqual(allowed ? ['resource:read'] : [])
+    if (allowed) expect(router.currentRoute.value.query.id).toBe('wl-1')
+  })
+
 })

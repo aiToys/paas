@@ -33,6 +33,8 @@ type AdminHandler struct {
 	tenants AdminTenantChecker
 	audit   AdminAuditRecorder
 	actorOf func(*http.Request) string
+	// usage 依赖预检（只读）：与租户侧 DELETE 前检查同一实现，admin 视图不另算一套。
+	usage EnvUsageChecker
 }
 
 // AdminHandlerOpt admin handler 配置。
@@ -55,6 +57,11 @@ func WithAdminTenants(c AdminTenantChecker) AdminHandlerOpt {
 // WithAdminAudit 注入审计 recorder。
 func WithAdminAudit(a AdminAuditRecorder) AdminHandlerOpt {
 	return func(h *AdminHandler) { h.audit = a }
+}
+
+// WithAdminUsage 注入环境依赖预检（只读；与租户侧删除前置检查同源）。
+func WithAdminUsage(u EnvUsageChecker) AdminHandlerOpt {
+	return func(h *AdminHandler) { h.usage = u }
 }
 
 // WithAdminActor 注入 actor 提取器（取 super_admin UserID 作审计 actor）。
@@ -98,18 +105,48 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// serveItem 处理 /api/admin/environments/{id}（GET 详情）。
+// serveItem 处理 /api/admin/environments/{id}（GET 详情）与 /{id}/usage（依赖预检）。
 func (h *AdminHandler) serveItem(w http.ResponseWriter, r *http.Request) {
-	id := strings.Trim(strings.TrimPrefix(strings.TrimRight(r.URL.Path, "/"), "/api/admin/environments/"), "/")
-	if id == "" || strings.Contains(id, "/") {
-		httputil.WriteError(w, http.StatusNotFound, "not found")
-		return
-	}
+	rest := strings.Trim(strings.TrimPrefix(strings.TrimRight(r.URL.Path, "/"), "/api/admin/environments/"), "/")
 	if r.Method != http.MethodGet {
 		httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	h.serveDetail(w, r, id)
+	// usage 分支必须先于单资源分支判断（rest 含斜杠时 Split 出的 id 会误匹配单资源）。
+	if strings.HasSuffix(rest, "/usage") {
+		h.serveUsage(w, r, strings.TrimSuffix(rest, "/usage"))
+		return
+	}
+	if rest == "" || strings.Contains(rest, "/") {
+		httputil.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	h.serveDetail(w, r, rest)
+}
+
+// serveUsage 跨租户环境依赖预检：定位环境归属租户 → 以该租户 ctx 复用租户侧检查器。
+// 只读：不代租户删除环境（删除仍走租户侧，依赖存在时 409）。
+func (h *AdminHandler) serveUsage(w http.ResponseWriter, r *http.Request, id string) {
+	if id == "" {
+		httputil.WriteError(w, http.StatusNotFound, "not found")
+		return
+	}
+	env, err := h.findByID(r.Context(), id)
+	if err != nil {
+		httputil.WriteServiceError(w, http.StatusNotFound, err)
+		return
+	}
+	if h.usage == nil {
+		httputil.WriteError(w, http.StatusNotImplemented, "依赖预检未装配")
+		return
+	}
+	ctx, _ := adminutil.TenantCtx(r, env.TenantID)
+	usage, err := h.usage.EnvUsage(ctx, id)
+	if err != nil {
+		httputil.WriteServiceError(w, http.StatusInternalServerError, err)
+		return
+	}
+	httputil.WriteData(w, usage)
 }
 
 // serveDetail 跨租户环境详情（ListAll filter by id）。
@@ -136,14 +173,14 @@ func (h *AdminHandler) findByID(ctx context.Context, id string) (Environment, er
 	return Environment{}, fmt.Errorf("环境不存在: %s", id)
 }
 
-// serveList 跨租户列表。
+// serveList 跨租户列表（支持 ?tenantId= 浏览范围过滤）。
 func (h *AdminHandler) serveList(w http.ResponseWriter, r *http.Request) {
 	list, err := h.repo.ListAll(r.Context())
 	if err != nil {
 		httputil.WriteInternalError(w, err)
 		return
 	}
-	httputil.WriteData(w, list)
+	httputil.WriteData(w, adminutil.FilterTenant(r, list, func(e Environment) string { return e.TenantID }))
 }
 
 // adminCreateInput 代建请求体。TenantID 必填（归属租户）；其余与 Environment 一致。

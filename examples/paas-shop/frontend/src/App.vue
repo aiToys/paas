@@ -2,7 +2,9 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import type { Product } from './types'
 import { fmtPrice } from './format'
-import { lane, setLane, laneFetch, detectEnv, currentLane } from './lane'
+import { lane, selectedLaneId, setLane, laneFetch, detectEnv, currentLane, domainPinned, laneError, laneNotice } from './lane'
+import { platform, platformLoading, platformError, loadPlatform, consoleLink } from './platform'
+import ExperiencePanel from './components/ExperiencePanel.vue'
 import SearchBar from './components/SearchBar.vue'
 import ProductCard from './components/ProductCard.vue'
 import DetailDrawer from './components/DetailDrawer.vue'
@@ -11,7 +13,7 @@ import NotificationCenter from './components/NotificationCenter.vue'
 import AdminPanel from './components/AdminPanel.vue'
 
 // 环境推断（spec §10 三套域名）：hostname 定环境，红生产/绿测试/蓝泳道（spec §11）
-const env = detectEnv(window.location.hostname)
+const env = computed(() => platform.value ? platform.value.envType : detectEnv(window.location.hostname).kind === 'prod' ? 'prod' : 'unknown')
 // 商店/运营视图切换（AdminPanel：订单管理 + 经营统计 + 商品上新）。
 // 视图进 URL hash（#/admin）：刷新/分享链接不丢视图——此前纯内存 ref，运营视图刷新即回商店页。
 const ADMIN_HASH = '#/admin'
@@ -40,21 +42,42 @@ const allCategories = ref<string[]>([])
 const selected = ref<Product | null>(null)
 const chatRef = ref<InstanceType<typeof ChatWindow> | null>(null)
 
-// 泳道演示：header 输入 lane 名（如 feature-x），所有请求自动染色 x-paas-lane；
-// 留空 = 基线。切换后需重载列表才走新泳道（下次请求即生效）。
-const laneInput = ref(lane.value)
-// 徽标按「当前生效泳道」显示（currentLane：hostname 域名优先于手动输入，与出站染色一致）。
+const showExperience = ref(false)
+const recommendationError = ref('')
+const recommendationLoading = ref(false)
+const routes = ref<Record<string, { requested: string; resolved: string; reason: string; instance: string; traceId: string }>>({})
+const reasonLabels: Record<string, string> = { matched: '命中目标泳道', 'baseline-fallback': '未覆盖，复用基线', static: '静态地址，泳道未验证', unknown: '实际泳道未知' }
 const laneActive = computed(() => currentLane() !== '')
-// 最近一次请求的实例指纹（bff/product 响应头）：泳道切换后可见「实际命中实例/版本」变化
-const servedBy = ref('')
-const servedLane = ref('')
-function applyLane() {
-  setLane(laneInput.value)
-  loadProducts(searchQ.value, searchCategory.value)
-  loadRecommend()
+const selectionDisabled = computed(() => platformLoading.value || !platform.value || platform.value.envType === 'prod' || !platform.value.discovery || domainPinned.value)
+let productsRequest = 0
+let recommendationsRequest = 0
+function recordRoute(service: string, response: Response) {
+  routes.value[service] = {
+    requested: response.headers.get('x-paas-requested-lane') || 'default',
+    resolved: response.headers.get('x-paas-resolved-lane') || 'unknown',
+    reason: response.headers.get('x-paas-route-reason') || 'unknown',
+    instance: response.headers.get('x-paas-target-instance') || '未返回',
+    traceId: response.headers.get('x-paas-trace-id') || '',
+  }
+}
+function applyLane(event: Event) {
+  laneNotice.value = ''
+  setLane((event.target as HTMLSelectElement).value)
+  selected.value = null
+  routes.value = {}
+  products.value = []
+  recommends.value = []
+  void loadProducts(searchQ.value, searchCategory.value)
+  void loadRecommend()
+}
+async function refreshPlatform() {
+  await loadPlatform()
+  routes.value = {}
+  await Promise.all([loadProducts(searchQ.value, searchCategory.value), loadRecommend()])
 }
 
 async function loadProducts(q?: string, category?: string) {
+  const request = ++productsRequest
   loading.value = true
   error.value = ''
   try {
@@ -63,27 +86,40 @@ async function loadProducts(q?: string, category?: string) {
     if (category) params.set('category', category)
     params.set('limit', '50')
     const resp = await laneFetch('/api/products?' + params.toString())
-    servedLane.value = resp.headers.get('x-paas-lane') || ''
-    servedBy.value = resp.headers.get('x-paas-service') || resp.headers.get('x-paas-bff') || ''
+    if (request !== productsRequest) return
+    if (!resp.ok) throw new Error((await resp.text()).trim() || `商品请求失败（${resp.status}）`)
+    recordRoute('商品', resp)
     const data: Product[] = await resp.json()
+    if (request !== productsRequest) return
+    if (!Array.isArray(data)) throw new Error('商品响应格式错误')
     // 首次全量加载（无过滤）时派生分类缓存
     if (!q && !category && allCategories.value.length === 0) {
       allCategories.value = [...new Set(data.map(p => p.category))]
     }
     products.value = data
   } catch (e) {
-    error.value = '商品加载失败'
+    if (request === productsRequest) { delete routes.value['商品']; error.value = e instanceof Error ? e.message : '商品加载失败' }
   } finally {
-    loading.value = false
+    if (request === productsRequest) loading.value = false
   }
 }
 
 async function loadRecommend() {
+  const request = ++recommendationsRequest
+  recommendationLoading.value = true
+  recommendationError.value = ''
   try {
     const resp = await laneFetch('/api/recommend?userId=user-1')
+    if (request !== recommendationsRequest) return
+    if (!resp.ok) throw new Error((await resp.text()).trim() || `推荐请求失败（${resp.status}）`)
     const data = await resp.json()
-    recommends.value = data.products || []
-  } catch {}
+    if (request !== recommendationsRequest) return
+    if (!Array.isArray(data.products)) throw new Error('推荐响应格式错误')
+    recordRoute('推荐', resp)
+    recommends.value = data.products
+  } catch (e) {
+    if (request === recommendationsRequest) { recommends.value = []; delete routes.value['推荐']; recommendationError.value = e instanceof Error ? e.message : '推荐加载失败' }
+  } finally { if (request === recommendationsRequest) recommendationLoading.value = false }
 }
 
 function onSearch(q: string, category: string) {
@@ -98,40 +134,52 @@ function onAsk(p: Product) {
   chatRef.value?.openWith(`${p.name}怎么样`)
 }
 
-onMounted(() => {
-  loadProducts()
-  loadRecommend()
-})
+onMounted(refreshPlatform)
 </script>
 
 <template>
   <div class="app">
     <header class="hdr">
       <div class="logo">🛍️ PaasShop</div>
-      <span class="env-badge" :class="env.kind">{{ env.kind === 'lane' ? `泳道 ${env.lane}` : env.kind === 'prod' ? '生产' : '测试' }}</span>
+      <span class="env-badge" :class="env">{{ env === 'prod' ? '生产' : env === 'test' ? '测试' : '环境待核实' }}</span>
       <div class="tag">智能商品服务 · 演示微服务 + AI 客服 + 全链路可观测</div>
-      <div class="lane-box" title="泳道演示：输入 lane 名（如 feature-x）使请求带 x-paas-lane 染色，走对应泳道实例；留空 = 基线">
-        <span class="lane-label">🚧 泳道</span>
-        <input v-model="laneInput" class="lane-input" placeholder="基线（default）" @keyup.enter="applyLane" />
-        <span v-if="laneActive" class="lane-badge">染色中：{{ currentLane() }}</span>
-        <button class="lane-btn" @click="applyLane">切换</button>
+      <div class="lane-box">
+        <label for="lane-select" class="lane-label">联调泳道</label>
+        <select id="lane-select" :value="selectedLaneId" class="lane-input" :disabled="selectionDisabled" @change="applyLane">
+          <option value="">基线（default）</option>
+          <option v-for="item in platform?.lanes || []" :key="item.id" :value="item.id">{{ item.name }}{{ item.description ? ` · ${item.description}` : '' }}</option>
+        </select>
+        <button class="lane-btn" :disabled="platformLoading" @click="refreshPlatform">{{ platformLoading ? '读取中…' : '刷新' }}</button>
       </div>
-      <div v-if="servedBy" class="served" title="最近一次请求实际命中的实例（Pod 名），泳道切换后此值变化即验证流量走了不同实例">
-        <span class="served-lane">lane={{ servedLane || 'default' }}</span>
-        <span class="served-svc">{{ servedBy }}</span>
-      </div>
-      <NotificationCenter />
+      <button class="chat-btn" :aria-expanded="showExperience" @click="showExperience = !showExperience">平台能力体验</button>
+      <NotificationCenter :key="lane" />
       <button class="chat-btn" @click="toggleView()">
         {{ view === 'shop' ? '运营视图' : '返回商店' }}
       </button>
       <button class="chat-btn" @click="chatRef?.open()">💬 智能客服</button>
     </header>
 
-    <!-- 泳道横幅（仅 lane 环境）：hostname 染色生效提示 -->
-    <div v-if="env.kind === 'lane'" class="lane-banner">泳道演示环境 {{ env.lane }} —— 流量已染色</div>
+    <div class="scope-bar" aria-live="polite">
+      <span v-if="platform">{{ platform.envName }} · {{ laneActive ? `请求泳道：${currentLane()}` : '基线流量' }}</span>
+      <span v-if="platform?.envType === 'prod'">生产环境不开放联调泳道</span>
+      <span v-else-if="platform && !platform.discovery" class="err">未接入数据面发现，泳道选择暂不可用</span>
+      <span v-else-if="platform && !platform.lanes.length">当前环境暂无活跃泳道</span>
+      <span v-if="domainPinned">当前泳道由访问域名固定</span>
+      <span v-if="laneNotice">{{ laneNotice }}</span>
+      <span v-if="platformError || laneError" class="err">{{ platformError || laneError }}</span>
+    </div>
+    <ExperiencePanel v-if="showExperience" />
+    <div v-if="Object.keys(routes).length" class="route-summary" aria-label="最近请求的选路结果">
+      <div v-for="(result, service) in routes" :key="service">
+        <strong>{{ service }}</strong> 请求 {{ result.requested }} → 选路 {{ result.resolved }} · {{ reasonLabels[result.reason] || result.reason }}
+        <span class="route-instance">实例：{{ result.instance }}</span>
+        <a v-if="result.traceId && consoleLink('observability')" :href="consoleLink(`observability?tab=traces&traceId=${result.traceId}`)" target="_blank" rel="noopener noreferrer">查看本次链路</a>
+      </div>
+      <p>以上为商品/推荐请求的选路结果；完整调用链及下游版本请查看 Trace。</p>
+    </div>
 
     <main v-if="view === 'admin'" class="main main-admin">
-      <AdminPanel />
+      <AdminPanel :key="lane" />
     </main>
 
     <main v-else class="main">
@@ -148,7 +196,9 @@ onMounted(() => {
 
       <aside class="rec">
         <h2>为你推荐（bff → recommend → redis + product）</h2>
-        <div v-if="recommends.length === 0" class="empty">加载中…</div>
+        <div v-if="recommendationLoading" class="empty">加载中…</div>
+        <div v-else-if="recommendationError" class="empty err">{{ recommendationError }}</div>
+        <div v-else-if="recommends.length === 0" class="empty">暂无推荐</div>
         <div v-else class="rec-list">
           <div v-for="p in recommends" :key="p.id" class="rec-item">
             <div class="rec-name">{{ p.name }}</div>
@@ -159,7 +209,7 @@ onMounted(() => {
     </main>
 
     <DetailDrawer :product="selected" @close="selected = null" @ask="onAsk" />
-    <ChatWindow ref="chatRef" />
+    <ChatWindow :key="lane" ref="chatRef" />
   </div>
 </template>
 
@@ -167,22 +217,19 @@ onMounted(() => {
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background: #f5f7fa; color: #2c3e50; }
 .app { min-height: 100vh; }
-.hdr { display: flex; align-items: center; gap: 16px; padding: 14px 32px; background: linear-gradient(135deg, #667eea, #764ba2); color: #fff; box-shadow: 0 2px 8px rgba(0,0,0,.1); }
+.hdr { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 14px 32px; background: linear-gradient(135deg, #667eea, #764ba2); color: #fff; box-shadow: 0 2px 8px rgba(0,0,0,.1); }
 .logo { font-size: 22px; font-weight: 700; }
 .tag { font-size: 13px; opacity: .9; flex: 1; }
 .chat-btn { background: rgba(255,255,255,.2); border: 1px solid rgba(255,255,255,.4); color: #fff; padding: 8px 16px; border-radius: 20px; cursor: pointer; font-size: 14px; }
 .chat-btn:hover { background: rgba(255,255,255,.3); }
 .lane-box { display: flex; align-items: center; gap: 8px; }
 .lane-label { font-size: 13px; opacity: .9; }
-.lane-input { width: 110px; padding: 5px 10px; border-radius: 14px; border: 1px solid rgba(255,255,255,.4); background: rgba(255,255,255,.15); color: #fff; font-size: 13px; }
-.lane-input::placeholder { color: rgba(255,255,255,.6); }
+.lane-input { max-width: 260px; min-width: 160px; padding: 5px 10px; border-radius: 14px; border: 1px solid rgba(255,255,255,.4); background: rgba(255,255,255,.15); color: #fff; font-size: 13px; }
+.lane-input option { color: #24304b; background: #fff; }
+.lane-input:disabled { opacity: .75; }
 .lane-input:focus { outline: 1px solid rgba(255,255,255,.7); }
-.lane-badge { font-size: 12px; background: #ff9800; color: #fff; padding: 3px 10px; border-radius: 12px; white-space: nowrap; }
 .lane-btn { background: rgba(255,255,255,.2); border: 1px solid rgba(255,255,255,.4); color: #fff; padding: 5px 12px; border-radius: 14px; cursor: pointer; font-size: 13px; }
 .lane-btn:hover { background: rgba(255,255,255,.3); }
-.served { display: flex; align-items: center; gap: 8px; font-size: 12px; background: rgba(0,0,0,.25); padding: 4px 12px; border-radius: 14px; }
-.served-lane { color: #ffd54f; font-family: ui-monospace, monospace; }
-.served-svc { color: #b3e5fc; font-family: ui-monospace, monospace; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .main { display: grid; grid-template-columns: 1fr 320px; gap: 24px; padding: 24px 32px; }
 .products h2, .rec h2 { font-size: 16px; margin-bottom: 16px; color: #5a6a7a; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }
@@ -198,7 +245,17 @@ body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
 .env-badge.prod { background: #e5484d; }
 .env-badge.test { background: #30a46c; }
 .env-badge.lane { background: #3e63dd; }
-.lane-banner { background: #eef4ff; color: #3e63dd; padding: 6px 16px; font-size: 13px; }
+.env-badge.unknown { background: #526174; }
 /* 运营视图单列（商店主体是 1fr+320px 两列，AdminPanel 占满） */
 .main-admin { grid-template-columns: 1fr; }
+.scope-bar, .route-summary { padding: 12px 32px; font-size: 13px; background: #fff; border-bottom: 1px solid #dce1ea; }
+.scope-bar { display: flex; flex-wrap: wrap; gap: 12px; }
+.route-summary > div { margin: 6px 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.route-summary p { color: #526174; margin-top: 8px; }
+.route-instance { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+a { color: #304ca9; }
+button:focus-visible, select:focus-visible, a:focus-visible { outline: 3px solid #d79600; outline-offset: 3px; }
+button:disabled { cursor: default; opacity: .65; }
+.err { color: #ad2525; }
+@media (max-width: 760px) { .hdr { padding: 16px; gap: 12px; } .tag { flex-basis: 100%; } .main { grid-template-columns: 1fr; padding: 16px; } .scope-bar, .route-summary { padding: 12px 16px; } .lane-input { max-width: 210px; } }
 </style>

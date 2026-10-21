@@ -40,6 +40,8 @@ spec:
             # 演示凭证 seed：seed.demo=false 时设 true，关闭 admin/123456 + sk-* 演示 Key（生产防护）。
             - name: PAAS_DISABLE_DEMO_SEED
               value: {{ if not .Values.seed.demo }}"true"{{ else }}""{{ end }}
+            - name: PAAS_ENABLE_DEMO_WORKLOADS
+              value: {{ .Values.seed.workloads | default false | quote }}
             # 身份会话：cookie Secure（HTTP false / TLS true）；生产标识。
             # JWT secret 经 Secret 注入（见下方 secretKeyRef），不进明文 env。
             - name: PAAS_COOKIE_SECURE

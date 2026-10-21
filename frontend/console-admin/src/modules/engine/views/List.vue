@@ -67,6 +67,7 @@ import {
   type Engine,
   type EngineSearchRequest,
 } from '../api'
+import { fetchDataserviceListAll } from '@/modules/resources/api'
 import EngineFormDrawer from './EngineFormDrawer.vue'
 
 const {
@@ -109,11 +110,27 @@ const openEdit = (row: Record<string, unknown>) => {
 }
 const onFormSuccess = () => { drawerVisible.value = false; fetchList() }
 
+// 删除引擎：引用预检（spec D2b）列出在用实例；不级联（实例不受影响但无法新建同引擎）。
 const handleDelete = async (row: Record<string, unknown>) => {
   const id = row.id as string
+  let refLines = ''
+  try {
+    const all = (await fetchDataserviceListAll()) ?? []
+    const refs = all.filter((d) => d.engineId === id)
+    if (refs.length > 0) {
+      const detail = refs
+        .slice(0, 8)
+        .map((d) => `  · 租户 ${d.tenantId} / 实例 ${d.name} (${d.id})`)
+        .join('\n')
+      const more = refs.length > 8 ? `\n  …共 ${refs.length} 条` : ''
+      refLines = `\n\n该引擎被 ${refs.length} 个数据服务实例使用：\n${detail}${more}\n（删除后存量实例不受影响，但无法再新建同引擎实例）`
+    }
+  } catch {
+    refLines = '\n\n（引用预检加载失败，无法确认实例引用数量）'
+  }
   try {
     await ElMessageBox.prompt(
-      `请输入引擎 ID "${id}" 确认删除（已用该引擎创建的实例不受影响，但无法再新建同引擎实例）：`,
+      `请输入引擎 ID "${id}" 确认删除：${refLines}`,
       '删除引擎', {
         confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning',
         inputValidator: (v: string) => v === id || `输入与引擎 ID "${id}" 不一致`,

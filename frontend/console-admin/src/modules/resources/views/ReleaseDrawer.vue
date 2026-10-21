@@ -102,7 +102,7 @@ const rollback = async () => {
   acting.value = true
   try {
     await rollbackRelease(props.id)
-    ElMessage.success('已回滚')
+    ElMessage.success('回滚已受理，滚动更新进行中')
     await loadDetail()
     emit('refresh')
   } finally {

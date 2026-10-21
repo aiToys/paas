@@ -18,13 +18,6 @@
         style="width: 240px"
         @keyup.enter="handleSearch"
       />
-      <el-input
-        v-model="searchForm.tenantId"
-        placeholder="租户 ID 过滤"
-        clearable
-        style="width: 160px; margin-left: 8px"
-        @keyup.enter="handleSearch"
-      />
     </template>
 
     <template #actions>
@@ -52,21 +45,31 @@
 </template>
 
 <script lang="ts" setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
 import { SearchTable } from '@/app/components'
 import { useCrud } from '@/app/composables/useCrud'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
 import { tableTimeFormatter } from '@/lib/format'
+import { useScopeStore } from '@/app/stores/scope'
 import { fetchSecretList, type AdminSecret, type ResSearchRequest } from '../api'
 import SecretDrawer from './SecretDrawer.vue'
 
+const scopeStore = useScopeStore()
+
 const { listData, loading, pagination, searchForm, fetchList, handleSearch, handleReset, handlePageChange } =
   useCrud<AdminSecret>({
-    fetch: (params) => fetchSecretList(params as unknown as ResSearchRequest),
-    defaultSearchForm: { keyword: '', tenantId: '' },
+    fetch: (params) =>
+      fetchSecretList({ ...params, tenantId: scopeStore.tenantId } as unknown as ResSearchRequest),
+    defaultSearchForm: { keyword: '' },
     pageSize: 10
   })
+
+// 浏览范围切换重新拉列表（D2a 统一语义；本页为此前漏网补接入）。
+watch(
+  () => scopeStore.tenantId,
+  () => fetchList()
+)
 
 const tableData = computed(() => listData.value as unknown as Record<string, unknown>[])
 

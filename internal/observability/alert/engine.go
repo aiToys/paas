@@ -14,6 +14,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -34,6 +35,7 @@ const (
 type Engine struct {
 	rules    RuleSource
 	metrics  observability.MetricsReader
+	channels ChannelSource // 可选：通知渠道（nil=只投递规则直连 WebhookURL）
 	client   *http.Client
 	interval time.Duration
 	states2  StateStore // 可选：状态机持久化（nil=纯内存）
@@ -41,6 +43,9 @@ type Engine struct {
 
 	mu     sync.RWMutex
 	states map[string]*alertState // key = ruleID|targetType|targetID
+	// lastNotify 重复提醒抑制（key = ruleID|targetType|targetID|channelID）。
+	// 渠道 CooldownMinutes=0 时不写入（无重复语义）；告警 resolved 时清理该告警的全部键。
+	lastNotify map[string]time.Time
 
 	stop chan struct{}
 	done chan struct{}
@@ -49,6 +54,12 @@ type Engine struct {
 // RuleSource 规则来源（跨租户全量；memory/pg RuleStore 均实现）。
 type RuleSource interface {
 	ListAllAlertRules(ctx context.Context) ([]observability.AlertRule, error)
+}
+
+// ChannelSource 通知渠道来源（ctx 租户过滤；memory/pg Store 均实现）。
+// 可选注入：未注入时引擎只投递规则直连 WebhookURL（存量行为不变）。
+type ChannelSource interface {
+	ListNotificationChannels(ctx context.Context) ([]observability.NotificationChannel, error)
 }
 
 // PersistedState 引擎状态机持久化快照（重启恢复用）。
@@ -79,10 +90,13 @@ type alertState struct {
 	tickBreach int // 连续命中计数（达 breachToFireTicks 转 firing）
 }
 
-// webhookDispatch firing 告警与其出站 URL 的绑定对（告警与 URL 一一对应，杜绝平行切片索引错位）。
+// webhookDispatch 告警与其出站目标（URL + 自定义头）的绑定对。
+// 告警与目标一一对应，杜绝平行切片索引错位（2026-09-25 跨租户泄漏回归锚点）。
 type webhookDispatch struct {
-	alert observability.Alert
-	url   string
+	alert   observability.Alert
+	url     string
+	headers map[string]string
+	repeat  bool // 重复提醒（firing 持续期间按渠道冷却窗口重发）
 }
 
 // NewEngine 创建评估引擎。interval<=0 用 DefaultInterval。
@@ -92,16 +106,23 @@ func NewEngine(rules RuleSource, metrics observability.MetricsReader, interval t
 		interval = DefaultInterval
 	}
 	return &Engine{
-		rules:    rules,
-		metrics:  metrics,
-		client:   httputil.NewClient(10 * time.Second),
-		interval: interval,
-		states2:  states2,
-		events:   events,
-		states:   map[string]*alertState{},
-		stop:     make(chan struct{}),
-		done:     make(chan struct{}),
+		rules:      rules,
+		metrics:    metrics,
+		client:     httputil.NewClient(10 * time.Second),
+		interval:   interval,
+		states2:    states2,
+		events:     events,
+		states:     map[string]*alertState{},
+		lastNotify: map[string]time.Time{},
+		stop:       make(chan struct{}),
+		done:       make(chan struct{}),
 	}
+}
+
+// WithChannels 注入通知渠道来源（Start 前调用；nil 保持「只投递直连 URL」）。
+func (e *Engine) WithChannels(src ChannelSource) *Engine {
+	e.channels = src
+	return e
 }
 
 // Restore 从 StateStore 恢复状态机（Start 前调用一次；重启不重置 pending/firing 计数）。
@@ -174,6 +195,8 @@ func (e *Engine) evaluate(ctx context.Context) {
 		ruleByID[r.ID] = r
 	}
 	seen := map[string]struct{}{} // 本轮命中的 state key（未命中的转 resolved）
+	// 租户渠道快照（resolved 出站也要用；取失败时该租户只投递直连地址）。
+	channelsByTenant := map[string][]observability.NotificationChannel{}
 	now := time.Now()
 	// webhook 派发对（alert 与其规则 URL 绑定）。曾用两个平行切片按索引取值，
 	// 但 fired 无条件 append、webhooks 仅 WebhookURL 非空才 append——索引错位后
@@ -183,6 +206,16 @@ func (e *Engine) evaluate(ctx context.Context) {
 
 	for tid, trs := range byTenant {
 		tctx := tenant.WithTenant(context.WithoutCancel(ctx), tid)
+		var chans []observability.NotificationChannel
+		if e.channels != nil {
+			list, cerr := e.channels.ListNotificationChannels(tctx)
+			if cerr != nil {
+				log.Printf("alert engine: 取通知渠道失败 tenant=%s（本轮只投递直连地址）: %v", tid, cerr)
+			} else {
+				chans = list
+			}
+			channelsByTenant[tid] = chans
+		}
 		series, err := e.metrics.ListMetrics(tctx, "", "", "")
 		if err != nil {
 			log.Printf("alert engine: 取 metrics 失败 tenant=%s: %v", tid, err)
@@ -212,9 +245,23 @@ func (e *Engine) evaluate(ctx context.Context) {
 				st := e.getState(key)
 				st.tickBreach++
 				if st.alert.Status == observability.AlertFiring {
-					// 已 firing：更新观测值与时间，状态不变。
+					// 已 firing：更新观测值与时间，状态不变；按渠道冷却窗口重发提醒
+					// （CooldownMinutes=0 的渠道只在状态转变时通知，不进入此分支）。
 					st.alert.Value = s.Current
 					st.alert.LastSeen = now
+					for _, t := range dispatchTargets(rule, chans, s.TargetType, s.TargetID, now) {
+						if t.cooldown <= 0 {
+							continue
+						}
+						k := t.key
+						if last, ok := e.lastNotify[k]; ok && now.Sub(last) < t.cooldown {
+							continue
+						}
+						e.lastNotify[k] = now
+						dispatches = append(dispatches, webhookDispatch{
+							alert: st.alert, url: t.url, headers: t.headers, repeat: true,
+						})
+					}
 					continue
 				}
 				if st.tickBreach >= breachToFireTicks {
@@ -228,8 +275,13 @@ func (e *Engine) evaluate(ctx context.Context) {
 						FiredAt: now, LastSeen: now,
 					}
 					fired = append(fired, st.alert)
-					if rule.WebhookURL != "" {
-						dispatches = append(dispatches, webhookDispatch{alert: st.alert, url: rule.WebhookURL})
+					for _, t := range dispatchTargets(rule, chans, s.TargetType, s.TargetID, now) {
+						if t.channelID != "" {
+							e.lastNotify[t.key] = now // 首次通知也占冷却窗口起点
+						}
+						dispatches = append(dispatches, webhookDispatch{
+							alert: st.alert, url: t.url, headers: t.headers,
+						})
 					}
 				} else if st.alert.Status == "" {
 					// 首次命中：pending。
@@ -266,9 +318,15 @@ func (e *Engine) evaluate(ctx context.Context) {
 			// resolved 也出站 webhook（status=resolved）：消费方（值班系统）需知道恢复，
 			// 否则 firing 通知后只能靠人盯平台确认——「只报忧不报喜」的告警系统不完整。
 			// 规则已删除（查无 ruleByID）时无 URL 可用，跳过（历史事件仍落库）。
-			if rule, ok := ruleByID[st.alert.RuleID]; ok && rule.WebhookURL != "" {
-				dispatches = append(dispatches, webhookDispatch{alert: st.alert, url: rule.WebhookURL})
+			if rule, ok := ruleByID[st.alert.RuleID]; ok {
+				for _, t := range dispatchTargets(rule, channelsByTenant[rule.TenantID], st.alert.TargetType, st.alert.TargetID, now) {
+					dispatches = append(dispatches, webhookDispatch{
+						alert: st.alert, url: t.url, headers: t.headers,
+					})
+				}
 			}
+			// 告警恢复：清理该告警的重复提醒键（否则 lastNotify 只增不减）。
+			e.clearNotify(st.alert.RuleID, st.alert.TargetType, st.alert.TargetID)
 		case observability.AlertResolved:
 			expired = append(expired, key) // resolved 展示一轮后清理（防列表无限膨胀）
 		}
@@ -280,7 +338,7 @@ func (e *Engine) evaluate(ctx context.Context) {
 
 	// webhook 出站（锁外，防慢 webhook 阻塞评估循环）：firing 转变与 resolved 各通知一次。
 	for _, d := range dispatches {
-		e.postWebhook(d.alert, d.url)
+		e.postWebhook(d.alert, d.url, d.headers, d.repeat)
 	}
 
 	// 持久化（锁外，WithoutCancel 防 SIGTERM 后用已 cancel ctx 落库）：
@@ -333,6 +391,64 @@ func (e *Engine) persistStates(ctx context.Context, seen map[string]struct{}, ex
 	}
 }
 
+// dispatchTarget 是解析后的单个出站目标。
+type dispatchTarget struct {
+	url       string
+	headers   map[string]string
+	channelID string        // 直连地址为空（不参与重复提醒跟踪）
+	cooldown  time.Duration // 重复提醒间隔（0=只在状态转变时通知）
+	key       string        // 重复提醒抑制键（直连为空）
+}
+
+// notifyKey 构造重复提醒抑制键（规则+目标+渠道；渠道维度防止一个渠道的通知压掉另一个）。
+func notifyKey(ruleID, targetType, targetID, channelID string) string {
+	return ruleID + "|" + targetType + "|" + targetID + "|" + channelID
+}
+
+// dispatchTargets 解析规则的通知目标：
+//   - ChannelIDs 非空时只投递这些渠道（同租户；Enabled=false 或静默期内跳过，悬空 ID 跳过）。
+//   - 为空时回落到直连 WebhookURL（存量规则零迁移）。
+func dispatchTargets(rule observability.AlertRule, chans []observability.NotificationChannel, targetType, targetID string, now time.Time) []dispatchTarget {
+	if len(rule.ChannelIDs) > 0 {
+		byID := make(map[string]observability.NotificationChannel, len(chans))
+		for _, c := range chans {
+			byID[c.ID] = c
+		}
+		out := make([]dispatchTarget, 0, len(rule.ChannelIDs))
+		for _, id := range rule.ChannelIDs {
+			c, ok := byID[id]
+			if !ok {
+				// 渠道被删/跨租户引用：跳过该渠道但规则其余渠道照常投递。
+				log.Printf("alert engine: 规则 %s 引用的渠道 %s 不存在或非本租户（跳过）", rule.ID, id)
+				continue
+			}
+			if !c.Active(now) {
+				continue // 渠道停用或处于静默期
+			}
+			out = append(out, dispatchTarget{
+				url: c.URL, headers: c.Headers, channelID: c.ID,
+				cooldown: time.Duration(c.CooldownMinutes) * time.Minute,
+				key:      notifyKey(rule.ID, targetType, targetID, c.ID),
+			})
+		}
+		return out
+	}
+	if rule.WebhookURL != "" {
+		return []dispatchTarget{{url: rule.WebhookURL}}
+	}
+	return nil
+}
+
+// clearNotify 删除某告警的全部重复提醒键（调用方持 e.mu 写锁）。
+func (e *Engine) clearNotify(ruleID, targetType, targetID string) {
+	prefix := notifyKey(ruleID, targetType, targetID, "")
+	for k := range e.lastNotify {
+		if strings.HasPrefix(k, prefix) {
+			delete(e.lastNotify, k)
+		}
+	}
+}
+
 // getState 取或建状态（调用方必须持 e.mu——evaluate 规则循环与 ListAlerts 并发）。
 func (e *Engine) getState(key string) *alertState {
 	if st, ok := e.states[key]; ok {
@@ -343,13 +459,15 @@ func (e *Engine) getState(key string) *alertState {
 	return st
 }
 
-// postWebhook POST 告警 JSON 到 rule.WebhookURL（fire-and-forget，失败记日志不重试）。
-func (e *Engine) postWebhook(a observability.Alert, url string) {
+// postWebhook POST 告警 JSON 到出站目标（fire-and-forget，失败记日志不重试）。
+// repeat=true 表示 firing 持续期间的重复提醒（消费方可据此降噪）。
+func (e *Engine) postWebhook(a observability.Alert, url string, headers map[string]string, repeat bool) {
 	body, _ := json.Marshal(map[string]any{
 		"ruleId": a.RuleID, "ruleName": a.RuleName, "status": a.Status,
 		"targetType": a.TargetType, "targetId": a.TargetID,
 		"metricName": a.MetricName, "value": a.Value, "threshold": a.Threshold,
 		"operator": a.Operator, "severity": a.Severity, "firedAt": a.FiredAt,
+		"repeat": repeat,
 	})
 	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
@@ -357,9 +475,12 @@ func (e *Engine) postWebhook(a observability.Alert, url string) {
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
 	resp, err := e.client.Do(req)
 	if err != nil {
-		log.Printf("alert engine: webhook 出站失败 url=%s: %v", url, err)
+		log.Printf("alert engine: webhook 出站失败 url=%s: %v", observability.MaskChannelURL(url), err) // 出站地址常含 token，脱敏（R5 审计 C3）
 		return
 	}
 	if err := resp.Body.Close(); err != nil {

@@ -24,6 +24,22 @@ func NewStore() *Store {
 	return &Store{lanes: map[string]lane.Lane{}}
 }
 
+// ListAll 跨租户列出全部泳道（admin 平台总览，不过滤 tenant），与 List 同序。
+func (s *Store) ListAll(_ context.Context) ([]lane.Lane, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]lane.Lane, 0, len(s.lanes))
+	for _, l := range s.lanes {
+		out = append(out, l)
+	}
+	for i := 1; i < len(out); i++ {
+		for j := i; j > 0 && out[j-1].CreatedAt.After(out[j].CreatedAt); j-- {
+			out[j-1], out[j] = out[j], out[j-1]
+		}
+	}
+	return out, nil
+}
+
 // List 租户内泳道列表（按创建时间稳定排序）。
 func (s *Store) List(ctx context.Context, envID string) ([]lane.Lane, error) {
 	tid, err := tenant.IDOrErr(ctx)

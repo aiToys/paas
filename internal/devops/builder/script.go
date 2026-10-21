@@ -24,7 +24,15 @@ const builderScript = `set -eu
 export DOCKER_BUILDKIT=0
 git clone --depth 1 --branch "$BRANCH" "$CLONE_URL" /workspace
 cd /workspace
-if [ -z "$COMMIT" ]; then COMMIT=$(git rev-parse HEAD); fi
+if [ -n "$COMMIT" ]; then
+  case "$COMMIT" in *[!0-9a-fA-F]*) echo "invalid commit SHA" >&2; exit 1;; esac
+  if [ "${#COMMIT}" -ne 40 ] && [ "${#COMMIT}" -ne 64 ]; then echo "full commit SHA required" >&2; exit 1; fi
+  git fetch --depth 1 origin "$COMMIT"
+  git checkout --detach FETCH_HEAD
+  test "$(git rev-parse HEAD)" = "$COMMIT"
+else
+  COMMIT=$(git rev-parse HEAD)
+fi
 if [ -n "$REGISTRY_USER" ]; then printf '%s\n' "$REGISTRY_PASS" | docker login -u "$REGISTRY_USER" --password-stdin "$REGISTRY"; fi
 BUILD_CTX="${BUILD_CONTEXT:-.}"
 BUILD_ARGS="-t $REF"

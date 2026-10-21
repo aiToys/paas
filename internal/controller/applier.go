@@ -116,6 +116,24 @@ func (a *K8sApplier) EnsureIfMissing(ctx context.Context, w workload.Workload) (
 	return true, nil
 }
 
+// Exists 只读判断 CRD 是否存在（reconcile dry-run 预览用，不写数据面）。
+// NotFound 返 (false, nil)；权限/连接等真实错误上抛——dry-run 必须能区分
+// 「确认缺失」与「查不了」，后者不能当作将补建。
+func (a *K8sApplier) Exists(ctx context.Context, w workload.Workload) (bool, error) {
+	if w.TenantID == "" {
+		return false, fmt.Errorf("workload tenantID 为空，无法派生数据面 namespace")
+	}
+	ns := tenant.Namespace(w.TenantID)
+	var existing v1alpha1.Workload
+	if err := a.Get(ctx, client.ObjectKey{Name: w.ID, Namespace: ns}, &existing); err != nil {
+		if realErr := client.IgnoreNotFound(err); realErr != nil {
+			return false, fmt.Errorf("get workload crd: %w", realErr)
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
 // Delete 删 Workload CRD（级联清 K8s 资源）。ns 从 ctx tenant 派生（与 Apply 同源）。
 // ctx 无 tenant（异常）记日志跳过——控制面 Delete 已成功，CRD 孤儿风险低（正常路径 ctx 均含 tenant：
 // 用户操作经身份 ctx，admin 跨租户删经 tenant.WithTenant 派生目标租户 ctx）。

@@ -421,3 +421,101 @@ func TestPGDeletePipelineCascadeRuns(t *testing.T) {
 		t.Fatalf("删 pipeline 后 GetRun 期望 ErrRunNotFound，got %v", err)
 	}
 }
+
+// ---------- Webhook 投递记录（D5-5，migration 0059） ----------
+
+// TestPGDeliveryCRUD 锁 PG 实现与 memory 同构：租户过滤、倒序列表、ReceivedAt/归属不可被 Update 改写、
+// 跨租户统一 ErrDeliveryNotFound。加列必须三处同步（deliveryCols/scanDelivery/INSERT·UPDATE）——
+// 本测试是 runCols 缺列事故（2026-10-17）同类防护。
+func TestPGDeliveryCRUD(t *testing.T) {
+	s := NewPGStore(newTestDB(t).Pool())
+	ctx := acmeCtx()
+
+	d := WebhookDelivery{
+		ID: "dlv-pg-1", PipelineID: "pipe-pg", AppID: "app-cs", Event: "push",
+		Branch: "main", Commit: "abc123", Status: DeliveryAccepted, RunID: "run-1",
+	}
+	if _, err := s.CreateDelivery(ctx, d); err != nil {
+		t.Fatalf("CreateDelivery 失败: %v", err)
+	}
+	got, err := s.GetDelivery(ctx, "pipe-pg", "dlv-pg-1")
+	if err != nil {
+		t.Fatalf("GetDelivery 失败: %v", err)
+	}
+	if got.TenantID != "t-acme" || got.Branch != "main" || got.Commit != "abc123" || got.RunID != "run-1" {
+		t.Fatalf("回读不一致: %+v", got)
+	}
+	if got.ReceivedAt.IsZero() {
+		t.Fatal("ReceivedAt 应回填")
+	}
+
+	// 跨租户不可见 + 不存在统一 ErrDeliveryNotFound。
+	if _, err := s.GetDelivery(globexCtx(), "pipe-pg", "dlv-pg-1"); err != ErrDeliveryNotFound {
+		t.Errorf("跨租户 Get 期望 ErrDeliveryNotFound，got %v", err)
+	}
+	if list, err := s.ListDeliveries(globexCtx(), "pipe-pg", 10); err != nil || len(list) != 0 {
+		t.Errorf("跨租户 List 应为空，got %d err %v", len(list), err)
+	}
+
+	// 再加两条验证倒序 + limit。
+	for i, id := range []string{"dlv-pg-2", "dlv-pg-3"} {
+		if _, err := s.CreateDelivery(ctx, WebhookDelivery{
+			ID: id, PipelineID: "pipe-pg", AppID: "app-cs", Status: DeliverySkipped,
+			Reason: "跳过", ReceivedAt: got.ReceivedAt.Add(time.Duration(i+1) * time.Minute),
+		}); err != nil {
+			t.Fatalf("CreateDelivery %s 失败: %v", id, err)
+		}
+	}
+	list, err := s.ListDeliveries(ctx, "pipe-pg", 2)
+	if err != nil {
+		t.Fatalf("ListDeliveries 失败: %v", err)
+	}
+	if len(list) != 2 || list[0].ID != "dlv-pg-3" || list[1].ID != "dlv-pg-2" {
+		t.Fatalf("列表应倒序取 2 条，got %+v", list)
+	}
+
+	// Update：状态/重放字段可改，ReceivedAt 与归属不可被请求方改写。
+	now := time.Now()
+	d.Status = DeliveryDuplicate
+	d.Replays = 1
+	d.LastReplayAt = &now
+	d.TenantID = "t-evil"
+	d.ReceivedAt = time.Now().Add(24 * time.Hour)
+	if _, err := s.UpdateDelivery(ctx, d); err != nil {
+		t.Fatalf("UpdateDelivery 失败: %v", err)
+	}
+	after, err := s.GetDelivery(ctx, "pipe-pg", "dlv-pg-1")
+	if err != nil {
+		t.Fatalf("更新后 Get 失败: %v", err)
+	}
+	if after.Status != DeliveryDuplicate || after.Replays != 1 || after.LastReplayAt == nil {
+		t.Errorf("状态/重放字段应更新，got %+v", after)
+	}
+	if after.TenantID != "t-acme" {
+		t.Errorf("归属不可被改写，got %s", after.TenantID)
+	}
+	if !after.ReceivedAt.Equal(got.ReceivedAt) {
+		t.Errorf("ReceivedAt 不可被改写，期望 %v got %v", got.ReceivedAt, after.ReceivedAt)
+	}
+
+	// 不存在 ID 的 Update → ErrDeliveryNotFound（RowsAffected=0）。
+	if _, err := s.UpdateDelivery(ctx, WebhookDelivery{ID: "nope", PipelineID: "pipe-pg"}); err != ErrDeliveryNotFound {
+		t.Errorf("Update 不存在期望 ErrDeliveryNotFound，got %v", err)
+	}
+}
+
+func TestPGAdminRunsWindowAndExactDetail(t *testing.T) {
+	db := newTestDB(t)
+	_, err := db.Pool().Exec(context.Background(), `
+ INSERT INTO pipelines(id,tenant_id,app_id,name,kind,template_id) VALUES
+ ('admin-a','t-acme','app-a','admin-a','ci','tpl-test'),('admin-b','t-globex','app-b','admin-b','ci','tpl-test');
+ INSERT INTO pipeline_runs(id,tenant_id,app_id,pipeline_id,trigger,status,created_at) VALUES
+ ('old-failure','t-acme','app-a','admin-a','manual','failed','2026-01-01T00:00:00Z');
+ INSERT INTO pipeline_runs(id,tenant_id,app_id,pipeline_id,trigger,status,created_at)
+ SELECT 'new-'||n,'t-globex','app-b','admin-b','manual','failed','2026-02-01T00:00:00Z'::timestamptz+n*interval '1 second' FROM generate_series(1,1001) n;
+ `)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testAdminRunQuery(t, NewPGStore(db.Pool()))
+}

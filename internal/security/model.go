@@ -94,6 +94,47 @@ type AuditLog struct {
 	At           time.Time `json:"at"`
 }
 
+// AuditQuery 跨租户审计后端过滤/分页条件（admin 平台总览）。空值=不限；
+// Action 精确匹配（含 admin: 前缀）；Keyword 对 resourceId/detail 子串（大小写不敏感）。
+type AuditQuery struct {
+	TenantID     string
+	Actor        string
+	Action       string
+	ResourceType string
+	ResourceID   string
+	Keyword      string
+	From, To     time.Time // 零值=不限；区间 [From, To)
+	Offset       int
+	Limit        int // <=0 取 DefaultAuditPageSize；上限 MaxAuditPageSize
+}
+
+const (
+	DefaultAuditPageSize = 50
+	MaxAuditPageSize     = 500
+)
+
+// AuditPage 分页结果：Total 为满足过滤条件的全量计数（非本页条数）。
+type AuditPage struct {
+	Items  []AuditLog `json:"items"`
+	Total  int        `json:"total"`
+	Offset int        `json:"offset"`
+	Limit  int        `json:"limit"`
+}
+
+// Normalize 夹紧分页参数。
+func (q AuditQuery) Normalize() AuditQuery {
+	if q.Limit <= 0 {
+		q.Limit = DefaultAuditPageSize
+	}
+	if q.Limit > MaxAuditPageSize {
+		q.Limit = MaxAuditPageSize
+	}
+	if q.Offset < 0 {
+		q.Offset = 0
+	}
+	return q
+}
+
 type fieldErr struct{ field string }
 
 func (e fieldErr) Error() string { return "字段非法或缺失: " + e.field }

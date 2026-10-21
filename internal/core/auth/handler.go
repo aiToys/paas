@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -47,6 +48,9 @@ type Handler struct {
 	cookieSecure bool
 	limiter      *loginLimiter
 	audit        AuditRecorder
+	// menuRoles 取调用者角色集（main.go 注入 gateway.RolesFrom）。
+	// 未注入时菜单不裁剪（保持超管语义，兼容既有测试与单实例调用）。
+	menuRoles func(*http.Request) []string
 }
 
 // AuditRecorder 审计记录器（依赖倒置，避免 auth->security 反向依赖）。
@@ -58,6 +62,13 @@ type AuditRecorder interface {
 // WithAudit 注入审计记录器（链式，可选）。
 func (h *Handler) WithAudit(a AuditRecorder) *Handler {
 	h.audit = a
+	return h
+}
+
+// WithMenuRoles 注入调用者角色来源（链式，可选）。注入后 /api/system/menus
+// 按平台权限裁剪菜单（D5-2 细分角色）；未注入则返回全部菜单。
+func (h *Handler) WithMenuRoles(fn func(*http.Request) []string) *Handler {
+	h.menuRoles = fn
 	return h
 }
 
@@ -100,6 +111,9 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 	if u.Status != identity.StatusActive {
 		httputil.WriteError(w, http.StatusForbidden, "账号已禁用")
+		return
+	}
+	if !h.tenantAdmission(w, r, u.TenantID) {
 		return
 	}
 	h.limiter.recordSuccess(ip, req.Username)
@@ -146,6 +160,15 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteError(w, http.StatusForbidden, "账号已禁用")
 		return
 	}
+	// 会话代次（D5-3）：撤销/改密/停用/改角色后，旧 refresh token 不得续期。
+	// 0 兼容本机制上线前的存量 token（不比对，等自然过期）。
+	if c.Ver != 0 && c.Ver != u.SessionVersion {
+		httputil.WriteError(w, http.StatusUnauthorized, "会话已失效，请重新登录")
+		return
+	}
+	if !h.tenantAdmission(w, r, u.TenantID) {
+		return
+	}
 	res, err := h.issueTokens(u)
 	if err != nil {
 		httputil.WriteError(w, http.StatusInternalServerError, "签发 token 失败")
@@ -156,6 +179,28 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 }
 
 // Logout: DELETE /api/auth/sessions —— 无状态 JWT，仅返回成功（前端清 token）。
+// tenantAdmission 是控制面准入闸门：租户被冻结时拒绝签发 token。
+// 读不到租户状态时 fail-closed（拒绝签发），不把「查不到」当作「正常」。
+// 已签发 token 的存量会话不受影响（access 15min 自然过期后无法续期），
+// 冻结不是全局实时踢出——数据面业务照常运行是本次语义的一部分。
+func (h *Handler) tenantAdmission(w http.ResponseWriter, r *http.Request, tenantID string) bool {
+	t, err := h.idb.GetTenant(r.Context(), tenantID)
+	if err != nil {
+		if errors.Is(err, identity.ErrTenantNotFound) {
+			// 用户所属租户已不存在：拒绝签发，但不把数据不一致当 500 抛给登录者。
+			httputil.WriteError(w, http.StatusForbidden, "租户不存在或已停用，请联系平台管理员")
+			return false
+		}
+		httputil.WriteInternalError(w, err)
+		return false
+	}
+	if t.IsFrozen() {
+		httputil.WriteError(w, http.StatusForbidden, "租户已被冻结，请联系平台管理员")
+		return false
+	}
+	return true
+}
+
 // loginFailed 统一处理登录失败：限流计数 + 审计 + 401（不泄漏账号存在性）。
 func (h *Handler) loginFailed(w http.ResponseWriter, r *http.Request, ip, username string) {
 	h.limiter.recordFailure(ip, username)
@@ -221,10 +266,21 @@ func (h *Handler) Me(w http.ResponseWriter, r *http.Request) {
 	httputil.WriteData(w, profile)
 }
 
-// Menus: GET /api/system/menus —— 初期静态菜单（对齐 admin 已有视图）。
-// P0-3 再做按角色过滤 + PaaS 业务页菜单。
-func (h *Handler) Menus(w http.ResponseWriter, _ *http.Request) {
-	httputil.WriteData(w, staticMenus())
+// Menus: GET /api/system/menus —— 静态菜单，按平台权限裁剪（D5-2）。
+// 超管（super_admin）由 main.go 注入的角色来源短路：其角色不在平台角色表内，
+// filterMenus 会裁掉全部带 Perm 的页面，故此处对超管直接返回全量。
+func (h *Handler) Menus(w http.ResponseWriter, r *http.Request) {
+	menus := staticMenus()
+	if h.menuRoles == nil {
+		httputil.WriteData(w, menus)
+		return
+	}
+	roles := h.menuRoles(r)
+	if isSuperAdmin(roles) {
+		httputil.WriteData(w, menus)
+		return
+	}
+	httputil.WriteData(w, filterMenus(menus, roles))
 }
 
 // issueTokens 签发 access + refresh。
@@ -238,14 +294,14 @@ func (h *Handler) issueTokens(u *identity.User) (AuthResult, error) {
 	now := time.Now()
 	access, err := Sign(Claims{
 		Sub: u.ID, Tenant: u.TenantID, Roles: roles, Typ: TokenAccess,
-		Exp: now.Add(AccessTTL).Unix(),
+		Exp: now.Add(AccessTTL).Unix(), Ver: u.SessionVersion,
 	}, h.secret)
 	if err != nil {
 		return AuthResult{}, err
 	}
 	refresh, err := Sign(Claims{
 		Sub: u.ID, Tenant: u.TenantID, Roles: roles, Typ: TokenRefresh,
-		Exp: now.Add(RefreshTTL).Unix(),
+		Exp: now.Add(RefreshTTL).Unix(), Ver: u.SessionVersion,
 	}, h.secret)
 	if err != nil {
 		return AuthResult{}, err
@@ -276,22 +332,25 @@ func isSuperAdmin(roles []string) bool {
 
 // expandPermissions 把 core 角色名展开为具体权限标识（供前端 v-permission 指令）。
 func expandPermissions(roles []string) []string {
-	builtin := identity.BuiltinRoles()
 	seen := map[string]struct{}{}
 	var out []string
-	for _, name := range roles {
-		r, ok := builtin[name]
-		if !ok {
-			continue
-		}
-		for _, p := range r.Permissions {
-			if _, ok := seen[string(p)]; ok {
+	merge := func(defs map[string]identity.Role) {
+		for _, name := range roles {
+			r, ok := defs[name]
+			if !ok {
 				continue
 			}
-			seen[string(p)] = struct{}{}
-			out = append(out, string(p))
+			for _, p := range r.Permissions {
+				if _, ok := seen[string(p)]; ok {
+					continue
+				}
+				seen[string(p)] = struct{}{}
+				out = append(out, string(p))
+			}
 		}
 	}
+	merge(identity.BuiltinRoles())
+	merge(identity.PlatformRoles()) // D5-2：平台运营角色（platform:* 权限，前端据此隐藏写操作）
 	return out
 }
 

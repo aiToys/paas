@@ -9,6 +9,7 @@ package observability
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -101,17 +102,20 @@ type MetricSeries struct {
 
 // AlertRule 是告警规则：对某 metric（可选 target）超阈值即告警。
 type AlertRule struct {
-	ID         string    `json:"id"`
-	TenantID   string    `json:"tenantId,omitempty"` // ctx 写入，请求体忽略
-	Name       string    `json:"name"`
-	MetricName string    `json:"metricName"`         // cpu | rps | ...
-	TargetType string    `json:"targetType"`         // app | workload | env | dataservice
-	TargetID   string    `json:"targetId,omitempty"` // 空 = 该类型全部 target
-	Operator   string    `json:"operator"`           // > >= < <=
-	Threshold  float64   `json:"threshold"`
-	Severity   string    `json:"severity"` // critical | warning
-	Enabled    bool      `json:"enabled"`
-	WebhookURL string    `json:"webhookUrl,omitempty"` // 告警 firing 时 POST 通知出站（空=不出站）
+	ID         string  `json:"id"`
+	TenantID   string  `json:"tenantId,omitempty"` // ctx 写入，请求体忽略
+	Name       string  `json:"name"`
+	MetricName string  `json:"metricName"`         // cpu | rps | ...
+	TargetType string  `json:"targetType"`         // app | workload | env | dataservice
+	TargetID   string  `json:"targetId,omitempty"` // 空 = 该类型全部 target
+	Operator   string  `json:"operator"`           // > >= < <=
+	Threshold  float64 `json:"threshold"`
+	Severity   string  `json:"severity"` // critical | warning
+	Enabled    bool    `json:"enabled"`
+	WebhookURL string  `json:"webhookUrl,omitempty"` // 直连地址（存量兼容）；ChannelIDs 非空时忽略
+	// ChannelIDs 引用的通知渠道（同租户）。非空时只投递这些渠道，WebhookURL 不再使用；
+	// 为空则回落到 WebhookURL（存量规则零迁移）。
+	ChannelIDs []string  `json:"channelIds,omitempty"`
 	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
@@ -140,6 +144,19 @@ func (r AlertRule) Validate() error {
 	}
 	if _, ok := validSeverities[r.Severity]; !ok {
 		return errInvalid("severity")
+	}
+	if len(r.ChannelIDs) > 10 {
+		return fmt.Errorf("单个规则最多引用 10 个通知渠道")
+	}
+	seen := make(map[string]struct{}, len(r.ChannelIDs))
+	for _, id := range r.ChannelIDs {
+		if strings.TrimSpace(id) == "" {
+			return fmt.Errorf("通知渠道 ID 不能为空")
+		}
+		if _, dup := seen[id]; dup {
+			return fmt.Errorf("通知渠道重复引用: %s", id)
+		}
+		seen[id] = struct{}{}
 	}
 	return nil
 }

@@ -6,6 +6,8 @@ import "context"
 type Repository interface {
 	// 定义
 	List(ctx context.Context) ([]WorkflowDef, error)
+	// ListAll 跨租户列表（admin 总览用，返回对象带 TenantID）；created_at 升序。
+	ListAll(ctx context.Context) ([]WorkflowDef, error)
 	Get(ctx context.Context, id string) (WorkflowDef, error)
 	Create(ctx context.Context, d WorkflowDef) (WorkflowDef, error)
 	Update(ctx context.Context, d WorkflowDef) (WorkflowDef, error)
@@ -17,5 +19,7 @@ type Repository interface {
 	GetRun(ctx context.Context, id string) (WorkflowRun, error)
 	UpdateRun(ctx context.Context, r WorkflowRun) (WorkflowRun, error)
 	ListRuns(ctx context.Context, workflowID string) ([]WorkflowRun, error)
+	// ListAllRuns 跨租户运行列表（admin 总览用）；created_at 倒序，LIMIT 上界防撑爆。
+	ListAllRuns(ctx context.Context) ([]WorkflowRun, error)
 	ListActiveRuns(ctx context.Context) ([]WorkflowRun, error) // 全表 running/paused（Sweep 启动恢复）
 }

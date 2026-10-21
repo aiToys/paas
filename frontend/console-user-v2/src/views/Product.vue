@@ -33,6 +33,8 @@ const showRun = ref(false)
 const runWlId = ref('')
 const showDeploy = ref(false)
 const deployHint = ref('')
+const deployServiceId = ref('')
+const deployEnvId = ref('')
 const showCreate = ref(false)
 const tabs = [{ id: 'services', label: '服务运行' }, { id: 'delivery', label: '交付' }, { id: 'resources', label: '共享资源' }, { id: 'configuration', label: '配置' }, { id: 'members', label: '成员与权限' }]
 const LEGACY: Record<string, string> = { services: 'services', overview: 'services', deploy: 'services', settings: 'resources', bindings: 'resources', configs: 'configuration', members: 'members', pipelines: 'delivery', changes: 'delivery', repositories: 'delivery', builds: 'delivery', images: 'delivery', releases: 'delivery' }
@@ -85,7 +87,7 @@ function openFromLink() {
 }
 watch(() => route.query.workload, openFromLink)
 async function refreshWorkloads() { await load() }
-function deploy(name: string) { deployHint.value = name; showDeploy.value = true }
+function deploy(s: ServiceEntity, w?: Workload) { deployHint.value = s.name; deployServiceId.value = s.id; deployEnvId.value = w?.envId || ''; showDeploy.value = true }
 function updated(a: { id: string; bindings?: Product['bindings'] }) { if (product.value?.id === a.id) product.value = { ...product.value, bindings: a.bindings } }
 </script>
 <template>
@@ -110,19 +112,19 @@ function updated(a: { id: string; bindings?: Product['bindings'] }) { if (produc
           <div class="table-scroll" data-table-scroll tabindex="0" v-else>
 <table class="list-table service-table">
 <thead><tr><th scope="col">服务</th><th scope="col">类型</th><th scope="col">环境</th><th scope="col">运行状态</th><th scope="col">访问地址</th><th scope="col">操作</th></tr></thead><tbody>
-            <tr v-for="row in rows" :key="row.key"><td><button v-if="row.workload" class="text-button service-name" @click="open(row.workload)">{{ row.service.name }}</button><strong v-else>{{ row.service.name }}</strong></td><td class="dim">{{ TYPE_LABEL[row.service.type] || row.service.type }}</td><td>{{ row.workload ? envName(row.workload.envId) : envName() }}</td><td><span v-if="workloadsError" class="status warn">状态未知</span><template v-else-if="row.workload"><span class="status" :class="tagTypeToCls(statusOf(WORKLOAD_STATUS, row.workload.status).type)">{{ statusOf(WORKLOAD_STATUS, row.workload.status).label }}</span><small class="replica-info">{{ row.workload.ready }}/{{ row.workload.replicas }} 副本就绪</small></template><span v-else class="status idle">未部署</span></td><td><template v-if="addresses(row.workload).length"><a v-for="h in addresses(row.workload)" :key="h" :href="'http://' + h" target="_blank" rel="noopener" class="domain-link" :title="h">{{ h }} ↗</a></template><span v-else class="dim">{{ addressError ? '地址暂不可用' : '未暴露' }}</span></td><td><button v-if="row.workload" class="act small" @click="open(row.workload)">实例与日志</button><button v-else class="act small" :disabled="!!workloadsError" @click="deploy(row.service.name)">运行部署流水线</button></td></tr>
+            <tr v-for="row in rows" :key="row.key"><td><button v-if="row.workload" class="text-button service-name" @click="open(row.workload)">{{ row.service.name }}</button><strong v-else>{{ row.service.name }}</strong></td><td class="dim">{{ TYPE_LABEL[row.service.type] || row.service.type }}</td><td>{{ row.workload ? envName(row.workload.envId) : envName() }}</td><td><span v-if="workloadsError" class="status warn">状态未知</span><template v-else-if="row.workload"><span class="status" :class="tagTypeToCls(statusOf(WORKLOAD_STATUS, row.workload.status).type)">{{ statusOf(WORKLOAD_STATUS, row.workload.status).label }}</span><small class="replica-info">{{ row.workload.ready }}/{{ row.workload.replicas }} 副本就绪</small></template><span v-else class="status idle">未部署</span></td><td><template v-if="addresses(row.workload).length"><a v-for="h in addresses(row.workload)" :key="h" :href="'http://' + h" target="_blank" rel="noopener" class="domain-link" :title="h">{{ h }} ↗</a></template><span v-else class="dim">{{ addressError ? '地址暂不可用' : '未暴露' }}</span></td><td><button v-if="row.workload" class="act small" @click="open(row.workload)">实例与日志</button><button class="act small" :disabled="!!workloadsError" @click="deploy(row.service, row.workload)">发起交付</button></td></tr>
           </tbody>
 </table>
 </div>
           <p class="view-note">每行对应一个服务在具体环境中的基线运行；泳道和任务实例可从“全部实例与泳道”查看。</p>
         </template>
       </section>
-      <ProductDelivery v-else-if="facet === 'delivery'" :app-id="product.id" />
+      <ProductDelivery v-else-if="facet === 'delivery'" :app-id="product.id" :app-name="product.name" />
       <ProductSettings v-else :key="facet" :app="product" :section="facet" @updated="updated" />
     </template>
-    <ServiceRunDrawer v-model="showRun" :workload-id="runWlId" :app-id="product?.id" :app-name="product?.name" @changed="refreshWorkloads" @deployed="pickTab('delivery')" />
+    <ServiceRunDrawer v-model="showRun" :workload-id="runWlId" :app-id="product?.id" :app-name="product?.name" @changed="refreshWorkloads" @deployed="run => router.push('/runs/' + run.id)" />
     <ServiceCreateDialog v-model="showCreate" :app-id="product?.id || ''" @created="load" />
-    <CdDeployDialog v-model="showDeploy" :app-id="product?.id" :app-name="product?.name" :hint="deployHint" @deployed="pickTab('delivery')" />
+    <CdDeployDialog v-model="showDeploy" :app-id="product?.id" :app-name="product?.name" :hint="deployHint" :service-id="deployServiceId" :env-id="deployEnvId" @deployed="run => router.push('/runs/' + run.id)" />
   </div>
 </template>
 <style scoped>

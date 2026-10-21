@@ -30,6 +30,8 @@ PaaS 在 K8s 集群内**自建 Docker Registry**（`deploy/karts/registry.yaml`�
 | `postgres:16-alpine` | 元数据 DB（PAAS_DB_URL） | `docker.m.daocloud.io/library/postgres:16-alpine` | `<nodeIP>:30050/library/postgres:16-alpine` |
 | `docker:git` | DevOps builder Job 容器（DooD） | `docker.m.daocloud.io/library/docker:git` | `<nodeIP>:30050/library/docker:git` |
 | `gitea:1.22.6` | 内置 Git 后端（无头） | `docker.m.daocloud.io/gitea/gitea:1.22.6` | `<nodeIP>:30050/devtools/gitea:1.22.6` |
+| `nginx:stable` | 显式开启的演示工作负载 | `docker.m.daocloud.io/library/nginx:stable` | `<nodeIP>:30050/library/nginx:stable` |
+| `nginx:alpine` | hello-web模板基础镜像 | `docker.m.daocloud.io/library/nginx:alpine` | `<nodeIP>:30050/library/nginx:alpine` |
 | `mysql:8` | 数据服务引擎（db=mysql） | `docker.m.daocloud.io/library/mysql:8` | `<nodeIP>:30050/library/mysql:8` |
 | `postgres:15-alpine` | 数据服务引擎（db=postgres） | `docker.m.daocloud.io/library/postgres:15-alpine` | `<nodeIP>:30050/library/postgres:15-alpine` |
 | `redis:7-alpine` | 数据服务引擎（cache=redis） | `docker.m.daocloud.io/library/redis:7-alpine` | `<nodeIP>:30050/library/redis:7-alpine` |
@@ -39,6 +41,8 @@ PaaS 在 K8s 集群内**自建 Docker Registry**（`deploy/karts/registry.yaml`�
 | `local-path-provisioner:v0.0.24` | StorageClass（local-path PVC） | `hub.wang.dd:5000/rancher/local-path-provisioner:v0.0.24` | （local-path.yaml 直接引用） |
 | `busybox:latest` | local-path helper（PV mount/umount） | `docker.m.daocloud.io/library/busybox:latest` | `<nodeIP>:30050/library/busybox:latest` |
 | observability 全套 | Prom/Loki/Jaeger/Grafana/Promtail/node-exporter | 见 `deploy/observability/`（**唯一部署入口 `scripts/deploy-observability.sh`**） | `<nodeIP>:30050/observability/*` |
+
+显式启用演示Workload需要`library/nginx:stable`，hello-web模板需要`library/nginx:alpine`；同步入口为`./scripts/sync-images.sh nginx`（两个标签均同步到目标registry，强制linux/amd64）。这两种标签不是同一镜像，禁止把alpine重新标记为stable来掩盖缺失。
 
 > **data-service 引擎镜像**：reconciler 按 `PAAS_IMAGE_REGISTRY` env 拼 `<registry>/library/<name>`，引擎镜像需推到 `<nodeIP>:30050/library/`。占位引擎（kafka/rabbitmq/rocketmq/vector/search）不拉起，无需预推。
 
@@ -145,3 +149,11 @@ core Pod registry client 访问 `<nodeIP>:30050` 失败。查：① registry Pod
 - **存储**：local-path PVC 20Gi（`kubectl -n paas get pvc paas-registry-data`），dev/demo 轻量。
 - **删除**：当前 registry 未启 delete API（`REGISTRY_STORAGE_DELETE_ENABLED=false`），镜像库只读。删除 + GC 留后续。
 - **持久化**：registry Pod 重启数据不丢（PVC）；删 PVC `kubectl -n paas delete pvc paas-registry-data` 才清空（高危）。
+
+## 演示工作负载与真实集群
+
+`seed.workloads`默认`false`（`PAAS_ENABLE_DEMO_WORKLOADS=false`）。演示登录和模型目录的`seed.demo=true`不会再隐式创建演示Deployment、Job、CronJob；只有独立开启工作负载演示且全局演示未关闭时才灌入。全局`seed.demo=false`仍优先禁止全部演示初始化。
+
+开关只控制新数据灌入，不删除已有数据库记录和Workload CR。清理已有演示资源时，须先核对完整预置特征和依赖，备份后移除控制面记录及对应CR，等待子资源级联回收；单删Pod会被重建。不要仅按租户、名称前缀或镜像批量删除。正式业务工作负载不受此开关影响。
+
+如确需开启`seed.workloads=true`，先执行nginx依赖同步并检查目标仓库中`stable`标签可拉取，再开启。当前集群保持关闭，不为消除告警而启动这些演示资源。

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -67,7 +68,7 @@ func (f *fakeRepo) GetUserByName(_ context.Context, name string) (*User, error) 
 }
 func (f *fakeRepo) GetUser(_ context.Context, tenantID, userID string) (*User, error) {
 	u, ok := f.users[userID]
-	if !ok || u.TenantID != tenantID {
+	if !ok || (tenantID != "" && u.TenantID != tenantID) {
 		return nil, errNotFound("用户")
 	}
 	uu := u
@@ -126,6 +127,7 @@ func (f *fakeRepo) UpdateUser(_ context.Context, u User) error {
 		u.PasswordHash = cur.PasswordHash
 	}
 	u.CreatedAt = cur.CreatedAt
+	u.SessionVersion = cur.SessionVersion // 只由 RevokeUserSessions 变更
 	f.users[u.ID] = u
 	return nil
 }
@@ -157,6 +159,76 @@ func (f *fakeRepo) DeleteAPIKey(_ context.Context, id string) error {
 	}
 	delete(f.keys, id)
 	return nil
+}
+
+// —— 生命周期（D5）——
+
+func (f *fakeRepo) SetTenantStatus(_ context.Context, id, status, reason string) (Tenant, error) {
+	t, ok := f.tenants[id]
+	if !ok {
+		return Tenant{}, ErrTenantNotFound
+	}
+	t.Status = status
+	if status == TenantStatusFrozen {
+		now := time.Now()
+		t.FrozenAt = &now
+		t.FrozenReason = reason
+	} else {
+		t.FrozenAt = nil
+		t.FrozenReason = ""
+	}
+	f.tenants[id] = t
+	return t, nil
+}
+
+func (f *fakeRepo) GetAPIKey(_ context.Context, id string) (APIKey, error) {
+	k, ok := f.keys[id]
+	if !ok {
+		return APIKey{}, errNotFound("API Key")
+	}
+	return k, nil
+}
+
+func (f *fakeRepo) TouchAPIKeyUsage(_ context.Context, id string, at time.Time) error {
+	if k, ok := f.keys[id]; ok {
+		k.LastUsedAt = &at
+		f.keys[id] = k
+	}
+	return nil
+}
+
+func (f *fakeRepo) RevokeAPIKey(_ context.Context, id string, at time.Time) error {
+	k, ok := f.keys[id]
+	if !ok {
+		return errNotFound("API Key")
+	}
+	k.RevokedAt = &at
+	f.keys[id] = k
+	return nil
+}
+
+func (f *fakeRepo) SetAPIKeyExpiry(_ context.Context, id string, at time.Time) error {
+	k, ok := f.keys[id]
+	if !ok {
+		return errNotFound("API Key")
+	}
+	if at.IsZero() {
+		k.ExpiresAt = nil
+	} else {
+		k.ExpiresAt = &at
+	}
+	f.keys[id] = k
+	return nil
+}
+
+func (f *fakeRepo) RevokeUserSessions(_ context.Context, tenantID, userID string) (int, error) {
+	u, ok := f.users[userID]
+	if !ok || (tenantID != "" && u.TenantID != tenantID) {
+		return 0, errNotFound("用户")
+	}
+	u.SessionVersion++
+	f.users[userID] = u
+	return u.SessionVersion, nil
 }
 
 func errConflict(s string) error { return &testErr{s + " 已存在"} }
@@ -418,4 +490,103 @@ func TestPlatformAdminCrossTenant(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.DeleteUser(rec, r)
 	assert.Equal(t, http.StatusOK, rec.Code, "平台超管可跨租户删除")
+}
+
+// —— 租户冻结 / 注销预检（D5）——
+
+func TestFreezeTenantRequiresReason(t *testing.T) {
+	h := newAdminHandler()
+	require.Equal(t, http.StatusOK, doReq(t, h.CreateTenant, http.MethodPost, "/api/admin/tenants", `{"id":"t-f","name":"Frozen"}`).Code)
+
+	rec := doReq(t, h.FreezeTenant, http.MethodPost, "/api/admin/tenants/t-f/freeze", `{}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "冻结无原因必须拒绝（后台操作需可追溯）")
+
+	rec = doReq(t, h.FreezeTenant, http.MethodPost, "/api/admin/tenants/t-f/freeze", `{"reason":"欠费停服"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var wrap struct {
+		Data Tenant `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &wrap))
+	assert.Equal(t, TenantStatusFrozen, wrap.Data.Status)
+	require.NotNil(t, wrap.Data.FrozenAt)
+	assert.Equal(t, "欠费停服", wrap.Data.FrozenReason)
+
+	rec = doReq(t, h.UnfreezeTenant, http.MethodPost, "/api/admin/tenants/t-f/unfreeze", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	// 用新变量解码：omitempty 字段在复用的目标结构里不会被清空，会造成假失败。
+	var after struct {
+		Data Tenant `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &after))
+	assert.Equal(t, TenantStatusActive, after.Data.Status)
+	assert.Nil(t, after.Data.FrozenAt)
+	assert.Empty(t, after.Data.FrozenReason)
+}
+
+func TestFreezeTenantNotFoundAndForbidden(t *testing.T) {
+	h := newAdminHandler()
+	assert.Equal(t, http.StatusNotFound,
+		doReq(t, h.FreezeTenant, http.MethodPost, "/api/admin/tenants/missing/freeze", `{"reason":"x"}`).Code)
+
+	// 非平台超管不能冻结任何租户（含本租户）
+	h.IsPlatformAdmin = func(*http.Request) bool { return false }
+	assert.Equal(t, http.StatusForbidden,
+		doReq(t, h.FreezeTenant, http.MethodPost, "/api/admin/tenants/t-f/freeze", `{"reason":"x"}`).Code)
+}
+
+func TestTenantOffboardingRequiresCounter(t *testing.T) {
+	h := newAdminHandler()
+	require.Equal(t, http.StatusOK, doReq(t, h.CreateTenant, http.MethodPost, "/api/admin/tenants", `{"id":"t-o","name":"Off"}`).Code)
+	// 未注入统计器：报 503 而不是给空清单（「0 项」与「未统计」不可混同）
+	assert.Equal(t, http.StatusServiceUnavailable,
+		doReq(t, h.TenantOffboarding, http.MethodGet, "/api/admin/tenants/t-o/offboarding", "").Code)
+}
+
+func TestTenantOffboardingReportsBlocking(t *testing.T) {
+	h := newAdminHandler()
+	require.Equal(t, http.StatusOK, doReq(t, h.CreateTenant, http.MethodPost, "/api/admin/tenants", `{"id":"t-o","name":"Off"}`).Code)
+	h.WithOffboardingCounter(func(_ context.Context, tenantID string) ([]OffboardingItem, error) {
+		assert.Equal(t, "t-o", tenantID)
+		return []OffboardingItem{
+			{Kind: "users", Label: "用户", Count: 2, Blocking: true},
+			{Kind: "workloads", Label: "工作负载", Count: 5},
+		}, nil
+	})
+	rec := doReq(t, h.TenantOffboarding, http.MethodGet, "/api/admin/tenants/t-o/offboarding", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var wrap struct {
+		Data OffboardingReport `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &wrap))
+	assert.Equal(t, "t-o", wrap.Data.TenantID)
+	assert.True(t, wrap.Data.Blocking, "有用户的租户删除会被拒，blocking 必须为 true")
+	require.Len(t, wrap.Data.Items, 2)
+	assert.NotEmpty(t, wrap.Data.Notes)
+}
+
+// TestFreezeTenantViaSecurityRole 正路径（R5 审计 C1 回归锁）：非超管但持平台安全写角色
+// （经 PlatformAuthorize 判定，cmd/core 装配层注入）可冻结/恢复租户——guard 层特例与
+// handler 层 second check 必须同源放行，否则「过 guard 但 handler 403」死路径。
+func TestFreezeTenantViaSecurityRole(t *testing.T) {
+	h := newAdminHandler()
+	// 身份域写（建租户）只留给超管（有意设计）；临时开超管准备数据。
+	require.Equal(t, http.StatusOK, doReq(t, h.CreateTenant, http.MethodPost, "/api/admin/tenants", `{"id":"t-sec","name":"Sec"}`).Code)
+
+	// 降到非超管 + 仅平台安全写角色：冻结正路径
+	h.IsPlatformAdmin = func(*http.Request) bool { return false }
+	h.PlatformAuthorize = func(_ *http.Request, perm Permission) bool {
+		return perm == PermPlatformSecurityWrite
+	}
+	rec := doReq(t, h.FreezeTenant, http.MethodPost, "/api/admin/tenants/t-sec/freeze", `{"reason":"安全处置"}`)
+	require.Equal(t, http.StatusOK, rec.Code, "安全写角色应可冻结（guard/handler 同源）")
+	var wrap struct {
+		Data Tenant `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &wrap))
+	assert.Equal(t, TenantStatusFrozen, wrap.Data.Status)
+
+	// 无安全写权限的角色仍拒绝
+	h.PlatformAuthorize = func(*http.Request, Permission) bool { return false }
+	assert.Equal(t, http.StatusForbidden,
+		doReq(t, h.FreezeTenant, http.MethodPost, "/api/admin/tenants/t-sec/freeze", `{"reason":"x"}`).Code)
 }

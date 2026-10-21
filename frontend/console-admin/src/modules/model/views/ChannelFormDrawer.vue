@@ -10,6 +10,39 @@
     :loading="submitting"
     width="600px"
     @submit="handleSubmit"
+  >
+    <!-- 凭证：供应商带入后仍可改（覆盖快照）；内嵌创建（spec §8.3） -->
+    <template #field-credentialRef>
+      <div class="credential-field">
+        <el-select
+          v-model="formData.credentialRef"
+          filterable
+          clearable
+          :disabled="mode === 'view'"
+          placeholder="平台级 Secret（openai-compatible 需要）"
+          data-testid="channel-credential-select"
+        >
+          <el-option
+            v-for="s in secretOptions"
+            :key="s.id"
+            :label="`${s.name} (${s.id})`"
+            :value="s.id"
+          />
+        </el-select>
+        <el-button
+          :disabled="mode === 'view'"
+          data-testid="channel-credential-create"
+          @click="secretDialog = true"
+        >
+          新建凭证
+        </el-button>
+      </div>
+    </template>
+  </FormDrawer>
+
+  <PlatformSecretCreateDialog
+    v-model="secretDialog"
+    @created="onSecretCreated"
   />
 </template>
 
@@ -22,12 +55,15 @@ import {
   createChannel,
   updateChannel,
   fetchVendorList,
+  fetchPlatformSecrets,
   CHANNEL_TYPES,
   CHANNEL_STATUS,
   type ModelChannel,
   type ChannelCreateRequest,
-  type Vendor
+  type Vendor,
+  type SecretOption
 } from '../api'
+import PlatformSecretCreateDialog from './PlatformSecretCreateDialog.vue'
 
 const props = defineProps<{
   modelValue: boolean
@@ -45,6 +81,8 @@ const visible = ref(props.modelValue)
 const submitting = ref(false)
 const formDrawerRef = ref<InstanceType<typeof FormDrawer>>()
 const vendorOptions = ref<Vendor[]>([])
+const secretOptions = ref<SecretOption[]>([])
+const secretDialog = ref(false)
 
 watch(() => props.modelValue, (v) => {
   visible.value = v
@@ -84,14 +122,15 @@ const fields = computed<FormField[]>(() => [
   },
   { prop: 'type', label: '类型', type: 'select', span: 12, options: CHANNEL_TYPES },
   { prop: 'priority', label: '优先级', type: 'number', span: 12, placeholder: '数字越小越优先' },
-  { prop: 'status', label: '状态', type: 'select', span: 12, options: CHANNEL_STATUS },
+  // 手动路由标记（非探活诊断）：offline=摘出路由；观测证据在详情「最近诊断」列。
+  { prop: 'status', label: '路由标记', type: 'select', span: 12, options: CHANNEL_STATUS },
   {
     prop: 'vendorId',
     label: '供应商',
     type: 'select',
     span: 24,
     options: vendorOptions.value.map((v) => ({ label: `${v.name} (${v.id})`, value: v.id })),
-    placeholder: '选供应商自动带入 BaseURL/凭证（免手填）',
+    placeholder: '选供应商带入 BaseURL/凭证快照（供应商后续修改不同步）',
     dependencies: [{ trigger: 'type', show: (v) => isReal(v) }]
   },
   {
@@ -100,6 +139,14 @@ const fields = computed<FormField[]>(() => [
     type: 'input',
     span: 24,
     placeholder: '供应商侧模型名（如 glm-5.2 / qwen-plus）',
+    dependencies: [{ trigger: 'type', show: (v) => isReal(v) }]
+  },
+  {
+    prop: 'credentialRef',
+    label: '凭证',
+    type: 'select',
+    span: 24,
+    placeholder: '平台级 Secret（选供应商自动带入，可覆盖）',
     dependencies: [{ trigger: 'type', show: (v) => isReal(v) }]
   }
 ])
@@ -128,6 +175,17 @@ const initForm = () => {
   }
 }
 
+// 凭证创建成功：刷新下拉 + 回填；通道表单草稿（含供应商带入的其他字段）不动。
+const onSecretCreated = async (s: SecretOption) => {
+  try {
+    secretOptions.value = await fetchPlatformSecrets()
+  } catch {
+    secretOptions.value = [s]
+  }
+  formData.credentialRef = s.id
+  ElMessage.success(`凭证已回填：${s.id}`)
+}
+
 const handleSubmit = async (data: Record<string, unknown>) => {
   submitting.value = true
   try {
@@ -154,5 +212,21 @@ onMounted(async () => {
   } catch {
     // 加载失败静默（下拉为空，可先去供应商管理创建）
   }
+  try {
+    secretOptions.value = await fetchPlatformSecrets()
+  } catch {
+    // 凭证下拉加载失败静默（新建后 onSecretCreated 会再刷新）
+  }
 })
 </script>
+
+<style scoped>
+.credential-field {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+.credential-field .el-select {
+  flex: 1;
+}
+</style>

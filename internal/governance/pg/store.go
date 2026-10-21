@@ -431,6 +431,25 @@ func (s *Store) ListRoutes(ctx context.Context, serviceID string) ([]governance.
 	return out, rows.Err()
 }
 
+// ListAllRoutes 跨租户列出全部路由（admin 平台总览；不过滤 tenant，带 TenantID 与下发状态）。
+func (s *Store) ListAllRoutes(ctx context.Context) ([]governance.Route, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+routeCols+` FROM gov_routes ORDER BY updated_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]governance.Route, 0)
+	for rows.Next() {
+		var rt governance.Route
+		if err = scanRoute(rows, &rt); err != nil {
+			return nil, err
+		}
+		out = append(out, rt)
+	}
+	return out, rows.Err()
+}
+
 // GetRoute 取单条；跨租户访问返回 not found（不泄漏）。
 func (s *Store) GetRoute(ctx context.Context, id string) (governance.Route, error) {
 	tid, err := storagepg.TenantOrErr(ctx)
@@ -593,6 +612,26 @@ func (s *Store) ListBreakers(ctx context.Context, serviceID string) ([]governanc
 	}
 	q += " ORDER BY updated_at DESC"
 	rows, err := s.db.Pool().Query(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]governance.CircuitBreaker, 0)
+	for rows.Next() {
+		var b governance.CircuitBreaker
+		if err = scanBreaker(rows, &b); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// ListAllBreakers 跨租户列出全部熔断器（admin 平台总览；不过滤 tenant，带 TenantID）。
+// 与 ListBreakers 同：State/Stats 零值，由 handler 调 EvaluateBreaker 即时填充。
+func (s *Store) ListAllBreakers(ctx context.Context) ([]governance.CircuitBreaker, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+breakerCols+` FROM gov_breakers ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, err
 	}

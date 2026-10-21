@@ -10,7 +10,7 @@
           color: isActive(tag) ? 'var(--el-menu-active-color)' : '',
           borderColor: isActive(tag) ? '' : ''
         }"
-        :to="{ path: tag.fullPath }"
+        :to="tag.fullPath"
         @contextmenu.prevent="openMenu($event, index)"
       >
         {{ tag.title }}
@@ -31,6 +31,7 @@
 </template>
 
 <script lang="ts" setup>
+import { Close } from '@element-plus/icons-vue'
 import ContextMenu from './ContextMenu.vue'
 import { useTagsViewClose } from './useTagsViewClose'
 import { ref, reactive, watch, onUnmounted } from 'vue'

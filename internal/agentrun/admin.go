@@ -6,6 +6,7 @@ package agentrun
 import (
 	"context"
 	"net/http"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -31,11 +32,14 @@ type AdminRun struct {
 
 // AdminStats 汇总计数（phase 分布 + token 按来源合计）。
 type AdminStats struct {
-	Total       int64 `json:"total"`
-	Succeeded   int64 `json:"succeeded"`
-	Failed      int64 `json:"failed"`
-	Running     int64 `json:"running"`
-	Pending     int64 `json:"pending"`
+	Total     int64 `json:"total"`
+	Succeeded int64 `json:"succeeded"`
+	Failed    int64 `json:"failed"`
+	Running   int64 `json:"running"`
+	Pending   int64 `json:"pending"`
+	// Unknown 未知 phase 独立计数（上游新增状态时不误并入 Pending——pending=排队等待，
+	// 把 Cancelled 之类未知态塞进它会虚高涨班队列，R3 审计 L-2）。
+	Unknown     int64 `json:"unknown"`
 	TokensTotal int64 `json:"tokensTotal"`
 	TokensAuto  int64 `json:"tokensAuto"` // agentrun 侧 webhook 自动 run 合计（无人为控制，成本可见性）
 	TokensPaas  int64 `json:"tokensPaas"` // paas 委派/agent stage 触发合计
@@ -59,15 +63,22 @@ func truncate(s string, n int) string {
 	return string(r[:n]) + "…"
 }
 
-// runSource 按名称前缀归类来源。
+// paasRunNameRe paas 编排 agent stage 的 run 名形态：<runID>-<stageIdx>（retry 再加 -rN），
+// runID 固定 `run-<12hex>`（store newID("run") 生成）。可证实才归 paas——
+// default 归 paas 会把用户在 agentrun 侧手动触发的 run 误算进 paas token 归因（R3 审计 M-4）。
+var paasRunNameRe = regexp.MustCompile(`^run-[0-9a-f]{12}-\d+(-r\d+)?$`)
+
+// runSource 按名称归类来源：可证实前缀归类，无法证实归 "other" 独立桶（token 合计不受影响）。
 func runSource(name string) string {
 	switch {
 	case strings.HasPrefix(name, "auto-review-"):
 		return "auto-review"
 	case strings.HasPrefix(name, "auto-test-"):
 		return "auto-test"
-	default:
+	case paasRunNameRe.MatchString(name):
 		return "paas"
+	default:
+		return "other"
 	}
 }
 
@@ -100,6 +111,8 @@ func (c *Client) Overview(ctx context.Context) (AdminOverview, error) {
 		case "paas":
 			ov.Stats.TokensPaas += r.Tokens
 		default:
+			// auto-review/auto-test/other 都计入自动侧合计（other=来源不可证实，
+			// 不冒充 paas 归因；总量 TokensTotal 兜底）。
 			ov.Stats.TokensAuto += r.Tokens
 		}
 		switch r.Phase {
@@ -109,8 +122,10 @@ func (c *Client) Overview(ctx context.Context) (AdminOverview, error) {
 			ov.Stats.Failed++
 		case "Running", "running":
 			ov.Stats.Running++
-		default:
+		case "Pending", "pending":
 			ov.Stats.Pending++
+		default:
+			ov.Stats.Unknown++
 		}
 	}
 	return ov, nil

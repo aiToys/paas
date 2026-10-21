@@ -19,13 +19,19 @@ type Store struct {
 	quotas map[string]billing.ResourceQuota // tenantID -> quota
 	usage  map[string]billing.ResourceUsage // tenantID -> usage
 	bills  []billing.BillingRecord          // 全租户；查询时按 tenant 过滤
-	seq    int
+	// D5-4 财务深化：预算 / 周期 token 用量 / 供应商对账记录。
+	budgets     map[string]billing.Budget        // budgetID -> budget
+	tokens      map[string]billing.TokenUsageRow // "tenant|period|app|model" -> row
+	settlements []billing.SettlementRecord       // 平台级（人工登记）
+	seq         int
 }
 
 func NewStore() *Store {
 	s := &Store{
-		quotas: map[string]billing.ResourceQuota{},
-		usage:  map[string]billing.ResourceUsage{},
+		quotas:  map[string]billing.ResourceQuota{},
+		usage:   map[string]billing.ResourceUsage{},
+		budgets: map[string]billing.Budget{},
+		tokens:  map[string]billing.TokenUsageRow{},
 	}
 	// 不 seed mock 配额/用量/账单（去假数据）：用量从 CheckAndInc 真实派生（应用/工作负载创建时递增），
 	// 配额用 GetQuota 默认值（未设返默认非错误），账单由 GenerateBill 真实产生。
@@ -131,6 +137,20 @@ func (s *Store) GetUsage(ctx context.Context) (billing.ResourceUsage, error) {
 	u.Counts = cloneIntMap(u.Counts) // 返回前深拷贝
 	u.ByApp = cloneByApp(u.ByApp)
 	return u, nil
+}
+
+// ListAllUsages 跨租户列出全部用量快照（admin 平台总览，不过滤 tenant；按 TenantID 升序，深拷贝）。
+func (s *Store) ListAllUsages(ctx context.Context) ([]billing.ResourceUsage, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]billing.ResourceUsage, 0, len(s.usage))
+	for _, u := range s.usage {
+		u.Counts = cloneIntMap(u.Counts) // 返回前深拷贝，与 store 独立
+		u.ByApp = cloneByApp(u.ByApp)
+		out = append(out, u)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].TenantID < out[j].TenantID })
+	return out, nil
 }
 
 func (s *Store) IncUsage(ctx context.Context, resource string, delta int) (billing.ResourceUsage, error) {

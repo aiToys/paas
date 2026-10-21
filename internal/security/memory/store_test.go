@@ -127,3 +127,55 @@ func TestMissingTenant(t *testing.T) {
 		t.Fatal("缺失租户上下文应拒绝")
 	}
 }
+
+// TestQueryAllAuditLogs 审计后端过滤/分页（D4）：跨租户、时间倒序、Total 为过滤后全量、
+// 关键字命中 resourceId/detail、分页切片正确。
+func TestQueryAllAuditLogs(t *testing.T) {
+	s := NewStore()
+	for i := 0; i < 5; i++ {
+		if err := s.RecordAudit(acmeCtx(), security.AuditLog{
+			Actor: "u1", Action: "create", ResourceType: "workload",
+			ResourceID: "wl-" + string(rune('a'+i)), Detail: "第" + string(rune('0'+i)) + "次",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.RecordAudit(globexCtx(), security.AuditLog{
+		Actor: "u2", Action: "admin:delete", ResourceType: "secret", ResourceID: "sec-x", Detail: "强制删",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 跨租户全量：本测试 6 条 + seed 存量，时间倒序（最后写入的最前）。
+	p, err := s.QueryAllAuditLogs(context.Background(), security.AuditQuery{})
+	if err != nil || p.Total < 6 || len(p.Items) != p.Total {
+		t.Fatalf("全量应 ≥6 条且 items==total，got total=%d items=%d err=%v", p.Total, len(p.Items), err)
+	}
+	if p.Items[0].Action != "admin:delete" {
+		t.Fatalf("应时间倒序（最新在前），got %+v", p.Items[0])
+	}
+
+	// 租户 + actor 过滤 + 分页：acme/u1 恒 5 条（与 seed 无关），limit=2 offset=2 → 本页 2 条。
+	p, _ = s.QueryAllAuditLogs(context.Background(), security.AuditQuery{TenantID: "t-acme", Actor: "u1", Limit: 2, Offset: 2})
+	if p.Total != 5 || len(p.Items) != 2 || p.Items[0].TenantID != "t-acme" || p.Items[0].Actor != "u1" {
+		t.Fatalf("分页不符: total=%d items=%d", p.Total, len(p.Items))
+	}
+
+	// 关键字命中 detail（大小写不敏感由 ILIKE 语义对齐，这里测子串）。
+	p, _ = s.QueryAllAuditLogs(context.Background(), security.AuditQuery{Keyword: "第3"})
+	if p.Total != 1 {
+		t.Fatalf("关键字应命中 1 条，got %d", p.Total)
+	}
+
+	// Action 精确匹配（与 Keyword 不同：不模糊）；叠加 actor 隔离 seed。
+	p, _ = s.QueryAllAuditLogs(context.Background(), security.AuditQuery{Action: "create", Actor: "u1"})
+	if p.Total != 5 {
+		t.Fatalf("Action=create+actor=u1 应 5 条，got %d", p.Total)
+	}
+
+	// 越界 offset 返回空页但 Total 正确。
+	p, _ = s.QueryAllAuditLogs(context.Background(), security.AuditQuery{Actor: "u1", Offset: 100})
+	if p.Total != 5 || len(p.Items) != 0 {
+		t.Fatalf("越界应空页, got total=%d items=%d", p.Total, len(p.Items))
+	}
+}

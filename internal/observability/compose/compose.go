@@ -92,6 +92,23 @@ func (r *Repo) ListAllAlertRules(ctx context.Context) ([]observability.AlertRule
 	return r.rules.ListAllAlertRules(ctx)
 }
 
+// 通知渠道委托 rules store（与规则同源：memory = 进程内存；PG = notification_channels 表）。
+func (r *Repo) ListNotificationChannels(ctx context.Context) ([]observability.NotificationChannel, error) {
+	return r.rules.ListNotificationChannels(ctx)
+}
+
+func (r *Repo) CreateNotificationChannel(ctx context.Context, ch observability.NotificationChannel) (observability.NotificationChannel, error) {
+	return r.rules.CreateNotificationChannel(ctx, ch)
+}
+
+func (r *Repo) UpdateNotificationChannel(ctx context.Context, id string, ch observability.NotificationChannel) (observability.NotificationChannel, error) {
+	return r.rules.UpdateNotificationChannel(ctx, id, ch)
+}
+
+func (r *Repo) DeleteNotificationChannel(ctx context.Context, id string) error {
+	return r.rules.DeleteNotificationChannel(ctx, id)
+}
+
 // ListAlerts：引擎注入时读引擎快照（含 pending/firing/resolved 状态，评估由后台循环驱动）；
 // 未注入降级即时评估（遍历 rules，对每 enabled 规则调 metrics reader 取匹配 series 当前值评估）。
 // real 模式 metrics 来自 Prometheus，memory 模式来自 mock seed。

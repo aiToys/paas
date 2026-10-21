@@ -18,6 +18,10 @@
 # 镜像清单真源：docs/deploy/dependencies.md。新增镜像同步更新清单 + 此处 IMAGES 数组。
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SYNC_TMP_DIR="$ROOT/tmp/image-sync"
+mkdir -p "$SYNC_TMP_DIR"
+
 NODE_IP="${NODE_IP:-$(kubectl get nodes -o wide | awk '!/master|ROLES/{print $6; exit}' | grep -E '^[0-9.]+$' || true)}"
 if [[ -z "$NODE_IP" ]]; then
   echo "✗ 无法检测 NODE_IP。手动指定：NODE_IP=x.x.x.x ./scripts/sync-images.sh"
@@ -36,6 +40,9 @@ IMAGES=(
   "library/postgres:16-alpine|library|16-alpine"
   "library/docker:git|library|git"
   "gitea/gitea:1.22.6|devtools|1.22.6"
+  # 显式启用的演示工作负载与hello-web模板，避免tag引用与同步清单脱节。
+  "library/nginx:stable|library|stable"
+  "library/nginx:alpine|library|alpine"
   # 数据服务引擎
   "library/mysql:8|library|8"
   "library/postgres:15-alpine|library|15-alpine"
@@ -86,7 +93,7 @@ sync_one() {
   if ! docker push "$target"; then
     echo "  ⚠ docker push 失败，尝试 crane 直推..."
     if command -v crane >/dev/null 2>&1; then
-      local tar; tar="$(mktemp -t sync.XXXXXX.tar)"
+      local tar; tar="$(mktemp "$SYNC_TMP_DIR/sync.XXXXXX")"
       docker save "$target" -o "$tar"
       crane push --insecure "$tar" "$target" && rm -f "$tar"
     else

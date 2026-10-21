@@ -54,8 +54,18 @@ type buildBridge struct {
 // handler 路径同源，消除流水线构建记录 mock commit——迭代旅程审计卡点）。
 // ListCommits 第三参传 branch（旅程审计 R5-C1）：此前固定取默认分支 HEAD，非默认分支
 // CI 的镜像 tag `<branch>-<commit8>` 里 commit 是默认分支的——tag 与代码实际内容错位。
-func (b *buildBridge) CreateBuildRun(ctx context.Context, appID, repoID, branch, commit string, buildArgs map[string]string) (devops.BuildRun, error) {
+func (b *buildBridge) CreateBuildRun(ctx context.Context, input devops.BuildRun) (devops.BuildRun, error) {
+	appID, repoID, branch, commit := input.AppID, input.RepoID, input.Branch, input.Commit
 	message := ""
+	if b.repos != nil {
+		repo, err := b.repos.GetRepo(ctx, repoID)
+		if err != nil {
+			return devops.BuildRun{}, err
+		}
+		if repo.AppID != appID {
+			return devops.BuildRun{}, fmt.Errorf("仓库不属于目标应用")
+		}
+	}
 	if b.gitea != nil && b.repos != nil {
 		if repo, err := b.repos.GetRepo(ctx, repoID); err == nil && repo.Source == devops.RepoSourceInternal {
 			owner := repo.GiteaOwner
@@ -66,6 +76,9 @@ func (b *buildBridge) CreateBuildRun(ctx context.Context, appID, repoID, branch,
 			if ref == "" {
 				ref = repo.Branch // 未指定分支回落仓库默认分支（同 ListCommits sha 语义）
 			}
+			if commit != "" {
+				ref = commit
+			}
 			if cs, gerr := b.gitea.ListCommits(ctx, owner, repo.GiteaRepo, 1, ref); gerr == nil && len(cs) > 0 {
 				// commit 已带（webhook push.after）时只补 message（构建记录可读性）；否则都取该分支 HEAD。
 				if commit == "" {
@@ -75,10 +88,8 @@ func (b *buildBridge) CreateBuildRun(ctx context.Context, appID, repoID, branch,
 			}
 		}
 	}
-	return b.builds.CreateBuildRun(ctx, devops.BuildRun{
-		AppID: appID, RepoID: repoID, Branch: branch, Commit: commit, Message: message,
-		Trigger: devops.TriggerManual, BuildArgs: buildArgs,
-	})
+	input.Commit, input.Message, input.Trigger = commit, message, devops.TriggerManual
+	return b.builds.CreateBuildRun(ctx, input)
 }
 
 // PollBuildRun 阻塞轮询到终态（success/failed）；ctx cancel 退出（Abort 传播）；
@@ -145,7 +156,9 @@ func (r *releaseBridge) PollWorkloadReady(ctx context.Context, workloadID string
 		// FillStatus 原地修改 slice 元素（值语义），须从 slice 读回填充后的 wl。
 		if r.status != nil {
 			wls := []workload.Workload{wl}
-			_ = r.status.FillStatus(ctx, wls)
+			if err := r.status.FillStatus(ctx, wls); err != nil {
+				return fmt.Errorf("读取工作负载实时状态失败: %w", err)
+			}
 			wl = wls[0]
 		}
 		if wl.Replicas > 0 && wl.Ready >= wl.Replicas {

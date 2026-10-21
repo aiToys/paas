@@ -45,6 +45,18 @@ func (f *fakeRules) ListAllAlertRules(ctx context.Context) ([]observability.Aler
 	return f.rules, nil
 }
 
+// 通知渠道：compose 测试不涉及渠道投递，仅满足接口。
+func (f *fakeRules) ListNotificationChannels(ctx context.Context) ([]observability.NotificationChannel, error) {
+	return nil, nil
+}
+func (f *fakeRules) CreateNotificationChannel(ctx context.Context, ch observability.NotificationChannel) (observability.NotificationChannel, error) {
+	return ch, nil
+}
+func (f *fakeRules) UpdateNotificationChannel(ctx context.Context, id string, ch observability.NotificationChannel) (observability.NotificationChannel, error) {
+	return ch, nil
+}
+func (f *fakeRules) DeleteNotificationChannel(ctx context.Context, id string) error { return nil }
+
 func TestListAlertsEvaluatesAgainstMetrics(t *testing.T) {
 	rules := &fakeRules{rules: []observability.AlertRule{
 		{ID: "r1", Name: "CPU 高", MetricName: observability.MetricCPU, TargetType: observability.TargetApp,

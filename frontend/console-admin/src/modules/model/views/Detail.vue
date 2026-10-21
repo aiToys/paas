@@ -11,7 +11,10 @@
     </div>
 
     <div class="toolbar">
-      <span class="hint">通道按优先级升序路由；健康通道参与请求级 failover。</span>
+      <span class="hint">
+        通道按优先级升序路由；「最近诊断」是网关运行态投影（请求级 failover 打标实时回显，无主动探活，重启后重置），
+        配置成功不等于上游可达。
+      </span>
       <div>
         <el-button type="primary" :icon="Plus" @click="openChannel(null)">新建通道</el-button>
         <el-button :icon="Refresh" @click="load">刷新</el-button>
@@ -20,11 +23,28 @@
 
     <el-table v-loading="loading" :data="channels" border row-key="id">
       <el-table-column prop="id" label="通道 ID" min-width="180" />
+      <el-table-column label="供应商" width="120">
+        <template #default="{ row }">
+          <span v-if="row.vendorId">{{ row.vendorId }}</span>
+          <span v-else class="dim">直填</span>
+        </template>
+      </el-table-column>
       <el-table-column prop="type" label="类型" width="140" />
       <el-table-column prop="priority" label="优先级" width="80" />
-      <el-table-column label="状态" width="90">
+      <el-table-column label="配置" width="110">
         <template #default="{ row }">
-          <el-tag :type="statusType(row.status)" size="small">{{ row.status }}</el-tag>
+          <el-tag :type="configType(row)" size="small">{{ configText(row) }}</el-tag>
+        </template>
+      </el-table-column>
+      <el-table-column label="最近诊断" width="200">
+        <template #default="{ row }">
+          <el-tag v-if="!row.status || row.status === 'healthy'" type="info" size="small">
+            未诊断（无失败记录）
+          </el-tag>
+          <el-tag v-else-if="row.status === 'degraded'" type="warning" size="small">
+            降级（请求失败被切走）
+          </el-tag>
+          <el-tag v-else type="danger" size="small">离线（摘出路由）</el-tag>
         </template>
       </el-table-column>
       <el-table-column prop="endpoint" label="BaseURL" min-width="200" show-overflow-tooltip />
@@ -74,10 +94,16 @@ const channelDrawer = ref(false)
 const channelMode = ref<'add' | 'edit'>('add')
 const channelData = ref<ModelChannel | null>(null)
 
-const statusType = (s: string) => {
-  if (s === 'healthy') return 'success'
-  if (s === 'degraded') return 'warning'
-  return 'danger'
+// 配置状态（spec M07 与观测分离）：echo/mock 进程内无需凭证；
+// openai-compatible 看 credentialRef（vendorId 选定即快照带入，此处即最终真值）。
+const needsCredential = (row: ModelChannel) => row.type === 'openai-compatible'
+const configText = (row: ModelChannel) => {
+  if (!needsCredential(row)) return '无需凭证'
+  return row.credentialRef ? '已配置' : '缺少凭证'
+}
+const configType = (row: ModelChannel) => {
+  if (!needsCredential(row)) return 'info'
+  return row.credentialRef ? 'success' : 'danger'
 }
 
 const load = async () => {
@@ -160,5 +186,9 @@ onMounted(() => {
 .hint {
   font-size: 12px;
   color: var(--el-text-color-secondary);
+}
+.dim {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
 }
 </style>

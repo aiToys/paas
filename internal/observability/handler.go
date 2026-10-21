@@ -3,11 +3,13 @@ package observability
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/aitoys/paas/internal/httputil"
+	"github.com/aitoys/paas/pkg/tenant"
 )
 
 // 粗粒度权限标识（与 identity.BuiltinRoles 对齐）。
@@ -32,6 +34,16 @@ type Handler struct {
 	repo      Repository
 	Authorize func(r *http.Request, perm string) bool
 	events    EventLister // 可选：告警历史查询（PG 路径注入；nil 时 events 端点 501）
+	// audit 审计（依赖倒置，cmd/core 桥接 security.AuditStore）。渠道 CRUD 决定告警发往何处，
+	// 属安全敏感配置——写操作必须留痕（R5 审计 C2）；未注入则不记（测试场景）。
+	audit AuditRecorder
+	// actorFn 从请求取操作者身份（依赖倒置，cmd/core 注入 gateway.UserIDFrom；不 import gateway）。
+	actorFn func(*http.Request) string
+}
+
+// AuditRecorder 审计记录（与 identity/pipeline 同源签名，cmd/core 装配层共用同一 adapter）。
+type AuditRecorder interface {
+	Record(ctx context.Context, tenantID, actor, action, resourceType, resourceID, detail string) error
 }
 
 // EventLister 告警历史事件查询（pg Store 实现）。
@@ -46,6 +58,27 @@ func NewHandler(repo Repository) *Handler {
 
 // WithEvents 注入告警历史查询（PG 路径；不注入则 history 端点 501 降级）。
 func (h *Handler) WithEvents(e EventLister) *Handler { h.events = e; return h }
+
+// WithAudit 注入审计记录器（渠道 CRUD 写留痕；与 identity/pipeline 装配层共用 adapter）。
+func (h *Handler) WithAudit(a AuditRecorder) *Handler { h.audit = a; return h }
+
+// WithActorFn 注入操作者身份提取（依赖倒置；不注入则审计 actor 为空串）。
+func (h *Handler) WithActorFn(fn func(*http.Request) string) *Handler { h.actorFn = fn; return h }
+
+// recordAudit 记渠道写审计：ctx 租户 + 注入的 actorFn；失败仅日志不影响主流程。
+func (h *Handler) recordAudit(r *http.Request, action, resourceID, detail string) {
+	if h.audit == nil {
+		return
+	}
+	tid, _ := tenant.TenantFrom(r.Context())
+	actor := ""
+	if h.actorFn != nil {
+		actor = h.actorFn(r)
+	}
+	if err := h.audit.Record(r.Context(), tid, actor, action, "notification_channel", resourceID, detail); err != nil {
+		log.Printf("observability: 渠道审计记录失败（%s %s）: %v", action, resourceID, err) //nolint:gosec // id 非敏感
+	}
+}
 
 func (h *Handler) allow(w http.ResponseWriter, r *http.Request, perm string) bool {
 	if h.Authorize == nil || h.Authorize(r, perm) {
@@ -68,6 +101,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveRuleCollection(w, r)
 	case strings.HasPrefix(path, "/api/observability/alert-rules/"):
 		h.serveRuleItem(w, r)
+	case path == "/api/observability/channels":
+		h.serveChannelCollection(w, r)
+	case strings.HasPrefix(path, "/api/observability/channels/"):
+		h.serveChannelItem(w, r)
 	case path == "/api/observability/alerts":
 		h.serveAlerts(w, r)
 	case path == "/api/observability/alerts/events":

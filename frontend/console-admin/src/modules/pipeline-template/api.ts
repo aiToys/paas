@@ -43,6 +43,17 @@ export interface PipelineTemplate {
 
 export const fetchTemplateList = () => api.get<PipelineTemplate[]>(BASE)
 export const createTemplate = (data: PipelineTemplate) => api.post<PipelineTemplate>(BASE, data)
+
+// 跨租户流水线（模板删除前引用预检用，spec 2026-10-19 D2b）。
+export interface AdminPipeline {
+  id: string
+  tenantId: string
+  appId: string
+  name: string
+  kind: string
+  templateId?: string
+}
+export const fetchAdminPipelines = () => api.get<AdminPipeline[]>('/api/admin/pipelines')
 export const updateTemplate = (id: string, data: PipelineTemplate) =>
   api.put<PipelineTemplate>(`${BASE}/${id}`, data)
 export const deleteTemplate = (id: string) => api.del(`${BASE}/${id}`)

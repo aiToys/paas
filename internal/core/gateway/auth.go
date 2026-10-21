@@ -23,9 +23,14 @@ func APIKeyAuth(idb identity.Repository) func(http.Handler) http.Handler {
 			}
 			k, err := idb.LookupAPIKey(r.Context(), strings.TrimPrefix(h, prefix))
 			if err != nil {
+				if code, msg, ok := credentialDeny(err); ok {
+					httputil.WriteError(w, code, msg)
+					return
+				}
 				httputil.WriteError(w, http.StatusUnauthorized, "invalid api key")
 				return
 			}
+			touchAPIKeyUsage(r.Context(), idb, k.ID)
 			ctx := tenant.WithTenant(r.Context(), k.TenantID)
 			ctx = WithRoles(ctx, k.Roles)
 			ctx = WithUserID(ctx, k.UserID)

@@ -34,15 +34,28 @@ ACTION_TOKEN="${ACTION_TOKEN:-paas-shop-order-token-2026}"
 api() { curl -sS -H "Authorization: Bearer $PAAS_TOKEN" "$@"; }
 jget() { python3 -c "import sys,json;d=json.load(sys.stdin);print(d$1)" 2>/dev/null || true; }
 
-# resolve_app_id 按名解析应用 ID（APP_ID 未显式指定时）。
-# 响应形态 {data:[...]}——索引前必须先取 ['data']（brief 原文 "[0]['id']" 漏层：KeyError 被
-# jget 的 2>/dev/null 吞成空串，APP_ID 恒空 → part1 整段虚假成功）。
+# resolve_app_id 按名精确解析 paas-shop 应用 ID（APP_ID 未显式指定时）；无则创建。
+# 2026-10-21 修正：原实现取「列表首项」依赖「单演示应用」假设——平台现有多应用
+# （app-cs 等），首项可能是别的应用，资源会建错宿主（实测 Route/appconfig/pipeline
+# 全部落到 app-cs）。改为按 name==paas-shop 精确匹配；找不到创建后回读。
 resolve_app_id() {
   if [ -z "$APP_ID" ]; then
-    APP_ID=$(api "$PAAS_API/api/applications" | jget "['data'][0]['id']") # 列表首项=paas-shop（单演示应用）
+    APP_ID=$(api "$PAAS_API/api/applications" | python3 -c "
+import sys, json
+try:
+    apps = json.load(sys.stdin)['data']
+    print(next((a['id'] for a in apps if a.get('name') == 'paas-shop'), ''))
+except Exception:
+    print('')" 2>/dev/null)
   fi
   if [ -z "$APP_ID" ]; then
-    echo "  [错误] 应用 ID 解析失败（PAAS_API=$PAAS_API 不可达或列表为空）" >&2
+    echo "  paas-shop 应用不存在，创建..."
+    APP_ID=$(api -X POST "$PAAS_API/api/applications" -H "Content-Type: application/json" \
+      -d '{"name":"paas-shop","description":"全场景演示商城（多服务/CI-CD/泳道/智能体/数据服务）"}' \
+      | jget "['data']['id']")
+  fi
+  if [ -z "$APP_ID" ]; then
+    echo "  [错误] paas-shop 应用解析/创建失败（PAAS_API=$PAAS_API 不可达或创建被拒）" >&2
     exit 1
   fi
   echo "APP_ID=$APP_ID"
@@ -321,6 +334,12 @@ ensure_appconfig "$ENV_TEST" "PAAS_APPCONFIG_URL" "http://paas-core.paas.svc.clu
 ensure_appconfig "$ENV_PROD" "PAAS_APPCONFIG_URL" "http://paas-core.paas.svc.cluster.local" "env"
 ensure_appconfig "$ENV_TEST" "PAAS_ENV_ID" "$ENV_TEST" "env"
 ensure_appconfig "$ENV_PROD" "PAAS_ENV_ID" "$ENV_PROD" "env"
+ensure_appconfig "$ENV_TEST" "PAAS_ENV_TYPE" "test" "env"
+ensure_appconfig "$ENV_PROD" "PAAS_ENV_TYPE" "prod" "env"
+for shop_env in "$ENV_TEST" "$ENV_PROD"; do
+  ensure_appconfig "$shop_env" "PAAS_SHOP_APP_ID" "$APP_ID" "env"
+  ensure_appconfig "$shop_env" "PAAS_CONSOLE_URL" "${PAAS_CONSOLE_URL:-${PAAS_API%/}/next/}" "env"
+done
 
 #    演示配置发布（热更新链路可验）：chatbot 欢迎语 + product 分页大小（默认 20 → 5 差异可见）。
 #    upsert 后查 active 快照，缺 key 才 publish（幂等：重跑不堆版本）。

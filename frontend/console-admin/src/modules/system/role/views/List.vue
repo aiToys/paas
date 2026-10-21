@@ -5,7 +5,7 @@
       :closable="false"
       show-icon
       title="系统内置角色为只读"
-      description="平台预置 tenant-admin / developer / viewer 三个角色及其权限集合，不可新建、编辑或删除。"
+      description="租户域角色（tenant-admin / developer / viewer / app-llm）作用于租户内业务；平台管理角色（platform-viewer 只读运维 / platform-ops 资源运维 / platform-finance 财务 / platform-security 安全）决定后台管理台可见页面与可写范围。均不可新建、编辑或删除。"
       style="margin-bottom: 12px"
     />
     <SearchTable

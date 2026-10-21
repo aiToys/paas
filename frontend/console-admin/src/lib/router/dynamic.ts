@@ -20,6 +20,28 @@ export function registerDynamicRoutes(
         walk(m.children)
         continue
       }
+      // 兼容跳转（spec 2026-10-19 §5.1）：旧入口注册为重定向路由。
+      // redirect 形如 "path?k=v"。query 合并规则（复核 F02）：
+      //   - 迁移目标 query 优先——旧页面的 tab 对目标页无意义甚至误导
+      //     （/resources/buildruns?tab=releases 应落交付记录的构建 tab，而非发布 tab）；
+      //   - 其余原 query（tenantId 等过滤参数）与 hash 保留，分享链接与收藏不失效。
+      if (m.redirect) {
+        const [targetPath, qs] = m.redirect.split('?')
+        const defaultQuery = Object.fromEntries(new URLSearchParams(qs ?? ''))
+        const route = {
+          path: m.path,
+          name: m.name,
+          redirect: (to: { query: Record<string, unknown>; hash: string }) => ({
+            path: targetPath,
+            query: { ...to.query, ...defaultQuery },
+            hash: to.hash
+          })
+        } as unknown as RouteRecordRaw
+        if (!m.name || !router.hasRoute(m.name)) {
+          router.addRoute('layout', route)
+        }
+        continue
+      }
       if (!m.component) continue
       // 跳过已注册的同名路由（静态 menus.ts 已含 home/crud 等），避免重复注册竞态
       if (m.name && router.hasRoute(m.name)) continue

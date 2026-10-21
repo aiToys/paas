@@ -38,6 +38,11 @@ type RuleStore interface {
 	DeleteAlertRule(ctx context.Context, id string) error
 	// ListAllAlertRules 跨租户列出全部告警规则（admin 平台总览，不过滤 tenant）。
 	ListAllAlertRules(ctx context.Context) ([]AlertRule, error)
+	// 通知渠道（租户级配置，与规则同存储实现；compose 一并委托）。
+	ListNotificationChannels(ctx context.Context) ([]NotificationChannel, error)
+	CreateNotificationChannel(ctx context.Context, ch NotificationChannel) (NotificationChannel, error)
+	UpdateNotificationChannel(ctx context.Context, id string, ch NotificationChannel) (NotificationChannel, error)
+	DeleteNotificationChannel(ctx context.Context, id string) error
 }
 
 // AppWorkloadLister 解析某应用下全部工作负载 ID（用于应用级指标/日志按 pod 名正则查询）。

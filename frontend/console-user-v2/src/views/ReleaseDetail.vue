@@ -8,6 +8,7 @@ import { confirmDangerous } from '@/composables/useDangerConfirm'
 import { getWorkload, type Workload } from '@/api/workload'
 import PageHeader from '@/components/PageHeader.vue'
 import StatePanel from '@/components/StatePanel.vue'
+import { RELEASE_STATUS, statusOf } from '@/composables/useStatus'
 interface Release {
   id: string
   appId: string
@@ -95,7 +96,7 @@ async function rollback() {
 </script>
 <template>
   <div class="page">
-    <RouterLink to="/delivery" class="text-button">← 交付中心</RouterLink><PageHeader title="发布详情" :description="release?.id">
+    <RouterLink to="/delivery" class="text-button">← 交付中心</RouterLink><PageHeader title="部署详情" :description="release?.id">
 <button
         v-if="release?.status === 'succeeded' && release.previousImageId"
         class="act danger"
@@ -115,7 +116,8 @@ async function rollback() {
     <div v-else-if="loading" v-loading="true" style="height: 200px" />
     <template v-else-if="release">
 <section class="card">
-        <h2>发布记录</h2>
+        <h2>部署记录</h2>
+        <p>此处记录部署配置变更。工作负载就绪情况请查看下方运行态，业务验收需另外确认。</p>
         <dl>
           <dt>产品</dt>
           <dd>
@@ -129,7 +131,7 @@ async function rollback() {
           <dd>{{ envName }} / {{ release.laneId || 'default' }}</dd>
           <dt>状态</dt>
           <dd>
-            {{ release.status }}{{ release.isRollback ? '（回滚单）' : '' }}
+            {{ statusOf(RELEASE_STATUS, release.status).label }}{{ release.isRollback ? '（回滚单）' : '' }}
           </dd>
           <dt>镜像</dt>
           <dd>
@@ -141,7 +143,7 @@ async function rollback() {
           <dd>{{ release.strategy }}</dd>
           <dt>创建时间</dt>
           <dd>{{ release.createdAt }}</dd>
-          <dt v-if="release.sourceRunId">来源运行</dt>
+          <dt>来源运行</dt>
           <dd v-if="release.sourceRunId">
             <RouterLink :to="'/runs/' + release.sourceRunId">
 {{
@@ -149,6 +151,7 @@ async function rollback() {
             }}
 </RouterLink>
           </dd>
+          <dd v-else>独立部署 · 未关联流水线</dd>
           <dt v-if="release.previousImageId">上一镜像</dt>
           <dd v-if="release.previousImageId">{{ release.previousImageId }}</dd>
         </dl>

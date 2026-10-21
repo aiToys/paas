@@ -41,19 +41,6 @@ var (
 // 无环境维度），跨环境串流量（R1 审计 C2）。
 var svcSuffix = os.Getenv("PAAS_SVC_SUFFIX")
 
-// svcURL 解析下游地址：数据面发现优先（/dp/instances，含泳道感知），静态 URL 兜底。
-// 平台 K8s Service 名与工作负载名一致（test=paas-shop-product，prod=paas-shop-product-prod），
-// dpdisc 按「基线名 + 环境后缀」查询。
-func svcURL(r *http.Request, service string) string {
-	if dp.Enabled() {
-		lane := r.Header.Get("x-paas-lane")
-		if u := dp.Addr(r.Context(), "paas-shop-"+service+svcSuffix, lane); u != "" {
-			return u
-		}
-	}
-	return fallback[service]
-}
-
 func main() {
 	shutdown := observ.Init("paas-shop-bff")
 	defer shutdown()
@@ -101,6 +88,7 @@ func buildMuxWithStats(events *eventRing, stats *statsAgg) *http.ServeMux {
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		observ.MetricsHandler().ServeHTTP(w, r)
 	})
+	mux.HandleFunc("/api/platform/lanes", platformLanes)
 	mux.HandleFunc("/api/products", proxyTo("product", "/products"))        // GET 列表
 	mux.HandleFunc("/api/products/", proxyPrefixTo("product", "/products")) // GET /{id}
 	mux.HandleFunc("/api/recommend", proxyTo("recommend", "/recommend"))    // GET 推荐
@@ -132,7 +120,11 @@ func buildMuxWithStats(events *eventRing, stats *statsAgg) *http.ServeMux {
 // proxyOrder 订单代理：路径后缀透传（/api/orders[...] → order /orders[...]），
 // 变更类 POST 注入 X-Action-Token（前端不感知，spec §3）；地址解析泳道感知同其他代理。
 func proxyOrder(w http.ResponseWriter, r *http.Request) {
-	target := svcURL(r, "order") + "/orders" + strings.TrimPrefix(r.URL.Path, "/api/orders")
+	route, ok := resolveService(w, r, "order")
+	if !ok {
+		return
+	}
+	target := route.URL + "/orders" + strings.TrimPrefix(r.URL.Path, "/api/orders")
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, r.Body)
 	if err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -151,8 +143,8 @@ func proxyOrder(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 	copyHeaders(w.Header(), resp.Header)
-	// 泳道演示可见性：响应带请求实际泳道 + bff 实例指纹（下游经 X-Paas-Service 透传）。
-	w.Header().Set("X-Paas-Lane", observ.LaneOrBase(r.Context()))
+	// 响应分别携带请求泳道、平台选路与下游实例。
+	writeRouteHeaders(w, r, route)
 	w.Header().Set("X-Paas-Bff", observ.ServiceFingerprint())
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, resp.Body)
@@ -220,10 +212,10 @@ func handleRefundRequest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"data": map[string]string{
-			"runId":       run.Data.ID,
-			"status":      run.Data.Status,
-			"workflowId":  wfID,
-			"hint":        "已发起，请到平台控制台「AI 服务 → 工作流 shop-refund-approval」运行详情点「通过」",
+			"runId":      run.Data.ID,
+			"status":     run.Data.Status,
+			"workflowId": wfID,
+			"hint":       "已发起，请到平台控制台「AI 服务 → 工作流 shop-refund-approval」运行详情点「通过」",
 		},
 	})
 }
@@ -409,10 +401,14 @@ func (r *eventRing) latest(n int) []shopEvent {
 	return out
 }
 
-// proxyTo 透传到下游服务（svcURL 请求时解析：dp 发现优先 + 泳道感知，静态兜底）。
+// proxyTo 透传到下游服务：启用发现时完全遵循平台选路，失败显式返回。
 func proxyTo(service, path string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		target := svcURL(r, service) + path
+		route, ok := resolveService(w, r, service)
+		if !ok {
+			return
+		}
+		target := route.URL + path
 		req, err := http.NewRequestWithContext(r.Context(), r.Method, target, r.Body)
 		if err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
@@ -428,8 +424,8 @@ func proxyTo(service, path string) http.HandlerFunc {
 		}
 		defer resp.Body.Close()
 		copyHeaders(w.Header(), resp.Header)
-		// 泳道演示可见性：响应带请求实际泳道 + bff 实例指纹（下游经 X-Paas-Service 透传）。
-		w.Header().Set("X-Paas-Lane", observ.LaneOrBase(r.Context()))
+		// 响应分别携带请求泳道、平台选路与下游实例。
+		writeRouteHeaders(w, r, route)
 		w.Header().Set("X-Paas-Bff", observ.ServiceFingerprint())
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(w, resp.Body)
@@ -439,8 +435,12 @@ func proxyTo(service, path string) http.HandlerFunc {
 // proxyPrefixTo 透传路径后缀（/api/products/{id} -> product/products/{id}），地址请求时解析。
 func proxyPrefixTo(service, base string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		route, ok := resolveService(w, r, service)
+		if !ok {
+			return
+		}
 		suffix := strings.TrimPrefix(r.URL.Path, "/api/products")
-		req, err := http.NewRequestWithContext(r.Context(), r.Method, svcURL(r, service)+base+suffix, r.Body)
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, route.URL+base+suffix, r.Body)
 		if err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
@@ -454,8 +454,8 @@ func proxyPrefixTo(service, base string) http.HandlerFunc {
 		}
 		defer resp.Body.Close()
 		copyHeaders(w.Header(), resp.Header)
-		// 泳道演示可见性：响应带请求实际泳道 + bff 实例指纹（下游经 X-Paas-Service 透传）。
-		w.Header().Set("X-Paas-Lane", observ.LaneOrBase(r.Context()))
+		// 响应分别携带请求泳道、平台选路与下游实例。
+		writeRouteHeaders(w, r, route)
 		w.Header().Set("X-Paas-Bff", observ.ServiceFingerprint())
 		w.WriteHeader(resp.StatusCode)
 		_, _ = io.Copy(w, resp.Body)
@@ -493,7 +493,11 @@ func imageProxy(w http.ResponseWriter, r *http.Request) {
 
 // chatProxy SSE 流式透传：按 data: 行透传 chatbot 的 SSE（含 reasoning_content）。
 func chatProxy(w http.ResponseWriter, r *http.Request) {
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, svcURL(r, "chatbot")+"/chat", r.Body)
+	route, ok := resolveService(w, r, "chatbot")
+	if !ok {
+		return
+	}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, route.URL+"/chat", r.Body)
 	if err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -507,6 +511,10 @@ func chatProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+	writeRouteHeaders(w, r, route)
+	if instance := resp.Header.Get("X-Paas-Service"); instance != "" {
+		w.Header().Set("X-Paas-Target-Instance", instance)
+	}
 	flusher, _ := w.(http.Flusher)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")

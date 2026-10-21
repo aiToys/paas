@@ -36,6 +36,7 @@ type RunPreview struct {
 
 // ImageMeta 镜像元数据摘要（产物锁定时取 digest/commit/buildRunId）。
 type ImageMeta struct {
+	RepoID     string
 	ID         string
 	Digest     string
 	Commit     string
@@ -131,7 +132,7 @@ func describeImage(s StageDef) string {
 func missingConfigItems(stages []StageDef) []string {
 	var missing []string
 	for _, s := range stages {
-		if (s.Type == StageDeploy || s.Type == StageCanary) && strOr(s.Params, "port", "") == "" {
+		if (s.Type == StageDeploy || s.Type == StageCanary) && intOr(s.Params, "port", 0) <= 0 {
 			if name := s.Name; name != "" {
 				missing = append(missing, "阶段「"+name+"」未配置端口（不建 Service，探活降级走集群内地址）")
 			}

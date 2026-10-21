@@ -2,6 +2,7 @@ import type { Router, RouteRecordRaw } from 'vue-router'
 import { authService } from '@/lib/auth/authService'
 import { useUserStore } from '@/app/stores/user'
 import { usePermissionStore } from '@/app/stores/permission'
+import { useScopeStore } from '@/app/stores/scope'
 import { api } from '@/lib/http/client'
 import { registerDynamicRoutes } from '@/lib/router/dynamic'
 import { defaultMonitor } from '@/lib/error/monitor'
@@ -89,8 +90,10 @@ export function installGuards(router: Router): void {
         // 避免对未注册的动态路由形成重试；下次导航会自动重试 bootstrap）
       }
       // 仅成功时重定向到当前目标，让新注册的路由可被解析
+      // 注意：必须用结构化 location 拆开 query/hash——vue-router 4 的 path 字段
+      // 不解析 "?a=b"，塞 fullPath 会静默丢弃 URL 上的查询串（深链 ?tab= 冷启动丢失根因）
       if (succeeded) {
-        return { path: to.fullPath, replace: true }
+        return { path: to.path, query: to.query, hash: to.hash, replace: true }
       }
     }
 
@@ -103,6 +106,11 @@ export function installGuards(router: Router): void {
       return false
     if (m.roles?.any && !perm.hasAnyRole(m.roles.any)) return false
     if (m.roles?.all && !perm.hasAllRoles(m.roles.all)) return false
+    // 只同步已授权页面的浏览过滤器，不改变登录身份或服务端权限。
+    if ((to.path.startsWith('/resources/') || to.path.startsWith('/operations/')) &&
+      typeof to.query.tenantId === 'string') {
+      useScopeStore().setTenant(to.query.tenantId)
+    }
     return true
   })
 }

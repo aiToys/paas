@@ -1,5 +1,9 @@
 <template>
-  <div class="stats-grid">
+  <!-- 加载失败显示错误条：统计失败 ≠ 0（R4 审计 H-3），不渲染 0 值卡片冒充正常 -->
+  <div v-if="error" class="stats-error">
+    {{ error }}
+  </div>
+  <div v-else class="stats-grid">
     <div
       v-for="item in items"
       :key="item.key"
@@ -40,6 +44,7 @@ interface StatItem {
 
 const props = defineProps<{
   items: StatItem[]
+  error?: string
 }>()
 
 const formatValue = (item: StatItem): string => {
@@ -66,6 +71,16 @@ void props
 </script>
 
 <style scoped>
+.stats-error {
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  border: 1px solid var(--el-color-danger-light-7);
+  background: var(--el-color-danger-light-9);
+  color: var(--el-color-danger);
+  border-radius: 4px;
+  font-size: 13px;
+}
+
 .stats-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);

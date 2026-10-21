@@ -81,7 +81,6 @@ import {
   deleteService,
   fetchAuditLogList,
   type AdminServiceDetail,
-  type AdminServiceInstance,
   type AdminAuditLog
 } from '../api'
 

@@ -319,3 +319,42 @@ func (s *Store) ListRuns(ctx context.Context, workflowID string) ([]workflow.Wor
 	}
 	return out, rows.Err()
 }
+
+// ListAll 跨租户定义列表（admin 总览用）；created_at 倒序（与 List 同序）。
+func (s *Store) ListAll(ctx context.Context) ([]workflow.WorkflowDef, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+defCols+` FROM ai_workflows ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]workflow.WorkflowDef, 0)
+	for rows.Next() {
+		d, err := scanDef(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// ListAllRuns 跨租户运行列表（admin 总览用）；created_at 倒序，LIMIT 500 上界（与
+// ListRuns 的 LIMIT 200 同防御语义，admin 侧跨全部租户放宽到 500）。
+func (s *Store) ListAllRuns(ctx context.Context) ([]workflow.WorkflowRun, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+runCols+` FROM ai_workflow_runs ORDER BY created_at DESC LIMIT 500`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]workflow.WorkflowRun, 0)
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -182,6 +183,45 @@ func (s *Store) ListAllAuditLogs(ctx context.Context) ([]security.AuditLog, erro
 		return out[i].At.After(out[j].At)
 	})
 	return out, nil
+}
+
+// QueryAllAuditLogs 跨租户后端过滤 + 分页（与 pg 实现语义一致：时间倒序，同刻按 ID 倒序）。
+func (s *Store) QueryAllAuditLogs(ctx context.Context, q security.AuditQuery) (security.AuditPage, error) {
+	q = q.Normalize()
+	kw := strings.ToLower(q.Keyword)
+	s.mu.RLock()
+	matched := make([]security.AuditLog, 0)
+	for _, l := range s.audits {
+		if (q.TenantID != "" && l.TenantID != q.TenantID) ||
+			(q.Actor != "" && l.Actor != q.Actor) ||
+			(q.Action != "" && l.Action != q.Action) ||
+			(q.ResourceType != "" && l.ResourceType != q.ResourceType) ||
+			(q.ResourceID != "" && l.ResourceID != q.ResourceID) ||
+			(!q.From.IsZero() && l.At.Before(q.From)) ||
+			(!q.To.IsZero() && !l.At.Before(q.To)) {
+			continue
+		}
+		if kw != "" && !strings.Contains(strings.ToLower(l.ResourceID), kw) && !strings.Contains(strings.ToLower(l.Detail), kw) {
+			continue
+		}
+		matched = append(matched, l)
+	}
+	s.mu.RUnlock()
+	sort.Slice(matched, func(i, j int) bool {
+		if !matched[i].At.Equal(matched[j].At) {
+			return matched[i].At.After(matched[j].At)
+		}
+		return matched[i].ID > matched[j].ID
+	})
+	page := security.AuditPage{Total: len(matched), Offset: q.Offset, Limit: q.Limit, Items: []security.AuditLog{}}
+	if q.Offset < len(matched) {
+		end := q.Offset + q.Limit
+		if end > len(matched) {
+			end = len(matched)
+		}
+		page.Items = append(page.Items, matched[q.Offset:end]...)
+	}
+	return page, nil
 }
 
 // RecordAudit 追加一条审计（actor 已由调用方填好）。

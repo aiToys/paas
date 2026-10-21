@@ -14,11 +14,15 @@ import (
 	"github.com/aitoys/paas/pkg/tenant"
 )
 
-// fakeAudit 记录最后一次审计 action。
-type fakeAudit struct{ last string }
+// fakeAudit 记录最后一次审计 action/detail。
+type fakeAudit struct {
+	last       string
+	lastDetail string
+}
 
 func (a *fakeAudit) Record(ctx context.Context, tid, actor, action, rt, rid, detail string) error {
 	a.last = action
+	a.lastDetail = detail
 	return nil
 }
 
@@ -44,11 +48,14 @@ func (f *fakeStatus) FillStatus(ctx context.Context, wls []workload.Workload) er
 	return nil
 }
 
-// fakeApplier 记录 Apply/EnsureIfMissing 调用（drift 修复端点测试用）。
+// fakeApplier 记录 Apply/EnsureIfMissing/Exists 调用（drift 修复端点测试用）。
 type fakeApplier struct {
 	applied       []workload.Workload
 	ensured       []workload.Workload
-	ensureCreated bool // EnsureIfMissing 是否每次都报「补建」（CRD 视为不存在）
+	probed        []workload.Workload // Exists 探测记录（dry-run 断言「只读」用）
+	ensureCreated bool                // EnsureIfMissing 是否每次都报「补建」（CRD 视为不存在）
+	existingIDs   map[string]bool     // Exists 真源；nil 时按 ensureCreated 反推
+	existsErr     map[string]error    // 指定 ID 的探测错误（区分「查不了」与「缺失」）
 }
 
 func (f *fakeApplier) Apply(ctx context.Context, w workload.Workload) error {
@@ -58,6 +65,16 @@ func (f *fakeApplier) Apply(ctx context.Context, w workload.Workload) error {
 func (f *fakeApplier) EnsureIfMissing(ctx context.Context, w workload.Workload) (bool, error) {
 	f.ensured = append(f.ensured, w)
 	return f.ensureCreated, nil
+}
+func (f *fakeApplier) Exists(ctx context.Context, w workload.Workload) (bool, error) {
+	f.probed = append(f.probed, w)
+	if err := f.existsErr[w.ID]; err != nil {
+		return false, err
+	}
+	if f.existingIDs != nil {
+		return f.existingIDs[w.ID], nil
+	}
+	return !f.ensureCreated, nil
 }
 func (f *fakeApplier) Delete(ctx context.Context, id string) error { return nil }
 
@@ -72,7 +89,7 @@ func (f *fakeStatus) PodLogs(ctx context.Context, wid, pod string, tail int64, p
 // newAdminForTest 构造 admin handler + 已 seed 的 wl-cs-api（属 t-acme）。
 func newAdminForTest(t *testing.T) (*workload.AdminHandler, *fakeAudit, *fakeQuota) {
 	t.Helper()
-	repo := wlmemory.NewStore()
+	repo := wlmemory.NewStore(wlmemory.WithDemoSeed(true))
 	au := &fakeAudit{}
 	q := &fakeQuota{}
 	h := workload.NewAdminHandler(repo,
@@ -224,7 +241,7 @@ func TestAdminScaleUsesResourceTenantCtx(t *testing.T) {
 // 扫全部 workload，对每行调 applier.EnsureIfMissing（仅 CRD 缺失才补建，绝不覆盖既有运行态），
 // 返 scanned/created/skipped 统计。
 func TestAdminReconcileDrift(t *testing.T) {
-	repo := wlmemory.NewStore()
+	repo := wlmemory.NewStore(wlmemory.WithDemoSeed(true))
 	applier := &fakeApplier{ensureCreated: true}
 	h := workload.NewAdminHandler(repo, workload.WithAdminApplier(applier))
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/workloads/reconcile", nil)
@@ -238,9 +255,101 @@ func TestAdminReconcileDrift(t *testing.T) {
 	}
 }
 
+// TestAdminReconcileDryRunIsReadOnly 锁死 dry-run 语义：只探测不写入。
+// 这是预览/执行两段式的前提——预览若偷偷补建，「先看清单再确认」就名存实亡。
+func TestAdminReconcileDryRunIsReadOnly(t *testing.T) {
+	repo := wlmemory.NewStore(wlmemory.WithDemoSeed(true))
+	applier := &fakeApplier{ensureCreated: true} // 全部视为 CRD 缺失
+	au := &fakeAudit{}
+	h := workload.NewAdminHandler(repo, workload.WithAdminApplier(applier), workload.WithAdminAudit(au))
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/workloads/reconcile?dryRun=true", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if len(applier.ensured) != 0 || len(applier.applied) != 0 {
+		t.Fatalf("dry-run 不得写数据面: ensured=%d applied=%d", len(applier.ensured), len(applier.applied))
+	}
+	if len(applier.probed) == 0 {
+		t.Fatal("dry-run 应对每行调 Exists 探测")
+	}
+	if au.last != "" {
+		t.Fatalf("dry-run 不得记执行审计，got action=%s", au.last)
+	}
+	var out struct {
+		Data workload.ReconcileResult `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+	}
+	if !out.Data.DryRun || out.Data.Created != 0 {
+		t.Fatalf("预览应 dryRun=true 且 created=0: %+v", out.Data)
+	}
+	if out.Data.MissingCount != len(applier.probed) {
+		t.Fatalf("缺失计数应等于探测数: missingCount=%d probed=%d", out.Data.MissingCount, len(applier.probed))
+	}
+	if out.Data.MissingCount == 0 || len(out.Data.Missing) != out.Data.MissingCount || out.Data.Missing[0].TenantID == "" {
+		t.Fatalf("缺失清单应带租户: %+v", out.Data.Missing)
+	}
+}
+
+// TestAdminReconcileDryRunProbeErrorIsNotMissing 探测失败不能混进「将补建」清单：
+// 权限/连接错误把条目报成缺失，会诱导管理员执行一次本不该发生的补建。
+func TestAdminReconcileDryRunProbeErrorIsNotMissing(t *testing.T) {
+	repo := wlmemory.NewStore(wlmemory.WithDemoSeed(true))
+	applier := &fakeApplier{
+		existingIDs: map[string]bool{"wl-cs-api": true},
+		existsErr:   map[string]error{"wl-cs-api": io.ErrUnexpectedEOF},
+	}
+	h := workload.NewAdminHandler(repo, workload.WithAdminApplier(applier))
+	req := httptest.NewRequest(http.MethodPost, "/api/admin/workloads/reconcile?dryRun=true", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	var out struct {
+		Data workload.ReconcileResult `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+	}
+	if out.Data.Failed != 1 || len(out.Data.FailedIDs) != 1 || out.Data.FailedIDs[0] != "wl-cs-api" {
+		t.Fatalf("探测失败应单独计 failed 并列出 ID: %+v", out.Data)
+	}
+	for _, m := range out.Data.Missing {
+		if m.ID == "wl-cs-api" {
+			t.Fatalf("探测失败不得进入缺失清单: %+v", out.Data)
+		}
+	}
+}
+
+// TestAdminReconcileExecutesAndAudits 执行路径保持原语义并记审计（含计数明细）。
+func TestAdminReconcileExecutesAndAudits(t *testing.T) {
+	repo := wlmemory.NewStore(wlmemory.WithDemoSeed(true))
+	applier := &fakeApplier{ensureCreated: true}
+	au := &fakeAudit{}
+	h := workload.NewAdminHandler(repo, workload.WithAdminApplier(applier), workload.WithAdminAudit(au))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/admin/workloads/reconcile", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Data workload.ReconcileResult `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Data.DryRun || out.Data.Created != len(applier.ensured) || out.Data.Created == 0 {
+		t.Fatalf("执行路径应补建并计数: %+v", out.Data)
+	}
+	if au.last != "reconcile-drift" || au.lastDetail == "" {
+		t.Fatalf("执行路径应记审计与明细: action=%s detail=%q", au.last, au.lastDetail)
+	}
+}
+
 // TestAdminReconcileDriftNoApplier 验证未注入 applier（K8s 未启用）返 503 友好提示。
 func TestAdminReconcileDriftNoApplier(t *testing.T) {
-	repo := wlmemory.NewStore()
+	repo := wlmemory.NewStore(wlmemory.WithDemoSeed(true))
 	h := workload.NewAdminHandler(repo) // 无 WithAdminApplier
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/workloads/reconcile", nil)
 	rec := httptest.NewRecorder()

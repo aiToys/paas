@@ -76,6 +76,15 @@ func (b Backup) EffectiveMode() string {
 	return b.Mode
 }
 
+// Restorable 判断该记录能否作为恢复源（与 restore 端点同一判定，单一真源）：
+// 仅「真实快照 + completed + 产物定位匹配 + 校验和合法」可恢复。
+// 记录模式（record）无产物无恢复证明；snapshot 的 VerifiedAt 只是校验和记录时间，
+// 不等于「恢复演练通过」——本方法只回答「平台是否受理恢复」，不证明恢复成功。
+func (b Backup) Restorable() bool {
+	return b.EffectiveMode() == ModeSnapshot && b.Status == StatusCompleted &&
+		b.ArtifactRef == "file://"+backupsPVCName+"/"+dumpFile(b) && ValidChecksum(b.Checksum)
+}
+
 // Repository 是 backup 持久化抽象（租户强制过滤）。
 type Repository interface {
 	List(ctx context.Context, tenantID, resourceID string) ([]Backup, error)
@@ -86,6 +95,9 @@ type Repository interface {
 	UpdateProgress(ctx context.Context, tenantID, id string, up ProgressUpdate) error
 	// ListActive 跨租户列出全部非终态记录（Pacer 恢复扫描；裸查管理面专用）。
 	ListActive(ctx context.Context) ([]Backup, error)
+	// ListAll 跨租户列出全部备份/恢复记录（admin 平台总览；不过滤 tenant，
+	// 返回对象带 TenantID，按创建时间倒序）。
+	ListAll(ctx context.Context) ([]Backup, error)
 }
 
 // ProgressUpdate 是 Pacer 推进的字段集（零值不更新，指针语义）。

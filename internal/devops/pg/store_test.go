@@ -447,8 +447,9 @@ func TestCreateReleaseNewWL(t *testing.T) {
 	if wl.Replicas != 1 {
 		t.Errorf("Replicas=1, got %d", wl.Replicas)
 	}
-	if wl.Name != "app-newapp-svc" {
-		t.Errorf("Name=app-svc, got %s", wl.Name)
+	// default 泳道名含 env 短段（同 ns 下 app×env 基线防撞名，见 BaselineWorkloadName）。
+	if want := devops.BaselineWorkloadName("app-newapp", "env-test", "", "default"); wl.Name != want {
+		t.Errorf("Name 期望 %s，got %s", want, wl.Name)
 	}
 }
 

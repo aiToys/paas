@@ -78,7 +78,7 @@ const shortDigest = (d: string) => (d ? d.replace('sha256:', '').slice(0, 12) : 
               <td><span class="mono dim">{{ b.branch || '-' }}</span></td>
               <td class="dim">{{ b.trigger }}</td>
               <td class="t-msg">{{ b.message || '-' }}</td>
-              <td class="dim">{{ fmtAgo(b.createdAt) }}</td>
+              <td class="dim">{{ fmtAgo(b.startedAt) }}</td>
             </tr>
           </tbody>
         </table>

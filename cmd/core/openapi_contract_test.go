@@ -28,19 +28,21 @@ func TestOpenAPIRepairContracts(t *testing.T) {
 		defer cleanup()
 	}
 	srv := buildHTTPServer(ctx, gateway.New(), &gateway.Meter{}, stores, k8sAppliers{}, metrics.NewRegistry(), nil)
-	defer srv.Close()
+	defer func() { _ = srv.Close() }()
 	w := httptest.NewRecorder()
 	srv.Handler.ServeHTTP(w, httptest.NewRequest("GET", "/openapi.json", nil))
 	if w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	for _, expected := range []string{"expectedRevision", "Idempotency-Key", "/api/backups/{id}/restore", "/api/observability/metrics/quality", "/api/dataservices/{id}/capabilities"} {
+	for _, expected := range []string{"expectedRevision", "Idempotency-Key", "/api/backups/{id}/restore", "/api/observability/metrics/quality", "/api/dataservices/{id}/capabilities",
+		"/api/observability/channels", "/api/billing/budgets", "/api/admin/settlements",
+		"/api/applications/{id}/pipelines/{pid}/deliveries/{deliveryId}/replay"} {
 		if !strings.Contains(w.Body.String(), expected) {
 			t.Fatalf("契约缺少 %s", expected)
 		}
 	}
 	if path := os.Getenv("PAAS_OPENAPI_EXPORT_PATH"); path != "" {
-		if err := os.WriteFile(path, w.Body.Bytes(), 0600); err != nil {
+		if err := os.WriteFile(path, w.Body.Bytes(), 0600); err != nil { //nolint:gosec // 导出路径来自开发者环境变量，非用户输入
 			t.Fatal(err)
 		}
 	}

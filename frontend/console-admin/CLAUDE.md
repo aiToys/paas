@@ -2,6 +2,8 @@
 
 > 本文件是 Claude Code 的**工程上下文索引**。详细内容见 `docs/standards/`，本文不重复。
 
+仓库级研发规范同样适用于后台和所有子 agent：[临时文件与验证产物](../../CONTRIBUTING.md#临时文件与验证产物) 必须遵守；截图、日志、临时脚本等输出到**项目根目录** `tmp/<任务名>/`，不要写到后台目录或项目根目录的散落文件中。
+
 ## 项目概述
 
 Vue Admin —— Vue 3 + Vite + TypeScript + Element Plus 的企业级后台管理前端基座。

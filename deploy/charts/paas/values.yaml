@@ -94,6 +94,8 @@ kb:
 # 生产部署必须设 false，关闭演示凭证防止开源仓公开值成为后门（PAAS_DISABLE_DEMO_SEED=true）。
 seed:
   demo: true
+  # 工作负载会创建真实Deployment/Job/CronJob，默认禁止；演示登录不隐含允许部署。
+  workloads: false
 
 # 身份会话：JWT 签名 secret + cookie Secure + 生产标识。
 #   - jwtSecret：生产必填（≥32 字节随机串，openssl rand -hex 32）；空 + prod=true 拒启；dev 空则随机生成。

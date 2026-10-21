@@ -245,6 +245,25 @@ func (s *Store) GetUsage(ctx context.Context) (billing.ResourceUsage, error) {
 	return u, nil
 }
 
+// ListAllUsages 跨租户列出全部用量快照（admin 平台总览；不与租户隔离冲突：仅 admin 路径调用）。
+func (s *Store) ListAllUsages(ctx context.Context) ([]billing.ResourceUsage, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+usageCols+` FROM billing_usages ORDER BY tenant_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]billing.ResourceUsage, 0)
+	for rows.Next() {
+		var u billing.ResourceUsage
+		if err = scanUsage(rows, &u); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
 // IncUsage 增减某资源用量（delta 可负）。无 usage 行时自动建行；不检查配额上限
 // （横切拦截由 CheckAndInc 承担，IncUsage 仅演示/手动调整用）。
 func (s *Store) IncUsage(ctx context.Context, resource string, delta int) (billing.ResourceUsage, error) {

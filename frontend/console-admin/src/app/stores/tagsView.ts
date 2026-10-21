@@ -42,7 +42,9 @@ export const useTagsViewStore = defineStore('tagsView', () => {
   const tagsViewList = ref<TagsViewItem[]>([defaultTagsViewItem])
 
   const addTagsViewList = (tag: TagsViewItem) => {
-    const exists = tagsViewList.value.some((item) => item.path === tag.path)
+    // 去重键用 fullPath（含 query）：同路由不同 query 是不同标签页（如详情页按 id 区分），
+    // 按 path 去重会合并丢页（R4 审计 F2）。
+    const exists = tagsViewList.value.some((item) => item.fullPath === tag.fullPath)
     if (!exists) {
       tagsViewList.value.push(tag)
     }

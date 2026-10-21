@@ -60,6 +60,16 @@ func tenantOrErr(ctx context.Context) (string, error) {
 	return storagepg.TenantOrErr(ctx)
 }
 
+// ListAll 跨租户列出全部泳道（admin 平台总览，不过滤 tenant），与 List 同序。
+func (s *Store) ListAll(ctx context.Context) ([]lane.Lane, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT `+laneCols+` FROM lanes ORDER BY created_at`)
+	if err != nil {
+		return nil, err
+	}
+	return scanLanes(rows)
+}
+
 // List 租户内泳道列表（按创建时间排序）；envID 空不过滤。
 func (s *Store) List(ctx context.Context, envID string) ([]lane.Lane, error) {
 	tid, err := tenantOrErr(ctx)

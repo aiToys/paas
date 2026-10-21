@@ -63,6 +63,9 @@ func ChatCompletions(gw *Gateway, meter *Meter, agents *AgentDispatcherHolder) h
 			httputil.WriteError(w, http.StatusBadRequest, "model 与 messages 必填")
 			return
 		}
+		if !gw.checkBudget(w, r) {
+			return
+		}
 		// Agent 虚拟模型：委托 runtime（不经通道/failover；用量按 agent:{id} 维度计量）。
 		if agents != nil && agents.Match(req.Model) {
 			if err := agents.ServeSSEConv(w, r, req.Model, req.ConversationID, req.Messages); err != nil {
@@ -137,6 +140,29 @@ func ChatCompletions(gw *Gateway, meter *Meter, agents *AgentDispatcherHolder) h
 		}
 		httputil.WriteError(w, http.StatusServiceUnavailable, "all channels unavailable: "+cause)
 	}
+}
+
+// checkBudget 调用月度预算闸门；超限时写好 429 并返回 false。
+// 未注入闸门、或调用方无租户（平台内部调用）一律放行——预算按租户记账，无租户无从判定。
+func (gw *Gateway) checkBudget(w http.ResponseWriter, r *http.Request) bool {
+	if gw.BudgetGate == nil {
+		return true
+	}
+	tid, _ := tenant.TenantFrom(r.Context())
+	if tid == "" {
+		return true
+	}
+	if err := gw.BudgetGate(r.Context(), tid, AppFrom(r.Context())); err != nil {
+		if errors.Is(err, ErrBudgetExceeded) {
+			// 429 而非 503：这是可预期的业务上限，调用方应稍后重试或联系管理员提额。
+			w.Header().Set("Retry-After", "3600")
+			httputil.WriteError(w, http.StatusTooManyRequests,
+				"monthly budget exceeded: 本月费用已达预算上限，请联系租户管理员调整预算")
+			return false
+		}
+		log.Printf("[gateway] 预算闸门异常（fail-open）: %v", err) //nolint:gosec // 错误文本不含凭证
+	}
+	return true
 }
 
 // isOfflineErr 判定是否 offline 类错误（配置/凭证问题，重试本通道无意义）。
@@ -281,6 +307,9 @@ func Embeddings(gw *Gateway) http.HandlerFunc {
 		}
 		if len(inputs) > 64 {
 			httputil.WriteError(w, http.StatusBadRequest, "input 单次上限 64 条")
+			return
+		}
+		if !gw.checkBudget(w, r) {
 			return
 		}
 		channels, err := gw.ResolveChannels(req.Model)

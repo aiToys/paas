@@ -5,7 +5,27 @@ import { api } from '@/lib/http/client'
 export interface TenantInfo {
   id: string
   name: string
+  status?: 'active' | 'frozen'
+  frozenAt?: string
+  frozenReason?: string
   createdAt?: string
+}
+
+// 注销预检项：blocking=true 表示该项存在时删除租户会被拒（当前仅「用户」）。
+export interface OffboardingItem {
+  kind: string
+  label: string
+  count: number
+  blocking: boolean
+  note?: string
+}
+
+export interface OffboardingReport {
+  tenantId: string
+  status: string
+  items: OffboardingItem[]
+  blocking: boolean
+  notes: string[]
 }
 
 export interface TenantCreateRequest {
@@ -30,12 +50,18 @@ export interface TenantSearchResponse {
 interface CoreTenant {
   id: string
   name: string
+  status?: 'active' | 'frozen'
+  frozenAt?: string
+  frozenReason?: string
   createdAt?: string
 }
 
 const mapTenant = (t: CoreTenant): TenantInfo => ({
   id: t.id,
   name: t.name,
+  status: t.status ?? 'active',
+  frozenAt: t.frozenAt,
+  frozenReason: t.frozenReason,
   createdAt: t.createdAt
 })
 
@@ -65,6 +91,23 @@ export const createTenant = async (data: TenantCreateRequest): Promise<TenantInf
   const t = await api.post<CoreTenant>('/api/admin/tenants', data)
   return mapTenant(t)
 }
+
+// 冻结租户（core POST /api/admin/tenants/{id}/freeze）：只关闭控制面准入（登录 / API Key），
+// 数据面已部署业务继续运行。reason 必填（后台操作需可追溯）。
+export const freezeTenant = async (id: string, reason: string): Promise<TenantInfo> => {
+  const t = await api.post<CoreTenant>(`/api/admin/tenants/${id}/freeze`, { reason })
+  return mapTenant(t)
+}
+
+// 恢复租户：重新开放控制面准入。
+export const unfreezeTenant = async (id: string, reason?: string): Promise<TenantInfo> => {
+  const t = await api.post<CoreTenant>(`/api/admin/tenants/${id}/unfreeze`, { reason })
+  return mapTenant(t)
+}
+
+// 注销预检（只读）：列出删除租户前需处理的资源与阻塞项，不触发任何删除。
+export const fetchTenantOffboarding = async (id: string): Promise<OffboardingReport> =>
+  api.get<OffboardingReport>(`/api/admin/tenants/${id}/offboarding`)
 
 // 删除租户（对接 core DELETE /api/admin/tenants/{id}；租户下有用户时 core 返 409 引导先清用户）。
 export const deleteTenant = async (id: string): Promise<boolean> => {

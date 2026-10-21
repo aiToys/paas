@@ -63,6 +63,7 @@ import {
   type AdminSecretDetail,
   type AdminAuditLog
 } from '../api'
+import { fetchVendorList, fetchModelList } from '@/modules/model/api'
 
 const props = defineProps<{ modelValue: boolean; id: string }>()
 const emit = defineEmits<{ (e: 'update:modelValue', v: boolean): void; (e: 'refresh'): void }>()
@@ -101,8 +102,33 @@ const onClose = () => {
 onUnmounted(onClose)
 
 const remove = async () => {
+  // 引用预检（spec 2026-10-19 D2b）：供应商（credentialRef）+ 通道（credentialRef）双路；
+  // 无安全同步能力——只列引用，不提供一键替换/传播。
+  let refLines = ''
   try {
-    await ElMessageBox.confirm('确认强制删除该密钥？此操作不可恢复，可能影响引用此密钥的应用/通道。', '危险操作', { type: 'error', confirmButtonText: '删除' })
+    const [vendors, models] = await Promise.all([fetchVendorList(), fetchModelList()])
+    const refs: string[] = []
+    for (const v of vendors ?? []) {
+      if (v.credentialRef === props.id) refs.push(`  · 供应商 ${v.name} (${v.id})`)
+    }
+    for (const m of models ?? []) {
+      for (const ch of m.channels ?? []) {
+        if (ch.credentialRef === props.id) refs.push(`  · 模型 ${m.id} / 通道 ${ch.id}`)
+      }
+    }
+    if (refs.length > 0) {
+      const more = refs.length > 8 ? `\n  …共 ${refs.length} 条` : ''
+      refLines = `\n\n该密钥被 ${refs.length} 处引用：\n${refs.slice(0, 8).join('\n')}${more}\n（删除后引用方凭证解析将失败，需逐个更新；平台无凭证同步能力）`
+    }
+  } catch {
+    refLines = '\n\n（引用预检加载失败，无法确认引用数量）'
+  }
+  try {
+    await ElMessageBox.confirm(
+      `确认强制删除该密钥？此操作不可恢复。${refLines}`,
+      '危险操作',
+      { type: 'error', confirmButtonText: '删除' }
+    )
   } catch {
     return
   }

@@ -39,8 +39,8 @@ dist/
 /core
 .tmp-build/
 
-# 排查截图（不入库，本地保留）
-paas-shop-*.png
+# 所有任务的临时文件（截图、日志、导出、试验脚本等）统一放在根目录 tmp/
+/tmp/
 # Go 编译产物
 examples/traffic-gen/traffic-gen
 examples/product

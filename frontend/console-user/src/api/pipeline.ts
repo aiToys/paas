@@ -41,6 +41,24 @@ export interface Pipeline {
   createdAt: string
 }
 
+/** Webhook 投递记录（D5-5）：每次通过鉴权的投递都留一条，「push 了为何没触发」可查。 */
+export interface WebhookDelivery {
+  id: string
+  tenantId?: string
+  pipelineId: string
+  appId: string
+  event?: string
+  branch?: string
+  commit?: string
+  /** accepted=已触发 / duplicate=同键重复（未重复触发）/ skipped=有意跳过 / rejected=门禁拒绝 / failed=链路失败 */
+  status: 'accepted' | 'duplicate' | 'skipped' | 'rejected' | 'failed'
+  reason?: string
+  runId?: string
+  replays: number
+  receivedAt: string
+  lastReplayAt?: string
+}
+
 export interface PipelineTemplate {
   id: string
   name: string
@@ -152,6 +170,23 @@ async function triggerRun(appId: string, pid: string, body: {
 
 const getRun = (id: string) => fetchJSON<PipelineRun>(`/api/pipelineruns/${id}`)
 
+/** webhook 投递记录（倒序，含跳过/拒绝原因）。 */
+const listDeliveries = (appId: string, pid: string, limit = 50) =>
+  fetchJSON<WebhookDelivery[]>(`/api/applications/${appId}/pipelines/${pid}/deliveries?limit=${limit}`)
+
+/** 重放投递：已有运行则幂等返回原 run（replayed=false），否则新建 run（trigger=replay）。 */
+async function replayDelivery(appId: string, pid: string, did: string): Promise<{
+  run: PipelineRun; delivery: WebhookDelivery; replayed: boolean; reason?: string
+}> {
+  const resp = await fetchAuth(
+    `/api/applications/${appId}/pipelines/${pid}/deliveries/${encodeURIComponent(did)}/replay`,
+    { method: 'POST' },
+  )
+  const json = await resp.json()
+  if (!resp.ok) throw new Error(json.error || '重放失败')
+  return json.data
+}
+
 /** 智能研发一条龙触发（2026-10-13）：需求文本 + 勾选段直触 tpl-agent-ship，免预建绑定。
  * 变更由 agent stage registerChange 自动注册（产出分支 open 态入变更 tab）。 */
 export async function triggerAgentShipRun(appId: string, body: {
@@ -226,5 +261,5 @@ async function retryRun(runId: string): Promise<void> {
 export {
   listPipelines, getPipeline, createPipeline, updatePipeline, deletePipeline,
   listTemplates, triggerRun, getRun, listRuns, approveStage, abortRun, retryRun, getBuildRun,
-  canaryDecision,
+  canaryDecision, listDeliveries, replayDelivery,
 }

@@ -448,7 +448,9 @@ func (h *Handler) serveCross(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// 回填真实 Ready/Status（与 List 一致），并加载运行实例。
-		h.fillStatus(r.Context(), []Workload{wl})
+		current := []Workload{wl}
+		h.fillStatus(r.Context(), current)
+		wl = current[0]
 		instances := h.instances(r.Context(), id)
 		httputil.WriteData(w, Detail{Workload: wl, Instances: instances})
 		return

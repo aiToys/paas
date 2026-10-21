@@ -333,3 +333,27 @@ func TestCreateProdRejectsEmptyResources(t *testing.T) {
 		`{"id":"wl-t","envId":"env-test","type":"service","name":"n3","image":"img","replicas":1}`))
 	assert.Equal(t, http.StatusCreated, rec3.Code)
 }
+
+type readyStatusReader struct{ stubStatusReader }
+
+func (readyStatusReader) FillStatus(_ context.Context, list []Workload) error {
+	for i := range list {
+		list[i].Ready = 1
+		list[i].Status = StatusRunning
+	}
+	return nil
+}
+func TestDetailReturnsObservedStatusInsteadOfStoredPlaceholder(t *testing.T) {
+	repo := &stubRepo{list: []Workload{{ID: "wl-observed", Type: TypeService, Replicas: 1, Ready: 0, Status: StatusDeploying}}}
+	h := NewHandler(repo, WithStatusReader(readyStatusReader{}))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, acmeReq(http.MethodGet, "/api/workloads/wl-observed", ""))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out struct {
+		Data Detail `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	assert.Equal(t, 1, out.Data.Workload.Ready)
+	assert.Equal(t, StatusRunning, out.Data.Workload.Status)
+	assert.Equal(t, 0, repo.list[0].Ready, "observation must not rewrite desired state")
+}

@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 所有 Agent 必须遵守的研发规范
+
+所有 agent（含子 agent）必须遵守 [贡献指南：临时文件与验证产物](CONTRIBUTING.md#临时文件与验证产物)：**截图、录屏、日志、临时导出、试验脚本及原型统一输出到项目根目录的 `tmp/<任务名>/`，禁止散落根目录或源码目录**；从任何子项目执行工具时也使用根目录 `tmp/`，该目录不入 Git、不进入镜像构建上下文，正式交付资产按指南放入对应目录，交付前检查本任务产物。
+
 ## 项目定位
 
 一站式 PaaS 平台 —— 面向基础设施的统一平台，覆盖服务治理、中间件管理、MaaS、DevOps。
@@ -144,7 +148,7 @@ pnpm build                    # 构建三套
 ### 并发与资源（踩坑沉淀）
 
 - Go mutex 不可重入（第 9 轮自死锁教训）；PG 补偿事务用 `context.WithoutCancel`（防 SIGTERM 后用已 cancel ctx 落库，如 runBuild）。
-- typed-nil 装箱陷阱：构造函数失败时返**接口类型 nil** 而非 `(*T)(nil)`（装箱后 != nil，守护失效）——已有 dataservice restarter、build log streamer 两例。
+- typed-nil 装箱陷阱：构造函数失败时返**接口类型 nil** 而非 `(*T)(nil)`（装箱后 != nil，守护失效）——已有 dataservice restarter、build log streamer、alert engine Restore 三例（第三例 2026-10-18：内存路径 `*obspg.Store(nil)` 装箱成非 nil StateStore，Restore 放行后 LoadStates 解引用 nil db panic 卡死启动且不打印 panic——集群 PG 路径不触发故 0042 起潜伏两月；修法=参数收窄具体类型在函数内装箱前判 nil，`TestBuildObservabilityStoreTypedNilPGStore` 锁）。
 - `defer rows.Close()`；HTTP Body Close；goroutine 用 `select <-ctx.Done()` 退出；前端轮询 `onUnmounted` 清理 + in-flight 防重入。
 - 深拷贝防 race：返回给外部的对象/切片一律 clone；读多写少考虑 RWMutex。
 - SSE：`X-Accel-Buffering: no` + Flusher 委托（中间件 statusRecorder 必须实现 Flusher）+ 前端 fetch 带 `Accept: text/event-stream`。
@@ -171,7 +175,7 @@ pnpm build                    # 构建三套
 - `internal/core/application/`：Application（Bindings 真源 + Resources 派生）+ OnAppCreate hook（自动绑定默认 CI/CD 流水线）+ CascadeDeleter（级联 workload/appconfig + 配额回收 + 清 app 级配置 ns）。
 - `internal/workload/`：Workload（Service/Job/CronJob，多服务 Service 字段）/ Instance（Pod 级）/ PodLogs（越权校验）/ ResourceSpec（cpu/mem requests+limits，**生产禁 BestEffort 双入口**）/ **MetricsPath（指标端点声明，opt-in：非空才注 `prometheus.io/scrape` 注解，空=不采集，见下）** / K8s 数据面（CRD 投影 + WorkloadReconciler，fake client 测不出 apiserver 校验类 bug，需真实集群验证）+ LaneGC（泳道回收级联 cleaners）+ **OrphanGC**（WorkloadReconciler 周期对账平台仓库，平台侧已删的 CR 级联回收，宽限 10min，防僵尸 Service 抢名；主体已泛化 `collectOrphanCRs`，dataservice 同款接入）。
 - **指标采集 opt-in（2026-09-24 语义反转）**：`spec.metricsPath` 非空（须 `/` 开头绝对路径，`Validate` 拦）时 reconciler 给 Pod 注 `prometheus.io/scrape=true` + `path=metricsPath` + `port=<ContainerPort|Port>`；**空则一个注解都不注**。反转前是无条件注 `/metrics`，不暴露该端点的应用（如 nginx frontend）变永久 down target（Prometheus 报 `unsupported Content-Type "text/html"`），将来 `up==0` 告警即假告警源。存量迁移：`PUT /api/workloads/{id}` 带 `metricsPath`（指针语义：缺省=不改，`""`=撤下）；**不做 DB 回填**（回填会把无指标端点的存量负载一并补上，等于固化 bug）。
-- `internal/environment/`：环境一等公民（type prod|test）+ PromoteOrder 发布阶序 + `NextPromoteTarget`。
+- `internal/environment/`：环境一等公民（type prod|test）+ PromoteOrder 发布阶序 + `NextPromoteTarget` + **删除依赖预检**（2026-10-19 spec 专项04 §6：`GET /api/environments/{id}/usage` 返回结构化 `{workloads,dataservices,lanes}` 清单，DELETE 409 文本逐项列出；前端有依赖直接展示清单阻断，不用重复确认弹窗代替依赖检查；**usage 路由必须先于 GET /{id}**——rest 含斜杠时 Split[0] 截出的 id 会误匹配单资源分支）。环境健康算法按类型区分：Job/CronJob 完成态 ready<replicas 是正常终态不判坏，仅 status=failed 计异常。
 - 命名约定：Deployment 名 = 工作负载 ID；Pod = `<id>-<rsHash>-<podHash>`；治理 Service.Name == K8s Service 名 == 工作负载名（数据面发现靠此对齐）；lane label `paas.aitoys/lane`（值经 sanitize，K8s label/Service 名不许 `/`）。
 
 ### 泳道（Lane）
@@ -205,19 +209,22 @@ pnpm build                    # 构建三套
 
 - `internal/dataservice/`：6 Kind（db/cache/mq/storage/vector/search）同构领域 + KindMetas 表单元数据真源 + Connection（凭证生成持久化 / FQDN / MaskConnection）/ Engine 三模式（managed/external-shared/external-dedicated，轻量引擎 qdrant/meilisearch）；reconciler 建 Secret+Service+StatefulSet（OwnerRef 级联）+ exporter sidecar（指标按 `paas_aitoys_dataservice` label 过滤）+ **内置 metrics 引擎抓取注解**（qdrant/minio 注 `prometheus.io/scrape`，minio 另需 `MINIO_PROMETHEUS_AUTH_TYPE=public`；meilisearch 需 experimental+鉴权带不了 header，暂不采）+ **OrphanGC**（2026-09-25 补齐：平台侧删除后 CR+STS 残留无回收路径，一次对账实测 9 个孤儿实例；现与 workload 同款周期对账回收）；PG 持久层加密；占位 Kind 返 failed 不拉起（避免 port=0 死循环）。
 - 绑定注入：`application.BindingInjector` 桥接，按 Kind 写 appconfig 连接条目（DATABASE_URL/REDIS_URL/...），解绑重注入最后剩余绑定。
-- `internal/backup/`：备份记录 CRUD（PG 持久化 migration 0044 + RLS；Create 即 completed，真实快照执行留后续）+ prod:write fail-closed。
+- `internal/backup/`：备份两模式（2026-10-19 spec 专项05 §4 落地，migration 0053）——**record 记录模式**（缺省兼容：仅登记意图，completed 即「记录已创建」，无产物无恢复证明，不再生成 deterministicSize 模拟值）+ **snapshot 真实快照**（仅 postgres+托管：K8sJob `pg_dump -Fc` 落租户 ns `paas-backups` PVC，凭证走 secretKeyRef 不落 Job spec，容器内算 sha256 echo `BK_META` 行，Pacer 读 Pod 日志解析）+ **restore 恢复作业**（Mode=restore：`backupRestorer` 复制源规格建新实例 + Job 内 `pg_isready` 等待后 `pg_restore`；仅 snapshot+completed+有 ArtifactRef 可恢复，覆盖原实例不支持）。状态机 accepted→running→completed|failed 全落库，`BackupPacer`（10s 扫/15min 超时）推进，core 重启 ListActive 恢复观察；ID 改时间基（旧确定性 ID 致同资源二次创建 409）。capabilities 端点 `GET /api/dataservices/{id}/capabilities` 按引擎/接入模式判定（外部实例提示「在源系统执行」）。**PVC 产物清理留后续**（删记录不删产物）。
 
 ### 服务治理（四件套已落地）
 
 - `internal/governance/`：Service/Instance（真源=K8s Endpoints 经 `InstanceDiscoverer`，手动注册表兜底）/ Route（Host 对外域名，ApplyRepo→K8sRouteApplier 聚合 Ingress 下发）/ CircuitBreaker（即时评估确定性生成，真实流量采集留后续）。
+- **路由下发状态证据链（2026-10-19，spec 专项04 §4）**：Route 加 `ApplyStatus`（''=未下发/applied/failed）+ `ApplyError`（截 200 字符）+ `AppliedAt`（migration 0052）；ApplyRepo 装饰器投影后 `recordApply` 回写（`context.WithoutCancel` 防请求结束丢租户）。「配置已下发」≠「公网可达」——DNS/TLS/HTTP 探测平台未做，前端 tooltip 明示。存量路由状态为空显示「未下发」，写操作后才回写。
 - **治理 Service 部署即注册（2026-10-13）**：service 型 workload 创建时自动注册治理 Service（`governance.AutoRegisterService`，Name=工作负载名对齐 K8s Service 命名，幂等；挂点=`workload.OnCreateRepo` 装饰器，ApplyRepo 外层 + devopsRepo 捕获前——handler 与 Release 内建基线两条创建路径全覆盖）+ 启动自愈 `backfillGovernanceServices` 补存量。动机：应用详情-治理 tab 此前只读且需跳平台页手动注册（两表断链，test-web 旅程实测）。
 
 - `internal/configcenter/`：Namespace 双 scope（app 派生懒建 `EnsureByAppEnv` / shared）+ 版本化 Publish 不可变快照（partial unique index 防双 active）+ **LaneOverride**（lane key 级覆盖，merge 链 app×env → lane，version+overrideHash 双指纹）+ 按应用名发现（未知/无 ns/无 active 统一 `{"published":false}` 不泄漏）+ 泳道回收级联 `LaneOverrideCleaner`。
+- **泳道覆盖批次原子契约（2026-10-19，spec 专项04 §3）**：`POST .../lane-overrides/batch`——`ApplyLaneOverrides(appID, envID, laneID, ops, expectedCount)` 整批全成功或全回滚（PG 真事务 / memory 备份恢复）；expectedCount 与实际数不符 409 `ErrLaneOverrideConflict`（重预览，防「预览到执行之间漂移」）；upsert 且 key 无基线 draft 时同事务写占位；remove 幂等；expectedCount<0 跳过漂移校验。发布成功文案如实标注「客户端采用情况未知」（平台无回报通道）。
 - 与 appconfig 严格区分：appconfig=应用×环境静态配置重启注入；configcenter=运行时动态版本热更新。
 
 ### 可观测（三支柱 + 告警 + OTel）
 
 - `internal/observability/`：`real/`（Prom/Loki/Jaeger 适配，env 开关 `PAAS_PROM_URL|PAAS_LOKI_URL|PAAS_JAEGER_URL` 三支柱独立混用）+ `compose/` 聚合；告警状态机/历史已迁 PG（migration 0042，重启不丢）。多租户：PromQL/LogQL/Tempo 均带 tenant/ns 过滤；应用级查询走 WorkloadLister pod 正则（`wl-<id>-.*`）。
+- **采集质量诊断（2026-10-19，spec 专项04 §5）**：`GET /api/observability/metrics/quality?targetType=app|workload|dataservice&targetId=` 独立诊断端点（不动 ListMetrics 主链路，alert engine 零影响）——逐约定 metric 发 Prometheus 即时查询，返回 ok/empty/failed 三探测态 + 报告级「未接入」（source=memory，PAAS_PROM_URL 未配置）。探测 PromQL 与主查询同源（`podSeriesDefs`/`dataserviceDefs` 抽出复用，否则结论失真）；「查询成功无数据」≠「采集源故障」（empty 引导查时间范围/目标/埋点）；网络错误脱敏（不回显上游 URL）。
 - **告警规则校验与维度（2026-09-25 审计修复）**：`AlertRule.Validate` 收口 targetType（app/workload/dataservice；env 无指标数据源 fail-fast 拒绝）+ metricName（5 基础 + 6 数据服务业务指标）合法集合，memory/PG 双实现同源调用（PG 曾缺 Validate 致 2 条全空脏规则入库）；评估引擎 webhook 派发改 (alert, url) 绑定对（曾用平行切片索引错位 → 跨租户泄漏）；real 模式补 workload 维度指标源（`listPodSeries` 单 wl-<id> pod 正则，与 app 级共享实现）；前端规则表单指标随维度联动（dataservice 全 10 指标）、workload 实体下拉。
 - **告警规则编辑/默认规则/恢复通知（2026-09-27）**：`PUT /api/observability/alert-rules/{id}` 更新规则（ID/TenantID 以库内为准，改阈值不断告警历史关联）；启动时给零规则租户灌 `DefaultAlertRules()` 4 条基础规则（demo 门控跳过，阈值按真实单位 cores/MiB 非百分比）；webhook 在 firing 与 resolved 转变时各通知一次（消费方闭环）。
 - **抓取目标来自工作负载声明**：应用级 RED 数据依赖 Pod 上的 `prometheus.io/scrape` 注解，该注解由工作负载 `spec.metricsPath` **显式声明**才注入（opt-in，见「应用主线 + 工作负载」）。排查「应用面板无数据」先查 `spec.metricsPath` 是否声明、再查目标是否 up。node-exporter/dataservice exporter 走各自 chart/sidecar 注解，不依赖此字段。
@@ -234,6 +241,10 @@ pnpm build                    # 构建三套
 ### 智能体（AI 编排）
 
 - `internal/ai/`：agent/tool/knowledgebase/prompt/skill 五实体（Skill=可叠加能力指令包）+ runtime（多轮记忆 conversationStore / eval 历史落库 / workflow 编排引擎 llm/condition/approve/end 节点 DB 状态驱动恢复）+ Marketplace **六类实体**（skill/prompt/tool/agent/knowledgebase/workflow；`marketplace_items` 平台级快照不可变 + fork 安装，SanitizeConfig 剔除凭证，EntityForker 依赖倒置；KB 只发配置骨架、安装时经 finder 重绑本租户 vector/storage 实例；workflow 整包快照内嵌引用的 Agent/工具副本、安装后节点引用旧ID→新ID重写 + Enabled=false）；admin 总览 `/api/admin/ai/*`（ListAll 只读）。
+- **工作流定义快照（2026-10-18，审计 WF-02 修复）**：`WorkflowRun.DefSnapshot`（Start 时固化完整定义，migration 0051 JSONB；UPDATE 有意不更新该列——创建后不可变）；进程重启后 paused run 的 Approve 无等待者拉起**优先用快照**（定义已改也按启动时拓扑续跑；存量 run 无快照 fallback 当前定义）；运行详情端点返回快照、**列表瘦身不带**（体积：每条含全部节点模板）；前端 WorkflowRunView 节点解释优先快照 + 拓扑漂移提示（「定义已修改，按启动时快照解释」/「存量运行无快照」）。集群实测：定义改成 s→e 后重启 Pod，Approve 仍按快照走完 s→af→e。
+- **新版控制台正确性批次（2026-10-18，任务五包 A，审计 `docs/reviews/2026-10-17-console-next/all-modules-audit.md`）**：WF-01 工作流编辑器插入节点自动重连前驱（新节点接管 end 前位置，旧实现孤立节点被后端可达性校验拒）、删除节点继承后继不写死 'e'；MD-02/03 Playground 错误对象与正文分离（`msg.error` 独立字段，失败不入后续上下文）+ 停止/断流/完成三态分开（主动停止按钮 + interrupted 标注）+ 字符计数不再冒充 tokens；AI-01 四个 AI 列表页主数据与引用独立结算（`fetchSettled`，失败≠假空态，StatePanel 错误态）；AI-02 工具测试按钮仅 MCP 显示；AC-01 成员/Key 列表失败态；AC-02 API Key 明文关闭弹窗即清除（@close）；UX-01 环境页负载依赖失败时健康值显示「未知」不派生；DS-01 备份状态「已记录」不冒充可恢复；BL-01 账单标注估算口径+「标记支付」；Prompt 创建按钮如实标「创建并激活」。
+- **AI 资产就绪批次（2026-10-18，任务五包 C，spec `docs/superpowers/specs/2026-10-17-console-ai-assets-design.md`）**：①工具发现 dialog 化——`POST /api/tools/{id}/test` 契约已有（tools/list 返方法名+说明+inputSchema），前端从 toast 改弹层展示发现结果+发现时间+副作用提示；②KB 嵌入模型只列 `capabilities` 含 embedding 的模型（下拉过滤，无兼容模型=禁选+阻塞指引），维度字段如实标注「须与模型输出维度一致/创建后不可改/不一致致检索失败」；③Prompt 显式激活——`POST /api/prompts` 加可选 `activate`（缺省 true 兼容旧语义；false=`CreateDraft` 草稿版本不动现有 active，memory/PG 双实现 FOR UPDATE 串行），激活确认框列引用该名称的 Agent（本地过滤全量列表）+影响说明；④Agent 列表「依赖就绪」列——本地元数据判断（模型在目录/工具存在且启用/KB 存在/Skill 存在且启用/promptRef 有激活版），引用数据加载失败=「未知」不画健康徽标（远程探活 readiness 端点留后续）；⑤广场安装结果 dialog——按 entityType 列类型化待办（工具补凭证/KB 重绑+传文档/工作流默认停用/Agent 查就绪），「去处理」直达。附带修复：Tools/Agents/Skills 三页创建请求空 `createdAt:""` 致后端 time.Time 解析 400（submit 剥空值）。
+- **模型体验批次（2026-10-18，任务五包 D，spec `docs/superpowers/specs/2026-10-17-console-model-experience-design.md`）**：能力标签≠试玩已实现——①Models 目录操作列按 capabilities 分派（chat→对话试玩/embedding→向量测试/其余→「暂不支持试玩」tooltip 说明，不给「用 chat 代替」的假入口）；②Playground embedding 模式（`isEmbeddingMode` 从模型 capabilities 派生）：自动切向量测试面板（每行一条文本批量 POST `/v1/embeddings`——平台已有端点真玩法），显示条数/实测维度/耗时/前 8 维预览，**不展示对话输入框**（非 chat 模型不盲发 chat 请求），?model= 深链带入即切换+解释条；③切模型默认新会话确认（多轮上下文不跨模型；取消回退旧模型，embedding 模式无上下文自然不触发）；④「参数与请求」popover 加请求证据区：首字延迟（无 delta=「未收到」）/总耗时/字符吞吐/「Token 用量：未返回（网关服务端计量，响应不含 usage 帧）」诚实标注不填 0；⑤Agent 虚拟模型下拉过滤停用项；⑥503 引导文案去旧菜单名（改「后台管理「推理」页」）。集群实测 text-embedding-v4 输出 **1024 维**（C2 维度实测缺口补上）。
 - REST `/api/skills|agent-evals|marketplace` 等；console-user「智能体」菜单 + `Explore.vue` 广场。
 
 ### 身份 + 前端
@@ -243,7 +254,20 @@ pnpm build                    # 构建三套
 - console-user：应用工作台（10 tab 三组）+ 三层 IA（资源中心=数据服务 / 工作负载 / 平台能力）+ 顶栏环境 scope（生产 gated 15min 自动回退 + 视觉强隔离）+ `useDangerConfirm`（生产输入名称确认，isProd 显式入参防顶栏漂移）+ ESLint（新代码禁 `as any`，错误文案走 `apiError/respError`）。
 - **console-user-v2 2026-10-16 重构**：以 `docs/superpowers/specs/2026-10-16-console-next-ux-refactor.md` 为当前 UI 组织方式真源。任务域导航 + 独立产品列表与全局交付中心；产品五分区，AI 成熟能力复用；旧“首页只能产品列表 / 所有低频放更多 / 产品固定三面”约束已由本次用户授权替换。共享视觉与列表契约在 theme.css、PageHeader/StatePanel/TablePager、fetchList 中维护。下条保留原迁移背景，当前导航以新 spec 为准。
 - console-user-v2（新 IA，`/next/`）：IA 终点 spec 第一期——产品为主线（首页=产品+待办三列抽屉；产品三面=服务/交付/设置，服务面运行主语 ServiceRunDrawer 实例/日志/伸缩/暴露闭环，交付面智能研发一条龙+最近运行，设置面绑定资源原生）；**2026-10-16 全量化+功能对等两批**：零跳老版链接——侧栏全 v2 路由（模型/数据服务/可观测一级 + 智能体/工作负载/试玩/流量/密钥/环境/组织设置），交付面深度五卡原生（DeliveryChanges 变更发车审批闭环/DeliveryBuilds/DeliveryReleases/DeliveryPipelines/DeliveryRepos），设置面四卡原生（绑定资源/ProductDynamicConfig 动态配置/ProductRunConfig 运行配置/ProductMembers 成员与受限开关），`/runs/:runId` 简版 run 详情（阶段表+日志展开+审批/终止/重试）；**功能补齐**：`/dataservices/:id` 详情（连接信息掩码/启停/伸缩/绑定应用）、可观测三支柱（告警+日志过滤+trace 瀑布 useSpanTree）、`/workloads` 全局负载视图、治理三视图（路由+服务目录实例展开+熔断器）、`/ai` 智能体聚合页（七 tab：agents/skills/prompts/tools/kbs/广场安装/Agent 运行取消）、`/builds/:id` 构建详情（SSE 实时日志+失败重试）；待办深链全落 v2；剩余深页（PR 浏览器/泳道可视化/shared ns 管理）后补；业务对外域名外链（target=_blank）除外；基建从经典版复制独立演进。
+- **成员/凭证/用量口径批次（2026-10-19，任务五包 G，spec 专项06）**：①ProductMembers 管理控件按真实权限显隐（tenant:admin/\*，后端 403 兜底）+「当前用户为什么可操作」三类判定说明 + 用户选择器独立失败态（禁选不假装无用户）+ 同名以 userId 为身份（addable 过滤从 name 改 id，修同名误过滤）+ 角色变更失败回读服务端真实旧角色；②ApiKeys 明文全路径清除（@close+onUnmounted）+ 接入说明区（env→curl→排错）+ appId 归因列（真实字段）；③Billing 用量/账单独立错误态（失败≠0/空）+ 配额卡「超限拦截 vs 仅估算」标记（拦截集合=applications/workloads/dataservices）+ 未采集资源「按 0 估算」标注 + Token 未归属差额行（子集之和≠全组织总量）+「支付」正名「标记已结算（模拟）」；④Secrets 删除确认按真实作用域（平台共享才名称确认，弃顶栏 isProd）+ 引用未知提示（无引用关系查询，不按 0 引用报安全）+ 创建弹窗 @close 清明文草稿 + 审计资源 ID 点击复制 + 去 envStore watch（组织级资产不随环境切换）。
+- **任务五收官（2026-10-19，A-H 八包全交付）**：包 H 视觉贯通验收（spec 总设计 §3 对表）——AI 四页（Skills/Tools/Prompts/Agents）创建/保存补 submitting 禁重复提交（防重入 + finally 复位 + 按钮态三件套，此前 KBS 有其余四页缺）；深链矩阵 14 静态路由 + 动态深链 + 核心端点全 200。累计：A 正确性、B 工作流快照（0051）、C AI 资产、D 模型体验、E 变更观测（0052）、F 数据服务备份（0053）、G 凭证用量、H 视觉贯通。真机项（亮暗主题/200% 缩放/长名称/焦点环/WCAG 点击高度）留用户抽查。
 - 主模块 vs 应用详情原则：主模块=全局视图 + 维度是过滤器不是门槛 + 告警漏斗式下钻。
+
+### 管理后台深化（D5，2026-10-20，spec `docs/superpowers/specs/2026-10-19-admin-ia-and-management-design.md`）
+
+- **租户生命周期（D5-1）**：租户冻结/恢复（冻结拒登录+新会话，存量 API Key 同拒）+ 全资源注销预检（非空 409 列依赖）。
+- **细分角色（D5-2）**：平台只读运维/资源运维/财务/安全四角色（`identity.BuiltinPlatformRoles`），服务端 `PlatformPermissionsFor` 收口；菜单 Perm 全表登记（`internal/core/auth/menus.go`，漏登记=对所有角色可见的权限泄漏，`menus_test.go` 锁）。
+- **凭证生命周期（D5-3）**：API Key `expiresAt` 到期即拒（Lookup 时校验）+ `Rotate` 轮换（旧 Key 标 revoked + rotatedFrom 链）+ `lastUsedAt` 最近使用 + 会话撤销（jti 黑名单内存实现）；SSO **裁决不做**（无可验证 IdP，半成品认证路径是不可验证攻击面，记遗留债务）。
+- **财务与通知（D5-4）**：预算 `budgets`（期基 YYYY-MM，强制=超限拦截推理，60s TTL 缓存护栏）+ 结算 `settlements`（供应商对账单 mock 单价）；菜单 `/resources/budgets|settlements` → `PermPlatformFinanceRead`。通知渠道 `NotificationChannel`（Kind=webhook，URL/Headers 掩码 `scheme://host/***`，`MergeSecretUpdates` 掩码占位保留原值）+ 三段抑制（渠道停用/`muteUntil` 临时静默/重复冷却 `cooldownMinutes`=0 仅状态转变）；`AlertRule.ChannelIDs` 非空忽略直连 Webhook。前端落 console-user（租户级配置，admin 是跨租户只读域）。
+- **webhook 投递记录与幂等重放（D5-5，migration 0059）**：每次通过鉴权的投递落 `pipeline_webhook_deliveries`（幂等键=源 delivery ID `X-Gitea-Delivery` 缺失平台生成；状态 accepted/duplicate/skipped/rejected/failed + 中文原因——「push 了为什么没触发」可查不再靠服务端日志猜）；**token 校验失败不落库**（无租户身份，落库=开放无界写入面）。同 ID 重发标 duplicate 保留首次结果（含 runID）；重放 `POST .../deliveries/{id}/replay` 复用记录 branch/commit（trigger=replay），**已有 run 幂等 no-op 返回原 run**，权限 PermPipelineWrite + appGuard + allowProdFlow（比 webhook 严：重放有用户身份）。PG 列名用 `commit_sha`（commit 是 SQL 保留字）。
+- **五路审计修复批次（2026-10-21）**：H-1 通道状态投影（`provider.ChannelStatusReader` 可选接口，Gateway failover 运行态覆盖 store 静态值不回写）；M-4 runSource 归桶（paas 编排 run 名正则 `run-<12hex>-<idx>[-rN]` 可证实才归 paas，其余独立 other 桶不冒充归因）+ L-2 未知 phase 独立桶；P6 权限对账测试锁（12 PermPlatform* 全被 platformDomains 引用）+ C1 细分角色正路径测试 + dashboard 权限登记；M-3 configcenter admin refs 查询失败置 RefsError（失败≠0 引用）；前端 H-3 三源独立结算（allSettled + 每源独立 error，失败不冒充 0/空）+ L-1 首页「统计截至」快照标注 + F2 TagsView 保留 query + R4 异步运维「受理≠生效」文案与操作记录轮询并列。留后续：P3 切租户抽屉清理（需全局 drawer 注册机制）、admin 命令面板、M-2 诊断时间戳 PG 加列。
+- **复核 F01–F08 收尾（2026-10-21，复核报告 `docs/reviews/2026-10-19-admin-design/completion-check-2026-10-21.md`）**：F01 切租户残留——`useScopeChange` composable 统一 22 资源页（reset 关抽屉/清详情先于 refresh 重拉，13 详情页带 reset）；F02 旧链接——`dynamic.ts` redirect query 合并**目标 tab 优先**（`{...to.query, ...defaultQuery}`，tenantId/hash 保留）；F03 可观测单层双 tab + 如实文案（指标/日志/trace 跨租户记 M20）；F04 工作流运行收敛至「执行记录」页双 tab（AI 资产页留迁移空态）；F05 AiOverview 工作流真懒加载；F06 首页 `AttentionPanel` 三源 allSettled（失败运行/触发告警/异常负载）+ 点击直达；F07/F08 handoff 清单与复核报告双回填 + 同源预览核验（`VITE_BASE=/admin/` 构建 embed 本地 core，不放宽 CSRF）。图标对账测试 `TestMenuIconsRegisteredInAdmin`（menus.go icon ↔ main.ts 注册清单跨语言锁，漏配 CI 即红）。剩余边界（服务端分页/模型探活 API/消费归因维度/平台凭证创建抽屉）已记 handoff「剩余边界」节。
+- **幽灵 workload 清理实践（2026-10-21）**：外部删 CR 后 DB 行残留（21 行 ready=0 假象）定夺清理——删应用级联（paas-shop/dsh/test-web 三应用）+ **「部署即注册」的治理 Service 表不随应用级联删除**（CascadeDeleter 边界外，需按应用前缀白名单手工注销 25 条，批量删服务前必须显式过滤防误删存活服务）；孤儿 CR 由 OrphanGC 宽限后自动回收无需手工。
 
 ## API 契约
 
@@ -271,8 +295,10 @@ route registry（`internal/apiroute/`）驱动 mux 注册与 spec 生成；`GET 
 ## 遗留债务索引（按需复审）
 
 - **安全**：refresh rotation + logout jti 黑名单、限流多副本 Redis、密钥轮转/过期、alert webhook SSRF（低危盲 SSRF：POST-only/无回显/不跟随重定向；真防护需 dialer 级连接时 IP 校验防 DNS rebinding，简单黑名单无效——2026-09-07 评估定案不做）、各 client CheckRedirect 已收口但新 client 需用 httputil.NewClient。
+- **D5 留后续（2026-10-20）**：SSO 对接不做（无可验证 IdP，半成品认证路径是不可验证攻击面；待真实 IdP 接入需求再立项）；会话撤销 jti 黑名单为内存实现（多副本需 Redis，与限流同款）；跨规则告警抑制（A 压 B 依赖图）不做；供应商结算为 mock 单价非真实账单；备份 PVC 产物清理（删记录不删产物）。
 - **持久化/规模**：observability 迁 PG、RLS 生产角色非超级用户生效（dev postgres chart 超级用户 BYPASSRLS，策略已全表覆盖 migration 0043/0044）、ClickHouse 时序计量、审计分页、流水线运行历史分页、configcenter 长连接 watch/灰度下发。~~配额计数回收失衡~~（**已修复 2026-09-04**：dataservice Delete 补回收 + 启动自愈 `recalcUsageIfDrift` 对齐行数计数型资源，reconcile C1 清零）。
 - **发布/部署**：batches 切流实现（D1）、蓝绿模板变体、金丝雀告警联动、promote 跨级跳迁、PVC 数据服务重启保数据（现 STS 删 pod 不删 PVC 可恢复）、异步创建流转 PG 反向同步、真实备份任务。
+- **数据服务**：CR 丢失周期自愈重 Apply 缺失——平台 DB 记录 running 但 K8s STS/SVC 全没了时无自动恢复路径（2026-10-19 实测 10 个 ds 中 9 个成幽灵，手工 GET+PUT 触发 reconciler 重 Apply 全恢复；workload 有 drift EnsureIfMissing 同款，dataservice 应补周期对账「DB 有行无 STS→重 Apply」）。
 - **MaaS**：通道健康检查真实探活、凭证测试 ping、Vendor 改配置后存量通道/绑定自动同步、按用户 scope 列 API Key。
 - **流水线**：cron 触发器、Gitea webhook 自动注册、process/mock 模式实时构建日志、租户自定义模板编辑器、行级评论、CI 状态挂 PR、pipeline PG store 集成测试缺位（runCols 加列漏 Scan 对齐时编译期/单测均查不出，2026-10-17 曾致集群全部 run 读路径 500「19 vs 20」——加列必须三处同步 runCols/scanRunInto/INSERT，或补 test-pg 用例）。
 - **前端**：应用级权限按钮级显隐、命令面板（Cmd+K）、console-admin 手写 interface 不迁（现行策略）。

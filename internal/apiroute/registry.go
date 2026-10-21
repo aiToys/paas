@@ -38,6 +38,13 @@ func WithHeader(name, description string, required bool) Opt {
 	}
 }
 
+// WithQuery 登记查询参数（如 admin 列表端点的 tenantId 浏览范围过滤）。
+func WithQuery(name, description string) Opt {
+	return func(r *Route) {
+		r.Parameters = append(r.Parameters, Parameter{Name: name, In: "query", Description: description, Required: false, Schema: &Schema{Type: "string"}})
+	}
+}
+
 // Perm 设置所需权限（映射为 security scope）。
 func Perm(p string) Opt { return func(r *Route) { r.Perm = p } }
 

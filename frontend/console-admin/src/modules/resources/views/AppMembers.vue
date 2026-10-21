@@ -18,13 +18,6 @@
         style="width: 220px"
         @keyup.enter="handleSearch"
       />
-      <el-input
-        v-model="searchForm.tenantId"
-        placeholder="租户 ID 过滤"
-        clearable
-        style="width: 160px; margin-left: 8px"
-        @keyup.enter="handleSearch"
-      />
     </template>
 
     <template #actions>
@@ -45,10 +38,13 @@
 // 应用成员跨租户总览（super_admin 只读）：观测各租户应用的成员角色分布（应用级权限运营面）。
 // 成员/角色的增删在 console-user 租户内自助完成（owner 治理），此处仅观测。
 import { computed, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { SearchTable } from '@/app/components'
 import { useCrud } from '@/app/composables/useCrud'
+import { useScopeStore } from '@/app/stores/scope'
+import { useScopeChange } from '@/app/composables'
 import type { ColumnDef } from '@/app/components/SearchTable/types'
 import { fetchAppMemberList, fetchAppList, type AdminAppMember, type AdminApplication, type ResSearchRequest } from '../api'
 
@@ -57,7 +53,7 @@ const appName = ref<Record<string, string>>({})
 
 const { listData, loading, pagination, searchForm, fetchList, handleSearch, handleReset, handlePageChange } =
   useCrud<AdminAppMember>({
-    fetch: (params) => loadMembers(params as unknown as ResSearchRequest),
+    fetch: (params) => loadMembers({ ...params, tenantId: scopeStore.tenantId } as unknown as ResSearchRequest),
     defaultSearchForm: { keyword: '', tenantId: '' },
     pageSize: 10
   })
@@ -107,5 +103,14 @@ const columns = computed<ColumnDef[]>(() => [
   { prop: 'role', label: '应用角色', width: 110, slot: 'role' },
 ])
 
-onMounted(() => fetchList())
+// 浏览范围（顶栏）联动：切租户重拉列表；范围是纯过滤器不改写目标
+const scopeStore = useScopeStore()
+useScopeChange(() => fetchList())
+
+// 深链预过滤（P5）：产品详情「应用成员」按钮带 ?appId= 跳入，按该应用聚焦。
+onMounted(() => {
+  const appId = useRoute().query.appId
+  if (appId) searchForm.keyword = String(appId)
+  fetchList()
+})
 </script>

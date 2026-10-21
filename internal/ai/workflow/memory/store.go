@@ -272,3 +272,27 @@ func (s *Store) ListRuns(ctx context.Context, workflowID string) ([]workflow.Wor
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out, nil
 }
+
+// ListAll 跨租户定义列表（admin 总览用）；created_at 升序。
+func (s *Store) ListAll(ctx context.Context) ([]workflow.WorkflowDef, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]workflow.WorkflowDef, 0, len(s.defs))
+	for _, d := range s.defs {
+		out = append(out, cloneDef(d))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out, nil
+}
+
+// ListAllRuns 跨租户运行列表（admin 总览用）；created_at 倒序，与 ListRuns 同排序语义。
+func (s *Store) ListAllRuns(ctx context.Context) ([]workflow.WorkflowRun, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]workflow.WorkflowRun, 0, len(s.runs))
+	for _, r := range s.runs {
+		out = append(out, cloneRun(r))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	return out, nil
+}

@@ -1,0 +1,212 @@
+{
+  "platformArtifact": {
+    "tag": "delivery-p0-20261020-6095de2f",
+    "image": "192.168.41.122:30050/paas/paas-core:delivery-p0-20261020-6095de2f",
+    "sourceManifestSHA256": "6095de2f4cb34348c74bfc9055630d6133ab55700676dab5f100bfcb26620064",
+    "binarySHA256": "6b18c9f63766569dc9a035ca8cd909d9f8fde81a497c7a7357e35ba402e5c84a",
+    "digest": "sha256:7ca5872361d9b0b2c952d532a67cc7124f85c4522a954a8d0d1d474d44f3d8fe"
+  },
+  "helmRevision": 379,
+  "platformChecks": {
+    "standardTemplates": [
+      "tpl-delivery-build",
+      "tpl-delivery-deploy",
+      "tpl-delivery-build-deploy"
+    ],
+    "nextIndexSHA256": "ae4fa145097d8338f712349a2ecaba62dbb40c1e6a9f6bc13452c9821a0ab78b",
+    "frontendRuntime": {
+      "id": "wl-1788346121649995308",
+      "ready": 1,
+      "replicas": 1,
+      "status": "running"
+    },
+    "livez": {
+      "status": "ok"
+    }
+  },
+  "pipeline": {
+    "id": "run-9f6f1cbd2a62",
+    "tenantId": "t-acme",
+    "appId": "app-1788302808516967113",
+    "pipelineId": "pipe-727b451caae1",
+    "branch": "feat/paas-shop-lane-experience-20261020",
+    "commit": "a3f80e632c03d0e74570063fd4ac67699e723076",
+    "repoId": "repo-5efbd2b0facd",
+    "trigger": "manual",
+    "status": "succeeded",
+    "currentStage": 2,
+    "stageRuns": [
+      {
+        "index": 0,
+        "type": "build",
+        "name": "构建",
+        "status": "succeeded",
+        "input": {
+          "buildArgs": {
+            "SERVICE": "bff"
+          },
+          "buildContext": ".",
+          "buildRunId": "build-f97a25eeed90",
+          "commit": "a3f80e632c03d0e74570063fd4ac67699e723076",
+          "dockerfile": "paas-shop/Dockerfile.backend",
+          "repoId": "repo-5efbd2b0facd",
+          "service": "bff",
+          "serviceId": "svc-cbe24f60739a3b06"
+        },
+        "output": {
+          "imageId": "img-c8b688706242"
+        },
+        "startedAt": "2026-10-20T09:19:58.127006Z",
+        "finishedAt": "2026-10-20T09:21:26.343217Z",
+        "log": "09:19:58 构建提交 buildRunId=build-f97a25eeed90\n09:21:26 构建 success\n"
+      },
+      {
+        "index": 1,
+        "type": "deploy",
+        "name": "部署并等待就绪",
+        "status": "succeeded",
+        "input": {
+          "envId": "env-acme-test",
+          "imageId": "img-c8b688706242",
+          "imageSource": "priorBuild",
+          "lane": "default",
+          "port": 8080,
+          "service": "bff",
+          "serviceId": "svc-cbe24f60739a3b06",
+          "strategy": "rolling"
+        },
+        "output": {
+          "imageId": "img-c8b688706242",
+          "releaseId": "rel-f6e4ed6d904c",
+          "workloadDomain": "wl-1788328157391123468.paas-t-acme.svc.cluster.local",
+          "workloadId": "wl-1788328157391123468"
+        },
+        "startedAt": "2026-10-20T09:21:26.349193Z",
+        "finishedAt": "2026-10-20T09:21:26.3803Z",
+        "log": "09:21:26 部署镜像 img-c8b688706242 到 env=env-acme-test lane=default service=bff serviceId=svc-cbe24f60739a3b06\n09:21:26 等待 Workload wl-1788328157391123468 就绪\n09:21:26 Workload 就绪，访问地址 wl-1788328157391123468.paas-t-acme.svc.cluster.local\n"
+      }
+    ],
+    "templateId": "tpl-delivery-build-deploy",
+    "templateVersion": 1,
+    "planHash": "a545122d72608864",
+    "createdAt": "2026-10-20T09:19:58.111572Z",
+    "finishedAt": "2026-10-20T09:21:26.384303Z"
+  },
+  "release": {
+    "id": "rel-f6e4ed6d904c",
+    "tenantId": "t-acme",
+    "appId": "app-1788302808516967113",
+    "envId": "env-acme-test",
+    "imageId": "img-c8b688706242",
+    "imageDigest": "sha256:df2412bbb8574844ade6e9439fd6d48554797c5f2e3ba936890951679a707f27",
+    "strategy": "rolling",
+    "status": "succeeded",
+    "workloadId": "wl-1788328157391123468",
+    "previousImageId": "img-98601a3ea22f",
+    "isRollback": false,
+    "laneId": "default",
+    "sourceRunId": "run-9f6f1cbd2a62",
+    "createdAt": "2026-10-20T09:21:26.360591Z",
+    "createdBy": ""
+  },
+  "image": {
+    "id": "img-c8b688706242",
+    "tenantId": "t-acme",
+    "appId": "app-1788302808516967113",
+    "registry": "192.168.41.122:30050/app-1788302808516967113",
+    "tag": "feat-paas-shop-lane-experience-20261020-a3f80e63-f594089c-4283bab2",
+    "digest": "sha256:df2412bbb8574844ade6e9439fd6d48554797c5f2e3ba936890951679a707f27",
+    "source": "a3f80e632c03d0e74570063fd4ac67699e723076",
+    "branch": "feat/paas-shop-lane-experience-20261020",
+    "buildRunId": "build-f97a25eeed90",
+    "builtAt": "2026-10-20T09:21:25.600756Z",
+    "status": "ready"
+  },
+  "businessChecks": {
+    "/healthz": {
+      "status": 200,
+      "bytes": 2,
+      "body": "ok"
+    },
+    "/api/platform/lanes": {
+      "status": 200,
+      "bytes": 173
+    },
+    "/api/products": {
+      "status": 200,
+      "bytes": 833
+    }
+  },
+  "buildJob": {
+    "name": "paas-build-build-f97a25eeed90",
+    "namespace": "paas-t-acme",
+    "succeeded": 1,
+    "completionTime": "2026-10-20T09:21:23Z"
+  },
+  "workload": {
+    "id": "wl-1788328157391123468",
+    "generation": 1,
+    "observedGeneration": 1,
+    "image": "192.168.41.122:30050/app-1788302808516967113:feat-paas-shop-lane-experience-20261020-a3f80e63-f594089c-4283bab2",
+    "readyReplicas": 1,
+    "replicas": 1
+  },
+  "pods": [
+    {
+      "name": "wl-1788328157391123468-868496b647-zb4mj",
+      "containers": [
+        {
+          "imageID": "docker-pullable://192.168.41.122:30050/app-1788302808516967113@sha256:df2412bbb8574844ade6e9439fd6d48554797c5f2e3ba936890951679a707f27",
+          "ready": true
+        }
+      ]
+    }
+  ],
+  "nonTestWorkloads": [
+    {
+      "id": "wl-1788620334494660546",
+      "envId": "env-acme-prod-bj",
+      "imageUnchanged": true
+    },
+    {
+      "id": "wl-1788620335174579879",
+      "envId": "env-acme-prod-bj",
+      "imageUnchanged": true
+    },
+    {
+      "id": "wl-1788620335788028908",
+      "envId": "env-acme-prod-bj",
+      "imageUnchanged": true
+    },
+    {
+      "id": "wl-1788620336429563715",
+      "envId": "env-acme-prod-bj",
+      "imageUnchanged": true
+    },
+    {
+      "id": "wl-1788620337168569471",
+      "envId": "env-acme-prod-bj",
+      "imageUnchanged": true
+    },
+    {
+      "id": "wl-1788620337863926326",
+      "envId": "env-acme-prod-bj",
+      "imageUnchanged": true
+    },
+    {
+      "id": "wl-1788620338631345932",
+      "envId": "env-acme-prod-bj",
+      "imageUnchanged": true
+    },
+    {
+      "id": "wl-1788620545404930448",
+      "envId": "env-acme-prod-bj",
+      "imageUnchanged": true
+    },
+    {
+      "id": "wl-6bdf174875e5",
+      "envId": "env-acme-prod-bj",
+      "imageUnchanged": true
+    }
+  ]
+}

@@ -108,7 +108,7 @@
 
 <script lang="ts" setup>
 import { visibleTick } from '@/app/composables/useAdminPolling'
-import { ref, watch, onUnmounted } from 'vue'
+import { ref, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { tableTimeFormatter } from "@/lib/format"
 import {
@@ -193,7 +193,7 @@ const doScale = async () => {
   acting.value = true
   try {
     await scaleDataservice(props.id, scale.value)
-    ElMessage.success('已扩缩容')
+    ElMessage.success('伸缩指令已下发，副本数由控制器异步推进')
     await loadDetail()
     emit('refresh')
   } finally {

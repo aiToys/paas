@@ -16,6 +16,7 @@ export default {
     small: 'Small'
   },
   common: {
+    platformScope: 'Platform-level supply, not tenant-filtered',
     welcome: 'Welcome, {name}',
     action: {
       search: 'Search',
@@ -27,6 +28,7 @@ export default {
       batchDelete: 'Batch Delete',
       export: 'Export',
       refresh: 'Refresh',
+      more: 'More',
       confirm: 'Confirm',
       cancel: 'Cancel',
       close: 'Close',
@@ -242,8 +244,9 @@ export default {
     noQuickAction: 'No quick actions available',
     latestActivity: 'Latest Activity',
     noActivity: 'No activity',
-    visitTrend: 'Visit Trend',
-    roleDistribution: 'Role Distribution',
+    visitTrend: 'Platform Trend',
+    noTrendData: 'No history data yet (daily usage metering not collected; will appear once available)',
+    roleDistribution: 'Users by Tenant',
     lastLoginPrefix: 'Last login'
   },
   profile: {

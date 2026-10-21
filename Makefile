@@ -26,21 +26,26 @@ openapi: ## 启动 core 拉起 /openapi.json，生成前端 TS 类型（pnpm gen
 
 PG_DSN ?= postgres://paas:paas-dev@localhost:5432/paas?sslmode=disable
 
+# compose 命令兼容：docker compose 插件（v2）优先，回退 docker-compose（v1/独立二进制）。
+COMPOSE ?= $(shell docker compose version >/dev/null 2>&1 && echo "docker compose" || echo "docker-compose")
+
 test-pg: ## 运行 PostgreSQL 集成测试（需先 docker compose up postgres，或可用 PG）
-	docker compose up -d postgres
+	$(COMPOSE) up -d postgres
 	@echo "等待 postgres 就绪…"
-	@until docker compose exec -T postgres pg_isready -U paas >/dev/null 2>&1; do sleep 1; done
+	@until docker exec paas-postgres pg_isready -U paas >/dev/null 2>&1; do sleep 1; done
 	@echo "注：各 pg 包 resetSchema 共享同一 database，必须 -p 1 串行跑避免互清"
 	PAAS_TEST_PG_URL=$(PG_DSN) go test -tags=integration -p 1 -count=1 \
 	  ./internal/core/identity/pg/ ./internal/core/application/pg/ \
 	  ./internal/environment/pg/ ./internal/appconfig/pg/ ./internal/dataservice/pg/ \
 	  ./internal/workload/pg/ ./internal/devops/pg/ ./internal/devops/pipeline/ \
+	  ./internal/devops/change/pg/ ./internal/backup/pg/ ./internal/lane/pg/ \
+	  ./internal/service/pg/ ./internal/observability/pg/ \
 	  ./internal/governance/pg/ ./internal/configcenter/pg/ ./internal/billing/pg/ \
 	  ./internal/security/pg/ ./internal/maas/pg/ ./internal/messaging/pg/
 
 migrate: ## 拉起本地 PG（迁移在 core 启动时自动跑：PAAS_DB_URL 非空即触发）
-	docker compose up -d postgres
-	@until docker compose exec -T postgres pg_isready -U paas >/dev/null 2>&1; do sleep 1; done
+	$(COMPOSE) up -d postgres
+	@until docker exec paas-postgres pg_isready -U paas >/dev/null 2>&1; do sleep 1; done
 	@echo "PG 就绪：$(PG_DSN)"
 	@echo "启动 core 即自动迁移 + seed：PAAS_DB_URL=$(PG_DSN) make run"
 

@@ -26,7 +26,7 @@ export const BUILD_STATUS: Record<string, StatusMeta> = {
 export const RELEASE_STATUS: Record<string, StatusMeta> = {
   pending: def('发布中', 'warning'),
   deploying: def('部署中', 'warning'),
-  succeeded: def('已生效', 'success'),
+  succeeded: def('配置已更新', 'info'),
   failed: def('失败', 'danger'),
   'rolled-back': def('已回滚', 'info'),
 }

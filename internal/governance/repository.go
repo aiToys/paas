@@ -48,6 +48,9 @@ type RouteStore interface {
 	// SetRouteApplyStatus 回写数据面下发状态（ApplyRepo 装饰器专用；""=未下发/
 	// applied/failed）。applyErr 为失败原因（脱敏后）。跨租户 not found。
 	SetRouteApplyStatus(ctx context.Context, id, status, applyErr string) error
+	// ListAllRoutes 跨租户列出全部路由（admin 平台总览，不过滤 tenant，返回对象带
+	// TenantID + ApplyStatus/ApplyError/AppliedAt 下发证据链）。
+	ListAllRoutes(ctx context.Context) ([]Route, error)
 }
 
 // BreakerStore 熔断器仓储（治理四件套之熔断）。
@@ -63,4 +66,7 @@ type BreakerStore interface {
 	UpdateBreaker(ctx context.Context, b CircuitBreaker) (CircuitBreaker, error)
 	// DeleteBreaker 删除（跨租户 not found）。
 	DeleteBreaker(ctx context.Context, id string) error
+	// ListAllBreakers 跨租户列出全部熔断器（admin 平台总览，不过滤 tenant，返回对象
+	// 带 TenantID；State 与租户侧列表一致由 handler 调 EvaluateBreaker 即时填充）。
+	ListAllBreakers(ctx context.Context) ([]CircuitBreaker, error)
 }

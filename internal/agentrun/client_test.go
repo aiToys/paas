@@ -287,10 +287,11 @@ func TestListRunsOverview(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`[
 			{"name":"auto-review-shop-3","stage":"analyze","phase":"Succeeded","verdict":"pass","tokens":414719,"createdAt":"2026-10-12 15:09:18"},
-			{"name":"run-abc-0","stage":"implement","phase":"Succeeded","verdict":"pass","tokens":38638,
+			{"name":"run-abc123def456-0","stage":"implement","phase":"Succeeded","verdict":"pass","tokens":38638,
 			 "request":"` + strings.Repeat("需", 300) + `","summary":"改了 README"},
 			{"name":"auto-test-shop-4","stage":"implement","phase":"Failed","tokens":1000,"error":"boom"},
-			{"name":"run-xyz-0","stage":"analyze","phase":"Running","tokens":0}
+			{"name":"run-0f1e2d3c4b5a-0","stage":"analyze","phase":"Running","tokens":0},
+			{"name":"manually-triggered","stage":"implement","phase":"Running","tokens":0}
 		]`))
 	})
 	srv := httptest.NewServer(mux)
@@ -301,7 +302,7 @@ func TestListRunsOverview(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Overview: %v", err)
 	}
-	if ov.Stats.Total != 4 || ov.Stats.Succeeded != 2 || ov.Stats.Failed != 1 || ov.Stats.Running != 1 {
+	if ov.Stats.Total != 5 || ov.Stats.Succeeded != 2 || ov.Stats.Failed != 1 || ov.Stats.Running != 2 {
 		t.Fatalf("phase 汇总不符: %+v", ov.Stats)
 	}
 	if ov.Stats.TokensTotal != 454357 || ov.Stats.TokensAuto != 415719 || ov.Stats.TokensPaas != 38638 {
@@ -314,11 +315,14 @@ func TestListRunsOverview(t *testing.T) {
 	if byName["auto-review-shop-3"].Source != "auto-review" || byName["auto-test-shop-4"].Source != "auto-test" {
 		t.Fatalf("auto-* 归类不符: %+v", byName)
 	}
-	if byName["run-abc-0"].Source != "paas" {
+	if byName["run-abc123def456-0"].Source != "paas" {
 		t.Fatalf("paas 归类不符: %+v", byName["run-abc-0"])
 	}
+	if byName["manually-triggered"].Source != "other" {
+		t.Fatalf("非 paas 形态应归 other（不冒充 paas 归因），got %s", byName["manually-triggered"].Source)
+	}
 	// 截断：300 字中文需求 → 200 字 + 省略号（UTF-8 不切半字符）
-	if got := byName["run-abc-0"].Request; len([]rune(got)) != 201 || !strings.HasSuffix(got, "…") {
+	if got := byName["run-abc123def456-0"].Request; len([]rune(got)) != 201 || !strings.HasSuffix(got, "…") {
 		t.Fatalf("request 截断不符: %d runes", len([]rune(got)))
 	}
 	// 上游不可达 → 脱敏错误

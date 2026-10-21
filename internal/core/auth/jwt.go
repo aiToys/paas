@@ -42,6 +42,9 @@ type Claims struct {
 	Typ    string   `json:"typ"`    // access|refresh
 	Exp    int64    `json:"exp"`    // 过期 unix 秒
 	Iat    int64    `json:"iat"`    // 签发 unix 秒
+	// Ver 是签发时用户的会话代次（D5-3）。与当前 User.SessionVersion 不等即失效；
+	// 0 兼容存量 token（未携带代次时不做比对，等待自然过期 ≤15min）。
+	Ver int `json:"ver,omitempty"`
 }
 
 const jwtHeader = `{"alg":"HS256","typ":"JWT"}`

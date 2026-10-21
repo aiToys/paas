@@ -29,12 +29,34 @@ type Store struct {
 func NewStore(db *storagepg.DB) *Store { return &Store{db: db} }
 
 // ruleCols 与 observability.AlertRule 字段顺序对齐（scan 列顺序必须一致）。
-const ruleCols = `id, tenant_id, name, metric_name, target_type, target_id, operator, threshold, severity, enabled, webhook_url, updated_at`
+const ruleCols = `id, tenant_id, name, metric_name, target_type, target_id, operator, threshold, severity, enabled, webhook_url, channel_ids, updated_at`
 
 func scanRule(r storagepg.RowScanner, rule *observability.AlertRule) error {
-	return r.Scan(&rule.ID, &rule.TenantID, &rule.Name, &rule.MetricName, &rule.TargetType,
+	var raw []byte
+	if err := r.Scan(&rule.ID, &rule.TenantID, &rule.Name, &rule.MetricName, &rule.TargetType,
 		&rule.TargetID, &rule.Operator, &rule.Threshold, &rule.Severity,
-		&rule.Enabled, &rule.WebhookURL, &rule.UpdatedAt)
+		&rule.Enabled, &rule.WebhookURL, &raw, &rule.UpdatedAt); err != nil {
+		return err
+	}
+	rule.ChannelIDs = nil
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &rule.ChannelIDs); err != nil {
+			return fmt.Errorf("解析规则 %s 的 channel_ids 失败: %w", rule.ID, err)
+		}
+	}
+	return nil
+}
+
+// encodeChannelIDs 把渠道引用序列化为 jsonb（空切片存 NULL，避免 'null' 与 '[]' 两种空形态）。
+func encodeChannelIDs(ids []string) any {
+	if len(ids) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(ids)
+	if err != nil {
+		return nil // []string 序列化不会失败；兜底为 NULL 而非中断写入
+	}
+	return b
 }
 
 // ListAlertRules 列出当前租户的全部规则，按 id 排序。
@@ -85,9 +107,10 @@ func (s *Store) CreateAlertRule(ctx context.Context, rule observability.AlertRul
 	rule.TenantID = tid
 	rule.UpdatedAt = time.Now()
 	err = s.db.Pool().QueryRow(ctx,
-		`INSERT INTO alert_rules (`+ruleCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+		`INSERT INTO alert_rules (`+ruleCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
 		rule.ID, rule.TenantID, rule.Name, rule.MetricName, rule.TargetType, rule.TargetID,
-		rule.Operator, rule.Threshold, rule.Severity, rule.Enabled, rule.WebhookURL, rule.UpdatedAt,
+		rule.Operator, rule.Threshold, rule.Severity, rule.Enabled, rule.WebhookURL,
+		encodeChannelIDs(rule.ChannelIDs), rule.UpdatedAt,
 	).Scan()
 	if storagepg.IsUniqueViolation(err) {
 		return observability.AlertRule{}, fmt.Errorf("告警规则已存在: %s", rule.Name)
@@ -113,10 +136,11 @@ func (s *Store) UpdateAlertRule(ctx context.Context, id string, rule observabili
 	rule.UpdatedAt = time.Now()
 	tag, err := s.db.Pool().Exec(ctx,
 		`UPDATE alert_rules SET name=$3, metric_name=$4, target_type=$5, target_id=$6,
-		 operator=$7, threshold=$8, severity=$9, enabled=$10, webhook_url=$11, updated_at=$12
+		 operator=$7, threshold=$8, severity=$9, enabled=$10, webhook_url=$11, channel_ids=$12, updated_at=$13
 		 WHERE id=$1 AND tenant_id=$2`,
 		rule.ID, rule.TenantID, rule.Name, rule.MetricName, rule.TargetType, rule.TargetID,
-		rule.Operator, rule.Threshold, rule.Severity, rule.Enabled, rule.WebhookURL, rule.UpdatedAt,
+		rule.Operator, rule.Threshold, rule.Severity, rule.Enabled, rule.WebhookURL,
+		encodeChannelIDs(rule.ChannelIDs), rule.UpdatedAt,
 	)
 	if err != nil {
 		return observability.AlertRule{}, err
@@ -254,6 +278,33 @@ func (s *Store) ListAlertEvents(ctx context.Context, limit int) ([]observability
 			return nil, err
 		}
 		ev.TenantID = tid
+		out = append(out, ev)
+	}
+	return out, rows.Err()
+}
+
+// ListAllAlertEvents 跨租户列出全部告警历史（admin 平台总览，时间倒序；limit<=0 用默认上限）。
+// 与 ListAlertEvents 同源同列集，仅去掉 tenant 过滤、TenantID 从行内取。
+func (s *Store) ListAllAlertEvents(ctx context.Context, limit int) ([]observability.AlertEvent, error) {
+	if limit <= 0 || limit > alertEventKeepPerTenant {
+		limit = 200
+	}
+	rows, err := s.db.Pool().Query(ctx,
+		`SELECT tenant_id, id, rule_id, rule_name, target_type, target_id, metric_name, value, threshold,
+			operator, severity, status, fired_at, occurred_at
+		FROM alert_events ORDER BY occurred_at DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]observability.AlertEvent, 0)
+	for rows.Next() {
+		var ev observability.AlertEvent
+		if err = rows.Scan(&ev.TenantID, &ev.ID, &ev.RuleID, &ev.RuleName, &ev.TargetType, &ev.TargetID,
+			&ev.MetricName, &ev.Value, &ev.Threshold, &ev.Operator, &ev.Severity,
+			&ev.Status, &ev.FiredAt, &ev.OccurredAt); err != nil {
+			return nil, err
+		}
 		out = append(out, ev)
 	}
 	return out, rows.Err()
