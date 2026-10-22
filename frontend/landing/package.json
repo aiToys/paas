@@ -5,8 +5,9 @@
   "type": "module",
   "description": "PaaS 官网展示页：产品介绍、能力矩阵、快速开始",
   "scripts": {
+    "test": "node --test test/theme.test.mjs",
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
+    "build": "pnpm test && vue-tsc --noEmit && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
