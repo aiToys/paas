@@ -287,6 +287,41 @@ test('trace waterfall keeps every span, parent depth and peer/error diagnostics'
   assert.equal(traceErrSummary({ spans }), 'timeout')
 })
 
+test('legacy traffic coloring and downstream fallback do not prove the current instance lane', async () => {
+  const { spanInstanceLane, spanRoute, traceContext } = await import('../src/composables/useSpanTree.ts')
+  const sp = { tags: {
+    'paas.lane': 'preview',
+    'paas.requested_lane': 'preview',
+    'paas.resolved_lane': 'default',
+    'paas.route_reason': 'baseline-fallback',
+  } }
+  assert.equal(spanInstanceLane(sp), '')
+  assert.equal(spanRoute(sp).resolved, 'default')
+  assert.deepEqual(traceContext({ spans: [sp] }), {
+    env: '', trafficLanes: ['preview'], instanceLanes: [], resolvedLanes: ['default'], fallback: true,
+  })
+})
+
+test('trace context separates instance deployment from request coloring and downstream routing', async () => {
+  const { spanInstanceLane, traceContext } = await import('../src/composables/useSpanTree.ts')
+  const sp = { tags: {
+    'paas.env': 'test',
+    'paas.instance_lane': 'default',
+    'paas.lane': 'preview',
+    'paas.requested_lane': 'preview',
+    'paas.resolved_lane': 'preview',
+    'paas.route_reason': 'matched',
+  } }
+  assert.equal(spanInstanceLane(sp), 'default')
+  assert.deepEqual(traceContext({ spans: [sp, sp] }), {
+    env: 'test', trafficLanes: ['preview'], instanceLanes: ['default'], resolvedLanes: ['preview'], fallback: false,
+  })
+  assert.equal(spanInstanceLane({ tags: { 'paas.instance_lane': 'unknown' } }), '')
+  assert.deepEqual(traceContext({ spans: [] }), {
+    env: '', trafficLanes: [], instanceLanes: [], resolvedLanes: [], fallback: false,
+  })
+})
+
 test('playground refuses unsupported models through every entry and excludes incomplete history', async () => {
   const { playgroundMode, conversationHistory } = await import('../src/domain/playground.ts')
   assert.equal(playgroundMode({ id: 'image', capabilities: ['image'] }), 'unsupported')

@@ -177,13 +177,80 @@ export function spanKindBadge(kind?: string): { text: string; title: string } | 
   }
 }
 
-/**
- * spanServiceLabel：span 服务列文案——client span 显示「调用方 → 真实对端」。
- * 如 bff 的 redis client span 显示「bff → redis」，而非只显示调用方 bff（对端语义丢失）。
- */
-/** spanLane：取 span 的泳道（paas.lane 属性；无 = default 基线）。 */
+/** spanLane：流量泳道标记，可能被请求染色覆盖；不能据此判断实例部署泳道。 */
 export function spanLane(span: Span): string {
   return span.tags?.['paas.lane'] || ''
+}
+
+/** spanInstanceLane：仅采用独立的实例属性；存量数据缺失时保持未知。 */
+export function spanInstanceLane(span: Span): string {
+  const lane = span.tags?.['paas.instance_lane'] || ''
+  return lane === 'unknown' ? '' : lane
+}
+
+/** spanEnv：span 所在环境（paas.env 资源属性；存量 span 未上报为空）。 */
+export function spanEnv(span: Span): string {
+  return span.tags?.['paas.env'] || ''
+}
+
+/** LaneRoute：泳道路由决策（bff/网关转发 span 上报；requested 是判定存在的锚点）。 */
+export interface LaneRoute {
+  requested: string
+  resolved: string
+  reason: string // matched 命中 / baseline-fallback 基线回退 / static 静态 / unknown
+}
+
+/** spanRoute：提取泳道路由决策三元组；非路由 span（无 paas.requested_lane）返回 null。 */
+export function spanRoute(span: Span): LaneRoute | null {
+  const t = span.tags || {}
+  const req = t['paas.requested_lane']
+  if (!req) return null
+  return {
+    requested: req,
+    resolved: t['paas.resolved_lane'] || 'unknown',
+    reason: t['paas.route_reason'] || 'unknown',
+  }
+}
+
+/** TraceContext：trace 级环境/泳道聚合（详情头部上下文行真源）。 */
+export interface TraceContext {
+  env: string
+  trafficLanes: string[]
+  instanceLanes: string[]
+  resolvedLanes: string[] // 路由下游的命中泳道，不代表当前 span 所在实例
+  fallback: boolean // 是否含 baseline-fallback 回退
+}
+
+/** traceContext：分别聚合流量标记、实例部署与下游路由，避免把染色当作实际落点。 */
+export function traceContext(row: Trace): TraceContext {
+  let env = ''
+  const trafficLanes = new Set<string>()
+  const instanceLanes = new Set<string>()
+  const resolvedLanes = new Set<string>()
+  let fallback = false
+  for (const sp of row.spans || []) {
+    if (!env && spanEnv(sp)) env = spanEnv(sp)
+    const route = spanRoute(sp)
+    const traffic = route?.requested || spanLane(sp)
+    const instance = spanInstanceLane(sp)
+    if (traffic && traffic !== 'unknown') trafficLanes.add(traffic)
+    if (instance) instanceLanes.add(instance)
+    if (route?.resolved && route.resolved !== 'unknown') resolvedLanes.add(route.resolved)
+    if (route?.reason === 'baseline-fallback') fallback = true
+  }
+  const sorted = (lanes: Set<string>) => [...lanes].sort((a, b) => Number(a === 'default') - Number(b === 'default') || a.localeCompare(b))
+  return { env, trafficLanes: sorted(trafficLanes), instanceLanes: sorted(instanceLanes), resolvedLanes: sorted(resolvedLanes), fallback }
+}
+
+/** kindGlyph：span.kind 行内符号（⇅ 入口 / → 出站 / ◀ 生产 / ▶ 消费），比文字徽标省空间。 */
+export function kindGlyph(kind?: string): string {
+  switch (kind) {
+    case 'server': return '⇅'
+    case 'client': return '→'
+    case 'producer': return '◀'
+    case 'consumer': return '▶'
+    default: return ''
+  }
 }
 
 /** traceHasLane：trace 是否含泳道 span（图例仅在含泳道时显示）。 */
@@ -191,6 +258,7 @@ export function traceHasLane(row: Trace): boolean {
   return (row.spans || []).some((s) => spanLane(s))
 }
 
+/** spanServiceLabel：client span 显示「调用方 → 真实对端」。 */
 export function spanServiceLabel(sp: Span): string {
   if (sp.kind === 'client' && sp.peer) return `${sp.service} → ${sp.peer}`
   return sp.service

@@ -72,6 +72,10 @@ func Init(serviceName string) func() {
 			attribute.String("paas.tenant", envOr("PAAS_TENANT_ID", "default")),
 			attribute.String("paas.cluster", envOr("PAAS_CLUSTER_ID", "default")),
 			attribute.String("paas.lane", envOr("PAAS_LANE_ID", "default")),
+			// 独立保存实例部署泳道，避免 paas.lane 被请求染色覆盖后失去实例证据。
+			attribute.String("paas.instance_lane", envOr("PAAS_LANE_ID", "default")),
+			// 环境标识（setup.sh 注入 PAAS_ENV_TYPE）：test/prod 链路在 trace 视图一眼可分。
+			attribute.String("paas.env", envOr("PAAS_ENV_TYPE", "unknown")),
 		)),
 	)
 	otel.SetTracerProvider(tp)

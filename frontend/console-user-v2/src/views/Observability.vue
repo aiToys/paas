@@ -33,6 +33,11 @@ import {
   spanServiceLabel,
   spanKindBadge,
   traceErrSummary,
+  spanLane,
+  spanInstanceLane,
+  spanRoute,
+  traceContext,
+  kindGlyph,
   type Span,
   type Trace,
 } from '@/composables/useSpanTree'
@@ -1175,6 +1180,40 @@ const time = (iso: string) => new Date(iso).toLocaleString('zh-CN')
           </button>
           <div v-if="expanded === t.id" class="trace-body">
             <div class="trace-summary">
+              <span class="trace-ctx">
+                <em
+                  v-if="traceContext(t).env"
+                  class="ctx-chip env"
+                  :title="'环境（paas.env）：' + traceContext(t).env"
+                >{{ traceContext(t).env }}</em>
+                <em
+                  v-for="ln in traceContext(t).trafficLanes"
+                  :key="ln"
+                  class="ctx-chip"
+                  :class="{ base: ln === 'default' }"
+                  :title="'流量泳道标记，不代表实例落点：' + ln"
+                >流量：{{ ln === 'default' ? '基线' : ln }}</em>
+                <em
+                  v-for="ln in traceContext(t).instanceLanes"
+                  :key="'instance-' + ln"
+                  class="ctx-chip"
+                  :class="{ base: ln === 'default' }"
+                  :title="'实例部署泳道（paas.instance_lane）：' + ln"
+                >实例：{{ ln === 'default' ? '基线' : ln }}</em>
+                <em v-if="!traceContext(t).instanceLanes.length" class="ctx-chip base">实例泳道：未知</em>
+                <em
+                  v-for="ln in traceContext(t).resolvedLanes"
+                  :key="'resolved-' + ln"
+                  class="ctx-chip"
+                  :class="{ base: ln === 'default' }"
+                  :title="'路由到下游的命中泳道（paas.resolved_lane）：' + ln"
+                >路由命中：{{ ln === 'default' ? '基线' : ln }}</em>
+                <em
+                  v-if="traceContext(t).fallback"
+                  class="ctx-chip fb"
+                  title="部分调用请求了泳道但泳道内无该服务实例，已回退基线（baseline-fallback）"
+                >↩ 泳道回退</em>
+              </span>
               <span>{{ t.spans?.length || 0 }} 个 span ·
                 {{ new Set(t.spans?.map((s) => s.service)).size }} 个服务 ·
                 {{ (t.spans || []).filter((s) => s.isError).length }} 个错误
@@ -1201,10 +1240,35 @@ const time = (iso: string) => new Date(iso).toLocaleString('zh-CN')
               @click="selectedSpan = f.span"
             >
               <span
-                :style="{ paddingLeft: f.depth * 14 + 'px' }"
+                class="span-label"
+                :style="{ '--span-indent': `min(${f.depth * 16}px, 25%)` }"
                 :title="spanServiceLabel(f.span) + ' / ' + f.span.operation"
-                >{{ f.span.isError ? '错误 · ' : ''
+              >
+                <span v-if="f.depth" class="tree-guides" aria-hidden="true">
+                  <i v-for="n in f.depth" :key="n" class="tree-line" />
+                </span>
+                <em
+                  v-if="kindGlyph(f.span.kind)"
+                  class="kind-glyph"
+                  :title="spanKindBadge(f.span.kind)?.title"
+                >{{ kindGlyph(f.span.kind) }}</em>
+                <em
+                  v-if="spanLane(f.span) && spanLane(f.span) !== 'default'"
+                  class="lane-dot"
+                  :title="'流量泳道标记，不代表实例落点：' + spanLane(f.span)"
+                />
+                <em
+                  v-if="spanRoute(f.span)?.reason === 'baseline-fallback'"
+                  class="fb-mark"
+                  :title="
+                    '请求泳道 ' + spanRoute(f.span)!.requested +
+                    ' 但泳道内无该服务实例，已回退基线 ' +
+                    (spanRoute(f.span)!.resolved || 'default')
+                  "
+                >↩ 基线</em>
+                <span class="span-text">{{ f.span.isError ? '错误 · ' : ''
                 }}{{ spanServiceLabel(f.span) }} / {{ f.span.operation }}</span>
+              </span>
               <div class="span-track">
                 <i
                   :class="{ failed: f.span.isError }"
@@ -1240,6 +1304,23 @@ const time = (iso: string) => new Date(iso).toLocaleString('zh-CN')
                     '未上报'
                   }}
                 </dd>
+                <template v-if="spanRoute(selectedSpan)">
+                  <dt>泳道路由</dt>
+                  <dd>
+                    请求 <strong>{{ spanRoute(selectedSpan)!.requested }}</strong>
+                    → 命中 <strong>{{ spanRoute(selectedSpan)!.resolved }}</strong>（{{ ({
+                      matched: '泳道命中',
+                      'baseline-fallback': '泳道无该服务实例，回退基线',
+                      static: '静态模式',
+                      unknown: '未知',
+                    } as Record<string, string>)[spanRoute(selectedSpan)!.reason] ||
+                      spanRoute(selectedSpan)!.reason }}）
+                  </dd>
+                </template>
+                <dt v-if="spanLane(selectedSpan)">流量泳道标记</dt>
+                <dd v-if="spanLane(selectedSpan)">{{ spanLane(selectedSpan) }}</dd>
+                <dt>实例部署泳道</dt>
+                <dd>{{ spanInstanceLane(selectedSpan) || '未知（未上报实例泳道）' }}</dd>
                 <dt>SpanID / ParentID</dt>
                 <dd>
                   {{ selectedSpan.id }} /
@@ -1915,11 +1996,93 @@ input[type='checkbox'] {
   font-size: 11px;
   margin: 8px 0;
 }
-.span-line > span {
-  width: 38%;
+.span-label {
+  flex: 0 0 38%;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+/* 树线集中在单个缩进区，不再叠加 padding；最多占标签宽度的 25%。 */
+.tree-guides {
+  flex: none;
+  width: var(--span-indent, 0px);
+  height: 14px;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  pointer-events: none;
+}
+.tree-line {
+  flex: none;
+  width: 16px;
+  height: 14px;
+  border-right: 1px dashed var(--border-strong);
+  opacity: 0.45;
+}
+.span-text {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* span.kind 行内符号（⇅ 入口 / → 出站）：低存在感，悬停有完整语义。 */
+.kind-glyph {
+  flex: none;
+  width: 14px;
+  text-align: center;
+  font-style: normal;
+  color: var(--text-faint);
+}
+/* 泳道色点：非 default 泳道的 span 才点亮（基线不标，减少噪音）。 */
+.lane-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--chart-violet);
+}
+/* 该 span 发生了泳道回退（route_reason=baseline-fallback）的小标记。 */
+.fb-mark {
+  flex: none;
+  font-style: normal;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+/* trace 头部上下文 chips：环境（teal）/ 泳道（violet）/ 基线（灰）/ 回退（warning）。 */
+.trace-ctx {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.ctx-chip {
+  font-style: normal;
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 3px 9px;
+  border-radius: 999px;
+  color: var(--chart-violet);
+  background: rgba(193, 162, 255, 0.13);
+  border: 1px solid rgba(193, 162, 255, 0.32);
+}
+.ctx-chip.env {
+  color: var(--chart-teal);
+  background: rgba(92, 213, 186, 0.11);
+  border-color: rgba(92, 213, 186, 0.3);
+}
+.ctx-chip.base {
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border-color: var(--border);
+}
+.ctx-chip.fb {
+  color: var(--warning);
+  background: var(--warning-soft);
+  border-color: transparent;
 }
 .span-track {
   position: relative;
