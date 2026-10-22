@@ -94,7 +94,9 @@ func TestBuiltinInstallIsTenantIsolatedAndPreservesEdits(t *testing.T) {
 		t.Fatalf("模板来源不完整：%+v", a)
 	}
 	a.Instructions = "用户修改的版本"
-	repo.Update(tenant.WithTenant(context.Background(), "a"), a)
+	if _, err := repo.Update(tenant.WithTenant(context.Background(), "a"), a); err != nil {
+		t.Fatal(err)
+	}
 	w = call(h, "a", "POST", path, "")
 	if w.Code != 200 || decode(t, w).Instructions != a.Instructions {
 		t.Fatalf("重装覆盖用户编辑：%s", w.Body.String())

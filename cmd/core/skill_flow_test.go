@@ -29,7 +29,11 @@ func TestSkillTemplateBindingLifecycle(t *testing.T) {
 		defer cleanup()
 	}
 	srv := buildHTTPServer(ctx, gateway.New(), &gateway.Meter{}, stores, k8sAppliers{}, metrics.NewRegistry(), nil)
-	defer srv.Close()
+	t.Cleanup(func() {
+		if err := srv.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	request := func(key, method, path, body string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(method, path, strings.NewReader(body))
 		r.Header.Set("Authorization", "Bearer "+key)

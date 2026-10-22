@@ -57,6 +57,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import StatePanel from '@/components/StatePanel.vue'
 import TablePager from '@/components/TablePager.vue'
 import MetricChart from '@/components/MetricChart.vue'
+import SkillTraceEvidence from '@/components/SkillTraceEvidence.vue'
 const route = useRoute(),
   router = useRouter(),
   envStore = useEnvStore()
@@ -1224,6 +1225,10 @@ const time = (iso: string) => new Date(iso).toLocaleString('zh-CN')
             <p v-if="traceErrSummary(t)" class="trace-error" role="alert">
               {{ traceErrSummary(t) }}
             </p>
+            <SkillTraceEvidence
+              :spans="t.spans || []"
+              @select="selectedSpan = (t.spans || []).find((span) => span.id === $event)"
+            />
             <p v-if="!t.spans?.length" class="data-note">
               此记录没有
               span；请检查采样、导出与保留策略。平台无法补回未上报的调用。

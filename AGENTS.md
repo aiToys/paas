@@ -891,6 +891,7 @@ internal/dataservice/  领域(DataService + 6 Kind 常量 + KindMeta 表单元�
 - `GET /api/skills/templates` 区分 `instructions`（平台 Agent 指令）与 `external-agent`（外部客户端技能）；只有前者可经 `/templates/{slug}/install` 复制。稳定租户 ID 使重复安装保留已有编辑；`installedFrom` 保存版本与内容 hash，不能从创建请求伪造来源。后者经 `/download` 返回标准 Markdown，不在控制面执行脚本。
 - Skill 创建缺省启用，显式 `enabled=false` 保留；memory/PG 仓储尊重输入状态，memory 锁内检查 ID 占用，不能跨租户覆盖。`/{id}/references` 由装配层查询当前租户 Agent；引用失败时阻断删除/停用，已知引用返回 409。该预检不等于跨 Store 的并发事务约束。
 - PaasShop 的业务技能源留在 `examples/paas-shop/skills/`。`install_ai.py` 是两个 setup 入口共用的结构化安装器；日常 `shop-agent` 只绑定商品搜索/详情、订单查询工具，退款写操作不由此入口执行。安装器保留 Skill 指令及 Agent 模型/Prompt/KB，管理其演示工具绑定为只读。场景检查点在 `scenarios.json`，不把初始化成功当作真实模型/业务验收。
+- Skill 运行证据用 `paas.skill.load` 自定义 INTERNAL 子 Span 记录实际指令读取，正文 SHA-256 与模板来源版本分开；不记录正文或任意来源文本。`paas.ai.context.ready` 仅代表上下文准备完成。新版链路页按历史 Span 展示证据，不从当前绑定回填；直接指令注入不冒充专门加载工具的 `execute_tool`。字段契约见 `docs/reviews/2026-10-22-skill-tracing.md`。
 - 回归包括 Skill memory/handler 并发与隔离、独立 schema 的 Skill PG 集成、Python 本机 fake HTTP 安装测试。`make test-pg` 和 CI 已加入 Skill PG 路径；其他 AI 模块 PG 覆盖、全局安装事务与运行证据继续按审计报告完善。
 
 ## 新版控制台组织方式（2026-10-16）

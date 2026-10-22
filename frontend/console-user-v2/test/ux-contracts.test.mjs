@@ -8,6 +8,47 @@ import {
 } from '../src/navigation/index.ts'
 import { baselineRunsFor } from '../src/domain/runtime.ts'
 import { instanceState, runtimeObservationLink } from '../src/domain/serviceRuntime.ts'
+import { skillLoadEvidence } from '../src/domain/skillTrace.ts'
+
+test('Skill evidence follows the recorded Agent parent and distinguishes template origin from content revision', () => {
+  const spans = [
+    { id: 'agent-a', tags: { 'gen_ai.agent.name': '客服 A', 'paas.ai.context.ready': 'true' } },
+    { id: 'agent-b', tags: { 'gen_ai.agent.name': '客服 B', 'paas.ai.context.ready': 'false' } },
+    { id: 'load-a', parentId: 'agent-a', operation: 'paas.skill.load', tags: {
+      'paas.skill.load.mode': 'instruction_injection', 'paas.skill.load.status': 'loaded',
+      'paas.skill.id': 's1', 'gen_ai.skill.name': '商品导购',
+      'paas.skill.instructions.sha256': 'a'.repeat(64),
+      'paas.skill.template.version': '1.0.0', 'paas.skill.template.sha256': 'b'.repeat(64),
+    } },
+    { id: 'load-b', parentId: 'agent-b', operation: 'paas.skill.load', isError: true, tags: {
+      'paas.skill.load.mode': 'instruction_injection', 'paas.skill.load.status': 'failed',
+      'paas.skill.id': 'missing', 'error.type': 'skill_not_found',
+    } },
+  ]
+  const [loaded, failed] = skillLoadEvidence(spans)
+  assert.equal(loaded.agent, '客服 A')
+  assert.equal(loaded.contextReady, true)
+  assert.equal(loaded.instructionsHash, 'a'.repeat(64))
+  assert.equal(loaded.templateHash, 'b'.repeat(64))
+  assert.equal(loaded.templateVersion, '1.0.0')
+  assert.equal(failed.agent, '客服 B')
+  assert.equal(failed.contextReady, false)
+  assert.equal(failed.status, 'failed')
+  assert.equal(failed.instructionsHash, '')
+  assert.equal(failed.error, 'skill_not_found')
+})
+
+test('old or incomplete traces never acquire inferred Skill evidence or a ready context', () => {
+  assert.deepEqual(skillLoadEvidence([{ id: 'old', operation: 'agent.run', tags: {} }]), [])
+  const [item] = skillLoadEvidence([{ id: 'load', parentId: 'dropped', operation: 'paas.skill.load', tags: {
+    'paas.skill.load.mode': 'instruction_injection', 'paas.skill.id': 's1',
+    'paas.skill.instructions.sha256': 'invalid',
+  } }])
+  assert.equal(item.contextReady, undefined)
+  assert.equal(item.status, 'unknown')
+  assert.equal(item.instructionsHash, '')
+  assert.equal(item.templateVersion, '')
+})
 
 test('Pod Running does not imply ready, and 0/0 or missing readiness stays unknown', () => {
   const pod = { name: 'api', status: 'Running', restarts: 0, ready: '0/0' }

@@ -3,9 +3,10 @@ package main
 import (
 	"context"
 	"errors"
+	"testing"
+
 	"github.com/aitoys/paas/internal/observability"
 	"github.com/aitoys/paas/pkg/tenant"
-	"testing"
 )
 
 type adminAlertsStub struct {

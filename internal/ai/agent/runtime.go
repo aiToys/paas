@@ -117,18 +117,16 @@ func (r *Runtime) buildSystem(ctx context.Context, a Agent, msgs []provider.Mess
 		}
 		sys = p.Template
 	}
-	if len(a.Skills) > 0 && r.skills == nil {
-		return "", dependencyErrorf("技能服务未接入")
-	}
-	for _, sid := range a.Skills {
-		sk, err := r.skills.Get(ctx, sid)
-		if err != nil || !sk.Enabled {
-			return "", dependencyErrorf("引用的技能不可用或已禁用，请修复依赖后重试")
+	for i, sid := range a.Skills {
+		instructions, err := r.loadSkillInstructions(ctx, a, sid)
+		if err != nil {
+			return "", err
 		}
 		if sys != "" {
 			sys += "\n\n"
 		}
-		sys += "# 能力：" + sk.Name + "\n" + sk.Instructions
+		sys += instructions
+		trace.SpanFromContext(ctx).SetAttributes(attribute.Int("paas.ai.skills.loaded_count", i+1))
 	}
 	if len(a.KnowledgeBases) > 0 {
 		if r.kb == nil {
@@ -287,6 +285,7 @@ func (r *Runtime) RunConv(ctx context.Context, agentID, conversationID string, m
 			attribute.String("gen_ai.system", "paas"),
 			attribute.String("gen_ai.request.model", a.Model),
 			attribute.String("gen_ai.agent.id", agentID),
+			attribute.String("gen_ai.agent.name", a.Name),
 		),
 	)
 	defer span.End()
@@ -356,6 +355,12 @@ func totalChars(msgs []provider.Message) int {
 // runLoop 跑多轮工具循环（抽离自 Run 便于用 fake provider 单测）。
 // p 为底层 LLM Provider；a.MaxSteps 为轮数上限。
 func (r *Runtime) runLoop(ctx context.Context, p provider.Provider, a Agent, msgs []provider.Message, onChunk func(provider.Chunk)) error {
+	runSpan := trace.SpanFromContext(ctx)
+	runSpan.SetAttributes(
+		attribute.Int("paas.ai.skills.requested_count", len(a.Skills)),
+		attribute.Int("paas.ai.skills.loaded_count", 0),
+		attribute.Bool("paas.ai.context.ready", false),
+	)
 	// 组装对话上下文：system + 用户消息。
 	sys, err := r.buildSystem(ctx, a, msgs)
 	if err != nil {
@@ -372,6 +377,7 @@ func (r *Runtime) runLoop(ctx context.Context, p provider.Provider, a Agent, msg
 	if err != nil {
 		return err
 	}
+	runSpan.SetAttributes(attribute.Bool("paas.ai.context.ready", true))
 
 	for step := 1; step <= a.MaxSteps; step++ {
 		req := provider.ChatRequest{Model: a.Model, Messages: conv, Stream: true}
@@ -421,8 +427,14 @@ func (r *Runtime) runLoop(ctx context.Context, p provider.Provider, a Agent, msg
 				onChunk(provider.Chunk{Reasoning: fmt.Sprintf("\n🔧 调用工具 %s(%s)\n", tc.Function.Name, tc.Function.Arguments)})
 				// gen_ai tool span：标记一次工具调用（trace 树 agent.run → chat → tool.call）。
 				toolCtx, toolSpan := tracer.Start(ctx, "tool.call",
-					trace.WithAttributes(attribute.String("gen_ai.tool.name", tc.Function.Name)),
+					trace.WithAttributes(
+						attribute.String("gen_ai.operation.name", "execute_tool"),
+						attribute.String("gen_ai.tool.name", tc.Function.Name),
+					),
 				)
+				if tc.ID != "" {
+					toolSpan.SetAttributes(attribute.String("gen_ai.tool.call.id", tc.ID))
+				}
 				if res, err := inv(toolCtx, tc.Function.Arguments); err == nil {
 					result = res
 				} else {

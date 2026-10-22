@@ -84,6 +84,7 @@ declare module 'vue' {
     ServiceCreateDialog: typeof import('./src/components/ServiceCreateDialog.vue')['default']
     ServiceRunDrawer: typeof import('./src/components/ServiceRunDrawer.vue')['default']
     SharedConfigEditor: typeof import('./src/components/SharedConfigEditor.vue')['default']
+    SkillTraceEvidence: typeof import('./src/components/SkillTraceEvidence.vue')['default']
     StatePanel: typeof import('./src/components/StatePanel.vue')['default']
     TablePager: typeof import('./src/components/TablePager.vue')['default']
     TerminalPanel: typeof import('./src/components/TerminalPanel.vue')['default']

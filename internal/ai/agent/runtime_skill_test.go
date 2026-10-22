@@ -42,7 +42,7 @@ func (s *stubSkillRepo) Update(context.Context, skill.Skill) (skill.Skill, error
 func (s *stubSkillRepo) Delete(context.Context, string) error                     { panic("unused") }
 func (s *stubSkillRepo) SkillsCount(context.Context) (int, error)                 { panic("unused") }
 
-// Skill 指令注入 system prompt：启用的 skill 内容出现，禁用/缺失的静默跳过。
+// Skill 指令注入 system prompt：只注入绑定的启用项；缺失/停用的阻断分支另测。
 func TestBuildSystemInjectsSkills(t *testing.T) {
 	rt := &Runtime{skills: &stubSkillRepo{m: map[string]skill.Skill{
 		"sk-on":  {ID: "sk-on", Name: "写周报", Instructions: "每周五输出 markdown 周报", Enabled: true},
