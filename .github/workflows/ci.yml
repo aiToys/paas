@@ -18,6 +18,10 @@ jobs:
         run: mkdir -p internal/web/dist && echo placeholder > internal/web/dist/index.html
       - run: go mod download
       - run: go test ./... -race -count=1
+      - name: Skill 演示安装器回归（仅本机 fake HTTP）
+        env:
+          PYTHONPYCACHEPREFIX: ${{ github.workspace }}/tmp/skill-python-cache
+        run: python3 -m unittest discover -s examples/paas-shop -p test_install_ai.py -v
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -70,7 +74,7 @@ jobs:
             ./internal/core/identity/pg/ ./internal/core/application/pg/ \
             ./internal/environment/pg/ ./internal/appconfig/pg/ ./internal/dataservice/pg/ \
             ./internal/workload/pg/ ./internal/devops/pg/ ./internal/governance/pg/ \
-            ./internal/configcenter/pg/ ./internal/billing/pg/ ./internal/security/pg/
+            ./internal/configcenter/pg/ ./internal/billing/pg/ ./internal/security/pg/ ./internal/ai/skill/pg/
   build:
     runs-on: ubuntu-latest
     needs: [test, lint, test-pg]

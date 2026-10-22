@@ -1,6 +1,7 @@
 package skill
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -27,6 +28,14 @@ const (
 type Handler struct {
 	repo      Repository
 	Authorize func(r *http.Request, perm string) bool
+	// References 由装配层注入，查询本租户 Agent，不依赖 agent 包。
+	References func(context.Context, string) ([]Reference, error)
+}
+
+// Reference 是引用 Skill 的 Agent 摘要。
+type Reference struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 func NewHandler(repo Repository) *Handler { return &Handler{repo: repo} }
@@ -43,6 +52,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	path := strings.TrimRight(r.URL.Path, "/")
 	switch {
+	case path == "/api/skills/templates" || strings.HasPrefix(path, "/api/skills/templates/"):
+		h.serveTemplates(w, r, path)
 	case path == "/api/skills":
 		h.serveCollection(w, r)
 	case strings.HasPrefix(path, "/api/skills/"):
@@ -69,11 +80,13 @@ func (h *Handler) serveCollection(w http.ResponseWriter, r *http.Request) {
 		if !h.allow(w, r, PermSkillWrite) {
 			return
 		}
-		var s Skill
+		// 缺省启用，显式 false 必须保留；仓储不再覆盖调用者的状态。
+		s := Skill{Enabled: true}
 		if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
 			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
+		s.InstalledFrom = "" // 来源由模板安装/广场 fork 写入，不接受自建请求伪造。
 		saved, err := h.repo.Create(r.Context(), s)
 		if err != nil {
 			h.writeErr(w, err)
@@ -93,6 +106,23 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := rest
+	if strings.HasSuffix(rest, "/references") {
+		if r.Method != http.MethodGet {
+			httputil.WriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		if !h.allow(w, r, PermSkillRead) {
+			return
+		}
+		id = strings.TrimSuffix(rest, "/references")
+		refs, err := h.references(r.Context(), id)
+		if err != nil {
+			h.writeErr(w, err)
+			return
+		}
+		httputil.WriteData(w, refs)
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		if !h.allow(w, r, PermSkillRead) {
@@ -114,6 +144,18 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.ID = id
+		old, err := h.repo.Get(r.Context(), id)
+		if err != nil {
+			h.writeErr(w, err)
+			return
+		}
+		s.InstalledFrom = old.InstalledFrom
+		if old.Enabled && !s.Enabled {
+			if err := h.checkUnused(r.Context(), id); err != nil {
+				h.writeErr(w, err)
+				return
+			}
+		}
 		saved, err := h.repo.Update(r.Context(), s)
 		if err != nil {
 			h.writeErr(w, err)
@@ -122,6 +164,10 @@ func (h *Handler) serveItem(w http.ResponseWriter, r *http.Request) {
 		httputil.WriteData(w, saved)
 	case http.MethodDelete:
 		if !h.allow(w, r, PermSkillWrite) {
+			return
+		}
+		if err := h.checkUnused(r.Context(), id); err != nil {
+			h.writeErr(w, err)
 			return
 		}
 		if err := h.repo.Delete(r.Context(), id); err != nil {
@@ -141,9 +187,41 @@ func (h *Handler) writeErr(w http.ResponseWriter, err error) {
 		httputil.WriteError(w, http.StatusNotFound, err.Error())
 	case errors.Is(err, ErrSkillExists):
 		httputil.WriteError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, ErrSkillInUse):
+		httputil.WriteError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, ErrReferencesUnavailable):
+		httputil.WriteError(w, http.StatusServiceUnavailable, err.Error())
 	case isFieldErr(err):
 		httputil.WriteError(w, http.StatusBadRequest, err.Error())
 	default:
 		httputil.WriteServiceError(w, http.StatusInternalServerError, err)
 	}
+}
+
+func (h *Handler) references(ctx context.Context, id string) ([]Reference, error) {
+	if _, err := h.repo.Get(ctx, id); err != nil {
+		return nil, err
+	}
+	if h.References == nil {
+		return nil, ErrReferencesUnavailable
+	}
+	refs, err := h.References(ctx, id)
+	if err != nil {
+		return nil, ErrReferencesUnavailable
+	}
+	if refs == nil {
+		refs = []Reference{}
+	}
+	return refs, nil
+}
+
+func (h *Handler) checkUnused(ctx context.Context, id string) error {
+	refs, err := h.references(ctx, id)
+	if err != nil {
+		return err
+	}
+	if len(refs) > 0 {
+		return ErrSkillInUse
+	}
+	return nil
 }

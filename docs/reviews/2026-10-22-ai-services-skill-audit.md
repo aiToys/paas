@@ -1,5 +1,7 @@
 # AI 服务与 Skill 现状审计及完善建议
 
+> 本报告记录审计时点的状态。后续模板、演示、对外技能及基础修复的实现和验证见 [Skill 首批交付](./2026-10-22-skill-foundation-delivery.md)。
+
 日期：2026-10-22。基线：`console-v2`，HEAD `0cfc165`。这是源码审计与建议，未修改业务实现、未提交、未部署。
 
 审计前已存在的修改：`examples/paas-shop/internal/observ/observ.go`、`frontend/console-user-v2/src/composables/useSpanTree.ts`、`frontend/console-user-v2/src/views/Observability.vue`。本次保留这些修改。

@@ -14,6 +14,7 @@ export default [
       'node_modules/**',
       'coverage/**',
       'src/api/types.gen.ts',
+      'src/api/skills.gen.ts',
       // 防闪烁脚本运行在 <head> 内联，需最小化且无模块体系
       'public/theme-init.js'
     ]
@@ -62,7 +63,7 @@ export default [
   },
   // 根目录配置文件运行在 Node 环境
   {
-    files: ['*.config.ts', '*.config.js', 'vite.config.ts'],
+    files: ['*.config.ts', '*.config.js', 'vite.config.ts', 'scripts/*.mjs'],
     languageOptions: {
       globals: { ...globals.node }
     }

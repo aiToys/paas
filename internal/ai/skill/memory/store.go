@@ -89,9 +89,11 @@ func (s *Store) Create(ctx context.Context, in skill.Skill) (skill.Skill, error)
 	in.TenantID = tid
 	now := time.Now()
 	in.CreatedAt, in.UpdatedAt = now, now
-	in.Enabled = true
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, exists := s.skills[in.ID]; exists {
+		return skill.Skill{}, skill.ErrSkillExists
+	}
 	for _, sk := range s.skills {
 		if sk.TenantID == tid && sk.Name == in.Name {
 			return skill.Skill{}, skill.ErrSkillExists

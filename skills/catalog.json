@@ -1,0 +1,8 @@
+[
+  {"slug":"knowledge-answer","name":"知识库问答","category":"service","useCases":"绑定已索引知识库的客服或文档 Agent。需要在 Agent 中另行绑定知识库。","examples":"输入：保修多久？\n检查：依据已检索保修条款回答；无条款时说明缺少依据。"},
+  {"slug":"structured-answer","name":"结构化结果","category":"data","useCases":"将 Agent 的有依据结论整理为摘要、证据和待确认项。","examples":"输入：整理本次订单查询结果。\n检查：列出真实结果、来源和未知项，不补造字段。"},
+  {"slug":"incident-summary","name":"故障证据整理","category":"general","useCases":"整理用户提供的日志与链路证据；本技能本身没有访问集群的工具。","examples":"输入：一段超时日志和 TraceID。\n检查：区分观测事实、推测及下一步检查；不宣称已重启或已恢复。"},
+  {"slug":"onepaas-get-started","name":"OnePaaS 接入","category":"coding","useCases":"外部 Agent 接入已授权的 OnePaaS 实例。","examples":"输入：检查我的平台连接，列出可见应用。"},
+  {"slug":"onepaas-app-delivery","name":"OnePaaS 应用交付","category":"coding","useCases":"外部 Agent 检查应用交付依赖并执行已授权的流水线任务。","examples":"输入：预演指定应用测试环境的流水线。"},
+  {"slug":"onepaas-runtime-diagnose","name":"OnePaaS 运行排障","category":"coding","useCases":"外部 Agent 基于实际工作负载、日志和链路排障。","examples":"输入：调查指定应用的错误，给出证据与下一步。"}
+]

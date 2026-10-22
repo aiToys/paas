@@ -12,6 +12,9 @@
 #   §7 知识库 + 文档上传                   [能力 3]
 #   §8 Prompt + Tool + Agent              [能力 4]
 set -uo pipefail
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+TASK_TMP="$PROJECT_ROOT/tmp/paas-shop-resources"
+mkdir -p "$TASK_TMP"
 H="Authorization: Bearer ${PAAS_TOKEN:?请设置 PAAS_TOKEN（API Key，dev 默认 sk-acme-admin）}"
 B="${PAAS_BASE:?请设置 PAAS_BASE（core 地址，dev 默认 http://paas.k8s.dd）}"
 APP="paas-shop"
@@ -81,10 +84,11 @@ content='''# PaasShop 常见问题
 ## 发票
 支持电子发票和纸质发票，下单时可备注。
 '''
-open('/tmp/shop-faq.md','w').write(content)
-"
+import sys
+open(sys.argv[1],'w').write(content)
+" "$TASK_TMP/shop-faq.md"
   # 7.4 上传文档（multipart，平台异步解析 + embedding + 入库）
-  DOC_ID=$(curl -s -X POST -H "$H" -F "file=@/tmp/shop-faq.md" -F "name=shop-faq.md" "$B/api/knowledgebases/$KB_ID/documents" \
+  DOC_ID=$(curl -s -X POST -H "$H" -F "file=@$TASK_TMP/shop-faq.md" -F "name=shop-faq.md" "$B/api/knowledgebases/$KB_ID/documents" \
     | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',{});print(d.get('id',''))" 2>/dev/null)
   echo "  doc: $DOC_ID"
   # 7.5 轮询文档状态到 indexed（embedding 异步）
@@ -102,53 +106,13 @@ fi
 
 echo "=== §7 知识库资源创建完成 ==="
 
-echo "=== §8 AI Agent + MCP 工具（平台 Agent runtime 多轮 function calling）==="
-# 8.1 Prompt：无占位符人设（平台不渲染模板变量，问题描述由 user 消息携带）；已存在则 PUT 更新，否则 POST 创建
-PROMPT_ID=$(curl -s -H "$H" "$B/api/prompts" | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',[]);items=d if isinstance(d,list) else d.get('items',[]);print(next((p['id'] for p in items if p.get('name')=='shop-cs'),''))" 2>/dev/null)
-PROMPT_BODY='{"name":"shop-cs","template":"你是 PaasShop 智能客服，友好专业。规则：\n1. 回答商品、订单、售后相关问题\n2. 找商品/推荐/比价用 search_products；已知商品 ID 查详情用 query_product；查订单用 query_order；退款用 refund_order\n3. 不确定时诚实告知，不编造\n4. 回答简洁","variables":[]}'
-if [ -n "$PROMPT_ID" ]; then
-  curl -s -X PUT -H "$H" -H "Content-Type: application/json" "$B/api/prompts/$PROMPT_ID" -d "$PROMPT_BODY" >/dev/null && echo "  prompt updated: $PROMPT_ID"
-else
-  curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/prompts" -d "$PROMPT_BODY" \
-    | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',{});print('  prompt:',d.get('id'))" 2>/dev/null
-fi
-
-# 8.2 4 个 Tool 实体（已验证 runtime.go:141-146 按 mt.Name == t.Name 匹配——
-#     Tool 实体 name 必须与 MCP server 工具名逐字一致，不能加 shop- 前缀）
-MCP_URL="http://paas-shop-mcp.paas-t-acme.svc.cluster.local"
-TOOL_IDS=""
-for t in \
-  "query_product:查商品详情（按商品 ID 返回名称/价格/库存）" \
-  "search_products:搜索商品（按关键字/分类，用于找商品/推荐/比价）" \
-  "query_order:查询订单状态（按订单号返回详情）" \
-  "refund_order:对订单发起退款" ; do
-  TNAME="${t%%:*}"; TDESC="${t#*:}"
-  TID=$(curl -s -H "$H" "$B/api/tools" | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',[]);items=d if isinstance(d,list) else d.get('items',[]);print(next((x['id'] for x in items if x.get('name')=='$TNAME'),''))" 2>/dev/null)
-  BODY="{\"name\":\"$TNAME\",\"description\":\"$TDESC\",\"type\":\"mcp\",\"config\":{\"serverURL\":\"$MCP_URL\",\"apiKey\":\"\"},\"enabled\":true}"
-  if [ -n "$TID" ]; then
-    curl -s -X PUT -H "$H" -H "Content-Type: application/json" "$B/api/tools/$TID" -d "$BODY" >/dev/null
-  else
-    TID=$(curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/tools" -d "$BODY" | python3 -c "import sys,json;print(json.load(sys.stdin).get('data',{}).get('id',''))" 2>/dev/null)
-  fi
-  echo "  tool: $TNAME -> $TID"
-  TOOL_IDS="$TOOL_IDS \"$TID\""
-done
-# 旧 shop-tools 单实体删除（实体名 shop-tools 匹配不到 MCP 工具，已废）
-OLD_TOOL=$(curl -s -H "$H" "$B/api/tools" | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',[]);items=d if isinstance(d,list) else d.get('items',[]);print(next((x['id'] for x in items if x.get('name')=='shop-tools'),''))" 2>/dev/null)
-[ -n "$OLD_TOOL" ] && curl -s -X DELETE -H "$H" "$B/api/tools/$OLD_TOOL" >/dev/null && echo "  deleted old tool: shop-tools"
-
-# 8.3 shop-agent：已存在则 PUT 更新 tools，否则 POST 创建（虚拟模型 model=agent:{id} 经平台 runtime 推理）
-AGENT_ID=$(curl -s -H "$H" "$B/api/agents" | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',[]);items=d if isinstance(d,list) else d.get('items',[]);print(next((a['id'] for a in items if a.get('name')=='shop-agent'),''))" 2>/dev/null)
-KB_ARG="[]"; [ -n "$KB_ID" ] && KB_ARG="[\"$KB_ID\"]"
-AGENT_BODY="{\"name\":\"shop-agent\",\"description\":\"PaasShop 商品客服 Agent（RAG+MCP 工具）\",\"model\":\"glm-5.2\",\"promptRef\":\"shop-cs\",\"tools\":[$TOOL_IDS],\"knowledgeBases\":$KB_ARG,\"maxSteps\":5,\"enabled\":true}"
-if [ -n "$AGENT_ID" ]; then
-  curl -s -X PUT -H "$H" -H "Content-Type: application/json" "$B/api/agents/$AGENT_ID" -d "$AGENT_BODY" >/dev/null && echo "  agent updated: $AGENT_ID"
-else
-  AGENT_ID=$(curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/agents" -d "$AGENT_BODY" | python3 -c "import sys,json;print(json.load(sys.stdin).get('data',{}).get('id',''))" 2>/dev/null)
-  echo "  agent: $AGENT_ID"
-fi
+echo "=== §8 Skill + 只读 MCP 工具 + Agent（共用安装器）==="
+AI_RESULT=$(PAAS_TOKEN="$PAAS_TOKEN" python3 "$PROJECT_ROOT/examples/paas-shop/install_ai.py" \
+  --base "$B" --mcp-url "${PAAS_SHOP_MCP_URL:-http://paas-shop-mcp.paas-t-acme.svc.cluster.local}" \
+  --knowledgebase-id "${KB_ID:-}") || exit 1
+AGENT_ID=$(python3 -c 'import sys,json;print(json.load(sys.stdin)["agentId"])' <<< "$AI_RESULT") || exit 1
 echo "PAAS_AGENT_ID=$AGENT_ID"
-echo "=== §8 Agent 资源创建完成 ==="
+echo "=== §8 演示配置已安装（尚未进行真实模型推理验证）==="
 
 echo "=== §8.4 chatbot env 注入（PAAS_AGENT_MODEL）==="
 curl -s -o /dev/null -X POST -H "$H" -H "Content-Type: application/json" "$B/api/applications/$APP/configs" -d \
@@ -211,8 +175,8 @@ done
 # 9.2b frontend 构建（独立 Dockerfile.frontend，无 SERVICE buildArgs）
 curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/applications/$APP/repositories" -d \
   '{"gitUrl":"https://github.com/aitoys/paas.git","branch":"main","dockerfile":"examples/paas-shop/frontend/Dockerfile","buildContext":".","source":"external"}' \
-  | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',{});print('  repo(frontend):',d.get('id',''))" 2>/dev/null >/tmp/shop-fe-repo
-FE_REPO_ID=$(cat /tmp/shop-fe-repo 2>/dev/null | awk '{print $2}')
+  | python3 -c "import sys,json;d=json.load(sys.stdin).get('data',{});print('  repo(frontend):',d.get('id',''))" 2>/dev/null >"$TASK_TMP/shop-fe-repo"
+FE_REPO_ID=$(cat "$TASK_TMP/shop-fe-repo" 2>/dev/null | awk '{print $2}')
 if [ -n "$FE_REPO_ID" ]; then
   curl -s -X POST -H "$H" -H "Content-Type: application/json" "$B/api/applications/$APP/buildruns" -d \
     "{\"repoId\":\"$FE_REPO_ID\",\"branch\":\"main\",\"trigger\":\"manual\"}" \

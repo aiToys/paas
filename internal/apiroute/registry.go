@@ -9,15 +9,16 @@ import (
 
 // Route 是单个端点操作的元数据。
 type Route struct {
-	Method      string
-	Path        string
-	Summary     string
-	Tags        []string
-	Description string
-	Parameters  []Parameter
-	Perm        string       // 映射为 BearerAPIKey 的 scope
-	RequestBody reflect.Type // 请求体载荷类型；nil = 无
-	Response    reflect.Type // 响应载荷类型（不含 {data:} 包裹）；nil = 无 schema
+	Method              string
+	Path                string
+	Summary             string
+	Tags                []string
+	Description         string
+	Parameters          []Parameter
+	Perm                string       // 映射为 BearerAPIKey 的 scope
+	RequestBody         reflect.Type // 请求体载荷类型；nil = 无
+	Response            reflect.Type // 响应载荷类型（不含 {data:} 包裹）；nil = 无 schema
+	ResponseContentType string       // 非空时为原始响应（如 Markdown 下载），不包裹 {data:}
 }
 
 // Opt 配置 Route。
@@ -56,7 +57,12 @@ func WithReqBody(sample any) Opt {
 // WithResp 标记响应载荷类型（list 端点传 []Entity 样本，详情传 Entity 样本）。
 // 生成时自动包成 {data: <T>, error: string} 包裹。
 func WithResp(sample any) Opt {
-	return func(r *Route) { r.Response = reflect.TypeOf(sample) }
+	return func(r *Route) { r.Response, r.ResponseContentType = reflect.TypeOf(sample), "" }
+}
+
+// WithRawResp 登记导出/协议响应的媒体类型与原始载荷，不改变普通 CRUD 包裹。
+func WithRawResp(contentType string, sample any) Opt {
+	return func(r *Route) { r.ResponseContentType, r.Response = contentType, reflect.TypeOf(sample) }
 }
 
 // BearerScheme 是 API Key Bearer 鉴权方案名（文档内固定）。
@@ -175,7 +181,11 @@ func (r *Registry) buildOperation(rt Route) *Operation {
 		}
 	}
 	// 成功响应：200，载荷包成 {data: T, error: string}。
-	if rt.Response != nil {
+	if rt.Response != nil && rt.ResponseContentType != "" {
+		op.Responses[200] = &Response{Description: "成功", Content: map[string]MediaType{
+			rt.ResponseContentType: {Schema: r.schemaOf(rt.Response)},
+		}}
+	} else if rt.Response != nil {
 		op.Responses[200] = &Response{
 			Description: "成功",
 			Content: map[string]MediaType{

@@ -24,3 +24,5 @@ frontend/**/dist/
 docs/
 *.md
 !README.md
+!skills/**/SKILL.md
+!examples/paas-shop/skills/**/SKILL.md

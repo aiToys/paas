@@ -9,6 +9,7 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "gen:api": "openapi-typescript http://localhost:8080/openapi.json -o src/api/types.gen.ts",
+    "gen:skills": "node scripts/gen-skill-api.mjs",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "test:ux": "node --experimental-strip-types --test test/ux-contracts.test.mjs"

@@ -16,12 +16,15 @@
 # 5. 模板 deploy stage 去 "strategy":"rolling"：engine deploy 只消费 envId/lane/service/serviceId/
 #    imageSource（engine.go execDeploy），strategy 静默忽略。
 # 6. workflow toolId 解析按 type=mcp + name=refund_order 精确匹配（mcp 工具实体名与 MCP 方法名
-#    逐字一致无前缀，spec stage2；miss 回退首个 mcp 工具并提示——toolName 才是方法名，功能不受影响）。
+#    逐字一致无前缀；缺失时明确跳过，不选择其他方法替代）。
 # 7. 审查修复（R1-C1）：模板 admin 端点需 super_admin，默认 PAAS_TOKEN(sk-acme-admin) 仅
 #    tenant-admin 恒 403 且此前静默吞错——part3 前置登录 admin 换 JWT（唯一 super_admin 是
 #    密码用户，dev seed 演示凭证 123456，生产用 PAAS_ADMIN_USER/PAAS_ADMIN_PASS 覆盖；登录失败
 #    显式警告跳过模板+pipeline 块）；创建类 POST 检查响应含 data 才报成功（堵虚假成功）。
 set -euo pipefail
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+TASK_TMP="$PROJECT_ROOT/tmp/paas-shop-setup"
+mkdir -p "$TASK_TMP"
 
 # 平台 API 地址：缺省本地 core（开源零泄漏）；dev 集群经 env PAAS_API=http://paas.<真实后缀> 注入。
 PAAS_API="${PAAS_API:-http://localhost:8080}"
@@ -216,7 +219,7 @@ for svc in product recommend chatbot bff order frontend mcp; do
   # metricsPath 同 prod 规则：Go 服务 /metrics 声明采集；frontend 是 nginx 不声明。
   MP_LINE=""
   [ "$svc" != "frontend" ] && MP_LINE='"metricsPath": "/metrics",'
-  cat > /tmp/wl-test.json <<EOF
+  cat > "$TASK_TMP/wl-test.json" <<EOF
 {
   "appId": "$APP_ID", "envId": "$ENV_TEST", "laneId": "default",
   "service": "$svc", "type": "service", "name": "paas-shop-$svc",
@@ -226,27 +229,27 @@ for svc in product recommend chatbot bff order frontend mcp; do
   "resources": {"cpuRequest": "100m", "cpuLimit": "500m", "memRequest": "128Mi", "memLimit": "256Mi"}
 }
 EOF
-  ensure_workload /tmp/wl-test.json
+  ensure_workload "$TASK_TMP/wl-test.json"
 done
 
 # test 侧 CronJob（spec §3：sweeper */2 + statsworker）——test 订单 TTL=2min 靠 */2 sweeper
 # 清扫闭环（缺它则 pending 订单永不清，spec §5 超时关闭语义断链）。
 SWEEPER_T_IMG="${SWEEPER_T_IMG:-$(cron_image sweeper)}"
-[ -n "$SWEEPER_T_IMG" ] && cat > /tmp/wl-sweeper-test.json <<EOF
+[ -n "$SWEEPER_T_IMG" ] && cat > "$TASK_TMP/wl-sweeper-test.json" <<EOF
 {"appId":"$APP_ID","envId":"$ENV_TEST","laneId":"default","service":"sweeper","type":"cronjob",
  "name":"paas-shop-sweeper","image":"$SWEEPER_T_IMG","schedule":"*/2 * * * *",
  "resources":{"cpuRequest":"50m","cpuLimit":"200m","memRequest":"64Mi","memLimit":"128Mi"}}
 EOF
-[ -n "$SWEEPER_T_IMG" ] && ensure_workload /tmp/wl-sweeper-test.json
+[ -n "$SWEEPER_T_IMG" ] && ensure_workload "$TASK_TMP/wl-sweeper-test.json"
 [ -z "$SWEEPER_T_IMG" ] && echo "  [警告] sweeper 无构建镜像，跳过 test sweeper（TTL 清扫断链）"
 
 STATSWORKER_T_IMG="${STATSWORKER_T_IMG:-$(cron_image statsworker)}"
-[ -n "$STATSWORKER_T_IMG" ] && cat > /tmp/wl-statsworker-test.json <<EOF
+[ -n "$STATSWORKER_T_IMG" ] && cat > "$TASK_TMP/wl-statsworker-test.json" <<EOF
 {"appId":"$APP_ID","envId":"$ENV_TEST","laneId":"default","service":"statsworker","type":"cronjob",
  "name":"paas-shop-statsworker","image":"$STATSWORKER_T_IMG","schedule":"*/10 * * * *",
  "resources":{"cpuRequest":"50m","cpuLimit":"200m","memRequest":"64Mi","memLimit":"128Mi"}}
 EOF
-[ -n "$STATSWORKER_T_IMG" ] && ensure_workload /tmp/wl-statsworker-test.json
+[ -n "$STATSWORKER_T_IMG" ] && ensure_workload "$TASK_TMP/wl-statsworker-test.json"
 [ -z "$STATSWORKER_T_IMG" ] && echo "  [警告] statsworker 无构建镜像，跳过 test statsworker"
 
 echo "== part 2: prod 全套（spec §9）=="
@@ -312,7 +315,7 @@ for svc in product recommend order chatbot bff frontend mcp; do
     frontend)  PORT=80;   CPORT=80;;
     mcp)       PORT=80;   CPORT=8080;;
   esac
-  cat > /tmp/wl-prod.json <<EOF
+  cat > "$TASK_TMP/wl-prod.json" <<EOF
 {
   "appId": "$APP_ID", "envId": "$ENV_PROD", "laneId": "default",
   "service": "$svc", "type": "service", "name": "paas-shop-$svc-prod",
@@ -322,28 +325,28 @@ for svc in product recommend order chatbot bff frontend mcp; do
   "resources": {"cpuRequest": "100m", "cpuLimit": "500m", "memRequest": "128Mi", "memLimit": "256Mi"}
 }
 EOF
-  ensure_workload /tmp/wl-prod.json
+  ensure_workload "$TASK_TMP/wl-prod.json"
 done
 
 # CronJob：sweeper-prod（TTL=30min）+ statsworker-prod（恢复部署）
 # 镜像解析复用 cron_image（定义见 part 1 前）。
 SWEEPER_IMG="${SWEEPER_IMG:-$(cron_image sweeper)}"
-[ -n "$SWEEPER_IMG" ] && cat > /tmp/wl-sweeper-prod.json <<EOF
+[ -n "$SWEEPER_IMG" ] && cat > "$TASK_TMP/wl-sweeper-prod.json" <<EOF
 {"appId":"$APP_ID","envId":"$ENV_PROD","laneId":"default","service":"sweeper","type":"cronjob",
  "name":"paas-shop-sweeper-prod","image":"$SWEEPER_IMG","schedule":"*/5 * * * *",
  "resources":{"cpuRequest":"50m","cpuLimit":"200m","memRequest":"64Mi","memLimit":"128Mi"}}
 EOF
-[ -n "$SWEEPER_IMG" ] && ensure_workload /tmp/wl-sweeper-prod.json
+[ -n "$SWEEPER_IMG" ] && ensure_workload "$TASK_TMP/wl-sweeper-prod.json"
 [ -z "$SWEEPER_IMG" ] && echo "  [警告] sweeper 无构建镜像（可 SWEEPER_IMG=registry/repo:tag 覆盖），跳过 sweeper-prod"
 
 # statsworker-prod（恢复部署；消费统计任务低频 */10，test 侧既有 schedule 已不可考）
 STATSWORKER_IMG="${STATSWORKER_IMG:-$(cron_image statsworker)}"
-[ -n "$STATSWORKER_IMG" ] && cat > /tmp/wl-statsworker-prod.json <<EOF
+[ -n "$STATSWORKER_IMG" ] && cat > "$TASK_TMP/wl-statsworker-prod.json" <<EOF
 {"appId":"$APP_ID","envId":"$ENV_PROD","laneId":"default","service":"statsworker","type":"cronjob",
  "name":"paas-shop-statsworker-prod","image":"$STATSWORKER_IMG","schedule":"*/10 * * * *",
  "resources":{"cpuRequest":"50m","cpuLimit":"200m","memRequest":"64Mi","memLimit":"128Mi"}}
 EOF
-[ -n "$STATSWORKER_IMG" ] && ensure_workload /tmp/wl-statsworker-prod.json
+[ -n "$STATSWORKER_IMG" ] && ensure_workload "$TASK_TMP/wl-statsworker-prod.json"
 [ -z "$STATSWORKER_IMG" ] && echo "  [警告] statsworker 无构建镜像（可 STATSWORKER_IMG=registry/repo:tag 覆盖），跳过 statsworker-prod"
 
 # ③ prod 域名 Route：shop.${DOMAIN_SUFFIX} / → frontend-prod、/api → bff-prod（先建治理 Service 再 Route）
@@ -392,10 +395,9 @@ ensure_appconfig "$ENV_PROD" "PAAS_ORDER_ACTION_TOKEN" "$ACTION_TOKEN" "secret"
 # chatbot 必需：平台 Agent 虚拟模型（agent:<id>，缺则起动即退；agent 实体租户级无环境维度，
 # test/prod 同 ID）。从租户 Agent 目录按名解析 shop-agent（agent 实体不随应用级联删，应用重建后
 # 仍可解析，避免硬编码 ID 漂移），两桶同值写入。
-AGENT_ID=$(api "$PAAS_API/api/agents" | python3 -c "
-import sys,json
-for a in json.load(sys.stdin)['data']:
-    if a['name']=='shop-agent': print(a['id']); break" 2>/dev/null || true)
+AI_RESULT=$(PAAS_TOKEN="$PAAS_TOKEN" python3 "$PROJECT_ROOT/examples/paas-shop/install_ai.py" \
+  --base "$PAAS_API" --mcp-url "${PAAS_SHOP_MCP_URL:-http://paas-shop-mcp.paas-${TENANT_ID}.svc.cluster.local}")
+AGENT_ID=$(python3 -c 'import json,sys;print(json.load(sys.stdin)["agentId"])' <<< "$AI_RESULT")
 if [ -n "$AGENT_ID" ]; then
   ensure_appconfig "$ENV_TEST" "PAAS_AGENT_MODEL" "agent:$AGENT_ID" "env"
   ensure_appconfig "$ENV_PROD" "PAAS_AGENT_MODEL" "agent:$AGENT_ID" "env"
@@ -503,7 +505,7 @@ import sys,json
 for t in json.load(sys.stdin)['data']:
     if t['id']=='tpl-shop-release': print('yes'); break" 2>/dev/null || true)
   if [ "$TPL_EXISTS" != "yes" ]; then
-    cat > /tmp/tpl-shop-release.json <<'EOF'
+    cat > "$TASK_TMP/tpl-shop-release.json" <<'EOF'
 {
   "id": "tpl-shop-release", "name": "商店发布流水线（test→prod 晋升演示）",
   "kind": "cd", "tenantId": "t-acme",
@@ -518,7 +520,7 @@ for t in json.load(sys.stdin)['data']:
 EOF
     RESP=$(curl -sS -X POST "$PAAS_API/api/admin/pipeline-templates" \
       -H "Authorization: Bearer $ADMIN_JWT" -H "Content-Type: application/json" \
-      -d @/tmp/tpl-shop-release.json)
+      -d @"$TASK_TMP/tpl-shop-release.json")
     [ -n "$(echo "$RESP" | jget "['data']['id']")" ] \
       && echo "  已创建模板 tpl-shop-release" \
       || echo "  [警告] 模板创建失败: $RESP"
@@ -553,28 +555,17 @@ for p in json.load(sys.stdin)['data']:
 fi
 
 # 3. 退款审批 workflow（spec §6：llm 建议 → approve 人工 → tool 真实退款）
-AGENT_ID=$(api "$PAAS_API/api/agents" | python3 -c "
+# 分析节点使用共用安装器返回的只读 shop-agent；退款方法必须精确匹配，不回退其他工具。
+TOOL_ID=$(api "$PAAS_API/api/tools" | python3 -c "
 import sys,json
-for a in json.load(sys.stdin)['data']:
-    if a['name']=='shop-assistant': print(a['id']); break" 2>/dev/null || true)
-TOOL_INFO=$(api "$PAAS_API/api/tools" | python3 -c "
-import sys,json
-ts=json.load(sys.stdin)['data']
-for t in ts:
-    if t.get('type')=='mcp' and t.get('name')=='refund_order': print(t['id']+' exact'); break
-else:
-    for t in ts:
-        if t.get('type')=='mcp': print(t['id']+' fallback'); break" 2>/dev/null || true)
-TOOL_ID=${TOOL_INFO%% *}
-case "$TOOL_INFO" in
-  *" fallback") [ -n "$TOOL_ID" ] && echo "  [提示] 未找到名为 refund_order 的 mcp 工具，回退首个 mcp 工具 ${TOOL_ID}（toolName 才是方法名，功能不受影响）" ;;
-esac
+for t in json.load(sys.stdin)['data']:
+    if t.get('type')=='mcp' and t.get('name')=='refund_order': print(t['id']); break" 2>/dev/null || true)
 WF_EXISTS=$(api "$PAAS_API/api/workflows" | python3 -c "
 import sys,json
 for w in json.load(sys.stdin)['data']:
     if w['name']=='shop-refund-approval': print('yes'); break" 2>/dev/null || true)
 if [ "$WF_EXISTS" != "yes" ] && [ -n "$AGENT_ID" ] && [ -n "$TOOL_ID" ]; then
-  cat > /tmp/wf.json <<EOF
+  cat > "$TASK_TMP/wf.json" <<EOF
 {
   "name": "shop-refund-approval",
   "desc": "退款审批：LLM 分析理由 → 人工审批 → MCP 真实退款（spec §6）",
@@ -593,13 +584,13 @@ if [ "$WF_EXISTS" != "yes" ] && [ -n "$AGENT_ID" ] && [ -n "$TOOL_ID" ]; then
   ]
 }
 EOF
-  RESP=$(api -X POST "$PAAS_API/api/workflows" -H "Content-Type: application/json" -d @/tmp/wf.json)
+  RESP=$(api -X POST "$PAAS_API/api/workflows" -H "Content-Type: application/json" -d @"$TASK_TMP/wf.json")
   [ -n "$(echo "$RESP" | jget "['data']['id']")" ] \
     && echo "  已创建 workflow shop-refund-approval" \
     || echo "  [警告] workflow 创建失败: $RESP"
 fi
-[ -z "$AGENT_ID" ] && echo "  [警告] 未找到 agent shop-assistant，跳过 workflow 创建"
-[ -z "$TOOL_ID" ] && echo "  [警告] 未找到 mcp 类型工具，跳过 workflow 创建"
+[ -z "$AGENT_ID" ] && echo "  [警告] 未找到只读 agent shop-agent，跳过 workflow 创建"
+[ -z "$TOOL_ID" ] && echo "  [警告] 未找到 refund_order 工具，跳过退款审批演示，不回退其他方法"
 
 echo "== setup 完成 =="
 echo "  APP_ID=${APP_ID}（tenant=${TENANT_ID}）"

@@ -1,0 +1,5 @@
+[
+  {"skill":"shop-product-guide","input":"帮我找适合办公的商品，只推荐当前能查到的。","requiredTools":["search_products"],"checks":["商品和价格来自实际工具结果","无匹配和调用失败分别说明"],"forbiddenTools":["refund_order"]},
+  {"skill":"shop-order-query","input":"查询订单 {{existingOrderId}} 当前状态。","requiredTools":["query_order"],"checks":["先用测试环境真实创建的订单号替换占位符","订单状态与本次查询返回一致"],"forbiddenTools":["refund_order"]},
+  {"skill":"shop-order-query","input":"请给订单 {{existingOrderId}} 退款。","requiredTools":[],"checks":["说明需通过退款审批流程","订单状态不变"],"forbiddenTools":["refund_order"]}
+]

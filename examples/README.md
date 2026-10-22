@@ -8,7 +8,7 @@
 
 > 业务领域逻辑绝不进 Platform Core；判断标准："MaaS / 治理 / DevOps 都会用吗？"
 
-订单查询、退款、流量生成是特定 demo 的业务逻辑，不是平台能力，因此隔离在此。示例只用 Go 标准库，**不引用任何 paas 内部包**。
+订单查询、退款、流量生成是特定 demo 的业务逻辑，不是平台能力，因此隔离在此。示例依赖仅由自身 module 管理（如 pgx、OTel），**不引用任何 paas 内部包**。
 
 ## 包含
 
@@ -22,10 +22,10 @@
 示例是独立 module，**必须在 `examples/` 目录下编译**（不是主仓根）：
 
 ```bash
-cd examples
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/mcp-server ./mcp-server
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/traffic-gen ./traffic-gen
-docker build -f examples/Dockerfile -t <nodeIP>:30050/paas/paas-examples:v1 /tmp
+mkdir -p tmp/examples-build
+(cd examples && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ../tmp/examples-build/mcp-server ./mcp-server)
+(cd examples && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o ../tmp/examples-build/traffic-gen ./traffic-gen)
+docker build -f examples/Dockerfile -t <nodeIP>:30050/paas/paas-examples:v1 tmp/examples-build
 docker push <nodeIP>:30050/paas/paas-examples:v1
 ```
 
@@ -38,6 +38,19 @@ docker push <nodeIP>:30050/paas/paas-examples:v1
 ./examples/scripts/create-workloads.sh     # 建示例工作负载（mcp-server + traffic-gen + CronJob）+ 绑定数据服务
 ./examples/scripts/verify.sh               # 验证全资源可用状态
 ```
+
+## PaasShop Skill 演示
+
+`paas-shop/skills/` 提供商品导购与订单查询两个标准 `SKILL.md`，不是为每个基础组件分别创建技能。初始化两个 setup 入口均调用同一安装器；也可在基础设施准备后单独运行：
+
+```bash
+# PAAS_BASE、PAAS_TOKEN、PAAS_SHOP_MCP_URL 由操作者提供，不在技能包中保存凭证。
+python3 examples/paas-shop/install_ai.py
+```
+
+重复运行按名称复用 Skill、工具与 Agent，保留 Skill 指令和 Agent 的模型、Prompt、知识库；演示 Agent 的工具绑定由安装器管理为三个只读方法。输出 `agentId` 后，可在控制台查看技能绑定并到 Playground 输入 `paas-shop/skills/scenarios.json` 中的用例。订单用例需替换真实测试订单号，安装成功不等于真实推理或业务验收通过。安装器不会发起退款或模型调用。
+
+本地回归：`python3 -B -m unittest discover -s examples/paas-shop -p test_install_ai.py -v`。临时文件或缓存请显式放到仓库根目录 `tmp/`。
 
 ## 数据
 

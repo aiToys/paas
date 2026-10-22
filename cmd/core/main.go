@@ -1365,6 +1365,22 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 	// AI Skill（P3.x）：可复用指令能力包，Agent 绑定后运行时注入 system prompt。
 	skillHandler := skill.NewHandler(stores.Skill)
 	skillHandler.Authorize = func(r *http.Request, perm string) bool { return gateway.RequestAllowed(r, perm) }
+	skillHandler.References = func(ctx context.Context, id string) ([]skill.Reference, error) {
+		agents, err := stores.Agent.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		refs := []skill.Reference{}
+		for _, a := range agents {
+			for _, sid := range a.Skills {
+				if sid == id {
+					refs = append(refs, skill.Reference{ID: a.ID, Name: a.Name})
+					break
+				}
+			}
+		}
+		return refs, nil
+	}
 	mux.Handle("/api/skills", auth(skillHandler))
 	mux.Handle("/api/skills/", auth(skillHandler))
 	reg.Operation("GET", "/api/skills", apiroute.Tags("Skill"), apiroute.Summary("Skill 列表"), apiroute.Perm("agent:read"), apiroute.WithResp([]skill.Skill{}))
@@ -1372,6 +1388,10 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 	reg.Operation("GET", "/api/skills/{id}", apiroute.Tags("Skill"), apiroute.Summary("Skill 详情"), apiroute.Perm("agent:read"), apiroute.WithResp(skill.Skill{}))
 	reg.Operation("PUT", "/api/skills/{id}", apiroute.Tags("Skill"), apiroute.Summary("更新 Skill"), apiroute.Perm("agent:write"), apiroute.WithReqBody(skill.Skill{}), apiroute.WithResp(skill.Skill{}))
 	reg.Operation("DELETE", "/api/skills/{id}", apiroute.Tags("Skill"), apiroute.Summary("删除 Skill"), apiroute.Perm("agent:write"))
+	reg.Operation("GET", "/api/skills/{id}/references", apiroute.Tags("Skill"), apiroute.Summary("当前租户引用 Skill 的 Agent"), apiroute.Perm("agent:read"), apiroute.WithResp([]skill.Reference{}))
+	reg.Operation("GET", "/api/skills/templates", apiroute.Tags("Skill"), apiroute.Summary("官方只读模板目录（区分平台指令与外部 Agent 技能）"), apiroute.Perm("agent:read"), apiroute.WithResp([]skill.Template{}))
+	reg.Operation("POST", "/api/skills/templates/{slug}/install", apiroute.Tags("Skill"), apiroute.Summary("幂等复制平台指令模板到当前租户，不覆盖已有编辑"), apiroute.Perm("agent:write"), apiroute.WithResp(skill.Skill{}))
+	reg.Operation("GET", "/api/skills/templates/{slug}/download", apiroute.Tags("Skill"), apiroute.Summary("下载标准 SKILL.md（text/markdown）"), apiroute.Perm("agent:read"), apiroute.WithRawResp("text/markdown", ""))
 
 	// AI Agent（P3）：组装 system prompt + 工具描述 + KB RAG 调底层 LLM。
 	// runtime 注入 MaaS（取 Provider）+ 凭证 + prompt/tool/skill/KB（组装上下文）。

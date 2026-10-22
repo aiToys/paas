@@ -885,6 +885,14 @@ internal/dataservice/  领域(DataService + 6 Kind 常量 + KindMeta 表单元�
 - **横切**：新端点 OpenAPI 登记 + `{data:T}` + camelCase；notifications 权限 pipeline:read（登录态）；轮询全部 onUnmounted clearInterval。
 
 
+## Skill 模板与演示（2026-10-22）
+
+- `skills/` 是官方标准 `SKILL.md` 真源，`assets.go` 嵌入文件供 `internal/ai/skill` 读取，随二进制离线交付；`.dockerignore` 显式保留这些正式资源。受控内置 frontmatter 解析不是任意 Skill 包导入器。
+- `GET /api/skills/templates` 区分 `instructions`（平台 Agent 指令）与 `external-agent`（外部客户端技能）；只有前者可经 `/templates/{slug}/install` 复制。稳定租户 ID 使重复安装保留已有编辑；`installedFrom` 保存版本与内容 hash，不能从创建请求伪造来源。后者经 `/download` 返回标准 Markdown，不在控制面执行脚本。
+- Skill 创建缺省启用，显式 `enabled=false` 保留；memory/PG 仓储尊重输入状态，memory 锁内检查 ID 占用，不能跨租户覆盖。`/{id}/references` 由装配层查询当前租户 Agent；引用失败时阻断删除/停用，已知引用返回 409。该预检不等于跨 Store 的并发事务约束。
+- PaasShop 的业务技能源留在 `examples/paas-shop/skills/`。`install_ai.py` 是两个 setup 入口共用的结构化安装器；日常 `shop-agent` 只绑定商品搜索/详情、订单查询工具，退款写操作不由此入口执行。安装器保留 Skill 指令及 Agent 模型/Prompt/KB，管理其演示工具绑定为只读。场景检查点在 `scenarios.json`，不把初始化成功当作真实模型/业务验收。
+- 回归包括 Skill memory/handler 并发与隔离、独立 schema 的 Skill PG 集成、Python 本机 fake HTTP 安装测试。`make test-pg` 和 CI 已加入 Skill PG 路径；其他 AI 模块 PG 覆盖、全局安装事务与运行证据继续按审计报告完善。
+
 ## 新版控制台组织方式（2026-10-16）
 
 `frontend/console-user-v2` 的 `/next/` 采用任务域导航：应用交付、AI 平台、基础设施、组织与访问；首页为跨产品事项与快捷入口，产品列表独立 `/products`。产品内分为服务运行、交付、共享资源、配置、成员与权限。导航和命令搜索共用 `src/navigation/index.ts`。详细设计及验证边界见 `docs/superpowers/specs/2026-10-16-console-next-ux-refactor.md`。

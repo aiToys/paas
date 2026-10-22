@@ -36,7 +36,8 @@ func TestOpenAPIRepairContracts(t *testing.T) {
 	}
 	for _, expected := range []string{"expectedRevision", "Idempotency-Key", "/api/backups/{id}/restore", "/api/observability/metrics/quality", "/api/dataservices/{id}/capabilities",
 		"/api/observability/channels", "/api/billing/budgets", "/api/admin/settlements",
-		"/api/applications/{id}/pipelines/{pid}/deliveries/{deliveryId}/replay"} {
+		"/api/applications/{id}/pipelines/{pid}/deliveries/{deliveryId}/replay",
+		"/api/skills/templates", "/api/skills/templates/{slug}/install", "/api/skills/{id}/references"} {
 		if !strings.Contains(w.Body.String(), expected) {
 			t.Fatalf("契约缺少 %s", expected)
 		}

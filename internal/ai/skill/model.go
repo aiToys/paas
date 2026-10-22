@@ -41,8 +41,10 @@ func (s Skill) Validate() error {
 
 // sentinel 错误（handler 映射 HTTP 状态）。
 var (
-	ErrSkillNotFound = errors.New("skill 不存在")
-	ErrSkillExists   = errors.New("skill 已存在")
+	ErrSkillNotFound         = errors.New("skill 不存在")
+	ErrSkillExists           = errors.New("skill 已存在")
+	ErrSkillInUse            = errors.New("Skill 正被 Agent 引用，请先解绑后再停用或删除")
+	ErrReferencesUnavailable = errors.New("Skill 引用查询不可用，请稍后重试")
 )
 
 type fieldErr string

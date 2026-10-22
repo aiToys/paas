@@ -101,7 +101,6 @@ func (s *Store) Create(ctx context.Context, sk skill.Skill) (skill.Skill, error)
 	sk.TenantID = tid
 	now := time.Now()
 	sk.CreatedAt, sk.UpdatedAt = now, now
-	sk.Enabled = true // 创建即启用（与 agent/tool 一致；用户可 Update 关闭）
 	_, err = s.db.Pool().Exec(ctx,
 		`INSERT INTO ai_skills (`+skillCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
 		sk.ID, sk.TenantID, sk.Name, sk.Description, sk.Instructions, sk.Category, sk.UseCases, sk.Examples, sk.InstalledFrom, sk.Enabled, sk.CreatedAt, sk.UpdatedAt)
