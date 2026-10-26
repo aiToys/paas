@@ -161,6 +161,20 @@ func TestCreateHandlerQuotaRollback(t *testing.T) {
 	assert.Equal(t, 0, net, "Create 失败应回滚配额（+1 -1 = 0）")
 }
 
+// TestCreateHandlerEmptyNameRejected 验证缺 name 的创建请求被 400 拒绝、不入库：
+// API 直调（脚本/curl）绕过前端表单校验时后端是最后防线（2026-10-24 空产品事故回归锚点）。
+func TestCreateHandlerEmptyNameRejected(t *testing.T) {
+	for _, body := range []string{`{"id":"a-x"}`, `{"id":"a-x","name":"   "}`, `{"id":"a-x","name":""}`} {
+		repo := &stubRepo{}
+		h := NewHandler(repo)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/applications", strings.NewReader(body)))
+
+		require.Equal(t, http.StatusBadRequest, rec.Code, "body=%s", body)
+		assert.Empty(t, repo.apps, "缺 name 不应入库（body=%s）", body)
+	}
+}
+
 // failCreateRepo.Create 总返回错误，用于触发回滚路径。
 type failCreateRepo struct{ stubRepo }
 

@@ -6,6 +6,7 @@ package application
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // ResourceCount 记录应用绑定的各类资源数量。
@@ -59,6 +60,16 @@ type Application struct {
 	// ResourceTemplate 是应用级资源规格默认值（新工作负载 deploy 时未显式指定 resources 则继承）。
 	// 两级来源：deploy stage params 覆盖 > 此模板 > 空（BestEffort，仅联调泳道可接受）。
 	ResourceTemplate ResourceTemplate `json:"resourceTemplate,omitempty"`
+}
+
+// Validate 校验应用字段：Name 必填（TrimSpace 后非空）。
+// 历史教训：Create 曾无 name 校验，API 直调缺字段请求体一路入库成空壳应用
+//（2026-10-24 实例：name="" 空产品混进列表）；同路径的 id 兜底注释是同类前科。
+func (a Application) Validate() error {
+	if strings.TrimSpace(a.Name) == "" {
+		return fmt.Errorf("name 不能为空")
+	}
+	return nil
 }
 
 // ResourceTemplate 是应用级资源规格模板（K8s Quantity 字符串；与 workload.ResourceSpec 同构）。

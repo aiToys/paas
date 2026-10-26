@@ -160,6 +160,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			httputil.WriteError(w, http.StatusBadRequest, "invalid body")
 			return
 		}
+		if err := a.Validate(); err != nil {
+			httputil.WriteError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		// id 兜底：客户端未提供时生成（与 workload 同款），避免空 id 入库——
 		// 历史 PG 脏数据（id="" 应用）即由此产生，致前端 Applications 列表访问 statusMeta[""] 崩溃。
 		if a.ID == "" {
