@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -67,6 +68,28 @@ func (a *DataServiceK8sApplier) Apply(ctx context.Context, d dataservice.DataSer
 		return fmt.Errorf("apply dataservice crd: %w", err)
 	}
 	return nil
+}
+
+// EnsureCR 幽灵自愈（遗留债务「DB 有行无 CR 无恢复路径」2026-10-29 再次发作后补）：
+// CR 存在则跳过（防覆盖运行态——与 workload drift EnsureIfMissing 同语义，周期全量 Apply
+// 会引发 STS 意外滚动），缺失则投影重建（reconciler 据此重建 Secret/Svc/STS）。
+// 返回是否发生了重建。external / 无租户与 Apply 同规则跳过。
+func (a *DataServiceK8sApplier) EnsureCR(ctx context.Context, d dataservice.DataService) (bool, error) {
+	if dataservice.IsExternal(d.Source) || d.TenantID == "" {
+		return false, nil
+	}
+	ns := tenant.Namespace(d.TenantID)
+	err := a.Get(ctx, client.ObjectKey{Namespace: ns, Name: d.ID}, &v1alpha1.DataService{})
+	if err == nil {
+		return false, nil // CR 在：不覆盖
+	}
+	if !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("get dataservice crd: %w", err)
+	}
+	if err := a.Apply(ctx, d); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Delete 删 DataService CRD（级联清 K8s 资源）。ns 从 ctx tenant 派生（与 Apply 同源）。

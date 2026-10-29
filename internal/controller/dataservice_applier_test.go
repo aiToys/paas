@@ -62,5 +62,47 @@ func TestEngineOfFallback(t *testing.T) {
 	}
 }
 
+// EnsureCR 幽灵自愈语义锁：CR 在则跳过不覆盖（防周期 Apply 引发 STS 滚动）；
+// CR 缺失则重投影重建；external 模式无 CR 语义不适用。
+func TestDataServiceK8sApplierEnsureCR(t *testing.T) {
+	scheme := newScheme(t)
+	cl := clientfake.NewClientBuilder().WithScheme(scheme).Build()
+	a := NewDataServiceK8sApplier(cl)
+	ctx := context.Background()
+
+	d := dataservice.DataService{
+		ID: "ds-h", TenantID: "t-acme", Kind: dataservice.KindDB, Name: "ds-h", EnvID: "env-1",
+		Spec: map[string]string{"engine": "postgres"},
+	}
+	// 1. CR 缺失 → 重建，返回 true。
+	healed, err := a.EnsureCR(ctx, d)
+	if err != nil || !healed {
+		t.Fatalf("CR 缺失应重建（healed=true, nil），实得 %v %v", healed, err)
+	}
+	var crd v1alpha1.DataService
+	key := types.NamespacedName{Name: "ds-h", Namespace: tenant.Namespace("t-acme")}
+	if err := cl.Get(ctx, key, &crd); err != nil {
+		t.Fatalf("重建后 CR 应存在: %v", err)
+	}
+	// 2. CR 存在 → 跳过（不覆盖运行态）：先外部篡改 spec 再 Ensure，字段应保持。
+	crd.Spec.Name = "renamed-by-someone"
+	if err := cl.Update(ctx, &crd); err != nil {
+		t.Fatal(err)
+	}
+	healed, err = a.EnsureCR(ctx, d)
+	if err != nil || healed {
+		t.Fatalf("CR 存在应跳过（healed=false, nil），实得 %v %v", healed, err)
+	}
+	if err := cl.Get(ctx, key, &crd); err != nil || crd.Spec.Name != "renamed-by-someone" {
+		t.Fatalf("存在的 CR 不得被覆盖: %v %s", err, crd.Spec.Name)
+	}
+	// 3. external 模式恒 false（无 CR 语义）。
+	ext := d
+	ext.Source = dataservice.SourceExternalDedicated
+	if healed, err := a.EnsureCR(ctx, ext); err != nil || healed {
+		t.Fatalf("external 应跳过，实得 %v %v", healed, err)
+	}
+}
+
 // 确保 v1alpha1.DataService 实现 runtime.Object（已由 deepcopy 保证），编译期校验。
 var _ metav1.Object = &v1alpha1.DataService{}

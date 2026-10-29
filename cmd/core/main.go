@@ -51,6 +51,8 @@ import (
 	"github.com/aitoys/paas/internal/devops/gitea"
 	"github.com/aitoys/paas/internal/devops/pipeline"
 	"github.com/aitoys/paas/internal/devops/registry"
+	"github.com/aitoys/paas/internal/diagnose"
+	diagtools "github.com/aitoys/paas/internal/diagnose/tools"
 	"github.com/aitoys/paas/internal/diagnostics"
 	"github.com/aitoys/paas/internal/environment"
 	"github.com/aitoys/paas/internal/governance"
@@ -150,6 +152,9 @@ func run(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, metrics
 		appliers.dsReconciler.PlatformExists = platformDataExists(stores.DataService)
 		appliers.dsReconciler.StartOrphanGC(ctx)
 	}
+	// 数据服务幽灵自愈（2026-10-29 两度发作后补）：平台记录在而 CR/STS 全没了时周期重投影，
+	// 与 OrphanGC 判定同源不互搏（heal 只建平台有的，OrphanGC 只删平台没有的）。
+	startDataserviceHeal(ctx, stores.DataService, appliers.dataservice)
 	// CredentialResolver 桥接 security store：注入 MaaS 插件解析平台级凭证。
 	// security.SecretStore 接口含 Resolve（PG/memory 透明）。
 	deps := realCoreDeps{gw: gw, resolver: secretResolver{store: stores.Security.(security.SecretStore)}}
@@ -441,6 +446,7 @@ func resolveJWTSecret() string {
 var (
 	obsRepo        observability.Repository
 	obsAlertEngine *alertengine.Engine
+	obsDiagRaw     diagRawSources
 )
 
 func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Meter, stores *Stores, appliers k8sAppliers, metricsReg *metrics.Registry, laneReclaimer *workload.LaneGC) *http.Server {
@@ -461,7 +467,7 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 	// obsHandler（下方可观测段）共用；必须在第一个消费者之前，否则 bridge 捕获 nil。
 	// 引擎启动在 run 层（有进程生命周期 ctx）。内存路径 AlertEvents 为 typed nil，
 	// buildObservabilityStore 内做装箱前 nil 判断（typed-nil 装箱陷阱，见其注释）。
-	obsRepo, obsAlertEngine = buildObservabilityStore(workloadLister{repo: stores.Workload}, tenantEntityLister{apps: stores.Application, ds: stores.DataService, wls: stores.Workload}, stores.AlertRules, stores.AlertEvents)
+	obsRepo, obsAlertEngine, obsDiagRaw = buildObservabilityStore(workloadLister{repo: stores.Workload}, tenantEntityLister{apps: stores.Application, ds: stores.DataService, wls: stores.Workload}, stores.AlertRules, stores.AlertEvents)
 	// 开箱默认告警规则：给「零规则」租户灌入默认基线（demo 门控，生产自配）。
 	seedDefaultAlertRules(ctx, stores.Identity, stores.AlertRules)
 	mux := http.NewServeMux()
@@ -1399,6 +1405,25 @@ func buildHTTPServer(ctx context.Context, gw *gateway.Gateway, meter *gateway.Me
 		WithSkills(stores.Skill).
 		WithGuard(guardrail.NewFromEnv()).
 		WithPromptLog(os.Getenv("PAAS_AI_LOG_PROMPTS") == "true")
+	// 平台诊断 agent（2026-10-27，spec tmp/diagnosis-agent/impl-spec.md）：8 个内置只读
+	// 工具（K8sRuntimeReader 跨 ns raw 面 + observability real raw 查询）注入 runtime
+	// builtin 分发——仅诊断语境放行（RunDiagnose 内部 ctx 标志），租户 agent 不可触达
+	// （buildTools builtin 分支对无标志 ctx 一律拒绝，防跨 ns 越权读）。
+	agentRuntime = agentRuntime.WithDiagnostics(diagtools.New(runtimeReader, obsDiagRaw.prom, obsDiagRaw.loki, obsDiagRaw.jaeger))
+	diagHandler := diagnose.NewHandler(agentRuntime, os.Getenv("PAAS_DIAGNOSE_MODEL")).
+		WithAudit(&identityAuditAdapter{store: stores.Security}, func(r *http.Request) string {
+			return gateway.UserIDFrom(r.Context())
+		})
+	mux.Handle("/api/admin/diagnose/", adminGuard(diagHandler))
+	reg.Operation("POST", "/api/admin/diagnose/run", apiroute.Tags("诊断"), apiroute.Summary("触发只读根因诊断（LLM 工具循环，跨全 ns 采集证据）"), apiroute.Perm("platform:diagnostics:run"), apiroute.WithReqBody(diagnose.Request{}), apiroute.WithResp(diagnose.Report{}))
+	// 控制台 AI 助手（2026-10-27，spec docs/superpowers/specs/2026-10-27-console-ai-assistant-diagnosis-design.md）：
+	// 租户侧资源作用域诊断（与上面跨租户 admin 诊断区分）。目标服务端授权解析（AuthorizedTarget
+	// + UID 快照）；scoped 工具集 7 工具全服务端构造查询（无 LLM 作用域参数）；预算准入复用
+	// gw.BudgetGate；PG 模式三表持久化（migration 0060），内存模式会话重启丢失（UI 明示）。
+	assistantHandler := mountAssistant(
+		ctx, stores, stores.DB, agentRuntime,
+		runtimeReader, obsDiagRaw.prom, obsDiagRaw.loki, gw.BudgetGate, obsRepo)
+	registerAssistantRoutes(mux, reg, assistantHandler, auth)
 	// token 计量（rune 粗估）：覆盖不经 gateway 的推理路径（agent run / eval / workflow llm），
 	// 防 agent:write 权限者绕过 billing ResTokens 配额。
 	agentRuntime.MeterFn = func(ctx context.Context, agentID string, tokens int) {
