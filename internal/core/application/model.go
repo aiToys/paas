@@ -64,7 +64,7 @@ type Application struct {
 
 // Validate 校验应用字段：Name 必填（TrimSpace 后非空）。
 // 历史教训：Create 曾无 name 校验，API 直调缺字段请求体一路入库成空壳应用
-//（2026-10-24 实例：name="" 空产品混进列表）；同路径的 id 兜底注释是同类前科。
+// （2026-10-24 实例：name="" 空产品混进列表）；同路径的 id 兜底注释是同类前科。
 func (a Application) Validate() error {
 	if strings.TrimSpace(a.Name) == "" {
 		return fmt.Errorf("name 不能为空")

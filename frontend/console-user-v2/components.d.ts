@@ -11,6 +11,8 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    AssistantConversation: typeof import('./src/components/assistant/AssistantConversation.vue')['default']
+    AssistantPanel: typeof import('./src/components/assistant/AssistantPanel.vue')['default']
     CdDeployDialog: typeof import('./src/components/CdDeployDialog.vue')['default']
     CommandPalette: typeof import('./src/components/CommandPalette.vue')['default']
     DataServiceCreateDialog: typeof import('./src/components/DataServiceCreateDialog.vue')['default']
@@ -23,6 +25,7 @@ declare module 'vue' {
     DeliveryReleases: typeof import('./src/components/DeliveryReleases.vue')['default']
     DeliveryRepos: typeof import('./src/components/DeliveryRepos.vue')['default']
     DetailShell: typeof import('./src/components/DetailShell.vue')['default']
+    DiagnosisReport: typeof import('./src/components/assistant/DiagnosisReport.vue')['default']
     ElAlert: typeof import('element-plus/es')['ElAlert']
     ElButton: typeof import('element-plus/es')['ElButton']
     ElCard: typeof import('element-plus/es')['ElCard']
@@ -80,6 +83,7 @@ declare module 'vue' {
     RouterView: typeof import('vue-router')['RouterView']
     RuntimeInstanceDrawer: typeof import('./src/components/RuntimeInstanceDrawer.vue')['default']
     RuntimeInstanceTable: typeof import('./src/components/RuntimeInstanceTable.vue')['default']
+    RunTimeline: typeof import('./src/components/assistant/RunTimeline.vue')['default']
     RuntimeLogs: typeof import('./src/components/RuntimeLogs.vue')['default']
     ServiceCreateDialog: typeof import('./src/components/ServiceCreateDialog.vue')['default']
     ServiceRunDrawer: typeof import('./src/components/ServiceRunDrawer.vue')['default']

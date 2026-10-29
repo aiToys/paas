@@ -54,11 +54,14 @@ import {
 } from '@/domain/observability'
 import { fmtMetric } from '@/composables/useMetricFormat'
 import PageHeader from '@/components/PageHeader.vue'
+import Icon from '@/components/Icon.vue'
+import { useAssistantStore } from '@/stores/assistant'
 import StatePanel from '@/components/StatePanel.vue'
 import TablePager from '@/components/TablePager.vue'
 import MetricChart from '@/components/MetricChart.vue'
 import SkillTraceEvidence from '@/components/SkillTraceEvidence.vue'
-const route = useRoute(),
+const route = useRoute()
+const assistant = useAssistantStore(),
   router = useRouter(),
   envStore = useEnvStore()
 const tabs = [
@@ -743,13 +746,22 @@ async function removeChannel(ch: NotificationChannel) {
   }
 }
 const time = (iso: string) => new Date(iso).toLocaleString('zh-CN')
+
+// 结构化上下文深链（spec 2026-10-29 §7）：Trace/告警只传业务 ID，目标由服务端解析授权。
+function openAssistant() {
+  if (expanded.value) void assistant.openPanel({ context: { kind: 'trace', id: expanded.value }, question: `分析这次 Trace（${expanded.value.slice(0, 8)}…）为什么异常` })
+  else assistant.openPanel()
+}
+function diagnoseAlert(id: string) {
+  void assistant.openPanel({ context: { kind: 'alert', id }, question: '分析这条告警的根因' })
+}
 </script>
 <template>
   <div class="page observation-page">
     <PageHeader
       title="可观测"
       description="先发现异常，再从指标趋势进入日志与请求链路。"
-      >
+      ><button class="act" @click="openAssistant"><Icon name="bot" :size="15" />AI 助手</button>
 <div class="refresh-action">
         <span>{{ refreshed ? '更新于 ' + refreshed : '加载中' }} · 15s 刷新</span><button class="act" @click="refresh()">刷新</button>
       </div>
@@ -1518,6 +1530,7 @@ const time = (iso: string) => new Date(iso).toLocaleString('zh-CN')
                 <th>目标</th>
                 <th>事件</th>
                 <th>值</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
@@ -1527,9 +1540,10 @@ const time = (iso: string) => new Date(iso).toLocaleString('zh-CN')
                 <td>{{ targetName(e.targetType, e.targetId) }}</td>
                 <td>{{ e.status === 'firing' ? '触发' : '恢复' }}</td>
                 <td>{{ e.value }}</td>
+                <td><button class="text-button" @click="diagnoseAlert(e.id)">诊断</button></td>
               </tr>
               <tr v-if="!scopedEvents.length">
-                <td colspan="5">暂无历史事件</td>
+                <td colspan="6">暂无历史事件</td>
               </tr>
             </tbody>
           </table>

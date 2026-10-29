@@ -3,10 +3,12 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { fetchList } from '@/api'
 import { navigation, aiSections, searchEntries } from '@/navigation'
+import { useAssistantStore } from '@/stores/assistant'
 import Icon from './Icon.vue'
 const props = defineProps<{ modelValue: boolean }>()
 const emit = defineEmits<{ (e: 'update:modelValue', v: boolean): void }>()
 const router = useRouter()
+const assistant = useAssistantStore()
 const q = ref('')
 const selected = ref(0)
 const loading = ref(false)
@@ -20,6 +22,8 @@ const results = computed(() => {
     ...navigation.flatMap((g) => g.items.map((i) => ({ ...i, group: g.label }))),
     ...[{ id: 'overview', label: '观测总览' }, { id: 'metrics', label: '指标' }, { id: 'logs', label: '日志' }, { id: 'traces', label: '链路' }, { id: 'alerts', label: '告警' }].map(s => ({ label: s.label, to: '/observability?tab='+s.id, icon: 'activity', group: '可观测', keywords: s.id })),
     ...aiSections.map((s) => ({ label: s.label, to: '/ai/' + s.id, icon: s.icon, group: 'AI 开发', keywords: s.id })),
+    { label: '打开 AI 助手', to: '@assistant', icon: 'bot', group: 'AI 助手', keywords: '诊断 assistant bot' },
+    { label: '智能诊断工作负载', to: '@assistant', icon: 'bot', group: 'AI 助手', keywords: 'diagnose 诊断' },
   ]
   return searchEntries(entries, q.value)
 })
@@ -36,6 +40,7 @@ watch(selected, async (i) => { await nextTick(); document.getElementById('comman
 function go(to?: string) {
   if (!to) return
   visible.value = false
+  if (to === '@assistant') { assistant.openPanel(); return }
   void router.push(to)
 }
 function move(delta: number) {

@@ -1,6 +1,7 @@
 package apiroute
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"time"
@@ -16,19 +17,36 @@ func (r *Registry) schemaOf(t reflect.Type) *Schema {
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
+	// RawMessage 是嵌入的 JSON 值，实际线协议不是 []byte 数组。
+	if t == reflect.TypeOf(json.RawMessage{}) {
+		return &Schema{}
+	}
 	// time.Time → string/date-time。
 	if t == reflect.TypeOf(time.Time{}) {
 		return &Schema{Type: "string", Format: "date-time"}
 	}
 	// 命名 struct：登记 component，返回 $ref（支持去重与自引用）。
+	// 跨包同名类型（如 diagnose.Evidence vs scoped.Evidence）按「包.类型」限定名
+	// 分离登记——先注册者保短名，后来者用限定名；否则后者静默覆盖前者的契约。
 	if t.Name() != "" && t.Kind() == reflect.Struct {
-		name := t.Name()
-		if _, exists := r.schemas[name]; exists {
+		short := t.Name()
+		full := t.String()
+		if prev, exists := r.schemaTypes[short]; exists && prev != full {
+			name := full
+			if _, seen := r.schemaTypes[name]; !seen {
+				r.schemas[name] = nil // 占位，打断循环引用
+				r.schemaTypes[name] = full
+				r.schemas[name] = r.buildStruct(t)
+			}
 			return &Schema{Ref: "#/components/schemas/" + name}
 		}
-		r.schemas[name] = nil // 占位，打断循环引用
-		r.schemas[name] = r.buildStruct(t)
-		return &Schema{Ref: "#/components/schemas/" + name}
+		if _, exists := r.schemas[short]; exists {
+			return &Schema{Ref: "#/components/schemas/" + short}
+		}
+		r.schemaTypes[short] = full
+		r.schemas[short] = nil // 占位，打断循环引用
+		r.schemas[short] = r.buildStruct(t)
+		return &Schema{Ref: "#/components/schemas/" + short}
 	}
 	return r.buildAnon(t)
 }

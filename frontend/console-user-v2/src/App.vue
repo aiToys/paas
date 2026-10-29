@@ -9,11 +9,14 @@ import { navigation } from '@/navigation'
 import { useEnvStore } from '@/stores/env'
 import { useSessionStore } from '@/stores/session'
 import { useTheme } from '@/composables/useTheme'
+import AssistantPanel from '@/components/assistant/AssistantPanel.vue'
+import { useAssistantStore } from '@/stores/assistant'
 
 const route = useRoute()
 const router = useRouter()
 const envStore = useEnvStore()
 const session = useSessionStore()
+const assistant = useAssistantStore()
 const { theme, toggle } = useTheme()
 const mobileNav = ref(false)
 const menuButton = ref<HTMLButtonElement>()
@@ -43,6 +46,7 @@ async function pickEnv(id: string) {
   }
 }
 function clearContext() {
+ assistant.reset()
   void envStore.switchEnv(null)
   envStore.envs = []
 }
@@ -67,7 +71,8 @@ watch(() => route.fullPath, () => {
   mobileNav.value = false
   if (scoped.value && !route.query.env && envStore.currentEnvId) void router.replace({ query: { ...route.query, env: envStore.currentEnvId } })
 })
-watch(() => session.profile?.id, async (id) => {
+watch(() => session.profile?.id, async (id, previous) => {
+ if (id !== previous) assistant.reset()
   if (!id) return
   await envStore.loadEnvs()
   await restoreEnv()
@@ -146,6 +151,7 @@ onUnmounted(() => {
             </el-dropdown-menu>
 </template>
           </el-dropdown>
+          <button class="icon-button assistant-trigger" :class="{ active: assistant.panelOpen }" id="assistant-trigger" aria-label="打开 AI 助手" title="AI 助手" :aria-expanded="assistant.panelOpen" aria-controls="assistant-dialog" @click="assistant.panelOpen ? assistant.closePanel() : assistant.openPanel()"><Icon name="bot" :size="18" /></button>
           <NotificationBell />
           <button class="icon-button theme-toggle" :aria-label="theme === 'dark' ? '切换为亮色主题' : '切换为暗色主题'" @click="toggle"><Icon name="theme" :size="18" /></button>
           <el-dropdown trigger="click" @command="account">
@@ -157,6 +163,7 @@ onUnmounted(() => {
       <div v-if="scoped && envStore.isProd" class="production-banner"><Icon name="shield" :size="14" /> 正在浏览生产环境 · 写操作以实际资源或流水线配置为准</div>
       <main id="main-content" tabindex="-1" class="console-content"><RouterView /></main>
     </div>
+    <AssistantPanel />
     <CommandPalette v-model="searchOpen" />
   </div>
 </template>
@@ -186,6 +193,7 @@ onUnmounted(() => {
 .search-trigger kbd { margin-left: 20px; }
 .scope-button { display: flex; align-items: center; gap: 7px; border: 1px solid var(--border-strong); color: var(--text-dim); background: var(--surface); padding: 7px 10px; border-radius: 6px; font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; }
 .scope-button.production { color: var(--danger); border-color: var(--danger); }
+.assistant-trigger.active { color: var(--brand); }
 .account-button { display: flex; align-items: center; gap: 8px; color: var(--text-dim); background: transparent; border: 0; padding: 3px; font: inherit; font-size: 12px; cursor: pointer; }
 .account-avatar { width: 28px; height: 28px; display: grid; place-items: center; background: var(--brand-soft); color: var(--brand); font-weight: 600; border-radius: 50%; }
 .console-content { width: 100%; max-width: 1680px; margin: 0 auto; padding: 32px; outline: none; }

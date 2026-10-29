@@ -9,6 +9,7 @@ import {
   type Operation, type Runtime, type RuntimeInstance,
 } from '@/api/workload'
 import { useEnvStore } from '@/stores/env'
+import { useAssistantStore } from '@/stores/assistant'
 import { statusOf, WORKLOAD_STATUS } from '@/composables/useStatus'
 import { confirmAction } from '@/composables/useConfirmAction'
 import { instanceState, runtimeObservationLink } from '@/domain/serviceRuntime'
@@ -23,6 +24,7 @@ import Icon from '@/components/Icon.vue'
 // 运行态真源：GET /runtime（observation 来源/时间 + 实例 UID/容器三态 + 能力 + 活跃操作）。
 const route = useRoute()
 const envStore = useEnvStore()
+const assistant = useAssistantStore()
 const runtime = ref<Runtime | null>(null)
 const loading = ref(false)
 const error = ref('')
@@ -156,7 +158,7 @@ const opStatusMeta: Record<string, { label: string; cls: string }> = {
 <template>
   <div class="page runtime-page">
     <nav class="runtime-breadcrumb" aria-label="面包屑"><RouterLink to="/workloads">工作负载</RouterLink><span>/</span><RouterLink v-if="workload" :to="'/products/' + encodeURIComponent(workload.appId)">{{ appName || workload.appId }}</RouterLink><span v-if="workload">/</span><span>{{ workload?.name || workloadId }}</span></nav>
-    <PageHeader :title="workload?.name || '服务运行'" eyebrow="服务运行" description="查看此工作负载的实例、定位故障并管理运行配置。"><button class="act" :disabled="loading" @click="load()">{{ loading ? '读取中…' : '刷新' }}</button><button v-if="workload" class="act" :disabled="!!error" @click="settingsOpen = true">运行设置</button><RouterLink v-if="workload" class="act primary" :to="{ path: '/products/' + encodeURIComponent(workload.appId), query: { tab: 'delivery', section: 'pipelines' } }"><Icon name="pipeline" :size="16" />前往交付</RouterLink></PageHeader>
+    <PageHeader :title="workload?.name || '服务运行'" eyebrow="服务运行" description="查看此工作负载的实例、定位故障并管理运行配置。"><button class="act" :disabled="loading" @click="load()">{{ loading ? '读取中…' : '刷新' }}</button><button v-if="workload" class="act" :disabled="!!error" @click="settingsOpen = true">运行设置</button><button v-if="workload" class="act" @click="assistant.openPanel({ workloadId: workload.id, workloadName: workload.name, service: workload.service || undefined, envName: environmentName, symptom: needsAttention.length ? 'crash' : 'unknown' })"><Icon name="bot" :size="15" />智能诊断</button><RouterLink v-if="workload" class="act primary" :to="{ path: '/products/' + encodeURIComponent(workload.appId), query: { tab: 'delivery', section: 'pipelines' } }"><Icon name="pipeline" :size="16" />前往交付</RouterLink></PageHeader>
     <div v-if="loading && !runtime" class="loading-block" v-loading="true" role="status" aria-label="读取运行详情"></div>
     <StatePanel v-else-if="error && !runtime" error title="运行详情读取失败" :description="error"><button class="act" @click="load()">重试</button><RouterLink to="/workloads" class="act">返回工作负载</RouterLink></StatePanel>
     <template v-if="workload">

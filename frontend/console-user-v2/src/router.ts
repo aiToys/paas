@@ -84,6 +84,18 @@ const router = createRouter({
       meta: { title: 'API 密钥' },
     },
     {
+      path: '/assistant',
+      name: 'assistant-history',
+      component: () => import('./views/AssistantHistory.vue'),
+      meta: { title: 'AI 助手对话' },
+    },
+    {
+      path: '/assistant/sessions/:id',
+      name: 'assistant-session',
+      component: () => import('./views/AssistantSession.vue'),
+      meta: { title: 'AI 助手会话' },
+    },
+    {
       path: '/observability',
       name: 'observability',
       component: () => import('./views/Observability.vue'),

@@ -252,6 +252,28 @@ func (s *Store) AppendEvent(ctx context.Context, ev observability.AlertEvent) er
 	return err
 }
 
+// GetAlertEvent 按 ID 精查单条告警事件（租户过滤；不存在统一 not found 不泄漏）。
+// 消费方：AI 助手告警上下文解析（spec 2026-10-29 §5 告警 → 诊断目标）。
+func (s *Store) GetAlertEvent(ctx context.Context, id string) (observability.AlertEvent, error) {
+	tid, err := storagepg.TenantOrErr(ctx)
+	if err != nil {
+		return observability.AlertEvent{}, err
+	}
+	var ev observability.AlertEvent
+	err = s.db.Pool().QueryRow(ctx,
+		`SELECT id, rule_id, rule_name, target_type, target_id, metric_name, value, threshold,
+			operator, severity, status, fired_at, occurred_at
+		FROM alert_events WHERE tenant_id=$1 AND id=$2`, tid, id).
+		Scan(&ev.ID, &ev.RuleID, &ev.RuleName, &ev.TargetType, &ev.TargetID,
+			&ev.MetricName, &ev.Value, &ev.Threshold, &ev.Operator, &ev.Severity,
+			&ev.Status, &ev.FiredAt, &ev.OccurredAt)
+	if err != nil {
+		return observability.AlertEvent{}, err // pgx.ErrNoRows 语义由调用方按「不存在」处理
+	}
+	ev.TenantID = tid
+	return ev, nil
+}
+
 // ListAlertEvents 列出租户告警历史（时间倒序；limit<=0 用默认上限）。
 func (s *Store) ListAlertEvents(ctx context.Context, limit int) ([]observability.AlertEvent, error) {
 	tid, err := storagepg.TenantOrErr(ctx)

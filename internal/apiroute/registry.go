@@ -74,6 +74,8 @@ type Registry struct {
 	info    Info
 	routes  []Route
 	schemas map[string]*Schema // 命名类型 → component schema
+	// schemaTypes schema 名 → Go 类型全路径（跨包同名类型按「包.类型」分离登记的判据）。
+	schemaTypes map[string]string
 }
 
 // New 创建 Registry，own 传入的 mux（Register 会向其注册路由）。
@@ -85,9 +87,10 @@ func New(mux *http.ServeMux, info Info) *Registry {
 		info.Version = "0.0.0"
 	}
 	return &Registry{
-		mux:     mux,
-		info:    info,
-		schemas: map[string]*Schema{},
+		mux:         mux,
+		info:        info,
+		schemas:     map[string]*Schema{},
+		schemaTypes: map[string]string{},
 	}
 }
 

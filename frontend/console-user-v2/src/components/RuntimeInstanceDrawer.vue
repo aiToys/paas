@@ -8,6 +8,8 @@ import { confirmAction } from '@/composables/useConfirmAction'
 import RuntimeLogs from './RuntimeLogs.vue'
 import StatePanel from './StatePanel.vue'
 import TerminalPanel from './TerminalPanel.vue'
+import Icon from '@/components/Icon.vue'
+import { useAssistantStore } from '@/stores/assistant'
 
 const props = defineProps<{
   modelValue: boolean; workloadId: string; context: string
@@ -18,6 +20,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ 'update:modelValue': [value: boolean]; changed: [detail: string] }>()
 const active = ref('details')
+const assistant = useAssistantStore()
 watch(() => [props.section, props.modelValue, props.instance?.name], () => { active.value = props.section }, { immediate: true })
 const sections = [{ id: 'details', label: '实例详情' }, { id: 'logs', label: '日志' }, { id: 'events', label: '事件' }, { id: 'terminal', label: '容器终端' }]
 
@@ -96,6 +99,10 @@ const containerLines = computed(() => props.instance?.containers || [])
           <button class="act" :disabled="recreating || !instance.uid || !recreateAllowed" @click="recreate">{{ recreating ? '提交中…' : '重建实例' }}</button>
         </div>
         <p class="capability-note">重建请求绑定当前实例 UID；实例已变化（409）或被 PDB 阻断（429）时需要处理后再试。</p>
+        <div class="recreate-box diagnose-box">
+          <div><strong>智能诊断</strong><p>以该工作负载为诊断目标，带入实例 {{ instance?.name }} 的上下文做只读根因分析。</p></div>
+          <button class="act" :disabled="!instance" @click="assistant.openPanel({ workloadId: props.workloadId, workloadName: props.workloadId, podName: instance?.name, podUID: instance?.uid, symptom: 'crash', question: instance ? `实例 ${instance.name} 反复异常（${instance.reason || instance.status}），请分析根因。` : '' })"><Icon name="bot" :size="15" />诊断</button>
+        </div>
       </div>
       <div v-else-if="active === 'events'" class="events-panel">
         <div class="events-toolbar"><button class="act" :disabled="eventsLoading" @click="loadEvents">{{ eventsLoading ? '读取中…' : '刷新事件' }}</button><span v-if="eventsLoadedAt" class="events-meta">读取于 {{ eventsLoadedAt }}</span></div>
