@@ -117,6 +117,7 @@ func TestPlatformDomainsCoverAllPermissions(t *testing.T) {
 		PermPlatformSecurityRead: false, PermPlatformSecurityWrite: false,
 		PermPlatformObservabilityRead: false, PermPlatformObservabilityWrite: false,
 		PermPlatformAIRead: false, PermPlatformAIWrite: false,
+		PermPlatformDiagnostics: false,
 	}
 	for _, d := range platformDomains {
 		if _, ok := all[d.read]; ok {

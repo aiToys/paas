@@ -623,7 +623,7 @@ func seedGovernance(ctx context.Context, repo governance.Repository) {
 }
 
 // seedMaasCatalog 灌入模型目录（demo 模式 PAAS_DISABLE_DEMO_SEED != true）。
-// PG store 支持 ModelsCount，表空才灌（幂等优化）；内存路径 SeedCatalog 自身幂等（exists 跳过）直接灌。
+// 全量经 SeedCatalog 幂等灌入（exists 跳过）：删增量走 Deprecated 清理，增增量靠 exists 跳过重复。
 // resolver 用于 catalog() 构造真实通道（impl 不入库，MaaSPlugin.Init 加载时 BuildProvider 重建）。
 func seedMaasCatalog(ctx context.Context, repo maas.Repository, secStore security.SecretStore) {
 	if os.Getenv("PAAS_DISABLE_DEMO_SEED") == "true" {
@@ -636,23 +636,13 @@ func seedMaasCatalog(ctx context.Context, repo maas.Repository, secStore securit
 			log.Printf("[seed] 清理废弃模型 %s 失败: %v", id, err)
 		}
 	}
-	// ensure airouter 预置供应商（不被 ModelsCount 跳过；admin 可见可改，创建通道选它即带入）。
+	// ensure airouter 预置供应商（admin 可见可改，创建通道选它即带入）。
 	if err := repo.CreateVendor(ctx, maas.AirouterVendor()); err != nil && !errors.Is(err, maas.ErrVendorExists) {
 		log.Printf("[seed] airouter vendor 失败: %v", err)
 	}
-	// PG store 暴露 ModelsCount，表非空跳过（避免重启重复尝试 insert 全部模型）。
-	if counter, ok := repo.(interface {
-		ModelsCount(context.Context) (int, error)
-	}); ok {
-		n, err := counter.ModelsCount(ctx)
-		if err != nil {
-			log.Printf("[seed] 统计模型失败: %v", err)
-			return
-		}
-		if n > 0 {
-			return
-		}
-	}
+	// 全量经 SeedCatalog（幂等：ErrModelExists/ErrChannelExists 忽略）——曾按 ModelsCount>0
+	// 跳过，导致 seed 列表新增模型（如 deepseek-v4.1-flash）在已有数据的 PG 里永远灌不进，
+	// 只有 Deprecated 清理的「删」增量没有「增」增量。exists 检查成本可忽略。
 	if err := maas.SeedCatalog(ctx, repo, secretResolver{store: secStore}); err != nil {
 		log.Printf("[seed] MaaS catalog: %v", err)
 	}

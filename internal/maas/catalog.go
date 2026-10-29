@@ -22,6 +22,12 @@ var DeprecatedSeedModelIDs = []string{
 	"echo-demo",
 	"qwen2.5-7b",
 	"bge-m3",
+	// 2026-10-27 下线（网关侧已移除，catalog 不再展示；deepseek-v3.1 由 v4.1-flash 接替）：
+	// 诊断 agent 主控模型默认 deepseek-v4.1-flash（spec tmp/diagnosis-agent/impl-spec.md 决策 2）。
+	"deepseek-v3.1",
+	"qwen3.6-plus",
+	"kimi-k2.5",
+	"doubao-seed-1.6",
 }
 
 // catalog 返回 seed 模型目录，启动时由 MaaSPlugin 加载注册到 Gateway。

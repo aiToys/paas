@@ -23,6 +23,9 @@ const (
 	PermPlatformObservabilityWrite Permission = "platform:observability:write"
 	PermPlatformAIRead             Permission = "platform:ai:read"
 	PermPlatformAIWrite            Permission = "platform:ai:write"
+	// PermPlatformDiagnostics 平台故障诊断（只读根因诊断 agent，跨全 ns 证据采集）。
+	// 语义即 spec 的 diagnostics:run；按 platform 命名空间统一（D5-2 命名约定）。
+	PermPlatformDiagnostics Permission = "platform:diagnostics:run"
 )
 
 // 平台内置角色（与租户域角色 BuiltinRoles 分开：不进租户成员的角色选择器）。
@@ -54,6 +57,7 @@ func PlatformRoles() map[string]Role {
 			PermPlatformIdentityRead, PermPlatformResourceRead, PermPlatformResourceWrite,
 			PermPlatformObservabilityRead, PermPlatformObservabilityWrite,
 			PermPlatformAIRead, PermPlatformSecurityRead,
+			PermPlatformDiagnostics, // 资源运维可跑只读根因诊断（排障主力角色）
 		}},
 		RolePlatformFinance: {Name: RolePlatformFinance, Permissions: []Permission{
 			PermPlatformFinanceRead, PermPlatformFinanceWrite,
@@ -146,6 +150,9 @@ var platformDomains = []platformDomain{
 	// 执行记录（外部 AgentRun 观测）在 admin 侧归「AI 运营」视图，故按 AI 域授权。
 	{"/api/admin/agentrun", PermPlatformAIRead, PermPlatformAIRead},
 	{"/api/admin/ai", PermPlatformAIRead, PermPlatformAIWrite},
+	// 故障诊断 agent（2026-10-27）：POST /run 走写方法派生，授权 platform:diagnostics:run
+	// （资源运维可跑诊断排障；读方法未登记端点，read 同 run 保持对账完备）。
+	{"/api/admin/diagnose", PermPlatformDiagnostics, PermPlatformDiagnostics},
 }
 
 // PlatformPermissionsFor 返回访问某管理端点所需的候选平台权限（任一满足即放行）。

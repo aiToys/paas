@@ -148,3 +148,84 @@ func TestBuildToolsNameMismatchKeepsEntityName(t *testing.T) {
 		t.Fatalf("不应调用未知方法: %s", called)
 	}
 }
+
+// fakeDiagToolset 模拟内置工具集：注册 handlerA（带 schema），其余查不到。
+type fakeDiagToolset struct{}
+
+func (f *fakeDiagToolset) Handlers() []string { return []string{"handlerA"} }
+
+func (f *fakeDiagToolset) Lookup(handler string) (BuiltinToolMeta, func(context.Context, string) (string, error), bool) {
+	if handler != "handlerA" {
+		return BuiltinToolMeta{}, nil, false
+	}
+	invoke := func(_ context.Context, argsJSON string) (string, error) {
+		return "builtin-ok:" + argsJSON, nil
+	}
+	return BuiltinToolMeta{
+		Description: "测试内置工具",
+		Schema:      map[string]any{"type": "object", "properties": map[string]any{"ns": map[string]any{"type": "string"}}},
+	}, invoke, true
+}
+
+// TestBuildToolsBuiltinRequiresDiagnoseContext 锁越权闸门：租户 agent 运行（无诊断标志）
+// 引用 builtin 实体必须拒绝——内置工具按原始 (ns, pod) 寻址，租户触达即跨 ns 越权读。
+func TestBuildToolsBuiltinRequiresDiagnoseContext(t *testing.T) {
+	rt := &Runtime{
+		tools: &fakeToolRepo{t: tool.Tool{
+			ID: "tl-3", Name: "pod_logs", Type: tool.TypeBuiltin, Enabled: true,
+			Config: map[string]string{"handler": "handlerA"},
+		}},
+		diag: &fakeDiagToolset{},
+	}
+	_, _, err := rt.buildTools(context.Background(), Agent{Tools: []string{"tl-3"}})
+	if err == nil || !strings.Contains(err.Error(), "仅限平台诊断") {
+		t.Fatalf("租户语境必须拒绝 builtin 实体，got %v", err)
+	}
+}
+
+// TestBuildToolsBuiltinResolves 诊断语境：builtin 实体解析出 ToolDef（schema 来自 toolset）
+// 且 invoker 进程内直调。
+func TestBuildToolsBuiltinResolves(t *testing.T) {
+	rt := &Runtime{
+		tools: &fakeToolRepo{t: tool.Tool{
+			ID: "tl-4", Name: "pod_logs", Type: tool.TypeBuiltin, Enabled: true,
+			Config: map[string]string{"handler": "handlerA"},
+		}},
+		diag: &fakeDiagToolset{},
+	}
+	dctx := context.WithValue(context.Background(), diagnoseCtxKey{}, true)
+	defs, invokers, err := rt.buildTools(dctx, Agent{Tools: []string{"tl-4"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(defs) != 1 || len(invokers) != 1 {
+		t.Fatalf("应构建 1 个工具定义，got defs=%d invokers=%d", len(defs), len(invokers))
+	}
+	props, ok := defs[0].Function.Parameters["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("schema 应来自 toolset，got %v", defs[0].Function.Parameters)
+	}
+	if _, hasNS := props["ns"]; !hasNS {
+		t.Fatalf("schema 应含 ns 属性，got %v", defs[0].Function.Parameters)
+	}
+	out, err := invokers["pod_logs"](context.Background(), `{"ns":"paas"}`)
+	if err != nil || out != `builtin-ok:{"ns":"paas"}` {
+		t.Fatalf("invoker 应进程内直调，got %q err=%v", out, err)
+	}
+}
+
+// TestBuildToolsBuiltinUnknownHandler 诊断语境但 handler 未注册：报「未注册」而非静默跳过。
+func TestBuildToolsBuiltinUnknownHandler(t *testing.T) {
+	rt := &Runtime{
+		tools: &fakeToolRepo{t: tool.Tool{
+			ID: "tl-5", Name: "ghost", Type: tool.TypeBuiltin, Enabled: true,
+			Config: map[string]string{"handler": "nope"},
+		}},
+		diag: &fakeDiagToolset{},
+	}
+	dctx := context.WithValue(context.Background(), diagnoseCtxKey{}, true)
+	_, _, err := rt.buildTools(dctx, Agent{Tools: []string{"tl-5"}})
+	if err == nil || !strings.Contains(err.Error(), "未注册") {
+		t.Fatalf("未注册 handler 必须报错，got %v", err)
+	}
+}

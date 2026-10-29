@@ -14,7 +14,7 @@ import (
 // 参数收窄为具体类型 + 函数内装箱前 nil 判断后，typed nil 必须被安全降级为纯内存状态机。
 func TestBuildObservabilityStoreTypedNilPGStore(t *testing.T) {
 	var pgStore *obspg.Store // typed nil（内存路径形态）
-	_, engine := buildObservabilityStore(nil, nil, nil, pgStore)
+	_, engine, _ := buildObservabilityStore(nil, nil, nil, pgStore)
 	if engine == nil {
 		t.Fatal("engine 不应为 nil")
 	}

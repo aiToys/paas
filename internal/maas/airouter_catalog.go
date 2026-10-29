@@ -62,17 +62,14 @@ type airSpec struct {
 var airouterModels = []airSpec{
 	// —— 通义千问（文本 + 长文本 + 视觉）——
 	{ID: "qwen-turbo", Vendor: "通义千问", Ctx: "131072", Caps: []string{"chat", "reasoning"}, In: 0.3, Out: 3, Desc: "Qwen3-Turbo，轻量高性价比，高频对话"},
-	{ID: "qwen3.6-plus", Vendor: "通义千问", Ctx: "", Caps: []string{"chat", "reasoning", "vision"}, In: 2, Out: 12, Desc: "Qwen3.6-Plus 新旗舰，agentic coding 与多模态增强"},
 	{ID: "qwen-long", Vendor: "通义千问", Ctx: "10000000", Caps: []string{"chat"}, In: 0.5, Out: 2, Desc: "Qwen-Long，1000 万 token 超长上下文，长文档分析"},
 	{ID: "qwq-plus", Vendor: "通义千问", Ctx: "131072", Caps: []string{"reasoning", "chat"}, In: 1.6, Out: 4, Desc: "QwQ-Plus 推理增强，数学代码达 R1 满血水平"},
 	{ID: "qwen-vl-max", Vendor: "通义千问", Ctx: "131072", Caps: []string{"vision"}, In: 3, Out: 9, Desc: "Qwen-VL-Max 视觉语言旗舰，复杂视觉推理"},
 	{ID: "qwen3-vl-flash", Vendor: "通义千问", Ctx: "256000", Caps: []string{"vision"}, In: 0.3, Out: 3, Desc: "Qwen3-VL-Flash，轻量视觉理解，图文/视频/定位"},
 	// —— DeepSeek（通用，推理版走直连 catalog）——
-	{ID: "deepseek-v3.1", Vendor: "deepseek", Ctx: "131072", Caps: []string{"chat", "reasoning"}, In: 4, Out: 12, Desc: "DeepSeek-V3.1 混合推理，思考/非思考双模式 + Agent"},
-	// —— 智谱 / 月之暗面 / 豆包（国产旗舰）——
+	{ID: "deepseek-v4.1-flash", Vendor: "deepseek", Ctx: "131072", Caps: []string{"chat", "reasoning"}, In: 0.5, Out: 2, Desc: "DeepSeek-V4.1-Flash 轻量高速，工具调用与诊断 agent 主控高性价比"},
+	// —— 智谱（国产旗舰）——
 	{ID: "glm-5.2", Vendor: "智谱", Ctx: "", Caps: []string{"chat"}, In: 8, Out: 28, Desc: "GLM-5.2 开源旗舰，1M 上下文，长程工程与 Agent"},
-	{ID: "kimi-k2.5", Vendor: "月之暗面", Ctx: "", Caps: []string{"chat", "reasoning", "vision"}, In: 4, Out: 21, Desc: "Kimi-K2.5 原生多模态，思考/Agent 全能"},
-	{ID: "doubao-seed-1.6", Vendor: "Doubao", Ctx: "256000", Caps: []string{"chat", "reasoning", "vision"}, In: 4.8, Out: 24, Desc: "豆包 Seed-1.6，多模态 Agent + 深度思考"},
 	// —— 图片生成 + 向量（非对话模态代表）——
 	{ID: "wanx2.1-t2i-plus", Vendor: "通义万相", Ctx: "1", Caps: []string{"image"}, In: 2, Out: 2, Desc: "通义万相 2.1 文生图 Plus，高美感真实感"},
 	{ID: "text-embedding-v4", Vendor: "通义千问", Ctx: "81920", Caps: []string{"embedding"}, In: 0.5, Out: 0.5, Desc: "通用向量 v4，多语言文本/多模态统一向量"},

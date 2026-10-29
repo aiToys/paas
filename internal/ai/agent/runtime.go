@@ -32,7 +32,7 @@ var tracer = otel.Tracer("paas.ai/agent")
 //
 // 当 Agent 配置了工具时进入**多轮工具循环**（MaxSteps 上限）：
 // 每轮把工具定义传给 LLM → 若 LLM 返回 tool_calls，runtime 调用对应工具
-// （MCP tools/call）→ 把结果作为 role=tool 消息回喂 → 下一轮 LLM 据结果作答；
+// （MCP tools/call 或内置工具进程内直调）→ 把结果作为 role=tool 消息回喂 → 下一轮 LLM 据结果作答；
 // 直到 LLM 不再请求工具（产出最终答案，流式输出），或达 MaxSteps 上限。
 // 工具调用进度作为 reasoning_content 推送（前端思考面板可见）。
 //
@@ -40,8 +40,9 @@ var tracer = otel.Tracer("paas.ai/agent")
 //   - models：MaaS catalog 取底层 Provider
 //   - resolver：凭证解析
 //   - prompts：PromptRef 解析（agent.SystemPrompt 为空时用）
-//   - tools：工具定义 + 调用（仅 MCP 类型可调用）
+//   - tools：工具定义 + 调用（MCP / builtin 类型可调用）
 //   - kb：知识库 RAG 检索
+//   - diag：内置工具集（平台诊断等 super_admin 语境；nil 则 builtin 实体不可用）
 type Runtime struct {
 	agents   Repository
 	models   maas.Repository
@@ -51,6 +52,7 @@ type Runtime struct {
 	skills   skill.Repository
 	kb       *knowledgebase.Retriever
 	guard    guardrail.Guard // 输入/输出护栏（nil 全放行）
+	diag     DiagnosticToolset
 	// promptLogEnabled 为 true 时，结构化日志记录输入/输出摘要（脱敏长度），便于审计/调试。
 	promptLogEnabled bool
 	// MeterFn token 用量记账钩子（cmd/core 注入 gateway.Meter.Record，粗估口径与 gateway stream 一致）。
@@ -58,8 +60,31 @@ type Runtime struct {
 	MeterFn func(ctx context.Context, agentID string, tokens int)
 }
 
+// DiagnosticToolset 内置工具集契约（依赖倒置；实现方 internal/diagnose/tools）。
+//
+// 语境约束：内置工具面向**平台运维**（super_admin 诊断等），按原始 (namespace, pod)
+// 寻址、不经租户 scope——绝不能让租户 agent 经 builtin 工具实体触达（越权读任意 ns）。
+// 闸门：buildTools 的 builtin 分支要求 ctx 带诊断标志（diagnoseCtxKey，仅 RunDiagnose
+// 内部设置），租户路径（RunConv）永远无标志，builtin 实体在租户语境一律拒绝。
+type DiagnosticToolset interface {
+	// Handlers 返回全部内置工具 handler 名（注册表键集，稳定顺序）。
+	Handlers() []string
+	// Lookup 按 handler 名取工具元信息 + 进程内调用器。
+	// argsJSON 是 LLM 产出的函数参数 JSON 字符串（OpenAI 规范）；返回结果文本喂 LLM。
+	Lookup(handler string) (meta BuiltinToolMeta, invoke func(ctx context.Context, argsJSON string) (string, error), ok bool)
+}
+
+// BuiltinToolMeta 内置工具的 LLM 侧定义（Description 进 ToolDef；Schema 为 JSON Schema 参数）。
+type BuiltinToolMeta struct {
+	Description string
+	Schema      map[string]any
+}
+
 // WithSkills 注入 skill 仓储（依赖倒置；不调则 skill 维度降级跳过）。
 func (r *Runtime) WithSkills(s skill.Repository) *Runtime { r.skills = s; return r }
+
+// WithDiagnostics 注入内置工具集（依赖倒置；不调则 builtin 工具不可用）。
+func (r *Runtime) WithDiagnostics(d DiagnosticToolset) *Runtime { r.diag = d; return r }
 
 // WithGuard 注入护栏（依赖倒置；不调则全放行）。
 func (r *Runtime) WithGuard(g guardrail.Guard) *Runtime { r.guard = g; return r }
@@ -154,8 +179,12 @@ func (r *Runtime) buildSystem(ctx context.Context, a Agent, msgs []provider.Mess
 }
 
 // buildTools 从 agent 引用的工具实体构建 LLM 工具定义 + 调用器。
-// 仅 MCP 类型可调用：经 ListTools 取真实 JSON Schema 参数；按工具实体 Name 精确匹配 MCP 工具名
-// （匹配失败保持实体名直调，MCP 端报 unknown tool），invoker 调 tools/call。http/builtin 暂不可调用（invoke 仅 mcp，留后续）。
+//   - MCP：经 ListTools 取真实 JSON Schema 参数；按工具实体 Name 精确匹配 MCP 工具名
+//     （匹配失败保持实体名直调，MCP 端报 unknown tool），invoker 调 tools/call。
+//   - builtin：按 Config["handler"] 查注入的 DiagnosticToolset 进程内直调（完成 TypeBuiltin
+//     设计留白）。**仅诊断语境可用**（ctx 带诊断标志）：内置工具按原始 (ns, pod) 寻址、
+//     不经租户 scope，租户 agent 经 builtin 实体触达即越权读任意 ns，一律拒绝。
+//   - http 暂不可调用（留后续）。
 func (r *Runtime) buildTools(ctx context.Context, a Agent) ([]provider.ToolDef, map[string]toolInvoker, error) {
 	if len(a.Tools) == 0 {
 		return nil, nil, nil
@@ -169,6 +198,25 @@ func (r *Runtime) buildTools(ctx context.Context, a Agent) ([]provider.ToolDef, 
 		t, err := r.tools.Get(ctx, tid)
 		if err != nil || !t.Enabled {
 			return nil, nil, dependencyErrorf("引用的工具不可用或已禁用")
+		}
+		if t.Type == tool.TypeBuiltin {
+			if r.diag == nil || ctx.Value(diagnoseCtxKey{}) == nil {
+				return nil, nil, dependencyErrorf("工具 %s 为平台内置工具，仅限平台诊断使用", t.Name)
+			}
+			handler := t.Config["handler"]
+			meta, invoke, ok := r.diag.Lookup(handler)
+			if !ok {
+				return nil, nil, dependencyErrorf("内置工具 %s 未注册", handler)
+			}
+			fnName := t.Name // LLM 侧函数名 = 工具实体名（租户内唯一，避免冲突）
+			defs = append(defs, provider.ToolDef{
+				Type: "function",
+				Function: provider.ToolDefFunction{
+					Name: fnName, Description: t.Description, Parameters: meta.Schema,
+				},
+			})
+			invokers[fnName] = invoke
+			continue
 		}
 		if t.Type != tool.TypeMCP {
 			return nil, nil, dependencyErrorf("工具 %s 暂不支持智能体调用，仅支持 MCP", t.Name)
@@ -352,6 +400,81 @@ func totalChars(msgs []provider.Message) int {
 	return n
 }
 
+// diagnoseCtxKey 诊断语境标志（未导出结构体 key：只有本包 RunDiagnose 能设置，
+// 租户路径无法伪造——buildTools builtin 分支据此拒绝租户 agent 触达内置工具）。
+type diagnoseCtxKey struct{}
+
+// RunDiagnose 跑平台诊断 agent（super_admin 语境，虚拟 agent 非租户实体）：
+// 工具集全量来自注入的 DiagnosticToolset（按原始 (ns, pod) 寻址，不经租户 scope、
+// 不碰 agents/tools repository），模型/SystemPrompt/MaxSteps 由 a 指定
+// （cmd/core 装配层从 env + 诊断预设构造）。复用 toolLoop 多轮循环 +
+// OTel gen_ai span + token 计量；不走会话记忆（无状态单次诊断）。
+func (r *Runtime) RunDiagnose(ctx context.Context, a Agent, msgs []provider.Message, onChunk func(provider.Chunk)) error {
+	if r.diag == nil {
+		return dependencyErrorf("诊断工具集未注入")
+	}
+	if a.MaxSteps <= 0 {
+		a.MaxSteps = DefaultMaxSteps
+	}
+	// 取底层 Provider（MaaS catalog；与 RunConv 同源，模型不存在时脱敏报错）。
+	m, err := r.models.GetModel(ctx, a.Model)
+	if err != nil {
+		return fmt.Errorf("底层模型 %s 不存在", a.Model)
+	}
+	if len(m.Channels) == 0 {
+		return fmt.Errorf("模型 %s 无通道", a.Model)
+	}
+	p := maas.BuildProvider(m.Channels[0], r.resolver)
+	// 诊断语境标志：builtin 工具分支唯一放行口（见 diagnoseCtxKey 注释）。
+	ctx = context.WithValue(ctx, diagnoseCtxKey{}, true)
+	ctx, span := tracer.Start(ctx, "agent.diagnose",
+		trace.WithAttributes(
+			attribute.String("gen_ai.operation.name", "invoke_agent"),
+			attribute.String("gen_ai.system", "paas"),
+			attribute.String("gen_ai.request.model", a.Model),
+			attribute.String("gen_ai.agent.name", a.Name),
+			attribute.Int("gen_ai.agent.max_steps", a.MaxSteps),
+		),
+	)
+	defer span.End()
+	// 全量内置工具（handler 名即 LLM 函数名；进程内注册表天然无重名）。
+	var defs []provider.ToolDef
+	invokers := map[string]toolInvoker{}
+	for _, h := range r.diag.Handlers() {
+		meta, invoke, ok := r.diag.Lookup(h)
+		if !ok {
+			continue // 注册表静态不变，此分支仅为防御
+		}
+		defs = append(defs, provider.ToolDef{
+			Type:     "function",
+			Function: provider.ToolDefFunction{Name: h, Description: meta.Description, Parameters: meta.Schema},
+		})
+		invokers[h] = invoke
+	}
+	conv := make([]provider.Message, 0, len(msgs)+1)
+	if a.SystemPrompt != "" {
+		conv = append(conv, provider.Message{Role: "system", Content: a.SystemPrompt})
+	}
+	conv = append(conv, msgs...)
+	var finalText strings.Builder
+	wrapped := func(c provider.Chunk) {
+		if c.Content != "" {
+			finalText.WriteString(c.Content)
+		}
+		if onChunk != nil {
+			onChunk(c)
+		}
+	}
+	if _, err := r.toolLoop(ctx, p, a, conv, defs, invokers, wrapped, nil); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	if r.MeterFn != nil {
+		r.MeterFn(ctx, a.ID, totalChars(msgs)+finalText.Len())
+	}
+	return nil
+}
+
 // runLoop 跑多轮工具循环（抽离自 Run 便于用 fake provider 单测）。
 // p 为底层 LLM Provider；a.MaxSteps 为轮数上限。
 func (r *Runtime) runLoop(ctx context.Context, p provider.Provider, a Agent, msgs []provider.Message, onChunk func(provider.Chunk)) error {
@@ -379,27 +502,158 @@ func (r *Runtime) runLoop(ctx context.Context, p provider.Provider, a Agent, msg
 	}
 	runSpan.SetAttributes(attribute.Bool("paas.ai.context.ready", true))
 
+	final, err := r.toolLoop(ctx, p, a, conv, defs, invokers, onChunk, nil)
+	_ = final // 普通路径不需要终稿轮文本（流式已输出）
+	return err
+}
+
+// ToolHooks 工具执行确定性钩子（spec §5.1：进度事件由 hook 发出，不从
+// Chunk.Reasoning 解析）。单次调用参数，不挂在共享 Runtime 上。
+type ToolHooks struct {
+	OnToolStart  func(name string)            // 工具开始（发 tool.started 事件）
+	OnToolEnd    func(name string, err error) // 工具结束（err=nil 成功）
+	BeforeModel  func(ctx context.Context, reserve int) (func(provider.Usage, string), error)
+	BeforeTool   func(ctx context.Context) error
+	MaxToolCalls int
+	NoTools      bool
+}
+
+// RunScoped 按次注入工具集的受控诊断执行入口（spec §5.1 RunWithToolset）。
+// 与 RunDiagnose 的差异：ts 由调用方单次传入（用户侧=ScopedToolset，防并发串租户）、
+// hooks 发工具进度、**返回最后一个无工具调用轮次的 assistant 终稿文本**（报告解析源
+// ——中间轮说明文本不混入，避免拼接全部 Content 污染 JSON）。onChunk 不需要（异步
+// worker 不流式）。
+func (r *Runtime) RunScoped(ctx context.Context, a Agent, msgs []provider.Message, ts DiagnosticToolset, hooks *ToolHooks) (string, error) {
+	if ts == nil {
+		return "", dependencyErrorf("工具集未注入")
+	}
+	if a.MaxSteps <= 0 {
+		a.MaxSteps = DefaultMaxSteps
+	}
+	m, err := r.models.GetModel(ctx, a.Model)
+	if err != nil {
+		return "", fmt.Errorf("底层模型 %s 不存在", a.Model)
+	}
+	if len(m.Channels) == 0 {
+		return "", fmt.Errorf("模型 %s 无通道", a.Model)
+	}
+	var channel *provider.Channel
+	for _, candidate := range m.Channels {
+		if candidate != nil && candidate.Status != "offline" && (channel == nil || candidate.Priority < channel.Priority) {
+			channel = candidate
+		}
+	}
+	if channel == nil {
+		return "", dependencyErrorf("模型没有可用通道")
+	}
+	p := maas.BuildProvider(channel, r.resolver)
+	ctx = context.WithValue(ctx, diagnoseCtxKey{}, true)
+	ctx, span := tracer.Start(ctx, "agent.diagnose.scoped",
+		trace.WithAttributes(
+			attribute.String("gen_ai.operation.name", "invoke_agent"),
+			attribute.String("gen_ai.system", "paas"),
+			attribute.String("gen_ai.request.model", a.Model),
+			attribute.String("gen_ai.agent.name", a.Name),
+			attribute.Int("gen_ai.agent.max_steps", a.MaxSteps),
+		),
+	)
+	defer span.End()
+	var defs []provider.ToolDef
+	invokers := map[string]toolInvoker{}
+	handlers := ts.Handlers()
+	if hooks != nil && hooks.NoTools {
+		handlers = nil
+	}
+	for _, h := range handlers {
+		meta, invoke, ok := ts.Lookup(h)
+		if !ok {
+			continue
+		}
+		defs = append(defs, provider.ToolDef{
+			Type:     "function",
+			Function: provider.ToolDefFunction{Name: h, Description: meta.Description, Parameters: meta.Schema},
+		})
+		invokers[h] = invoke
+	}
+	conv := make([]provider.Message, 0, len(msgs)+1)
+	if a.SystemPrompt != "" {
+		conv = append(conv, provider.Message{Role: "system", Content: a.SystemPrompt})
+	}
+	conv = append(conv, msgs...)
+	final, err := r.toolLoop(ctx, p, a, conv, defs, invokers, nil, hooks)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return "", err
+	}
+	span.SetAttributes(attribute.Int("gen_ai.output.chars", len(final)))
+	return final, nil
+}
+
+// toolLoop 多轮工具循环核心（runLoop/RunDiagnose 共用）：每轮把工具定义传 LLM →
+// 执行 tool_calls → role=tool 回喂 → 下一轮；LLM 不再调工具即最终答案。
+// 输出护栏仅租户路径生效（RunDiagnose 不注入 guard，平台内部运行）。
+func (r *Runtime) toolLoop(ctx context.Context, p provider.Provider, a Agent, conv []provider.Message, defs []provider.ToolDef, invokers map[string]toolInvoker, onChunk func(provider.Chunk), hooks *ToolHooks) (string, error) {
+	toolCount := 0
 	for step := 1; step <= a.MaxSteps; step++ {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		req := provider.ChatRequest{Model: a.Model, Messages: conv, Stream: true}
 		if len(defs) > 0 {
 			req.Tools = defs
 			req.ToolChoice = "auto"
 		}
+		var settle func(provider.Usage, string)
+		if hooks != nil && hooks.BeforeModel != nil {
+			maxTokens := 4096
+			req.MaxTokens = &maxTokens
+			raw, _ := json.Marshal(req)
+			if len(raw) > 512*1024 {
+				return "", fmt.Errorf("对话上下文过长，请新建会话")
+			}
+			var e error
+			settle, e = hooks.BeforeModel(ctx, len(raw)+maxTokens)
+			if e != nil {
+				return "", e
+			}
+		}
 		chunkCh, err := p.Chat(ctx, req)
 		if err != nil {
-			return err
+			if settle != nil {
+				settle(provider.Usage{}, "estimated")
+			}
+			return "", err
 		}
 		var assistantText strings.Builder
+		var usage *provider.Usage
+		var outputChars int
 		var toolCalls []provider.ToolCall
 		for c := range chunkCh {
+			if c.Usage != nil {
+				u := *c.Usage
+				usage = &u
+			}
+			outputChars += len(c.Content) + len(c.Reasoning)
+			if outputChars > 128*1024 {
+				if settle != nil {
+					settle(provider.Usage{InputTokens: totalChars(conv), OutputTokens: outputChars}, "estimated")
+				}
+				return "", fmt.Errorf("模型输出超过上限")
+			}
+
 			if c.Role != "" || c.Content != "" || c.Reasoning != "" {
 				// 输出护栏：逐段检生成内容（命中即截断 + ErrBlocked，停止后续输出）。
 				if r.guard != nil && c.Content != "" {
 					if d := r.guard.CheckOutput(ctx, c.Content); !d.Allowed {
-						return fmt.Errorf("%w: %s", guardrail.ErrBlocked, d.Reason)
+						if settle != nil {
+							settle(provider.Usage{InputTokens: totalChars(conv), OutputTokens: outputChars}, "estimated")
+						}
+						return "", fmt.Errorf("%w: %s", guardrail.ErrBlocked, d.Reason)
 					}
 				}
-				onChunk(c)
+				if onChunk != nil {
+					onChunk(c)
+				}
 				if c.Content != "" {
 					assistantText.WriteString(c.Content)
 				}
@@ -408,23 +662,56 @@ func (r *Runtime) runLoop(ctx context.Context, p provider.Provider, a Agent, msg
 				toolCalls = c.ToolCalls
 			}
 		}
+		if settle != nil {
+			if usage != nil {
+				settle(*usage, "provider")
+			} else {
+				raw, _ := json.Marshal(req)
+				settle(provider.Usage{InputTokens: len(raw), OutputTokens: outputChars}, "estimated")
+			}
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		// 无工具调用：本轮 content 即最终答案（已流式输出），结束。
 		if len(toolCalls) == 0 {
 			if r.promptLogEnabled {
 				log.Printf("[ai] agent=%s 输出字符数=%d", a.ID, assistantText.Len())
 			}
-			return nil
+			return assistantText.String(), nil
 		}
 		// 有工具调用：回放 assistant 消息（含 tool_calls），执行工具，追加 role=tool 结果。
 		conv = append(conv, provider.Message{Role: "assistant", Content: assistantText.String(), ToolCalls: toolCalls})
 		for _, tc := range toolCalls {
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			toolCount++
+			if hooks != nil {
+				if hooks.MaxToolCalls > 0 && toolCount > hooks.MaxToolCalls {
+					return "", fmt.Errorf("工具调用次数已达上限")
+				}
+				if hooks.BeforeTool != nil {
+					if err := hooks.BeforeTool(ctx); err != nil {
+						return "", err
+					}
+				}
+			}
+
 			inv, ok := invokers[tc.Function.Name]
 			result := ""
 			if !ok {
 				result = "未知工具: " + tc.Function.Name
-				onChunk(provider.Chunk{Reasoning: fmt.Sprintf("\n⚠️ 未知工具 %s\n", tc.Function.Name)})
+				if onChunk != nil {
+					onChunk(provider.Chunk{Reasoning: fmt.Sprintf("\n⚠️ 未知工具 %s\n", tc.Function.Name)})
+				}
 			} else {
-				onChunk(provider.Chunk{Reasoning: fmt.Sprintf("\n🔧 调用工具 %s(%s)\n", tc.Function.Name, tc.Function.Arguments)})
+				if onChunk != nil {
+					onChunk(provider.Chunk{Reasoning: fmt.Sprintf("\n🔧 调用工具 %s(%s)\n", tc.Function.Name, tc.Function.Arguments)})
+				}
+				if hooks != nil && hooks.OnToolStart != nil {
+					hooks.OnToolStart(tc.Function.Name)
+				}
 				// gen_ai tool span：标记一次工具调用（trace 树 agent.run → chat → tool.call）。
 				toolCtx, toolSpan := tracer.Start(ctx, "tool.call",
 					trace.WithAttributes(
@@ -435,20 +722,27 @@ func (r *Runtime) runLoop(ctx context.Context, p provider.Provider, a Agent, msg
 				if tc.ID != "" {
 					toolSpan.SetAttributes(attribute.String("gen_ai.tool.call.id", tc.ID))
 				}
+				var invErr error
 				if res, err := inv(toolCtx, tc.Function.Arguments); err == nil {
 					result = res
 				} else {
+					invErr = err
 					result = "工具调用失败: " + err.Error()
 					toolSpan.SetStatus(codes.Error, err.Error())
 				}
 				toolSpan.End()
-				onChunk(provider.Chunk{Reasoning: "结果: " + truncate(result, 500) + "\n"})
+				if hooks != nil && hooks.OnToolEnd != nil {
+					hooks.OnToolEnd(tc.Function.Name, invErr)
+				}
+				if onChunk != nil {
+					onChunk(provider.Chunk{Reasoning: "结果: " + truncate(result, 500) + "\n"})
+				}
 			}
 			conv = append(conv, provider.Message{Role: "tool", Content: result, ToolCallID: tc.ID})
 		}
 	}
-	// 达 MaxSteps 上限：最后一轮 content 已流式输出，正常结束。
-	return nil
+	// 达 MaxSteps 上限：无终稿轮（最后轮仍在调工具），返回空由调用方分流。
+	return "", nil
 }
 
 // truncate 截断长文本（工具结果入 reasoning 面板用，防刷屏）。

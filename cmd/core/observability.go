@@ -35,7 +35,7 @@ import (
 // pgStore 是告警状态机/历史事件的 PG 存储（migration 0042）。参数收窄为具体类型：
 // 内存路径传入 *obspg.Store(nil)，若参数是接口类型会把 typed nil 装箱成非 nil 接口，
 // engine.Restore 放行后 LoadStates 解引用 nil db panic 卡死启动——nil 判断必须在装箱前。
-func buildObservabilityStore(lister observability.AppWorkloadLister, entities observability.TenantEntityLister, pgRules observability.RuleStore, pgStore *obspg.Store) (observability.Repository, *alertengine.Engine) {
+func buildObservabilityStore(lister observability.AppWorkloadLister, entities observability.TenantEntityLister, pgRules observability.RuleStore, pgStore *obspg.Store) (observability.Repository, *alertengine.Engine, diagRawSources) {
 	// 告警规则持久化：PG 可用时迁 PG（R4-C1，重启不丢）；否则 memory（含 dev seed）。
 	// memory Store 同时实现 RuleStore/MetricsReader/LogsReader/TracesReader（惰性降级），
 	// 作为三支柱未接真实后端时的兜底 reader；PG 只实现 RuleStore，兜底 reader 需独立 memory 实例。
@@ -45,20 +45,28 @@ func buildObservabilityStore(lister observability.AppWorkloadLister, entities ob
 	if pgRules != nil {
 		rules = pgRules
 	}
+	// diagRaw 诊断 raw 数据源（spec 2026-10-27 诊断 agent）：real store 的 raw 查询
+	// 入口（任意 PromQL/LogQL/Jaeger），未配 URL 的支柱保持 nil（诊断工具返 error 态）。
+	var diagRaw diagRawSources
 	metrics := observability.MetricsReader(fallback)
 	var prober observability.QualityProber // 采集质量探测（spec 专项04 §5）：接真实 Prom 才注入
 	if u := os.Getenv("PAAS_PROM_URL"); u != "" {
 		promStore := obreal.NewMetricsStore(u, lister, entities)
 		metrics = promStore
 		prober = promStore
+		diagRaw.prom = promStore
 	}
 	logs := observability.LogsReader(fallback)
 	if u := os.Getenv("PAAS_LOKI_URL"); u != "" {
-		logs = obreal.NewLogsStore(u, lister)
+		lokiStore := obreal.NewLogsStore(u, lister)
+		logs = lokiStore
+		diagRaw.loki = lokiStore
 	}
 	traces := observability.TracesReader(fallback)
 	if u := os.Getenv("PAAS_JAEGER_URL"); u != "" {
-		traces = obreal.NewTracesStore(u, lister, entities)
+		jaegerStore := obreal.NewTracesStore(u, lister, entities)
+		traces = jaegerStore
+		diagRaw.jaeger = jaegerStore
 	}
 	repo := obcompose.New(rules, metrics, logs, traces)
 	repo.WithQualityProber(prober)
@@ -75,7 +83,15 @@ func buildObservabilityStore(lister observability.AppWorkloadLister, entities ob
 	engine := alertengine.NewEngine(rules.(alertengine.RuleSource), metrics, 0, alertStateStore, alertEventStore).
 		WithChannels(rules.(alertengine.ChannelSource))
 	repo.WithEngine(engine)
-	return repo, engine
+	return repo, engine, diagRaw
+}
+
+// diagRawSources 诊断 agent 的 raw 数据源（buildObservabilityStore 附带产出）。
+// 三支柱独立可混用；nil 支柱 = 数据源未接入（诊断工具如实返 error 态）。
+type diagRawSources struct {
+	prom   *obreal.MetricsStore
+	loki   *obreal.LogsStore
+	jaeger *obreal.TracesStore
 }
 
 // workloadLister 桥接 workload.Repository → observability.AppWorkloadLister。

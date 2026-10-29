@@ -65,3 +65,60 @@ export interface DiagnosticSnapshot {
 }
 
 export const fetchDiagnostics = () => api.get<DiagnosticSnapshot>('/api/admin/diagnostics')
+
+// -- 智能诊断（只读根因诊断 Agent，2026-10-27）--
+// 后端契约 internal/diagnose：LLM 工具循环跨全 ns 采集证据，返回结构化根因报告。
+// 同步接口（服务端整体超时 3 分钟），前端超时 200s；degraded 时 verdict.category=unknown
+// 且 rawOutput 保留 LLM 原文。
+export interface DiagnoseTarget {
+  namespace: string
+  workload: string
+  pod?: string
+  service?: string
+  symptom?: string // 未知 | CrashLoop | 延迟 | 错误率
+}
+
+export interface DiagnoseVerdict {
+  severity: string // critical | warning | info
+  category: string // code_bug | config_error | resource_exhaustion | dependency_failure | infra | unknown
+  summary: string
+}
+
+export interface DiagnoseEvidence {
+  source: string // 工具名（get_pod_logs/prometheus/...）
+  detail: string
+  weight: string // high | medium | low
+}
+
+export interface DiagnoseHypothesis {
+  hypothesis: string
+  confidence: number
+  evidence: DiagnoseEvidence[]
+}
+
+export interface DiagnoseAction {
+  action: string
+  type: string // config | code
+  risk: string // low | medium | high
+  requiresApproval: boolean
+}
+
+export interface DiagnoseReport {
+  verdict: DiagnoseVerdict
+  rootCauseHypotheses: DiagnoseHypothesis[]
+  recommendedActions: DiagnoseAction[]
+  dataSourceCoverage: Record<string, string> // 源名 → ok/empty/missing/error
+  confidenceNote: string
+  rawOutput?: string
+  tokensUsed: number
+  durationSeconds: number
+}
+
+export interface DiagnoseRequest {
+  target: DiagnoseTarget
+  timeWindow: { lookbackMinutes: number }
+}
+
+// runDiagnose 触发诊断（约 1-3 分钟，同步返回报告；超时单独放行覆盖全局 15s）。
+export const runDiagnose = (req: DiagnoseRequest) =>
+  api.post<DiagnoseReport>('/api/admin/diagnose/run', req, { timeout: 200_000 })
